@@ -68,6 +68,8 @@ export const VAULT_SERVICE_CAPABILITY = defineCapability<VaultService>({
 export type VaultStatus = "booting" | "uninitialized" | "locked" | "unlocked";
 
 export interface KeyIdentity {
+  /** 已提交的执行后端；旧软件身份省略时仍按软件处理。 */
+  backend?: "software" | "hardware";
   publicKeyHex: string;
   label: string;
   capabilities: string[];
@@ -123,6 +125,9 @@ export interface VaultLocalSecretService {
  * Vault 内部重置 UI 之后的重新创建或导入。
  */
 export interface VaultService {
+  /** 业务入口不包含设置额度或代替用户回答确认。 */
+  requestPayment(command: Exclude<import("./sessionCoordinator.js").CoordinatorWalletPaymentCommand,
+    {action: "configure" | "answer" | "list" | "pending"}>): Promise<import("./channel.js").JSONValue>;
   /** 当前状态。 */
   status(): VaultStatus;
 

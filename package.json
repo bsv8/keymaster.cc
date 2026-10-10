@@ -23,7 +23,7 @@
     "prepare:lifecycle-evidence": "node scripts/prepare-plugin-lifecycle-evidence.mjs",
     "verify:lifecycle-production-gates": "node scripts/check-plugin-lifecycle-production-gates.mjs",
     "verify:lifecycle-release": "pnpm verify:final-io-audit && pnpm verify:lifecycle-deployment && pnpm test:e2e:external && pnpm test:e2e:irreversible-io && pnpm test:e2e:recovery && pnpm verify:lifecycle-production-gates",
-    "typecheck": "tsc -b",
+    "typecheck": "pnpm --filter @keymaster/vaultlink-integration build && tsc -b",
     "check:contracts": "node scripts/check-contracts.mjs",
     "test:contracts": "vitest run packages/contracts/src",
     "test:types": "pnpm check:plugin-catalog && pnpm typecheck && pnpm check:contracts && pnpm test:contracts && pnpm lint:worker-boundaries",
@@ -72,7 +72,11 @@
     "generate:plugin-catalog": "node scripts/materialize-plugin-catalog.mjs --write && node scripts/generate-plugin-function-dependencies.mjs",
     "check:plugin-catalog": "node scripts/materialize-plugin-catalog.mjs && node scripts/generate-plugin-function-dependencies.mjs --check",
     "generate:plugin-dependencies": "node scripts/generate-plugin-function-dependencies.mjs",
-    "check:plugin-dependencies": "node scripts/generate-plugin-function-dependencies.mjs --check"
+    "check:plugin-dependencies": "node scripts/generate-plugin-function-dependencies.mjs --check",
+    "test:e2e:rockey": "node Coding/keymaster/e2e-rockey/run.mjs",
+    "test:e2e:rockey:prepare": "node Coding/keymaster/e2e-rockey/run.mjs --prepare",
+    "test:e2e:rockey:list": "node Coding/keymaster/e2e-rockey/run.mjs --list",
+    "test:e2e:rockey:flash": "node Coding/keymaster/e2e-rockey/run.mjs --flash"
   },
   "devDependencies": {
     "@keymaster/contracts": "workspace:*",

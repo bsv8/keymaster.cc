@@ -863,7 +863,7 @@ export async function prepareBitfsFundingSplit(input: {
   let inputReservation: BitfsFundingInputReservation | undefined;
   let txid: string | undefined;
   try {
-    preview = await deps.protocolSpend.prepare({
+    preview = await deps.protocolSpend.presign({
       ownerPublicKeyHex: owner,
       requestingPluginId: "msfile",
       network,
@@ -1239,7 +1239,7 @@ export async function prepareBitfsFunding(input: {
   let inputReservation: BitfsFundingInputReservation | undefined;
   let outboxDurable = false;
   try {
-    preview = await deps.protocolSpend.prepare({
+    preview = await deps.protocolSpend.presign({
       ownerPublicKeyHex: owner,
       requestingPluginId: "msfile",
       network,

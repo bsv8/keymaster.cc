@@ -18,8 +18,8 @@ describe("plugin dependency explorer", () => {
     fireEvent.keyDown(node, { key: "Enter" });
     const dialog = screen.getByRole("dialog");
     expect(within(dialog).getAllByText("vault.service").length).toBeGreaterThan(0);
-    fireEvent.change(within(dialog).getByLabelText("pluginManager.graph.functionSearch"), { target: { value: "verifyPassword" } });
-    expect(within(dialog).getAllByText("verifyPassword()").length).toBeGreaterThan(0);
+    fireEvent.change(within(dialog).getByLabelText("pluginManager.graph.functionSearch"), { target: { value: "requestPayment" } });
+    expect(within(dialog).getAllByText("requestPayment()").length).toBeGreaterThan(0);
     expect(within(dialog).queryByText("unlock()")).toBeNull();
     fireEvent.click(within(dialog).getByRole("button", { name: "pluginManager.graph.incoming" }));
     fireEvent.change(within(dialog).getByLabelText("pluginManager.graph.functionSearch"), { target: { value: "launchAppView" } });
@@ -49,7 +49,7 @@ describe("plugin dependency explorer", () => {
     fireEvent.click(vault);
     expect(document.querySelectorAll('[data-dependency-provider="vault"]')).toHaveLength(0);
     fireEvent.click(document.querySelector('[data-plugin-id="protocol"]')!);
-    expect(within(screen.getByRole("dialog")).getAllByText("verifyPassword()").length).toBeGreaterThan(0);
+    expect(within(screen.getByRole("dialog")).getAllByText("requestPayment()").length).toBeGreaterThan(0);
   });
   it("can search the overview and reports an empty search", () => {
     render(<PluginManagerPage />);

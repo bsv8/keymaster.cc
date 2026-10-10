@@ -6,8 +6,11 @@
 //   - 没有 list/readAll/delete:一个钱包只有一把 Key,多 Key、切换和逐 Key
 //     删除在产品上已不存在。更换身份只能通过重置钱包后重新创建或导入。
 //
-// KeyHold 的格式与密码学实现完全沿用 keyhold SDK,这里只负责把固定路径的读写
-// 接到新钱包引擎上,并在解码后校验公钥与私钥一致。
+// 软件 KeyHold 沿用 keyhold SDK。硬件公开记录使用同一固定路径，严格校验
+// 格式与曲线点；密码/软件导出入口拒绝硬件记录，不保留软件回退副本。
+
+import { validateHardwareKeyDocument, type HardwareKeyDocumentV1 } from "@keymaster/vaultlink-integration";
+import { Point } from "@noble/secp256k1";
 
 import type { KeyHoldDocumentV1, StorageErrorCode } from "@keymaster/contracts";
 import { KEYHOLD_LIMITS, WALLET_KEYHOLD_PATH } from "@keymaster/contracts";
@@ -23,7 +26,8 @@ import {
 /** 唯一 KeyHold 的固定路径。 */
 export const WALLET_KEYHOLD_FILE_PATH = WALLET_KEYHOLD_PATH;
 
-export interface WalletKeyFile {
+export interface SoftwareWalletKeyFile {
+  backend: "software";
   /** 已严格校验的 KeyHold 文档。 */
   document: KeyHoldDocumentV1;
   /** 文件原始 bytes;导出时必须原样返回。 */
@@ -31,6 +35,14 @@ export interface WalletKeyFile {
   /** 该文件的 revision;改密等条件写依赖它。 */
   revision: number;
 }
+
+/** 同一个固定路径只允许一种后端；硬件记录不含软件私钥封装。 */
+export type WalletKeyFile = SoftwareWalletKeyFile | {
+  backend: "hardware";
+  document: HardwareKeyDocumentV1;
+  bytes: Uint8Array;
+  revision: number;
+};
 
 export interface UnlockedWalletKey {
   document: KeyHoldDocumentV1;
@@ -41,7 +53,7 @@ export interface UnlockedWalletKey {
 }
 
 export interface WalletKeyRepository {
-  /** 读取唯一 KeyHold;不存在返回 undefined。 */
+  /** 读取唯一软件或硬件记录；不存在返回 undefined，不建立解锁会话。 */
   read(): Promise<WalletKeyFile | undefined>;
   /** 使用 Key 密码解锁唯一 Key。 */
   unlock(password: string): Promise<UnlockedWalletKey>;
@@ -59,6 +71,11 @@ export interface WalletKeyRepository {
   changePassword(input: { oldPassword: string; newPassword: string; iterations?: number }): Promise<WalletKeyFile>;
   /** 只修改显示名称,不改密、不换私钥。 */
   rename(label: string): Promise<WalletKeyFile>;
+  /** Worker 迁移提交边界：调用者须先验证设备持有权、预算迁移和公开 journal。
+   * 仅替换同一 Key 的后端，不能创建另一身份；不作为普通页面导入 API。
+   */
+  commitHardwareMigration(input: { expectedRevision: number; document: HardwareKeyDocumentV1 }): Promise<WalletKeyFile>;
+  commitSoftwareMigration(input: { expectedRevision: number; privateKeyBytes: Uint8Array; password: string; iterations?: number }): Promise<WalletKeyFile>;
 }
 
 function fail(code: StorageErrorCode, message: string): StorageRuntimeError {
@@ -73,14 +90,25 @@ function parseFile(bytes: Uint8Array, revision: number): WalletKeyFile {
   if (bytes.byteLength > KEYHOLD_LIMITS.maxSerializedBytes) {
     throw fail("storage_limit_exceeded", "KeyHold file exceeds its size limit");
   }
-  let document: KeyHoldDocumentV1;
   try {
-    document = parseKeyHoldDocument(bytes);
+    const raw: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    if (raw && typeof raw === "object" && "format" in raw && raw.format === "keymaster.hardware-key") {
+      const document = validateHardwareKeyDocument(raw);
+      Point.fromHex(document.publicKeyHex).assertValidity();
+      return { backend: "hardware", document, bytes: cloneBytes(bytes), revision };
+    }
+    const document = parseKeyHoldDocument(bytes);
+    return { backend: "software", document, bytes: cloneBytes(bytes), revision };
   } catch {
-    throw fail("storage_wallet_corrupt", "KeyHold file is invalid or incompatible");
+    throw fail("storage_wallet_corrupt", "Wallet Key file is invalid or incompatible");
   }
-  // 文件名不再参与身份校验:公钥由文档自身声明,并在解锁时与解出的私钥比对。
-  return { document, bytes: cloneBytes(bytes), revision };
+}
+
+/** Trusted Worker migration validation uses the same parser as normal cold start. */
+export function inspectWalletKeyBytes(bytes: Uint8Array): { publicKeyHex: string; backend: "software" | "hardware"; walletGeneration?: string } {
+  const file = parseFile(bytes, 1);
+  return { publicKeyHex: file.document.publicKeyHex, backend: file.backend,
+    ...(file.backend === "hardware" ? { walletGeneration: file.document.walletGeneration } : {}) };
 }
 
 async function rethrowStorage(caught: unknown, message: string): Promise<never> {
@@ -109,7 +137,7 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
         ifNoneMatch: true,
         contentType: "application/json",
       });
-      return { document, bytes: cloneBytes(bytes), revision: written.revision };
+      return { backend: "software", document, bytes: cloneBytes(bytes), revision: written.revision };
     } catch (caught) {
       return rethrowStorage(caught, "KeyHold file could not be written");
     }
@@ -118,6 +146,7 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
   async function unlock(password: string): Promise<UnlockedWalletKey> {
     const file = await read();
     if (!file) throw fail("storage_not_found", "KeyHold file does not exist");
+    if (file.backend === "hardware") throw fail("storage_wallet_unsupported", "Hardware Key requires an authenticated USB connection and device unlock");
     try {
       const plain = await decryptKeyHoldDocument(file.document, password);
       return { document: file.document, privateKeyBytes: plain.privateKey, revision: file.revision };
@@ -164,6 +193,7 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
   async function exportFile(): Promise<Uint8Array> {
     const file = await read();
     if (!file) throw fail("storage_not_found", "KeyHold file does not exist");
+    if (file.backend === "hardware") throw fail("storage_wallet_unsupported", "Hardware public record is not a KeyHold backup; export requires the device migration flow");
     return cloneBytes(file.bytes);
   }
 
@@ -190,7 +220,7 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
           ifRevision: unlocked.revision,
           contentType: "application/json",
         });
-        return { document: nextDocument, bytes: cloneBytes(nextBytes), revision: written.revision };
+        return { backend: "software", document: nextDocument, bytes: cloneBytes(nextBytes), revision: written.revision };
       } catch (caught) {
         return rethrowStorage(caught, "KeyHold password change could not be written");
       }
@@ -202,19 +232,61 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
   async function rename(label: string): Promise<WalletKeyFile> {
     const file = await read();
     if (!file) throw fail("storage_not_found", "KeyHold file does not exist");
-    const nextDocument: KeyHoldDocumentV1 = { ...file.document, label };
-    const nextBytes = new TextEncoder().encode(serializeKeyHoldDocument(nextDocument));
+    // 改名也重跑对应格式校验；不能写入下一次启动无法读取的标签。
+    let nextDocument: KeyHoldDocumentV1 | HardwareKeyDocumentV1;
+    try {
+      nextDocument = file.backend === "hardware"
+        ? validateHardwareKeyDocument({ ...file.document, label })
+        : parseKeyHoldDocument(new TextEncoder().encode(serializeKeyHoldDocument({ ...file.document, label })));
+    } catch { throw fail("storage_wallet_corrupt", "Wallet Key label is invalid"); }
+    const nextBytes = new TextEncoder().encode(JSON.stringify(nextDocument));
     try {
       // 改名不要求密码,但也不能覆盖别人的并发更新。
       const written = await store.put(WALLET_KEYHOLD_FILE_PATH, nextBytes, {
         ifRevision: file.revision,
         contentType: "application/json",
       });
-      return { document: nextDocument, bytes: cloneBytes(nextBytes), revision: written.revision };
+      return parseFile(nextBytes, written.revision);
     } catch (caught) {
       return rethrowStorage(caught, "KeyHold label could not be written");
     }
   }
 
-  return { read, unlock, create, import: importFile, export: exportFile, changePassword, rename };
+  async function migrationSource(revision: number, backend: "software" | "hardware"): Promise<WalletKeyFile> {
+    if (!Number.isSafeInteger(revision) || revision < 1) throw fail("storage_conflict", "Invalid migration revision");
+    const file = await read();
+    if (!file || file.revision !== revision || file.backend !== backend) throw fail("storage_conflict", "Migration source changed");
+    return file;
+  }
+  async function commitHardwareMigration(input: {expectedRevision:number;document:HardwareKeyDocumentV1}): Promise<WalletKeyFile> {
+    const document = validateHardwareKeyDocument(input.document);
+    Point.fromHex(document.publicKeyHex).assertValidity();
+    const source = await migrationSource(input.expectedRevision,"software");
+    if (document.publicKeyHex !== source.document.publicKeyHex) throw fail("storage_identity_required", "Backend migration cannot replace the wallet identity");
+    const next = new TextEncoder().encode(JSON.stringify(document));
+    try {
+      // 替换固定路径，不保留源 KeyHold 副本。设备缺席不能自动回退软件。
+      const result = await store.put(WALLET_KEYHOLD_FILE_PATH,next,{ifRevision:source.revision,contentType:"application/json"});
+      return parseFile(next,result.revision);
+    } catch (caught) { return rethrowStorage(caught,"Hardware migration commit failed"); }
+  }
+  async function commitSoftwareMigration(input: {expectedRevision:number;privateKeyBytes:Uint8Array;password:string;iterations?:number}): Promise<WalletKeyFile> {
+    // 独占工作副本，任何校验、加密或 CAS 失败都清零；调用者仍须清理自己的导出缓冲。
+    const privateKey = new Uint8Array(input.privateKeyBytes);
+    try {
+      const source = await migrationSource(input.expectedRevision,"hardware");
+      let publicKeyHex: string;
+      try { publicKeyHex = Point.fromPrivateKey(privateKey).toHex(true); }
+      catch { throw fail("storage_identity_required","Exported migration Key is invalid"); }
+      if (publicKeyHex !== source.document.publicKeyHex) throw fail("storage_identity_required","Exported migration Key does not match the current identity");
+      const document = await createKeyHoldDocument({label:source.document.label,privateKey},input.password,
+        input.iterations===undefined?undefined:{iterations:input.iterations});
+      const next = new TextEncoder().encode(serializeKeyHoldDocument(document));
+      try {
+        const result = await store.put(WALLET_KEYHOLD_FILE_PATH,next,{ifRevision:source.revision,contentType:"application/json"});
+        return parseFile(next,result.revision);
+      } catch (caught) { return rethrowStorage(caught,"Software migration commit failed"); }
+    } finally { privateKey.fill(0); }
+  }
+  return { read, unlock, create, import: importFile, export: exportFile, changePassword, rename, commitHardwareMigration, commitSoftwareMigration };
 }

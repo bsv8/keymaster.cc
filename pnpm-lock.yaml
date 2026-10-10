@@ -8,7 +8,7 @@ overrides:
   bitcoin-libp2p: 0.3.1
 
 patchedDependencies:
-  go-bitfs@0.3.2: fe0b12d0fb9079316211ff2041161d691d77f808fe8a9ce2c1412387b447dfad
+  go-bitfs@0.3.2: 139242f5c4336bb73687e66f534bbb5804bd7e4bf0f416fecc5ea8cda9a3158f
 
 importers:
 
@@ -99,6 +99,37 @@ importers:
       webloom-framework:
         specifier: 0.6.0
         version: 0.6.0(react@18.3.1)
+
+  Coding/keymaster/vaultlink-integration:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: workspace:*
+        version: link:../../../packages/contracts
+      '@keymaster/ui':
+        specifier: workspace:*
+        version: link:../../../packages/ui
+      '@vaultlink/sdk':
+        specifier: workspace:0.2.0-draft.1
+        version: link:../vaultlink-sdk
+      bsv8-channel-protocol:
+        specifier: 0.6.0
+        version: 0.6.0
+      react:
+        specifier: ^18.3.1
+        version: 18.3.1
+    devDependencies:
+      go-bitfs:
+        specifier: 0.3.2
+        version: 0.3.2(patch_hash=139242f5c4336bb73687e66f534bbb5804bd7e4bf0f416fecc5ea8cda9a3158f)(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+
+  Coding/keymaster/vaultlink-sdk:
+    dependencies:
+      '@noble/curves':
+        specifier: 1.9.7
+        version: 1.9.7
+      '@noble/hashes':
+        specifier: 1.8.0
+        version: 1.8.0
 
   apps/connect-docs:
     devDependencies:
@@ -218,7 +249,7 @@ importers:
         version: 6.0.3
       go-bitfs:
         specifier: 0.3.2
-        version: 0.3.2(patch_hash=fe0b12d0fb9079316211ff2041161d691d77f808fe8a9ce2c1412387b447dfad)(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+        version: 0.3.2(patch_hash=139242f5c4336bb73687e66f534bbb5804bd7e4bf0f416fecc5ea8cda9a3158f)(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       keyhold:
         specifier: 2.1.0
         version: 2.1.0
@@ -489,6 +520,9 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
+      '@keymaster/vaultlink-integration':
+        specifier: workspace:*
+        version: link:../../Coding/keymaster/vaultlink-integration
       '@libp2p/webrtc':
         specifier: 6.0.30
         version: 6.0.30(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
@@ -506,7 +540,7 @@ importers:
         version: 0.6.0
       go-bitfs:
         specifier: 0.3.2
-        version: 0.3.2(patch_hash=fe0b12d0fb9079316211ff2041161d691d77f808fe8a9ce2c1412387b447dfad)(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+        version: 0.3.2(patch_hash=139242f5c4336bb73687e66f534bbb5804bd7e4bf0f416fecc5ea8cda9a3158f)(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       masterseed:
         specifier: 1.1.0
         version: 1.1.0
@@ -528,6 +562,9 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
+      '@keymaster/vaultlink-integration':
+        specifier: workspace:*
+        version: link:../../Coding/keymaster/vaultlink-integration
       '@noble/hashes':
         specifier: ^1.4.0
         version: 1.8.0
@@ -586,6 +623,9 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
+      '@keymaster/vaultlink-integration':
+        specifier: workspace:*
+        version: link:../../Coding/keymaster/vaultlink-integration
       '@noble/ciphers':
         specifier: ^2.2.0
         version: 2.2.0
@@ -707,6 +747,9 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
+      '@keymaster/vaultlink-integration':
+        specifier: workspace:*
+        version: link:../../Coding/keymaster/vaultlink-integration
       '@noble/ciphers':
         specifier: ^2.2.0
         version: 2.2.0
@@ -6285,7 +6328,7 @@ snapshots:
       package-json-from-dist: 1.0.1
       path-scurry: 1.11.1
 
-  go-bitfs@0.3.2(patch_hash=fe0b12d0fb9079316211ff2041161d691d77f808fe8a9ce2c1412387b447dfad)(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)):
+  go-bitfs@0.3.2(patch_hash=139242f5c4336bb73687e66f534bbb5804bd7e4bf0f416fecc5ea8cda9a3158f)(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)):
     dependencies:
       '@bsv/sdk': 2.0.5
       '@noble/curves': 2.0.1

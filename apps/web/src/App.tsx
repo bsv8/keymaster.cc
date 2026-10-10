@@ -280,7 +280,8 @@ function RuntimeApp({ initialVaultStatus }: RuntimeAppProps = {}) {
   // 钱包 locked / uninitialized / unlocked 都直接走协议页，
   // 协议 service 内部会自己处理 unlock / confirm 状态机。
   if (isProtocolPopupPath(path)) {
-    return <ApplicationFrame slot="storage-guard"><ApplicationFrame slot="protocol-popup" /></ApplicationFrame>;
+    // Connect 独立窗口也要承载钱包超额批准；不能依赖主页面仍然打开。
+    return <ApplicationFrame slot="storage-guard"><ApplicationFrame slot="wallet-guard"><ApplicationFrame slot="protocol-popup" /></ApplicationFrame></ApplicationFrame>;
   }
 
   if (effectiveVault === "uninitialized" || effectiveVault === "locked") {

@@ -402,7 +402,7 @@ export function createProtocolFundingService(deps: CreateProtocolFundingServiceD
       if (total <= BigInt(feeCap)) {
         throw new ProtocolFundingError("funding-state-unknown", "专用资金不足以覆盖回收交易的矿工费");
       }
-      const preview = await spend.prepare({
+      const preview = await spend.presign({
         ownerPublicKeyHex: input.ownerPublicKeyHex,
         requestingPluginId: record.ownerPluginId ?? "protocol",
         network: record.network,
@@ -485,7 +485,7 @@ export function createProtocolFundingService(deps: CreateProtocolFundingServiceD
     // 专用 UTXO 是本交易自己的 vout 0 P2PKH 输出，收款地址就是当前 owner 的地址。
     const dedicatedAddress = changeAddress;
     const dedicatedScriptHex = p2pkhAddressToScriptHex(dedicatedAddress, input.network);
-    const preview = await spend.prepare({
+    const preview = await spend.presign({
       ownerPublicKeyHex: input.ownerPublicKeyHex,
       requestingPluginId: input.ownerPluginId ?? "protocol",
       network: input.network,

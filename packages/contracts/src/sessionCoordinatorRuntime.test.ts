@@ -829,3 +829,29 @@ describe("Coordinator runtime contract parsers", () => {
     })).toThrow();
   });
 });
+
+// Migration is a private Vault DTO: no key bytes, host PIN or generic device commands.
+it("migration request/result boundaries reject private material and forged recovery phases",()=>{
+ const operation={type:"migrateToSoftware",newPassword:"new-password"};
+ expect(parse(COORDINATOR_RPC_CAPABILITY.request,{kind:"vault.operation",operation,expectedSessionEpoch:"epoch-1"})).toMatchObject({operation});
+ expect(()=>parse(COORDINATOR_RPC_CAPABILITY.request,{kind:"vault.operation",operation:{...operation,privateKey:new Uint8Array(32)},expectedSessionEpoch:"epoch-1"})).toThrow();
+ const request=rpcRequest("vault.operation",{operation});
+ const result={migrationId:"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",phase:"complete",target:"software"};
+ const envelope={ack:{status:"ok"},sessionEpoch:"epoch-2",operationResult:result};
+ expect(parseCoordinatorResponseFor(request,envelope)).toMatchObject({operationResult:result});
+ expect(()=>parseCoordinatorResponseFor(request,{...envelope,operationResult:{...result,privateKey:new Uint8Array(32)}})).toThrow();
+ const recovery=rpcRequest("vault.operation",{operation:{type:"migrationState"}});
+ expect(()=>parseCoordinatorResponseFor(recovery,{...envelope,operationResult:{migrationId:result.migrationId,phase:"local-committed",publicKeyHex:"02"+"00".repeat(32),passwordRequired:true}})).toThrow();
+});
+
+it('software migration and provisioning remain strict private DTOs and target-bound results',()=>{
+ const operation={type:'migrateToHardware',sourcePassword:'source-password'};
+ expect(parse(COORDINATOR_RPC_CAPABILITY.request,{kind:'vault.operation',operation,expectedSessionEpoch:'epoch-1'})).toMatchObject({operation});
+ for(const extra of [{pin:'12345678'},{privateKey:new Uint8Array(32)},{approved:true}])expect(()=>parse(COORDINATOR_RPC_CAPABILITY.request,{kind:'vault.operation',operation:{...operation,...extra},expectedSessionEpoch:'epoch-1'})).toThrow();
+ const request=rpcRequest('vault.operation',{operation}),migrationId='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+ expect(parseCoordinatorResponseFor(request,{ack:{status:'ok'},sessionEpoch:'epoch-2',operationResult:{migrationId,phase:'complete',target:'hardware'}})).toMatchObject({operationResult:{target:'hardware'}});
+ expect(()=>parseCoordinatorResponseFor(request,{ack:{status:'ok'},sessionEpoch:'epoch-2',operationResult:{migrationId,phase:'complete',target:'software'}})).toThrow();
+ const recovery=rpcRequest('vault.operation',{operation:{type:'migrationState'}}),state={migrationId,phase:'local-committed',publicKeyHex:'02'+'00'.repeat(32),passwordRequired:false,target:'hardware'};
+ expect(parseCoordinatorResponseFor(recovery,{ack:{status:'ok'},sessionEpoch:'epoch-2',operationResult:state})).toMatchObject({operationResult:state});
+ expect(()=>parseCoordinatorResponseFor(recovery,{ack:{status:'ok'},sessionEpoch:'epoch-2',operationResult:{...state,pin:'12345678'}})).toThrow();
+});

@@ -1,6 +1,8 @@
 packages:
   - "apps/*"
   - "packages/*"
+  - "Coding/keymaster/vaultlink-integration"
+  - "Coding/keymaster/vaultlink-sdk"
 
 linkWorkspacePackages: true
 

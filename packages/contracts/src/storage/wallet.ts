@@ -348,7 +348,12 @@ export interface WalletColdStartSnapshot {
   /** state 为 ready 时的元数据。 */
   meta?: WalletMetaV1;
   /** ready 状态下的唯一 Key 公开信息；不解密。 */
-  key?: { publicKeyHex: string; label: string };
+  key?: {
+    publicKeyHex: string;
+    label: string;
+    /** 软件旧快照可缺省；硬件明确声明，密码不能用来认证该后端。 */
+    backend?: "software" | "hardware";
+  };
   /** 仅用于界面提示的脱敏原因。 */
   reason?: string;
 }

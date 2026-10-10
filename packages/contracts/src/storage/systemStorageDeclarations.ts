@@ -8,6 +8,9 @@ import type { PluginStorageDeclaration } from "./access.js";
  * 复制这些坐标再拼物理路径。
  */
 export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
+  vaultPayments: Object.freeze({
+    moduleId: "vault", purposeId: "payments", authority: "platform-only", model: "files", schemaVersion: 1,
+  } satisfies PluginStorageDeclaration),
   coordinatorSettings: Object.freeze({
     moduleId: "coordinator",
     purposeId: "settings",
@@ -193,6 +196,7 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
 
 /** manifest pluginId 到中央声明的绑定目录。 */
 export const SYSTEM_STORAGE_DECLARATIONS: Readonly<Record<string, readonly PluginStorageDeclaration[]>> = Object.freeze({
+  vault: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.vaultPayments]),
   "bsv-price": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.bsvPrice]),
   "collectible-1satordinals": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.ordinalsMintHistory]),
   contacts: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook]),

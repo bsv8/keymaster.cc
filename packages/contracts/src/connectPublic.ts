@@ -57,6 +57,8 @@ export type {
   P2pkhTransferAssetId,
   P2pkhTransferParams,
   P2pkhTransferResult,
+  PaymentChannelRegisterParams,
+  PaymentChannelRegisterResult,
   ProtocolError,
   ProtocolErrorCode,
   ProtocolEventMessage,

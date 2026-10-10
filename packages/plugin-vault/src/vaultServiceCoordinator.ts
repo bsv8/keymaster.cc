@@ -1,4 +1,5 @@
 import { sameWalletSession } from "@keymaster/contracts";
+import { authenticateAppWallet } from "@keymaster/vaultlink-integration";
 import type { InternalVaultService } from "./internalVaultService.js";
 // packages/plugin-vault/src/vaultServiceCoordinator.ts
 // VaultService Coordinator Facade —— 单 Key 钱包的唯一页面侧入口。
@@ -209,6 +210,18 @@ export class VaultServiceCoordinator implements InternalVaultService {
   async renameKey(label: string): Promise<void> {
     await this.vaultOperation({ type: "renameKey", label });
   }
+  async migrationState(){return this.vaultOperation({type:"migrationState"});}
+  async migrateToHardware(sourcePassword:string):Promise<void>{await this.vaultOperation({type:"migrateToHardware",sourcePassword});}
+  async migrateToSoftware(newPassword:string):Promise<void>{await this.vaultOperation({type:"migrateToSoftware",newPassword});}
+  async hardware(command: import("@keymaster/contracts").CoordinatorHardwareCommand): Promise<import("@keymaster/contracts").CoordinatorHardwareState> {
+    return this.vaultOperation({ type: "hardware", command });
+  }
+  async payment(command: import("@keymaster/contracts").CoordinatorWalletPaymentCommand): Promise<import("@keymaster/contracts").JSONValue> {
+    return this.vaultOperation({type: "payment", command});
+  }
+  async requestPayment(command: Parameters<VaultService["requestPayment"]>[0]): Promise<import("@keymaster/contracts").JSONValue> {
+    return this.payment(command);
+  }
 
   /**
    * 原样导出加密 KeyHold 文档。
@@ -251,9 +264,9 @@ export class VaultServiceCoordinator implements InternalVaultService {
     if (this.lifecycleSnapshot.activePublicKeyHex !== input.publicKeyHex) {
       throw new Error("AppView crypto requires the wallet key");
     }
-    // appView session 必须自己提供 Key 密码，不能借用页面当前会话的授权
-    // 凭据。verifyPassword 不改变 Vault 状态。
-    await this.verifyPassword(input.password);
+    const issued = this.walletSnapshot();
+    await authenticateAppWallet(this, input.publicKeyHex, input.password, this.walletState);
+    if (!sameWalletSession(issued, this.walletSnapshot())) throw new Error("AppView wallet session has been revoked");
     this.disposeAppViewSession(input.sessionId, "appView session replaced");
     const crypto = await this.createCoordinatorCrypto(input.publicKeyHex, input.sessionId);
     this.appViewRevocations.set(input.sessionId, () => crypto.dispose?.("appView session disposed"));
@@ -322,6 +335,14 @@ export class VaultServiceCoordinator implements InternalVaultService {
     };
     return {
       getIdentity: () => { guard(); return { publicKeyHex, label: "", capabilities: [], createdAt: "", sessionId }; },
+      ...(issuedSession.activeKeyIdentity?.backend === "hardware" ? {async signConnectEnvelope(input: Parameters<NonNullable<ActiveKeyCrypto["signConnectEnvelope"]>>[0]) {
+        guard();
+        if(input.publicKeyHex!==publicKeyHex)throw new Error("session_key_mismatch");
+        const r=await client.crypto!({type:"signConnectEnvelope",kind:input.kind,envelope:new Uint8Array(input.envelope).slice(),...(input.content ? {content:new Uint8Array(input.content).slice()} : {}),appSessionId:input.appSessionId});
+        guard();
+        if(r.ack.status!=="ok"||r.result?.type!=="signConnectEnvelope")throw new Error(commandResultMessage(r.ack,"Connect signature failed"));
+        return {publicKeyHex,format:"compact" as const,signature:hexToArrayBuffer(r.result.signatureHex)};
+      }} : {}),
       async signDigest(input) {
         guard();
         const r = await client.crypto!({ type: "signDigest", digestHex: bytesToHex(input.digest), format: input.format });

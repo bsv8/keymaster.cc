@@ -195,6 +195,17 @@ export function rawTxHexByteLength(rawTxHex: string): number {
   }
   return clean.length / 2;
 }
+/** 组装钱包核心返回的全部输入签名，不再逐输入申请支付额度。 */
+export function attachP2pkhSignatures(unsigned: UnsignedTx, signatures: readonly string[], publicKeyHex: string): string {
+  if (signatures.length !== unsigned.inputs.length) throw new Error("P2PKH signature count mismatch");
+  const pub = hexToBytes(publicKeyHex);
+  const inputs = unsigned.inputs.map((input, index) => {
+    const signature = hexToBytes(signatures[index]!);
+    if (signature.length < 9 || signature.length > 73 || signature[signature.length - 1] !== SIGHASH_ALL_FORKID) throw new Error("Invalid P2PKH signature");
+    return {...input, scriptSig: concatBytes(new Uint8Array([signature.length]), signature, new Uint8Array([pub.length]), pub)};
+  });
+  return bytesToHex(serializeTx({...unsigned, inputs}));
+}
 
 /** 计算 rawTxHex 对应的 txid。 */
 export function calcTxidFromRawTxHex(rawTxHex: string): string {

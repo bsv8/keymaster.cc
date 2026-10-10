@@ -58,7 +58,7 @@ export function createOrdinalMintService(input: {
       selected.push(u);
       total += u.value;
       try {
-        await input.protocolSpend.prepare({
+        const quote=await input.protocolSpend.prepare({
           ownerPublicKeyHex,
           network,
           inputs: selected,
@@ -66,6 +66,7 @@ export function createOrdinalMintService(input: {
           feeRateSatoshisPerKb,
           changeAddress: selected[0]?.address
         });
+        await input.protocolSpend.releasePrepared?.(quote);
         if (total >= amount) return selected;
       } catch {
         // keep adding inputs
@@ -78,7 +79,7 @@ export function createOrdinalMintService(input: {
     if (!input.historyRepository) return;
     const now = new Date().toISOString();
     await input.historyRepository.put({
-      id: preview.spend.txid,
+      id: preview.spend.previewId??preview.spend.txid,
       createdAt: now,
       updatedAt: now,
       status: "prepared",
@@ -103,7 +104,7 @@ export function createOrdinalMintService(input: {
   async function persistFinal(preview: OrdinalMintPreview, result: ProtocolSpendResult, finalInscriptionId: string): Promise<void> {
     if (!input.historyRepository) return;
     const now = new Date().toISOString();
-    const existing = await input.historyRepository.get(preview.spend.txid).catch(() => undefined);
+    const existing = await input.historyRepository.get(preview.spend.previewId??preview.spend.txid).catch(() => undefined);
     if (existing) {
       await input.historyRepository.put({
         ...existing,
@@ -123,7 +124,7 @@ export function createOrdinalMintService(input: {
       return;
     }
     await input.historyRepository.put({
-      id: preview.spend.txid,
+      id: preview.spend.previewId??preview.spend.txid,
       createdAt: now,
       updatedAt: now,
       status: result.status,
@@ -176,7 +177,7 @@ export function createOrdinalMintService(input: {
       const preview = {
         outputScriptHex: bytesToHex(outputScript),
         spend,
-        inscriptionId: `${spend.txid}_0`
+        inscriptionId: spend.txid?`${spend.txid}_0`:""
       };
       await persistDraft(req, preview, ownerPublicKeyHex);
       return preview;

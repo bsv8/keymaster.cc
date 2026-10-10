@@ -1,3 +1,4 @@
+import { signProtocolPayment } from "@keymaster/vaultlink-integration";
 // P2PKH 协议 spend：受控签名 + 广播任意输出计划。
 
 import type {
@@ -18,8 +19,7 @@ import type { P2pkhProtocolSubmission, P2pkhUtxo } from "./p2pkhContracts.js";
 import {
   calcTxidFromRawTxHex,
   rawTxHexByteLength,
-  signMixedInputs,
-  signP2pkhTx,
+  serializeTx,
   type UnsignedTx,
 } from "./p2pkhSigner.js";
 import { resourceIdFor } from "./storage/p2pkhStateRepository.js";
@@ -47,7 +47,10 @@ export interface P2pkhProtocolSpendSubmissionStore {
 }
 
 export interface P2pkhProtocolSpendDeps {
-  vault: Pick<VaultService, "status" | "createActiveKeyCrypto">;
+  vault: Pick<VaultService, "status" | "createActiveKeyCrypto" | "requestPayment">;
+  previousTransactions(network: BsvNetwork, inputs: readonly ProtocolSpendInput[]): Promise<string[]>;
+  /** Production query: reject spent/unknown inputs immediately before claiming/signing. */
+  assertInputsUnspent?(network:BsvNetwork,inputs:readonly ProtocolSpendInput[]):Promise<void>;
   /** 生产广播入口；协议 spend 不直接依赖 WOC 或其它 Provider。 */
   centralBroadcastService?: CentralBroadcastService;
   /** 从当前快照取得协议输入对应的序号绑定。 */
@@ -248,8 +251,8 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
     }
   }
 
-  return {
-    async prepare(input: ProtocolSpendPrepareInput): Promise<ProtocolSpendPreview> {
+  const tickets=new Map<string,{preview:ProtocolSpendPreview;input:ProtocolSpendPrepareInput;expires:number}>();
+  const build=async(input:ProtocolSpendPrepareInput,sign:boolean):Promise<ProtocolSpendPreview>=>{
       let protectedClaimIds: string[] = [];
       let inputClaimIds: string[] = [];
       const submissionId = crypto.randomUUID();
@@ -272,39 +275,26 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
         lockingScripts?: readonly (string | undefined)[];
       }): Promise<ProtocolSpendPreview> => {
         const unsigned = buildUnsignedTx(plan.inputs, plan.outputs, plan.changeAddress, plan.changeSatoshis);
-        const activeCrypto = await deps.vault.createActiveKeyCrypto(resolvedOwner.publicKeyHex);
-        const signDigest = async (digest: Uint8Array): Promise<Uint8Array> => {
-          const res = await activeCrypto.signDigest({
-            publicKeyHex: resolvedOwner.publicKeyHex,
-            digest: new Uint8Array(digest).buffer,
-            format: "der"
-          });
-          if (res.format !== "der") {
-            throw new Error(`signDigest format mismatch: got ${res.format}`);
-          }
-          return new Uint8Array(res.signature);
-        };
-        // 混用两种输入形状时按笔分别签名：两者的 scriptCode 与解锁脚本都不同，
-        // 用错一种会让交易在网络上被拒，而本地一切正常。
-        const lockingScripts = plan.lockingScripts ?? [];
-        const hasBare = lockingScripts.some((script) => script !== undefined);
-        const rawTxHex = hasBare
-          ? await signMixedInputs(
-            unsigned,
-            plan.inputs.map((utxo, index) => ({
-              // 缺省项按 P2PKH：从地址重建脚本；给了锁定脚本就用它逐字节当 scriptCode。
-              scriptCode: lockingScripts[index] === undefined
-                ? addressToP2pkhScript(utxo.address)
-                : hexToBytes(lockingScripts[index]),
-              value: utxo.value,
-              // 逐笔决定：裸公钥脚本的解锁脚本里没有公钥，P2PKH 有。
-              // 统一按一种形状推，会让另一种的 scriptSig 多出无用数据。
-              pushPublicKeyInUnlock: lockingScripts[index] === undefined,
-            })),
-            signDigest,
-            { publicKey: hexToBytes(resolvedOwner.publicKeyHex) },
-          )
-          : await signP2pkhTx(unsigned, plan.inputs, signDigest, resolvedOwner.publicKeyHex);
+        if(!sign){
+          const now=Date.now();for(const [id,t] of tickets)if(t.expires<=now)tickets.delete(id);
+          if(tickets.size>=32)throw Error("Too many pending protocol previews");
+          const rawTxHex=Array.from(serializeTx(unsigned),b=>b.toString(16).padStart(2,"0")).join("");
+          const preview:ProtocolSpendPreview={previewId:crypto.randomUUID(),ownerPublicKeyHex:resolvedOwner.publicKeyHex,requestingPluginId:input.requestingPluginId,network:input.network,
+            inputs:structuredClone(input.inputs),outputs:structuredClone(plan.outputs),...(plan.changeAddress===undefined?{}:{changeAddress:plan.changeAddress}),changeSatoshis:plan.changeSatoshis,
+            estimatedFeeSatoshis:plan.feeSatoshis,serializedSizeBytes:serializeTx(unsigned).length+input.inputs.reduce((n,u)=>n+(u.lockingScriptHex===undefined?108:74),0),txid:"",rawTxHex};
+          tickets.set(preview.previewId!,{preview:structuredClone(preview),input:structuredClone(input),expires:now+120000});return preview;
+        }
+        await deps.assertInputsUnspent?.(input.network,input.inputs);
+        // 输入占用先于额度批准/签名，竞争失败不产生第二份可花费签名。
+        inputClaimIds = (await deps.claimStore.tryClaimInputs({submissionId, resourceId: resourceIdFor(input.network), publicKeyHex: resolvedOwner.publicKeyHex, network: input.network,
+          inputs: input.inputs.map(u => ({txid: u.txid, vout: u.vout, value: u.value})),
+        })).claimIds;
+        const rawTxHex = await signProtocolPayment({
+          rawTxHex: Array.from(serializeTx(unsigned), b => b.toString(16).padStart(2, "0")).join(""),
+          prevTransactionHexes: await deps.previousTransactions(input.network, input.inputs),
+          publicKeyHex: resolvedOwner.publicKeyHex, network: input.network,
+          pluginId: input.requestingPluginId ?? "p2pkh", requestPayment: c => deps.vault.requestPayment(c),
+        });
         const serializedSizeBytes = rawTxHexByteLength(rawTxHex);
         inputClaimIds = (await deps.claimStore.tryClaimInputs({
           submissionId,
@@ -359,7 +349,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           if (hasProtectedInputs && !input.requestingPluginId) {
             throw new Error("Protocol spend requires requestingPluginId for protected inputs");
           }
-          if (input.requestingPluginId) {
+          if (sign && input.requestingPluginId) {
             protectedClaimIds = (await deps.protectedOutpoints.claimProtectedInputs({
               ownerPluginId: input.requestingPluginId,
               publicKeyHex: input.ownerPublicKeyHex,
@@ -429,24 +419,8 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
             throw new Error("Protocol spend requires changeAddress when inputs exceed outputs + fee");
           }
           const unsigned = buildUnsignedTx(inputs, outputs, input.changeAddress, changeSatoshis);
-          const activeCrypto = await deps.vault.createActiveKeyCrypto(resolvedOwner.publicKeyHex);
-          const rawTxHex = await signP2pkhTx(
-            unsigned,
-            inputs,
-            async (digest) => {
-              const res = await activeCrypto.signDigest({
-                publicKeyHex: resolvedOwner.publicKeyHex,
-                digest: new Uint8Array(digest).buffer,
-                format: "der"
-              });
-              if (res.format !== "der") {
-                throw new Error(`signDigest format mismatch: got ${res.format}`);
-              }
-              return new Uint8Array(res.signature);
-            },
-            resolvedOwner.publicKeyHex
-          );
-          const serializedSizeBytes = rawTxHexByteLength(rawTxHex);
+          // DER 长度不再驱动真实签名迭代；使用每输入解锁脚本上界求稳定费用。
+          const serializedSizeBytes = serializeTx(unsigned).length + inputs.reduce((n, _u, i) => n + (input.inputs[i]?.lockingScriptHex === undefined ? 108 : 74), 0);
           const nextFee = Math.max(1, Math.ceil((serializedSizeBytes * input.feeRateSatoshisPerKb) / 1000));
           // Changing change changes the signature digest and DER length. Exact
           // equality can alternate forever between adjacent fee values. A fee
@@ -477,9 +451,12 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
         }
         throw err;
       }
-    },
-
+    };
+  return {
+    prepare:input=>build(input,false),
+    presign:input=>build(input,true),
     async releasePrepared(preview): Promise<void> {
+      if(preview.previewId){tickets.delete(preview.previewId);return;}
       const submissionId = preview.submissionId;
       if (!submissionId || !deps.submissionStore) throw new Error("Prepared protocol spend has no durable submission record");
       await serializeSubmissionOperation(submissionId, async () => {
@@ -569,6 +546,15 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
     },
 
     async submit(preview): Promise<ProtocolSpendResult> {
+      if(preview.previewId){
+        const ticket=tickets.get(preview.previewId);
+        if(!ticket||ticket.expires<=Date.now()){tickets.delete(preview.previewId);throw Error("Protocol preview expired or already submitted");}
+        if(JSON.stringify(ticket.preview)!==JSON.stringify(preview))throw Error("Protocol preview changed");
+        tickets.delete(preview.previewId);
+        // Rebuild and revalidate owner/protection/prevouts at actual authorization.
+        preview=await build(ticket.input,true);
+      }
+      if(!preview.txid||calcTxidFromRawTxHex(preview.rawTxHex)!==preview.txid)throw Error("Protocol signed transaction bytes do not match txid");
       const submissionIdForLock = preview.submissionId ?? preview.txid;
       return serializeSubmissionOperation(submissionIdForLock, async () => {
       if (preview.submissionId && deps.submissionStore) {

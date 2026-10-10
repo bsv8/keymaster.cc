@@ -187,6 +187,7 @@ describe("p2pkh.transfer / feepool 多资产校验（施工单 2026-09-18 001）
     id: "p2pkh-asset",
     method: "p2pkh.transfer" as const,
     params: {
+      channelId: "pay.test-p2pkh",
       recipientAddress: MAINNET_P2PKH,
       amountSatoshis: 1000,
       connectSessionId: "session"
@@ -198,6 +199,7 @@ describe("p2pkh.transfer / feepool 多资产校验（施工单 2026-09-18 001）
     id: "feepool-asset",
     method: "feepool.prepare" as const,
     params: {
+      channelId: "pay.test-feepool",
       counterpartyPublicKeyHex: "02" + "11".repeat(32),
       amountSatoshis: 1000,
       connectSessionId: "session"
@@ -209,6 +211,13 @@ describe("p2pkh.transfer / feepool 多资产校验（施工单 2026-09-18 001）
     expect(parsed.params).toMatchObject({ recipientAddress: MAINNET_P2PKH, assetId: undefined });
     const explicit = parseRequestMessage({ ...baseP2pkh, params: { ...baseP2pkh.params, assetId: "bsv-mainnet" } });
     expect(explicit.params).toMatchObject({ assetId: "bsv-mainnet" });
+  });
+
+  it("付款缺少渠道编号直接拒绝，不由宿主补默认编号", () => {
+    const {channelId: _p2pkh, ...p2pkh} = baseP2pkh.params;
+    const {channelId: _pool, ...pool} = baseFeepool.params;
+    expect(() => parseRequestMessage({...baseP2pkh, params: p2pkh})).toThrow(/channelId/);
+    expect(() => parseRequestMessage({...baseFeepool, params: pool})).toThrow(/channelId/);
   });
 
   it("bsv-testnet 接受 testnet 地址", () => {

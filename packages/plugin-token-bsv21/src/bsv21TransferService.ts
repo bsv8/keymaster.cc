@@ -63,7 +63,7 @@ export function createBsv21TransferService(input: {
     for (const u of sorted) {
       selected.push(u);
       try {
-        await input.protocolSpend.prepare({
+        const quote=await input.protocolSpend.prepare({
           ownerPublicKeyHex,
           requestingPluginId: "token-bsv21",
           network,
@@ -72,6 +72,7 @@ export function createBsv21TransferService(input: {
           feeRateSatoshisPerKb,
           changeAddress
         });
+        await input.protocolSpend.releasePrepared?.(quote);
         return selected;
       } catch {
         // keep adding

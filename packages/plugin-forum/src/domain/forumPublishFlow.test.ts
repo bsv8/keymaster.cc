@@ -284,7 +284,8 @@ function protocolSpendStub(record: {
       control.beforePrepare = next;
     },
     service: {
-      async prepare(input) {
+      async prepare(){throw Error("Unsigned preview is not used by exact Forum publish");},
+      async presign(input) {
         await control.beforePrepare?.();
         log.push({
           changeAddress: input.changeAddress,

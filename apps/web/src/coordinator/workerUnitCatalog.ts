@@ -81,7 +81,7 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
     unitId: "vault.coordinator-worker",
     taskIds: [],
     serviceIds: ["vault.walletState", "vault.crypto"],
-    storagePurposes: [],
+    storagePurposes: ["payments"],
     finalIoAuditEntries: [],
   },
   {

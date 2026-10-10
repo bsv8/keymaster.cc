@@ -40,6 +40,8 @@ export interface ProtocolSpendOutput {
 }
 
 export interface ProtocolSpendPreview {
+  /** In-memory unsigned preview ticket; absent on explicit durable presign. */
+  previewId?: string;
   ownerPublicKeyHex: string;
   requestingPluginId?: string;
   network: BsvNetwork;
@@ -83,7 +85,11 @@ export interface ProtocolSpendResult {
 }
 
 export interface ProtocolSpendService {
+  /** Pure unsigned preview: no signature, payment reservation or input claim. */
   prepare(input: ProtocolSpendPrepareInput): Promise<ProtocolSpendPreview>;
+  /** Explicit signature for workflows whose next stage depends on signed txid.
+   * It consumes payment authorization and persists input claims immediately. */
+  presign(input: ProtocolSpendPrepareInput): Promise<ProtocolSpendPreview>;
   submit(preview: ProtocolSpendPreview): Promise<ProtocolSpendResult>;
   /** 释放尚未广播的预签名及其输入占用；未知或已派发交易不得调用。 */
   releasePrepared?(preview: ProtocolSpendPreview): Promise<void>;

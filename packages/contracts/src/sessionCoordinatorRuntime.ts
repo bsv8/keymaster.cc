@@ -155,8 +155,10 @@ const STORAGE_DATA_TYPES = [
 ] as const satisfies readonly CoordinatorStorageData["type"][];
 
 const VAULT_OPERATION_TYPES = [
+  "hardware", "migrateToHardware", "migrateToSoftware", "migrationState",
   "getCurrentKey", "verifyPassword", "changePassword", "renameKey", "exportKeyHold",
   "sealLocalSecret", "openLocalSecret",
+  "payment",
 ] as const satisfies readonly CoordinatorVaultOperation["type"][];
 
 const CHANNEL_OPERATION_TYPES = [
@@ -205,6 +207,11 @@ export type CoordinatorClientCommandRequest = Exclude<CoordinatorClientRequest, 
 
 /** 依据 Vault 内层操作 discriminant 收窄 operationResult。 */
 export type CoordinatorVaultOperationResultFor<O extends CoordinatorVaultOperation> =
+  O extends {type:"migrationState"} ? {migrationId:string;phase:"prepared"|"device-committed"|"local-committed";publicKeyHex:string;passwordRequired:boolean;target:"software"|"hardware"}|null :
+  O extends {type:"migrateToHardware"} ? {migrationId:string;phase:"complete";target:"hardware"} :
+  O extends {type:"migrateToSoftware"} ? {migrationId:string;phase:"complete";target:"software"} :
+  O extends { type: "hardware" } ? import("./sessionCoordinator.js").CoordinatorHardwareState :
+  O extends { type: "payment" } ? JSONValue :
   O extends { type: "getCurrentKey" } ? CoordinatorVaultKeyView | undefined :
   O extends { type: "verifyPassword" | "changePassword" | "renameKey" } ? true :
   O extends { type: "exportKeyHold" } ? Uint8Array :
@@ -295,6 +302,7 @@ export type CoordinatorOwnerStorageResultFor<D extends CoordinatorOwnerStorageDa
 
 /** 依据 Coordinator crypto operation discriminant 收窄 cryptoResult。 */
 export type CoordinatorCryptoResultFor<O extends CoordinatorCryptoOperation> =
+  O extends { type: "signConnectEnvelope" } ? Extract<CoordinatorCryptoResult, { type: "signConnectEnvelope" }> :
   O extends { type: "signDigest" } ? Extract<CoordinatorCryptoResult, { type: "signDigest" }> :
   O extends { type: "deriveP2pkhAddress" } ? Extract<CoordinatorCryptoResult, { type: "deriveP2pkhAddress" }> :
   never;
@@ -1250,6 +1258,60 @@ function parseVaultOperation(value: unknown): CoordinatorVaultOperation {
   const type = enumValue(operation.type, VAULT_OPERATION_TYPES, "Vault operation.type");
   const password = (field: string): string => text(operation[field], "Vault operation." + field, 4_096);
   switch (type) {
+    case "migrationState":
+      if(Object.keys(operation).length!==1)throw new TypeError("Invalid migration state request");return {type};
+    case "migrateToHardware":
+
+      if(Object.keys(operation).length!==2)throw new TypeError("Invalid migration request fields");
+      return {type,sourcePassword:password("sourcePassword")};
+    case "migrateToSoftware":
+      if(Object.keys(operation).length!==2)throw new TypeError("Invalid migration request fields");
+      return {type,newPassword:password("newPassword")};
+    case "hardware": {
+      const command = expectRecord(operation.command, "hardware.command");
+      const action = enumValue(command.action, ["state", "attach", "recover", "recover-erased", "provision", "recover-import", "enroll", "pair", "disconnect"] as const, "hardware.action");
+      const allowed = action === "state" ? ["action"] : (action === "attach"||action === "recover"||action === "recover-erased"||action === "provision"||action === "recover-import") ? ["action", "leaseId", "port"] : action === "enroll" ? ["action", "leaseId", "port", "label"] : action === "pair" ? ["action", "leaseId", "allow"] : ["action", "leaseId"];
+      if (Object.keys(command).length !== allowed.length || Object.keys(command).some(key => !allowed.includes(key))) throw new TypeError("Invalid hardware command fields");
+      if (action === "state") return { type, command: { action } };
+      const leaseId = text(command.leaseId, "hardware.leaseId", 36);
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(leaseId)) throw new TypeError("Invalid USB lease");
+      if (action === "enroll") return {type, command: {action, leaseId, port: messagePortValue(command.port, "hardware.port"), label: text(command.label, "hardware.label", 64)}};
+      if (action === "attach"||action === "recover"||action === "recover-erased"||action === "provision"||action === "recover-import") return { type, command: { action, leaseId, port: messagePortValue(command.port, "hardware.port") } };
+      if (action === "pair") return { type, command: { action, leaseId, allow: booleanValue(command.allow, "hardware.allow") } };
+      return { type, command: { action, leaseId } };
+    }
+    case "payment": {
+      const command = expectRecord(operation.command, "payment.command");
+      const action = enumValue(command.action, ["list", "pending", "register", "configure", "session-open", "session-close", "session-cancel", "answer", "sign-p2pkh", "sign-standard", "sign-feepool"] as const, "payment.action");
+      const id = (key: string) => text(command[key], `payment.${key}`, 96);
+      const amount = (v: unknown): string => {
+        const s = text(v, "payment.amount", 20);
+        if (!/^(0|[1-9][0-9]*)$/.test(s) || BigInt(s) > 0xffffffffffffffffn) throw new TypeError("payment amount is invalid");
+        return s;
+      };
+      if (action === "list" || action === "pending") return {type, command: {action}};
+      if (action === "register") return {type, command: {action, id: id("id"), owner: id("owner"), kind: enumValue(command.kind, ["app", "plugin"] as const, "payment.kind"), network: id("network"), paymentType: id("paymentType")}};
+      if (action === "configure") {
+        const c = expectRecord(command.channel, "payment.channel");
+        return {type, command: {action, channel: {id: text(c.id,"payment.id",96), owner: text(c.owner,"payment.owner",96), kind: enumValue(c.kind,["app","plugin"] as const,"payment.kind"), network: text(c.network,"payment.network",96), paymentType: text(c.paymentType,"payment.type",96), enabled: booleanValue(c.enabled,"payment.enabled"), singleLimit: amount(c.singleLimit), defaultSessionLimit: amount(c.defaultSessionLimit), revision: (() => { const n = c.revision; if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 1 || n >= 0xffffffff) throw new TypeError("invalid payment revision"); return n; })()}}};
+      }
+      if (action === "session-open") return {type, command: {action, id: id("id"), owner: id("owner")}};
+      if (action === "session-close" || action === "session-cancel") return {type, command: {action, id: id("id")}};
+      if (action === "answer") return {type, command: {action, id: id("id"), allow: booleanValue(command.allow,"payment.allow"), ...(command.raiseSessionLimit === undefined ? {} : {raiseSessionLimit: amount(command.raiseSessionLimit)})}};
+      const transaction = {rawTxHex: text(command.rawTxHex,"payment.rawTxHex",16384), prevTransactionHexes: stringList(command.prevTransactionHexes,"payment.previous",10,16384), channelId: id("channelId"), paymentId: id("paymentId"), sessionId: command.sessionId === null ? null : id("sessionId")};
+      let authorization: {documentHex:string;refundTemplateHex:string}|undefined;
+      if(command.authorization!==undefined){
+        if(action!=="sign-feepool"||command.family!=="bitfs"||command.stage!=="state"||(command.role!==undefined&&command.role!=="payer"))throw new TypeError("invalid payment authorization");
+        const a=expectRecord(command.authorization,"payment.authorization");authorization={documentHex:text(a.documentHex,"payment.authorization.document",32768),refundTemplateHex:text(a.refundTemplateHex,"payment.authorization.refund",16384)};
+      }
+      let openingRequestHex:string|undefined;
+      if(command.openingRequestHex!==undefined){
+        if(action!=="sign-feepool"||command.family!=="bitfs"||command.stage!=="state"||command.role!=="cosigner"||authorization||transaction.prevTransactionHexes.length)throw new TypeError("invalid payment opening");
+        openingRequestHex=text(command.openingRequestHex,"payment.openingRequest",32768);
+      }
+      if(action === "sign-feepool") return {type, command: {action, ...transaction, ...(authorization ? {authorization} : {}), ...(openingRequestHex ? {openingRequestHex} : {}), family: enumValue(command.family,["connect","bitfs"] as const,"payment.family"), ...(command.role === undefined ? {} : {role: enumValue(command.role,["payer","cosigner"] as const,"payment.role")}), stage: enumValue(command.stage,["fund","state"] as const,"payment.stage")}};
+      return {type, command: {action, ...transaction}};
+    }
     // 唯一 Key：读取公开摘要，不存在列表、选择、切换或第二把 Key 的入口。
     case "getCurrentKey": case "exportKeyHold":
       return { type };
@@ -1878,7 +1940,8 @@ function parseWalletColdStartSnapshot(value: unknown, field: string): WalletCold
   let key: WalletColdStartSnapshot["key"];
   if (result.key !== undefined) {
     const record = expectRecord(result.key, field + ".key");
-    key = { publicKeyHex: text(record.publicKeyHex, field + ".key.publicKeyHex", 66), label: text(record.label, field + ".key.label", 256) };
+    const backend = record.backend === undefined ? undefined : enumValue(record.backend, ["software", "hardware"] as const, field + ".key.backend");
+    key = { publicKeyHex: text(record.publicKeyHex, field + ".key.publicKeyHex", 66), label: text(record.label, field + ".key.label", 1024), ...(backend === undefined ? {} : { backend }) };
   }
   return { state, ...(meta === undefined ? {} : { meta }), ...(key === undefined ? {} : { key }), ...(reason === undefined ? {} : { reason }) };
 }
@@ -2493,6 +2556,42 @@ function parseCoordinatorVaultOperationResultFor(
   field: string,
 ): unknown {
   switch (operation.type) {
+    case "migrationState": {
+      if(value===null)return null;
+      const result=expectRecord(value,field);
+      if(Object.keys(result).length!==5||Object.keys(result).some(k=>!["migrationId","phase","publicKeyHex","passwordRequired","target"].includes(k)))throw new TypeError("Invalid migration state");
+      const migrationId=text(result.migrationId,field+".migrationId",36),publicKeyHex=text(result.publicKeyHex,field+".publicKeyHex",66);
+      const phase=enumValue(result.phase,["prepared","device-committed","local-committed"] as const,field+".phase");
+      if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(migrationId)||!/^(02|03)[0-9a-f]{64}$/u.test(publicKeyHex)||result.passwordRequired!==(phase!=="local-committed"))throw new TypeError("Invalid migration binding");
+      const target=enumValue(result.target,["software","hardware"] as const,field+".target");
+      return {migrationId,phase,publicKeyHex,passwordRequired:result.passwordRequired,target};
+    }
+    case "migrateToHardware":
+    case "migrateToSoftware": {
+      const result=expectRecord(value,field);
+      if(Object.keys(result).length!==3||result.phase!=="complete"||result.target!==(operation.type==="migrateToHardware"?"hardware":"software"))throw new TypeError("Invalid migration result");
+      const migrationId=text(result.migrationId,field+".migrationId",36);
+      if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(migrationId))throw new TypeError("Invalid migration identity");
+      return {migrationId,phase:"complete",target:operation.type==="migrateToHardware"?"hardware":"software"};
+    }
+    case "hardware": {
+      const result = expectRecord(value, field);
+      const status = enumValue(result.status, ["disconnected", "connecting", "pairing", "connected"] as const, field + ".status");
+      const leaseId = optionalText(result.leaseId, field + ".leaseId", 36);
+      const pairingCode = optionalText(result.pairingCode, field + ".pairingCode", 6);
+      if (status === "disconnected" ? leaseId !== undefined : !leaseId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(leaseId)) throw new TypeError("Invalid hardware lease result");
+      if (status === "pairing" ? !pairingCode || !/^[0-9]{6}$/u.test(pairingCode) : pairingCode !== undefined) throw new TypeError("Invalid hardware pairing result");
+      let activity: {operation: string; state: "awaiting-user" | "executing" | "completed" | "denied" | "cancelled" | "unknown" | "failed"} | undefined;
+      if (result.activity !== undefined) {
+        if (status !== "connected") throw new TypeError("Disconnected hardware cannot have activity");
+        const source = expectRecord(result.activity, field + ".activity");
+        if (Object.keys(source).length !== 2 || Object.keys(source).some(key => key !== "operation" && key !== "state")) throw new TypeError("Invalid hardware activity fields");
+        activity = {operation: text(source.operation, field + ".activity.operation", 96),
+          state: enumValue(source.state, ["awaiting-user", "executing", "completed", "denied", "cancelled", "unknown", "failed"] as const, field + ".activity.state")};
+      }
+      return { status, ...(leaseId === undefined ? {} : { leaseId }), ...(pairingCode === undefined ? {} : { pairingCode }), ...(activity === undefined ? {} : {activity}) };
+    }
+    case "payment": return parseJsonValue(value, field);
     case "getCurrentKey":
       return value === undefined ? undefined : parseCoordinatorVaultKeyView(value, field);
     case "verifyPassword":
@@ -2916,7 +3015,9 @@ function parseOwnerStorageResultFor(data: CoordinatorOwnerStorageData | Coordina
 
 function parseCryptoResultFor(operation: CoordinatorCryptoOperation, value: unknown, field: string): CoordinatorCryptoResult {
   const result = parseCryptoResult(value);
-  if (operation.type === "signDigest") {
+  if (operation.type === "signConnectEnvelope") {
+    if (result.type !== "signConnectEnvelope" || result.format !== "compact") throw new TypeError(`Coordinator ${field} does not match Connect operation`);
+  } else if (operation.type === "signDigest") {
     if (result.type !== "signDigest" || result.format !== operation.format) throw new TypeError(`Coordinator ${field} does not match signDigest operation`);
   } else if (result.type !== "deriveP2pkhAddress") {
     throw new TypeError(`Coordinator ${field} does not match deriveP2pkhAddress operation`);
@@ -3557,6 +3658,15 @@ function parseTopicEvent(value: unknown): CoordinatorTopicEvent {
 
 function parseCryptoOperation(value: unknown): CoordinatorCryptoOperation {
   if (!record(value)) throw new TypeError("Coordinator crypto operation is invalid");
+  if (value.type === "signConnectEnvelope") {
+    if (value.kind !== "identity" && value.kind !== "intent") throw new TypeError("Invalid Connect envelope kind");
+    const envelope = uint8ArrayValue(value.envelope,"crypto.envelope");
+    const content = value.content === undefined ? undefined : uint8ArrayValue(value.content,"crypto.content");
+    if (!envelope.length || envelope.length > 8192 || (content && content.length > 16384) || (value.kind === "identity" && content !== undefined) || (value.kind === "intent" && content === undefined)) throw new TypeError("Invalid Connect envelope payload");
+    const appSessionId=text(value.appSessionId,"crypto.appSessionId",96);
+    if(!appSessionId)throw new TypeError("Connect app session is required");
+    return {type:"signConnectEnvelope",kind:value.kind,envelope, ...(content ? {content} : {}),appSessionId};
+  }
   if (value.type === "signDigest") {
     const digestHex = text(value.digestHex, "crypto.digestHex", 256);
     if (value.format !== "der" && value.format !== "compact") throw new TypeError("Coordinator crypto format is invalid");
@@ -3571,6 +3681,11 @@ function parseCryptoOperation(value: unknown): CoordinatorCryptoOperation {
 
 function parseCryptoResult(value: unknown): CoordinatorCryptoResult {
   if (!record(value)) throw new TypeError("Coordinator crypto result is invalid");
+  if (value.type === "signConnectEnvelope") {
+    const signatureHex=text(value.signatureHex,"crypto.signatureHex",128);
+    if(value.format!=="compact"||!/^[0-9a-f]{128}$/i.test(signatureHex))throw new TypeError("Invalid Connect signature");
+    return {type:"signConnectEnvelope",signatureHex,format:"compact"};
+  }
   if (value.type === "signDigest") {
     const signatureHex = text(value.signatureHex, "crypto.signatureHex", 512);
     if (value.format !== "der" && value.format !== "compact") throw new TypeError("Coordinator crypto result format is invalid");
@@ -3745,7 +3860,8 @@ void integer;
 
 function parsePublicKeyIdentity(value: unknown): import("./vault.js").KeyIdentity {
   const identity = expectRecord(value, "activeKeyIdentity");
+  if (identity.backend !== undefined && identity.backend !== "software" && identity.backend !== "hardware") throw new TypeError("Invalid public identity backend");
   if (!Array.isArray(identity.capabilities) || identity.capabilities.length > 64) throw new TypeError("Invalid public identity capabilities");
-  return { publicKeyHex: text(identity.publicKeyHex, "activeKeyIdentity.publicKeyHex", 256), label: text(identity.label, "activeKeyIdentity.label", 1024),
+  return { ...(identity.backend === undefined ? {} : { backend: identity.backend }), publicKeyHex: text(identity.publicKeyHex, "activeKeyIdentity.publicKeyHex", 256), label: text(identity.label, "activeKeyIdentity.label", 1024),
     createdAt: text(identity.createdAt, "activeKeyIdentity.createdAt", 256), capabilities: identity.capabilities.map(item => text(item, "activeKeyIdentity.capabilities", 256)) };
 }

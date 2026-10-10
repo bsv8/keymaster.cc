@@ -1,3 +1,4 @@
+import { rememberTransaction, fundingCoin, previousTransactions, paymentRequester, cleanupPayments } from "../../../Coding/keymaster/vaultlink-integration/test/transfer-fixture.mjs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import type { ActiveKeyCrypto, VaultWalletState, CentralBroadcastService } from "@keymaster/contracts";
@@ -11,8 +12,8 @@ import { deriveP2pkhAddress } from "./p2pkhSigner.js";
 
 const secret = "00".repeat(31) + "a1";
 const owner = deriveP2pkhAddress(secret, "main");
-const input = { txid: "11".repeat(32), vout: 0, value: 10000, address: owner.address };
-afterEach(disposeP2pkhStateRepository);
+const input = { ...fundingCoin(owner.publicKeyHex, 10000, "11".repeat(32)), address: owner.address };
+afterEach(async () => {disposeP2pkhStateRepository();await cleanupPayments();});
 
 async function fixture() {
   const storage = createMemoryOwnerFileStore();
@@ -34,6 +35,7 @@ async function fixture() {
     abortNotDispatched: async () => undefined, refresh: async () => ({}), publishChanged: () => undefined,
   });
   const central = { submitOnce: async (submission: Parameters<typeof broadcast>[0]) => {
+    rememberTransaction(submission.rawTxHex);
     const result = await broadcast(submission);
     if (result.ack.status !== "ok") throw new Error("broadcast validation failed");
     return result.operationResult;
@@ -44,12 +46,12 @@ async function fixture() {
     signDigest: async ({ digest, format }) => { assertActive(); const signature = secp256k1.sign(new Uint8Array(digest), Uint8Array.from(secret.match(/../g)!.map(byte => parseInt(byte, 16))), { prehash: false, lowS: true, format }); return { publicKeyHex: owner.publicKeyHex, format, signature: signature.slice().buffer as ArrayBuffer }; },
     dispose: () => undefined,
   } as ActiveKeyCrypto);
-  const runtime = await createWorkerProtocolRuntime({ storage, owner: owner.publicKeyHex, assertActive, crypto, central,
+  const runtime = await createWorkerProtocolRuntime({ requestPayment: paymentRequester(secret), storage, owner: owner.publicKeyHex, assertActive, crypto, central,
     transfer: { allocateUtxos: async () => ({ selected: [input], totalInputSatoshis: input.value }) } as never,
     snapshot: async () => ({ available: false, state: "unavailable", items: [] }),
-    query: () => ({ getTransactionObservation: async () => ({ observation: "confirmed" }), getSpentOutput: async () => null }) as never,
+    query: () => ({ getRawTransaction: async (network: string, txid: string) => (await previousTransactions(network,[{txid}]))[0], getTransactionObservation: async () => ({ observation: "confirmed" }), getSpentOutput: async () => null }) as never,
   });
-  const prepare = () => runtime.spend.prepare({ ownerPublicKeyHex: owner.publicKeyHex, network: "main", feeRateSatoshisPerKb: 1, inputs: [input], outputs: [{ value: 9900, scriptHex: "51" }], noChangeRule: { maxMinerFeeSatoshis: 100 } });
+  const prepare = () => runtime.spend.presign({ ownerPublicKeyHex: owner.publicKeyHex, network: "main", feeRateSatoshisPerKb: 1, inputs: [input], outputs: [{ value: 9900, scriptHex: "51" }], noChangeRule: { maxMinerFeeSatoshis: 100 } });
   return { storage, runtime, prepare, provider, broadcast, revoke: () => { active = false; runtime.dispose(); } };
 }
 

@@ -8,7 +8,7 @@ export const VAULT_WORKER_CRYPTO_CAPABILITY = defineCapability<VaultWorkerCrypto
 
 export interface P2pkhWorkerTransfer {
   getGlobalSettings(): { includeTestnet?: boolean; feeRateSatoshisPerKb?: Partial<Record<"low" | "medium" | "high", number>> };
-  prepareTransfer(input: { assetId: "bsv" | "bsvtest"; ownerPublicKeyHex: string; recipientAddress: string; amountSatoshis: number; feeRateSatoshisPerKb?: number }): Promise<unknown>;
+  prepareTransfer(input: { paymentContext?: { channelId: string; sessionId: string | null }; assetId: "bsv" | "bsvtest"; ownerPublicKeyHex: string; recipientAddress: string; amountSatoshis: number; feeRateSatoshisPerKb?: number }): Promise<unknown>;
   submitTransfer(preview: unknown): Promise<{ status: string; txid?: string; error?: string; rawTxHex?: string }>;
 }
 export interface P2pkhWorkerTransferBinding {

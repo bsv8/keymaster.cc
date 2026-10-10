@@ -8,7 +8,7 @@ describe("Vault public boundary", () => {
     const published = createPublicVaultService(internal);
     expect(Object.isFrozen(published)).toBe(true);
     expect(Object.getPrototypeOf(published)).toBe(null);
-    for (const name of ["initialize", "exportKeyHold", "changePassword", "renameKey", "resetWallet", "coldStart", "storageControl", "vaultOperation", "coordinatorClient", "mirror", "dispose"]) {
+    for (const name of ["migrateToHardware", "migrateToSoftware", "migrationState", "hardware", "initialize", "exportKeyHold", "changePassword", "renameKey", "resetWallet", "coldStart", "storageControl", "vaultOperation", "coordinatorClient", "mirror", "dispose"]) {
       expect(name in published).toBe(false);
     }
     expect(await published.getCurrentKey()).toBe("internal");

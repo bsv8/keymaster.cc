@@ -16,7 +16,8 @@ import { useInternalVault } from "./VaultInternalContext.js";
 //
 // 所有展示文案走 i18n，缺 key 时回退到 defaultValue。
 
-import { useEffect, useState } from "react";
+import { HardwareConnectionPanel } from "@keymaster/vaultlink-integration/ui";
+import { useCallback, useEffect, useState } from "react";
 import { Button, EmptyState, PageHeader, TextInput } from "@keymaster/ui";
 import { usePluginCapability, useOptionalPluginCapability } from "webloom-framework/react";
 import { usePluginI18n } from "@keymaster/runtime";
@@ -28,7 +29,7 @@ function OnboardingShell({ width, children }: { width: "narrow" | "wide" | "wiza
   return <>{page.renderFrame("onboarding", children, width)}</>;
 }
 
-type Mode = "welcome" | "new-wallet-form" | "first-time-import" | "unlock-form";
+type Mode = "welcome" | "new-wallet-form" | "first-time-import" | "hardware-new" | "unlock-form";
 
 export function VaultWalletEntry() {
   const vault = useInternalVault();
@@ -41,6 +42,9 @@ export function VaultWalletEntry() {
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const preserveHardwareConnection = useCallback(() => vault.walletSnapshot().status === "unlocked", [vault]);
+  const hardware = useCallback((command: import("@keymaster/contracts").CoordinatorHardwareCommand) => vault.hardware(command), [vault]);
+  const [backend, setBackend] = useState<"software" | "hardware">();
   const [lockedKeyLabel, setLockedKeyLabel] = useState<string | undefined>(undefined);
 
   // 锁定态只需要知道"这把 Key 叫什么"，好让用户确认自己解锁的是哪个身份。
@@ -48,16 +52,24 @@ export function VaultWalletEntry() {
   useEffect(() => {
     if (status !== "locked") {
       setLockedKeyLabel(undefined);
+      setBackend(undefined);
       return;
     }
     let cancelled = false;
-    void vault.getCurrentKey()
-      .then((key) => {
+    setBackend(undefined);
+    setLockedKeyLabel(undefined);
+    void vault.coldStart().then(async snapshot => {
+      if (cancelled || snapshot.state !== "ready") return;
+      const kind = snapshot.key?.backend ?? "software";
+      setBackend(kind);
+      if (kind === "hardware") {
+        setLockedKeyLabel(snapshot.key?.label);
+      } else {
+        // 软件的附加显示名称读取失败不阻断已经确认的后端类型。
+        const key = await vault.getCurrentKey().catch(() => undefined);
         if (!cancelled) setLockedKeyLabel(key?.label);
-      })
-      .catch(() => {
-        if (!cancelled) setLockedKeyLabel(undefined);
-      });
+      }
+    }).catch(e => { if (!cancelled) setError(e instanceof Error ? e.message : String(e)); });
     return () => {
       cancelled = true;
     };
@@ -129,6 +141,7 @@ export function VaultWalletEntry() {
   }
 
   async function unlock() {
+    if (backend !== "software") return;
     setError(null);
     setBusy(true);
     try {
@@ -182,6 +195,10 @@ export function VaultWalletEntry() {
                 {t("shell.locked.card.importCta", { defaultValue: "开始导入 →" })}
               </span>
             </button>
+            <button type="button" className="locked-shell__card" onClick={() => setMode("hardware-new")} data-intent="hardware">
+              <h2>{t("vault.hardware.title", {defaultValue: "连接硬件钱包"})}</h2>
+              <p>{t("vault.hardware.enrollBody", {defaultValue: "使用 RocKey 上的 Key 建立钱包。PIN 和私钥由设备管理。"})}</p>
+            </button>
           </div>
           <EmptyState
             title={t("shell.locked.notice.title", { defaultValue: "私钥不会离开你的浏览器" })}
@@ -193,6 +210,12 @@ export function VaultWalletEntry() {
       </OnboardingShell>
     );
   }
+
+  if (mode === "hardware-new") return <OnboardingShell width="narrow">
+    <PageHeader title={t("vault.hardware.title", {defaultValue: "连接硬件钱包"})} />
+    <HardwareConnectionPanel preserveConnectionOnUnmount={preserveHardwareConnection} execute={hardware} enrollmentLabel="RocKey" text={(key, fallback) => t(`vault.hardware.${key}`, {defaultValue: fallback})} />
+    <Button variant="ghost" onClick={() => setMode("welcome")}>{t("common.back", {defaultValue: "返回"})}</Button>
+  </OnboardingShell>;
 
   // ---------- 新建钱包：设置 Key 密码 ----------
   if (mode === "new-wallet-form") {
@@ -246,6 +269,12 @@ export function VaultWalletEntry() {
   }
 
   // ---------- 已有钱包：解锁 ----------
+  if (backend === "hardware") return <OnboardingShell width="narrow">
+    <PageHeader title={t("vault.hardware.title", { defaultValue: "连接硬件钱包" })} />
+    {lockedKeyLabel ? <p>{lockedKeyLabel}</p> : null}
+    <HardwareConnectionPanel preserveConnectionOnUnmount={preserveHardwareConnection} execute={hardware} text={(key, fallback) => t(`vault.hardware.${key}`, { defaultValue: fallback })} />
+  </OnboardingShell>;
+
   return (
     <OnboardingShell width="narrow">
       <div className="locked-shell locked-shell--form">
@@ -269,7 +298,7 @@ export function VaultWalletEntry() {
           error={error ?? undefined}
         />
         <div className="locked-shell__actions">
-          <Button onClick={unlock} loading={busy} disabled={!password}>
+          <Button onClick={unlock} loading={busy} disabled={!password || backend !== "software"}>
             {t("common.action.unlock", { defaultValue: "解锁" })}
           </Button>
         </div>

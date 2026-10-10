@@ -27,6 +27,8 @@ import {
   type MsFileStatResult,
   type P2pkhTransferParams,
   type P2pkhTransferResult,
+  type PaymentChannelRegisterParams,
+  type PaymentChannelRegisterResult,
   type PriceGetParams,
   type PriceGetResult,
   type PriceSubscribeParams,
@@ -410,6 +412,11 @@ export class KeymasterConnectClient {
    */
   p2pkhTransfer(params: P2pkhTransferParams, options?: KeymasterRequestOptions): Promise<P2pkhTransferResult> {
     return this.request("p2pkh.transfer", params, options);
+  }
+
+  /** 注册零额度渠道；用户在钱包设置额度后，付款携带返回的 channelId。 */
+  registerPaymentChannel(params: PaymentChannelRegisterParams, options?: KeymasterRequestOptions): Promise<PaymentChannelRegisterResult> {
+    return this.request("payment.channel.register", params, options);
   }
 
   /**

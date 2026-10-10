@@ -161,7 +161,7 @@ export function calculateP2pkhBalanceBreakdown(input: {
 }
 
 export interface P2pkhServiceDeps {
-  vault: Pick<VaultService, "status" | "createActiveKeyCrypto">;
+  vault: Pick<VaultService, "status" | "createActiveKeyCrypto" | "requestPayment">;
   coordinator?: Pick<P2pkhCoordinatorControl, "p2pkhUtxosGet" | "p2pkhUtxosRefresh">
     & Partial<Pick<P2pkhCoordinatorControl, "subscribeTopic" | "p2pkhSettingsUpdate">>
     & { getBootstrapSnapshot(): Pick<CoordinatorBootstrapSnapshot, "p2pkhSettings"> };
@@ -366,6 +366,15 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
   }
 
   const transfer = createP2pkhTransferService({
+    async previousTransactions(network, inputs) {
+      if (!deps.woc?.getRawTransaction) throw new Error("Previous transaction evidence is unavailable");
+      const fetched = new Map<string, Promise<string>>();
+      return Promise.all(inputs.map(input => {
+        let raw = fetched.get(input.txid);
+        if (!raw) { raw = deps.woc!.getRawTransaction!(network, input.txid); fetched.set(input.txid, raw); }
+        return raw;
+      }));
+    },
     vault: deps.vault,
     centralBroadcastService: deps.centralBroadcastService,
     broadcastWithCoordinator: deps.broadcastWithCoordinator,
@@ -852,6 +861,10 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       return filtered.filter((r) => r.network === network);
     },
 
+    async getRawTransaction(network, txid) {
+      if (!deps.woc?.getRawTransaction) throw new Error("Previous transaction evidence is unavailable");
+      return deps.woc.getRawTransaction(network,txid);
+    },
     async listUtxos(filter) {
       return collectUtxos(filter);
     },

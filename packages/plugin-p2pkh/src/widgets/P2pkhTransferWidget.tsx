@@ -223,7 +223,7 @@ function P2pkhTransferWidgetInner({
       await navigator.clipboard.writeText(preview.rawTxHex);
       setHexCopied(true);
     } catch {
-      setError(t("p2pkh.transfer.err.copyHex", { defaultValue: "复制 rawTxHex 失败" }));
+      setError(t("p2pkh.transfer.err.copyHex", { defaultValue: "复制未签名交易 失败" }));
     }
   }
 
@@ -329,24 +329,21 @@ function P2pkhTransferWidgetInner({
                 {formatNumber(preview.estimatedFeeSatoshis)} sats
               </p>
               <p>
-                {t("p2pkh.transfer.preview.size", { defaultValue: "序列化大小：" })}
+                {t("p2pkh.transfer.preview.size", { defaultValue: "签名后大小上限：" })}
                 {formatNumber(preview.serializedSizeBytes)} bytes
               </p>
-              <p>
-                {t("p2pkh.transfer.preview.txid", { defaultValue: "最终 txid：" })}
-                <code>{preview.txid}</code>
-              </p>
+              <p>{t("p2pkh.transfer.preview.unsigned", { defaultValue: "确认后才会签名，生成交易编号。" })}</p>
               <div className="p2pkh-transfer-widget__actions">
                 <Button onClick={doSubmit} loading={busy} variant="primary" disabled={!preview}>
                   {t("p2pkh.transfer.form.sign", { defaultValue: "确认并广播交易" })}
                 </Button>
                 <Button variant="ghost" onClick={copyRawTxHex}>
-                  {t("p2pkh.transfer.preview.copyHex", { defaultValue: "复制 rawTxHex" })}
+                  {t("p2pkh.transfer.preview.copyHex", { defaultValue: "复制未签名交易" })}
                 </Button>
                 {hexCopied ? <span>{t("p2pkh.transfer.preview.copied", { defaultValue: "已复制" })}</span> : null}
               </div>
               <label className="p2pkh-transfer-widget__hex-label">
-                {t("p2pkh.transfer.preview.rawTxHex", { defaultValue: "最终 rawTxHex：" })}
+                {t("p2pkh.transfer.preview.rawTxHex", { defaultValue: "未签名交易：" })}
               </label>
               <pre className="p2pkh-transfer-widget__hex">
                 <code>{preview.rawTxHex}</code>

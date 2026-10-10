@@ -1,6 +1,6 @@
 // packages/plugin-protocol/src/OriginSettingsTray.tsx
-// popup 顶栏 inline 配置面板：编辑当前 origin 的 p2pkh auto-approve +
-// feepool auto-sign + identity / cipher auto-approve + 确认超时。
+// popup 顶栏配置面板：identity/cipher 授权、费用池初始大小和确认超时。
+// 付款额度只在钱包核心渠道设置，不能再叠加一套 origin 支付授权。
 //
 // 设计缘由（施工单 002 硬切换：即时生效 + 样式补全；施工单 003：confirmTimeoutSeconds；
 // 施工单 2026-06-27 001：文案明确 timeout 仅作用于解锁后人工确认阶段）：
@@ -8,7 +8,7 @@
 //   - 站点级配置**不**走 settings.registry（settings 路由是 per-user 全局
 //     设置；站点级是 per-origin per-popup-session）。
 //   - 写操作走 service.setOriginSettings；service 内部同步刷 originCache，
-//     让下一次 p2pkh.auto-approve 同步判断立即生效。
+//     让下一次身份/解密请求的判断立即生效。
 //   - 交互模型（施工单 002 硬切换，取代旧的"整页 Save"模式）：
 //       * 复选框：点击立即提交（无中间态）；
 //       * 数字输入：编辑态本地维护字符串；blur / Enter 才提交；
@@ -44,11 +44,8 @@ interface OriginSettingsTrayInlineProps {
 function defaultOriginSettings(origin: string): ProtocolOriginSettingsRecord {
   return {
     origin,
-    p2pkhAutoApproveEnabled: false,
-    p2pkhAutoApproveMaxSatoshis: 0,
     identityAutoApproveEnabled: false,
     cipherAutoApproveEnabled: false,
-    feePoolAutoSignMaxSatoshis: 0,
     feePoolDefaultFundSatoshis: 0,
     confirmTimeoutSeconds: 30,
     updatedAt: Date.now()
@@ -57,8 +54,6 @@ function defaultOriginSettings(origin: string): ProtocolOriginSettingsRecord {
 
 /** 数字字段名集合。每个字段单独维护一个本地字符串编辑态。 */
 type NumberFieldKey =
-  | "p2pkhAutoApproveMaxSatoshis"
-  | "feePoolAutoSignMaxSatoshis"
   | "feePoolDefaultFundSatoshis"
   | "confirmTimeoutSeconds";
 
@@ -337,19 +332,7 @@ export function OriginSettingsTrayInline({ origin, onClose }: OriginSettingsTray
         </button>
       </header>
       <div className="origin-settings-panel__form">
-        <label className="origin-settings-panel__field origin-settings-panel__field--inline">
-          <input
-            type="checkbox"
-            checked={record.p2pkhAutoApproveEnabled}
-            disabled={saving}
-            onChange={(e) => toggleBoolean("p2pkhAutoApproveEnabled", e.currentTarget.checked)}
-          />
-          <span>
-            {t("protocol.originSettings.p2pkhAutoApprove.label", {
-              defaultValue: "Auto-approve p2pkh.transfer when amount ≤ max"
-            })}
-          </span>
-        </label>
+        <p>{t("protocol.originSettings.paymentPolicyHint", {defaultValue: "付款额度统一在钱包顶栏的支付渠道设置；超过单笔或 App 会话累计额度时由钱包确认。"})}</p>
         {/* ============== 施工单 001：identity / cipher auto-approve ============== */}
         <label className="origin-settings-panel__field origin-settings-panel__field--inline">
           <input
@@ -377,18 +360,6 @@ export function OriginSettingsTrayInline({ origin, onClose }: OriginSettingsTray
             })}
           </span>
         </label>
-        {renderNumberField(
-          "p2pkhAutoApproveMaxSatoshis",
-          t("protocol.originSettings.p2pkhAutoApproveMax.label", {
-            defaultValue: "Max satoshis for auto-approve (0 = off)"
-          })
-        )}
-        {renderNumberField(
-          "feePoolAutoSignMaxSatoshis",
-          t("protocol.originSettings.feepoolAutoSignMax.label", {
-            defaultValue: "Max satoshis for fee-pool auto-sign (0 = off)"
-          })
-        )}
         {renderNumberField(
           "feePoolDefaultFundSatoshis",
           t("protocol.originSettings.feePoolDefaultFundSatoshis.label", {

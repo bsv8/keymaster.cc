@@ -343,9 +343,9 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.transfer.preview.noChange": "None",
       "p2pkh.transfer.preview.fee": "Final fee: ",
       "p2pkh.transfer.preview.size": "Serialized size: ",
-      "p2pkh.transfer.preview.txid": "Final txid: ",
-      "p2pkh.transfer.preview.rawTxHex": "Final rawTxHex: ",
-      "p2pkh.transfer.preview.copyHex": "Copy rawTxHex",
+      "p2pkh.transfer.preview.unsigned": "Confirmation authorizes signing and generates the transaction ID.",
+      "p2pkh.transfer.preview.rawTxHex": "Unsigned transaction: ",
+      "p2pkh.transfer.preview.copyHex": "Copy unsigned transaction",
       "p2pkh.transfer.preview.copied": "Copied",
       "p2pkh.transfer.err.recipient": "Please enter a recipient address",
       "p2pkh.transfer.err.amount": "Amount must be a positive integer",
@@ -354,8 +354,8 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.transfer.err.submit": "Submit failed",
       "p2pkh.transfer.err.keyChanged": "Active key switched. Please prepare the preview again",
       "p2pkh.transfer.err.copyHex": "Failed to copy rawTxHex",
-      "p2pkh.transfer.description.bsv": "Final signed BSV mainnet transfer preview. Broadcast uses the exact rawTxHex shown here.",
-      "p2pkh.transfer.description.bsvtest": "Final signed BSV testnet transfer preview. Broadcast uses the exact rawTxHex shown here.",
+      "p2pkh.transfer.description.bsv": "Unsigned BSV mainnet transfer preview. Confirm to authorize signing and broadcasting.",
+      "p2pkh.transfer.description.bsvtest": "Unsigned BSV testnet transfer preview. Confirm to authorize signing and broadcasting.",
       "p2pkh.col.protected": "Protected",
       "p2pkh.col.protected.empty": "Not protected",
       "p2pkh.transfer.result.broadcastPending": "Broadcast pending",
@@ -605,9 +605,9 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.transfer.preview.noChange": "无",
       "p2pkh.transfer.preview.fee": "最终矿工费：",
       "p2pkh.transfer.preview.size": "序列化大小：",
-      "p2pkh.transfer.preview.txid": "最终 txid：",
-      "p2pkh.transfer.preview.rawTxHex": "最终 rawTxHex：",
-      "p2pkh.transfer.preview.copyHex": "复制 rawTxHex",
+      "p2pkh.transfer.preview.unsigned": "确认后才会签名，生成交易编号。",
+      "p2pkh.transfer.preview.rawTxHex": "未签名交易：",
+      "p2pkh.transfer.preview.copyHex": "复制未签名交易",
       "p2pkh.transfer.preview.copied": "已复制",
       "p2pkh.transfer.err.recipient": "请输入接收方地址",
       "p2pkh.transfer.err.amount": "金额必须为正整数",
@@ -615,9 +615,9 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.transfer.err.prepare": "准备失败",
       "p2pkh.transfer.err.submit": "提交失败",
       "p2pkh.transfer.err.keyChanged": "当前 key 已切换，请重新准备预览",
-      "p2pkh.transfer.err.copyHex": "复制 rawTxHex 失败",
-      "p2pkh.transfer.description.bsv": "最终已签名的 BSV 主网转账预览。广播时直接使用这里展示的 rawTxHex。",
-      "p2pkh.transfer.description.bsvtest": "最终已签名的 BSV Testnet 转账预览。广播时直接使用这里展示的 rawTxHex。",
+      "p2pkh.transfer.err.copyHex": "复制未签名交易 失败",
+      "p2pkh.transfer.description.bsv": "BSV 主网未签名转账预览。确认后才申请签名并广播。",
+      "p2pkh.transfer.description.bsvtest": "BSV Testnet 未签名转账预览。确认后才申请签名并广播。",
       "p2pkh.col.protected": "已保护",
       "p2pkh.col.protected.empty": "未保护",
       "p2pkh.transfer.result.broadcastPending": "等待广播",
@@ -763,7 +763,12 @@ const p2pkhPluginDefinition = {
     ctx.provide(BALANCE_BROADCAST_CAPABILITY, service.balanceBroadcaster);
     ctx.provide(P2PKH_ADDRESS_CODEC_CAPABILITY, p2pkhAddressCodec);
     ctx.provide(P2PKH_PROTOCOL_SPEND_CAPABILITY, createP2pkhProtocolSpendService({
+      assertInputsUnspent:async(network,inputs)=>{await Promise.all(inputs.map(async i=>{if(await woc.getSpentOutput(network,i.txid,i.vout)!==null)throw Error("Protocol input is already spent");}));},
       vault,
+      previousTransactions: async (network, inputs) => {
+        if (!woc.getRawTransaction) throw new Error("Complete previous transaction reader unavailable");
+        return Promise.all(inputs.map(i => woc.getRawTransaction!(network, i.txid)));
+      },
       centralBroadcastService,
       getUtxoBinding: async ({ ownerPublicKeyHex, network }) => {
         const result = await publicCoordinator.p2pkhUtxosGet({ ownerPublicKeyHex, network });

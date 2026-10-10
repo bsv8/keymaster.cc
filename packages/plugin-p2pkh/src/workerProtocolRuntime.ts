@@ -8,6 +8,7 @@ import { createWorkerProtocolEvidence } from "./workerProtocolEvidence.js";
 import type { P2pkhService } from "./p2pkhContracts.js";
 
 export interface WorkerProtocolDependencies {
+  requestPayment: import("@keymaster/contracts").VaultService["requestPayment"];
   assertActive(): void;
   owner: string;
   storage: BorrowedModuleFileStore;
@@ -52,7 +53,9 @@ export async function createWorkerProtocolRuntime(deps: WorkerProtocolDependenci
     }
   };
   const spend = createP2pkhProtocolSpendService({
-    vault: { status: () => { check(); return "unlocked"; }, createActiveKeyCrypto: async owner => { check(owner); const crypto = await deps.crypto(owner); check(); return crypto; } },
+    assertInputsUnspent:async(network,inputs)=>{const query=deps.query();if(!query)throw Error("Protocol input reader unavailable");await Promise.all(inputs.map(async i=>{if(await query.getSpentOutput(network,i.txid,i.vout)!==null)throw Error("Protocol input is already spent");}));check();},
+    previousTransactions: async (network, inputs) => { const q = deps.query(); if (!q?.getRawTransaction) throw new Error("Complete previous transaction reader unavailable"); const raw = await Promise.all(inputs.map(i => q.getRawTransaction!(network, i.txid))); check(); return raw; },
+    vault: { requestPayment: c => { check(); return deps.requestPayment(c); }, status: () => { check(); return "unlocked"; }, createActiveKeyCrypto: async owner => { check(owner); const crypto = await deps.crypto(owner); check(); return crypto; } },
     centralBroadcastService: deps.central,
     getUtxoBinding: async ({ ownerPublicKeyHex, network }) => {
       check(ownerPublicKeyHex); const snapshot = await deps.snapshot(network); check();

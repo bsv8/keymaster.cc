@@ -109,6 +109,7 @@ function harness(input: {
   const raws = new Map<string, string>([[defaultTx.txid, input.rawTxHex ?? defaultTx.rawTxHex]]);
   for (const tx of input.extraTxs ?? []) raws.set(tx.txid, tx.rawTxHex);
   const spend = {
+    async presign(){throw Error("Self sweep uses unsigned preview then submit");},
     async prepare(prepareInput: Parameters<ProtocolSpendService["prepare"]>[0]): Promise<ProtocolSpendPreview> {
       prepared.push({
         inputs: prepareInput.inputs,
@@ -273,7 +274,8 @@ describe("自有输出的归集", () => {
         return OWNER_ADDRESS;
       },
       protocolSpend: () => ({
-        async prepare(prepareInput: Parameters<ProtocolSpendService["prepare"]>[0]): Promise<ProtocolSpendPreview> {
+        async presign(){throw Error("Self sweep uses unsigned preview then submit");},
+    async prepare(prepareInput: Parameters<ProtocolSpendService["prepare"]>[0]): Promise<ProtocolSpendPreview> {
           return {
             ownerPublicKeyHex: prepareInput.ownerPublicKeyHex,
             network: prepareInput.network,

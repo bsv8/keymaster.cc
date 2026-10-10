@@ -184,6 +184,7 @@ describe("KeymasterConnectClient", () => {
     ["cipherEncrypt", "cipher.encrypt"],
     ["cipherDecrypt", "cipher.decrypt"],
     ["p2pkhTransfer", "p2pkh.transfer"],
+    ["registerPaymentChannel", "payment.channel.register"],
     ["channelPublish", "channel.publish"],
     ["channelSubscriptionSet", "channel.subscription_set"],
     ["priceGet", "price.get"],

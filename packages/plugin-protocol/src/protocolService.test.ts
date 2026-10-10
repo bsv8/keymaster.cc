@@ -13,7 +13,8 @@ import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
 //   - pageUnloading 才发 closing；
 //   - DB 写失败不阻塞主协议结果。
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {paymentRequester, cleanupPayments} from "../../../Coding/keymaster/vaultlink-integration/test/transfer-fixture.mjs";
 import {
   PROTOCOL_VERSION,
   LaunchAppViewError,
@@ -39,6 +40,7 @@ import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 
 const TEST_PRIV_HEX = "0000000000000000000000000000000000000000000000000000000000000001";
+afterEach(cleanupPayments);
 const TEST_PUB_HEX = "0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798";
 const ORIGIN = "https://abc.com";
 const VALID_PROOF = {
@@ -81,6 +83,7 @@ function makeVaultStub(publicKeyHex: string): VaultService & { subscribeWalletSt
   const listeners = new Set<(s: "locked" | "unlocked") => void>();
   const lifecycleListeners = new Set<(snapshot: { status: "locked" | "unlocked" }) => void>();
   return {
+    requestPayment: paymentRequester(TEST_PRIV_HEX),
     status: () => (state.locked ? "locked" : "unlocked"),
     walletSnapshot: () => ({ status: state.locked ? "locked" as const : "unlocked" as const, sessionEpoch: "test-epoch", vaultLifecycleRevision: 1 }),
     subscribeWalletState: (h: (snapshot: { status: "locked" | "unlocked" }) => void) => {
@@ -493,6 +496,17 @@ function makeService(publicKeyHex = TEST_PUB_HEX, storageRepository: ProtocolSto
 }
 
 function makeEvent<T>(data: T, origin = ORIGIN, source: object | null = null): MessageEvent {
+  // 已注册的真实钱包 fixture 渠道；App 线上参数必须显式提交，无产品 fallback。
+  if (data && typeof data === "object" && "method" in data && "params" in data
+    && (data.method === "p2pkh.transfer" || data.method === "feepool.prepare" || data.method === "feepool.commit")
+    && data.params && typeof data.params === "object" && !("channelId" in data.params)) {
+    const owner = "connect." + Array.from(sha256(new TextEncoder().encode(origin)), b => b.toString(16).padStart(2, "0")).join("");
+    const paymentType = data.method === "p2pkh.transfer" ? "p2pkh" : "feepool.connect";
+    const network = "assetId" in data.params && data.params.assetId === "bsv-testnet" ? "test" : "main";
+    const channelHash = sha256(new TextEncoder().encode(JSON.stringify(["keymaster.app-payment-channel.v1", owner, "default", paymentType, network])));
+    const channelId = "pay." + Array.from(channelHash, b => b.toString(16).padStart(2, "0")).join("");
+    data = {...data, params: {...data.params, channelId}};
+  }
   return {
     data,
     origin,
@@ -609,6 +623,7 @@ describe("ProtocolServiceImpl", () => {
     );
     await service.handleMessage(event);
     await service.confirmByUser();
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r).not.toBeNull();
     expect(r?.ok).toBe(false);
@@ -634,6 +649,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await service.rejectByUser();
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(false);
     if (r && r.ok === false) expect(r.error.code).toBe("user_rejected");
@@ -661,6 +677,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await service.confirmByUser();
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(true);
     if (!r || r.ok !== true) return;
@@ -714,6 +731,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await service.confirmByUser();
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r1 = getResult();
     expect(r1?.ok).toBe(true);
     if (!r1 || r1.ok !== true) return;
@@ -746,6 +764,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await service.confirmByUser();
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r1 = getResult();
     if (!r1 || r1.ok !== true) throw new Error("expected ok");
     const enc = r1.result as { nonce: { bytes: ArrayBuffer }; cipherbytes: { bytes: ArrayBuffer } };
@@ -808,6 +827,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await s2.confirmByUser();
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(false);
   });
@@ -1987,6 +2007,7 @@ describe("ProtocolServiceImpl", () => {
         )
       );
       await service.confirmByUser();
+      await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
       const result = getResult();
       expect(result?.ok).toBe(false);
       if (result?.ok === false) {
@@ -2227,7 +2248,7 @@ describe("ProtocolServiceImpl", () => {
     };
   }
 
-  it("p2pkh manual happy path: confirmByUser returns txid/rawTxHex/feeSatoshis", async () => {
+  it("p2pkh: wallet core authorizes payment without a second origin confirmation", async () => {
     const p2pkh = makeP2pkhServiceStub();
     const { service, opener, getResult } = makeService(TEST_PUB_HEX, undefined, {
       p2pkhService: p2pkh as never
@@ -2249,8 +2270,9 @@ describe("ProtocolServiceImpl", () => {
         opener
       )
     );
-    expect(service.snapshot().phase).toBe("confirming");
+    expect(service.snapshot().phase).not.toBe("confirming");
     await service.confirmByUser();
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(true);
     if (!r || r.ok !== true) return;
@@ -2262,7 +2284,7 @@ describe("ProtocolServiceImpl", () => {
     const card = feed.commands.find((c) => c.requestId === "p2pkh-manual");
     expect(card?.recipientAddress).toBe(MAINNET_P2PKH);
     expect(card?.amountSatoshis).toBe(5000);
-    expect(card?.autoApproved).toBe(false);
+    expect(card?.autoApproved).toBe(true);
     expect(card?.decision).toBe("approved");
   });
 
@@ -2274,11 +2296,8 @@ describe("ProtocolServiceImpl", () => {
     // 用 service.setOriginSettings 写 origin（同时刷新 originCache）。
     await service.setOriginSettings({
       origin: ORIGIN,
-      p2pkhAutoApproveEnabled: true,
-      p2pkhAutoApproveMaxSatoshis: 10000,
       identityAutoApproveEnabled: false,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 50000,
       confirmTimeoutSeconds: 30,
       updatedAt: 1
@@ -2302,6 +2321,7 @@ describe("ProtocolServiceImpl", () => {
     );
     // auto-approve 命中：不走 confirming；等待内联执行完成后看终态卡真值。
     await new Promise((r) => setTimeout(r, 30));
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(true);
     if (!r || r.ok !== true) return;
@@ -2347,6 +2367,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await service.confirmByUser();
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(false);
     if (r && r.ok === false) {
@@ -2510,11 +2531,8 @@ describe("ProtocolServiceImpl", () => {
   function setOriginViaService(service: ProtocolServiceImpl, overrides: Partial<ProtocolOriginSettingsRecord> = {}) {
     return service.setOriginSettings({
       origin: ORIGIN,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 10000,
       confirmTimeoutSeconds: 30,
       updatedAt: 1,
@@ -2544,6 +2562,8 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
+    await vi.waitFor(() => expect(h.service.snapshot().phase).toBe("waiting"), {timeout: 5000, interval: 10});
+    await vi.waitFor(() => expect(h.lastResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = h.lastResult();
     expect(r?.ok).toBe(true);
     if (r && r.ok && r.result) {
@@ -2590,6 +2610,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
+    await vi.waitFor(() => expect(h.service.snapshot().phase).toBe("waiting"), {timeout: 5000, interval: 10});
     const lastError = h.firstError();
     expect(lastError?.ok).toBe(false);
     if (lastError && lastError.ok === false) {
@@ -2619,6 +2640,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
+    await vi.waitFor(() => expect(h.service.snapshot().phase).toBe("waiting"), {timeout: 5000, interval: 10});
     const lastError = h.firstError();
     expect(lastError?.ok).toBe(false);
     if (lastError && lastError.ok === false) {
@@ -2668,6 +2690,8 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
+    await vi.waitFor(() => expect(h.service.snapshot().phase).toBe("waiting"), {timeout: 5000, interval: 10});
+    await vi.waitFor(() => expect(h.lastResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = h.lastResult();
     expect(r?.ok).toBe(true);
     if (r && r.ok && r.result) {
@@ -2724,6 +2748,8 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
+    await vi.waitFor(() => expect(h.service.snapshot().phase).toBe("waiting"), {timeout: 5000, interval: 10});
+    await vi.waitFor(() => expect(h.lastResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = h.lastResult();
     expect(r?.ok).toBe(true);
     if (r && r.ok && r.result) {
@@ -2769,6 +2795,8 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
+    await vi.waitFor(() => expect(h.service.snapshot().phase).toBe("waiting"), {timeout: 5000, interval: 10});
+    await vi.waitFor(() => expect(h.lastResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const preparedResult = h.lastResult();
     expect(preparedResult?.ok).toBe(true);
     if (!preparedResult || preparedResult.ok !== true) {
@@ -2799,6 +2827,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
+    await vi.waitFor(() => expect(h.service.snapshot().phase).toBe("waiting"), {timeout: 5000, interval: 10});
     const results = h.posted.result;
     const commitResult = results[results.length - 1];
     expect(commitResult?.ok).toBe(true);
@@ -2840,6 +2869,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
+    await vi.waitFor(() => expect(h.service.snapshot().phase).toBe("waiting"), {timeout: 5000, interval: 10});
     const lastError = h.firstError();
     expect(lastError?.ok).toBe(false);
     if (lastError && lastError.ok === false) {
@@ -2869,6 +2899,8 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
+    await vi.waitFor(() => expect(h.service.snapshot().phase).toBe("waiting"), {timeout: 5000, interval: 10});
+    await vi.waitFor(() => expect(h.lastResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = h.lastResult();
     expect(r?.ok).toBe(true);
     if (!r || r.ok !== true) throw new Error("prepare failed");
@@ -2893,6 +2925,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
+    await vi.waitFor(() => expect(h.service.snapshot().phase).toBe("waiting"), {timeout: 5000, interval: 10});
     const results = h.posted.result;
     const lastError = [...results].reverse().find((m) => m.ok === false);
     expect(lastError?.ok).toBe(false);
@@ -2915,14 +2948,13 @@ describe("ProtocolServiceImpl", () => {
     teardownFeepoolMock();
   });
 
-  it("feepool.prepare auto-sign: skips ConfirmView when feePoolAutoSignMaxSatoshis >= amount", async () => {
+  it("feepool.prepare: wallet core authorizes payment without an origin amount limit", async () => {
     const h = await setupFeepoolMock({
       sdkBase: { txHex: "cc".repeat(120), outputIndex: 0, amount: 1000 }
     });
     await setOriginViaService(h.service, {
       feePoolDefaultFundSatoshis: 10000,
       confirmTimeoutSeconds: 30,
-      feePoolAutoSignMaxSatoshis: 5000
     });
     h.service.startSession();
     await h.service.handleMessage(
@@ -2941,6 +2973,7 @@ describe("ProtocolServiceImpl", () => {
     // auto-sign 命中：phase 不应是 confirming。
     expect(h.service.currentRequestAutoApproved()).toBe(true);
     await new Promise((r) => setTimeout(r, 30));
+    await vi.waitFor(() => expect(h.lastResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = h.lastResult();
     expect(r?.ok).toBe(true);
     if (r && r.ok && r.result) {
@@ -2960,7 +2993,6 @@ describe("ProtocolServiceImpl", () => {
     await setOriginViaService(h.service, {
       feePoolDefaultFundSatoshis: 10000,
       confirmTimeoutSeconds: 30,
-      feePoolAutoSignMaxSatoshis: 5000
     });
     // 先跑 prepare（auto-sign 内联），pending op 会被清掉（commit 后才清；
     // 这里我们手动把 op 留下给下一步 commit 用）。
@@ -2979,8 +3011,10 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
+    await vi.waitFor(() => expect(h.service.snapshot().phase).toBe("waiting"), {timeout: 5000, interval: 10});
     // 等待内联 executeFeepoolPrepare 完成。
     await new Promise((r) => setTimeout(r, 30));
+    await vi.waitFor(() => expect(h.lastResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const prep = h.lastResult();
     expect(prep?.ok).toBe(true);
     if (!prep || prep.ok !== true) throw new Error("prepare failed");
@@ -3008,6 +3042,7 @@ describe("ProtocolServiceImpl", () => {
     // 关键：commit 命中 auto-sign（3000 <= 5000）。
     expect(h.service.currentRequestAutoApproved()).toBe(true);
     await new Promise((r) => setTimeout(r, 30));
+    await vi.waitFor(() => expect(h.lastResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = h.lastResult();
     expect(r?.ok).toBe(true);
     if (r && r.ok && r.result) {
@@ -3051,6 +3086,8 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
+    await vi.waitFor(() => expect(h.service.snapshot().phase).toBe("waiting"), {timeout: 5000, interval: 10});
+    await vi.waitFor(() => expect(h.lastResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const prep = h.lastResult();
     expect(prep?.ok).toBe(true);
     if (!prep || prep.ok !== true) throw new Error("prepare failed");
@@ -3074,6 +3111,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
+    await vi.waitFor(() => expect(h.service.snapshot().phase).toBe("waiting"), {timeout: 5000, interval: 10});
     const stored = await h.storageRepository.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
     expect(stored).not.toBeNull();
     expect(stored?.totalAmount).toBe(10000);
@@ -3104,6 +3142,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
+    await vi.waitFor(() => expect(h.service.snapshot().phase).toBe("waiting"), {timeout: 5000, interval: 10});
     let opId = (h.lastResult() as unknown as { ok: true; result: { operationId: string } }).result.operationId;
     await h.service.handleMessage(
       makeEvent(
@@ -3124,6 +3163,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
+    await vi.waitFor(() => expect(h.service.snapshot().phase).toBe("waiting"), {timeout: 5000, interval: 10});
     let stored = await h.storageRepository.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
     expect(stored?.serverAmount).toBe(1000);
 
@@ -3141,6 +3181,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
+    await vi.waitFor(() => expect(h.service.snapshot().phase).toBe("waiting"), {timeout: 5000, interval: 10});
     opId = (h.lastResult() as unknown as { ok: true; result: { operationId: string } }).result.operationId;
     await h.service.handleMessage(
       makeEvent(
@@ -3161,6 +3202,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
+    await vi.waitFor(() => expect(h.service.snapshot().phase).toBe("waiting"), {timeout: 5000, interval: 10});
     stored = await h.storageRepository.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
     // 池持续累计：1000 + 1500 = 2500；草稿已更新到 update 版（"ee"）
     expect(stored?.serverAmount).toBe(2500);
@@ -3205,6 +3247,8 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
+    await vi.waitFor(() => expect(h.service.snapshot().phase).toBe("waiting"), {timeout: 5000, interval: 10});
+    await vi.waitFor(() => expect(h.lastResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const prep = h.lastResult();
     expect(prep?.ok).toBe(true);
     if (!prep || prep.ok !== true) throw new Error("prepare failed");
@@ -3229,6 +3273,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
+    await vi.waitFor(() => expect(h.service.snapshot().phase).toBe("waiting"), {timeout: 5000, interval: 10});
     const oldPool = await h.storageRepository.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
     expect(oldPool).not.toBeNull();
     expect(oldPool?.totalAmount).toBe(10000);
@@ -3278,6 +3323,8 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
+    await vi.waitFor(() => expect(h.service.snapshot().phase).toBe("waiting"), {timeout: 5000, interval: 10});
+    await vi.waitFor(() => expect(h.lastResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const prep = h.lastResult();
     expect(prep?.ok).toBe(true);
     if (!prep || prep.ok !== true) throw new Error("prepare failed");
@@ -3302,6 +3349,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
+    await vi.waitFor(() => expect(h.service.snapshot().phase).toBe("waiting"), {timeout: 5000, interval: 10});
     // 新池覆盖：totalAmount = 新池大小（= feePoolDefaultFundSatoshis = 10000）；
     // serverAmount = 新池第一次 transfer（= site 的 amountSatoshis = 2000）。
     // 关键：close 旧池 2000 + 新池 2000 = 4000（**不是**）；V5 修复后新池只继承
@@ -3333,6 +3381,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
+    await vi.waitFor(() => expect(h.service.snapshot().phase).toBe("waiting"), {timeout: 5000, interval: 10});
     const opId = (h.lastResult() as unknown as { ok: true; result: { operationId: string } }).result.operationId;
     await h.service.handleMessage(
       makeEvent(
@@ -3353,6 +3402,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
+    await vi.waitFor(() => expect(h.service.snapshot().phase).toBe("waiting"), {timeout: 5000, interval: 10});
     const result = (h.lastResult() as unknown as { ok: true; result: { draftTxid: string; draftTxHex: string } }).result;
     expect(result.draftTxid).toBeDefined();
     expect(result.draftTxHex).toBe("dd".repeat(100));
@@ -3455,11 +3505,8 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     const { service, storageRepository } = makeService();
     await service.setOriginSettings({
       origin: ORIGIN_FRESH,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: true,
       cipherAutoApproveEnabled: true,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 30,
       updatedAt: 1
@@ -3479,9 +3526,6 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     // 归一化路径（缺字段 → 30）。
     await storageRepository.putOrigin({
       origin: ORIGIN_FRESH,
-      p2pkhAutoApproveEnabled: true,
-      p2pkhAutoApproveMaxSatoshis: 5000,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 10000,
       updatedAt: 1
     } as ProtocolOriginSettingsRecord);
@@ -3502,11 +3546,8 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     const { service, opener, getResult } = makeService();
     await service.setOriginSettings({
       origin: ORIGIN_FRESH,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: true,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 30,
       updatedAt: 1
@@ -3529,6 +3570,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     expect(service.currentRequestAutoApproved()).toBe(true);
     // 等内联执行完成。
     await new Promise((r) => setTimeout(r, 30));
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(true);
     expect(service.snapshot().phase).toBe("waiting");
@@ -3540,11 +3582,8 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     const { service, opener, getResult, storageRepository } = makeService();
     await service.setOriginSettings({
       origin: ORIGIN_FRESH,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
       cipherAutoApproveEnabled: true,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 30,
       updatedAt: 1
@@ -3592,11 +3631,8 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     const { service, opener, storageRepository } = makeService();
     await service.setOriginSettings({
       origin: ORIGIN_FRESH,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
       cipherAutoApproveEnabled: true,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 30,
       updatedAt: 1
@@ -3660,11 +3696,8 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     const first = makeService();
     await first.service.setOriginSettings({
       origin: ORIGIN_FRESH,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: true,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 30,
       updatedAt: 1
@@ -3746,11 +3779,8 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     });
     await storageRepository.putOrigin({
       origin: ORIGIN_FRESH,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: true,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 30,
       updatedAt: 1
@@ -3806,11 +3836,8 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     const { service, opener } = makeService();
     await service.setOriginSettings({
       origin: ORIGIN_FRESH,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: true,
       cipherAutoApproveEnabled: true,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 30,
       updatedAt: 1
@@ -3849,11 +3876,8 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     const { service, opener, getResult } = makeService();
     await service.setOriginSettings({
       origin: ORIGIN_FRESH,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: true,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 30,
       updatedAt: 1
@@ -3888,6 +3912,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     // 终态才是真值。
     await new Promise((r) => setTimeout(r, 30));
     // 对外回 invalid_origin(不是 user_rejected)。
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(false);
     if (r && !r.ok) {
@@ -3907,11 +3932,8 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     const { service, opener, getResult, storageRepository } = makeService();
     await service.setOriginSettings({
       origin: ORIGIN_FRESH,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
       cipherAutoApproveEnabled: true,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 30,
       updatedAt: 1
@@ -3950,6 +3972,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     );
     expect(service.currentRequestAutoApproved()).toBe(true);
     await new Promise((r) => setTimeout(r, 30));
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(false);
     if (r && !r.ok) {
@@ -4020,6 +4043,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     // 用户在 popup UI 上点"用此 key 登录"：推进到 queued → executing → approved。
     await service.confirmConnectLogin(view!.recordId, TEST_PUB_HEX, "pw");
     await new Promise((r) => setTimeout(r, 30));
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(true);
     if (!r || r.ok !== true) return;
@@ -4142,6 +4166,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     expect(service.connectResumeRecord()).toBeNull();
     expect(service.snapshot().phase).toBe("executing");
     await new Promise((r) => setTimeout(r, 30));
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(true);
     if (!r || r.ok !== true) return;
@@ -4192,6 +4217,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     void service.resumeAfterUnlock();
     await new Promise((r) => setTimeout(r, 30));
     // 关键：解锁后**不**经过 confirming，直接执行成功。
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(true);
     if (!r || r.ok !== true) return;
@@ -4239,6 +4265,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     expect(card?.phase).toBe("failed");
     expect(card?.failureReason).toBe("internal_error");
     expect(card?.errorCode).toBe("user_rejected");
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(false);
     if (r && !r.ok) expect(r.error.code).toBe("user_rejected");
@@ -4288,6 +4315,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     // lockState 不变（fail-fast 不走 unlock 路径）。
     expect(service.lockState()).toBe("locked");
     // 对外回 result。
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(false);
     if (r && !r.ok) expect(r.error.code).toBe("user_rejected");
@@ -4339,6 +4367,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     );
     expect(service.snapshot().phase).toBe("executing");
     await new Promise((r) => setTimeout(r, 30));
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(true);
     if (!r || r.ok !== true) return;
@@ -4399,6 +4428,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     // vault.lock() 被同步调过（哪怕抛错也算）。
     expect(lockCalls).toBe(1);
     // caller 看到失败。
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(false);
     if (r && !r.ok) expect(r.error.code).toBe("user_rejected");
@@ -4470,6 +4500,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     expect(card?.phase).toBe("failed");
     expect(card?.failureReason).toBe("internal_error");
     expect(card?.errorCode).toBe("user_rejected");
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(false);
     if (r && !r.ok) expect(r.error.code).toBe("user_rejected");
@@ -4509,6 +4540,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     expect(card?.phase).toBe("failed");
     expect(card?.failureReason).toBe("internal_error");
     expect(service.lockState()).toBe("locked");
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(false);
     if (r && !r.ok) expect(r.error.code).toBe("user_rejected");
@@ -4549,6 +4581,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     );
     await service.confirmByUser();
     await new Promise((r) => setTimeout(r, 30));
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(false);
     if (r && !r.ok) expect(r.error.code).toBe("invalid_origin");
@@ -4590,6 +4623,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     const card = service.feedSnapshot().commands.find((c) => c.requestId === "resume-deleted");
     expect(card?.phase).toBe("failed");
     expect(card?.failureReason).toBe("internal_error");
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(false);
     if (r && !r.ok) expect(r.error.code).toBe("user_rejected");
@@ -4631,6 +4665,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     // 真正的硬切换由 contract 保护：cipher 走 session.ownerPublicKeyHex，不读 active key。
     await service.confirmByUser();
     await new Promise((r) => setTimeout(r, 30));
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(true);
     if (!r || r.ok !== true) return;
@@ -4692,6 +4727,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     const card = service.feedSnapshot().commands.find((c) => c.requestId === "resume-x");
     expect(card?.phase).toBe("failed");
     expect(card?.failureReason).toBe("internal_error");
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r2 = getResult();
     expect(r2?.ok).toBe(false);
     if (r2 && !r2.ok) expect(r2.error.code).toBe("user_rejected");
@@ -4751,6 +4787,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
         opener
       )
     );
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(false);
     if (r && r.ok === false) {
@@ -4854,11 +4891,8 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     const { service, opener } = makeService();
     await service.setOriginSettings({
       origin: ORIGIN,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 30,
       updatedAt: 1
@@ -4900,11 +4934,8 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     const first = makeService();
     await first.service.setOriginSettings({
       origin: ORIGIN,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 5,
       updatedAt: 1
@@ -4953,11 +4984,8 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     const first = makeService();
     await first.service.setOriginSettings({
       origin: ORIGIN,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 60,
       updatedAt: 1
@@ -5143,11 +5171,8 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     await new Promise((r) => setTimeout(r, 2000));
     resolveGetOrigin({
       origin: ORIGIN,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 5,
       updatedAt: 1
@@ -5251,11 +5276,8 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
       // DB 返回 20s 真值。
       resolveGetOrigin({
         origin: ORIGIN,
-        p2pkhAutoApproveEnabled: false,
-        p2pkhAutoApproveMaxSatoshis: 0,
         identityAutoApproveEnabled: false,
         cipherAutoApproveEnabled: false,
-        feePoolAutoSignMaxSatoshis: 0,
         feePoolDefaultFundSatoshis: 0,
         confirmTimeoutSeconds: 20,
         updatedAt: 1
@@ -5270,6 +5292,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
       // 下次 setInterval tick（再过约 1s）才会触发 finalize——但这里
       // 我们已把时间推进到 start+29s + 0，**没**再推进 1s，tick 不会
       // 触发。所以这个测试会卡住旧 bug。
+      await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
       const r = getResult();
       expect(r?.ok).toBe(false);
       if (r && r.ok === false) {
@@ -5317,11 +5340,8 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     const { service, opener } = makeService();
     await service.setOriginSettings({
       origin: ORIGIN,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 5,
       updatedAt: 1
@@ -5349,11 +5369,8 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     const { service, opener, getResult } = makeService();
     await service.setOriginSettings({
       origin: ORIGIN,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 1,
       updatedAt: 1
@@ -5430,6 +5447,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     ]);
     // 最多只回 1 条 result（cancel 不单独回包）。
     expect(posted.result).toHaveLength(1);
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(false);
     if (r && r.ok === false) {
@@ -5443,11 +5461,8 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     const { service, opener, getResult, posted } = makeService();
     await service.setOriginSettings({
       origin: ORIGIN,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 1,
       updatedAt: 1
@@ -5506,11 +5521,8 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
   it("正向：cache 命中 60s 后改 20s 不热更新（startedFromFallback=false）", async () => {
     let currentOriginConfig: ProtocolOriginSettingsRecord | null = {
       origin: ORIGIN,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 60,
       updatedAt: 1
@@ -5776,6 +5788,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     await new Promise((r) => setTimeout(r, 30));
     const card = service.feedSnapshot().commands.find((c) => c.requestId === "no-session");
     expect(card?.phase).toBe("failed");
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(false);
   });
@@ -6117,6 +6130,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
       )
     );
     await new Promise((resolve) => setTimeout(resolve, 20));
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(false);
     if (r && !r.ok) expect(r.error.code).toBe("asset_not_enabled");
@@ -6201,9 +6215,10 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
         opener
       )
     );
-    expect(service.snapshot().phase).toBe("confirming");
+    expect(service.snapshot().phase).not.toBe("confirming");
     await service.confirmByUser();
     await new Promise((resolve) => setTimeout(resolve, 30));
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(true);
     if (r && r.ok) {
@@ -6257,6 +6272,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
       )
     );
     await new Promise((resolve) => setTimeout(resolve, 20));
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     expect(r?.ok).toBe(false);
     if (r && !r.ok) expect(r.error.code).toBe("asset_not_enabled");
@@ -6294,11 +6310,8 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     });
     await service.setOriginSettings({
       origin: ORIGIN,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 10000,
       confirmTimeoutSeconds: 30,
       updatedAt: 1
@@ -6364,11 +6377,8 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     });
     await service.setOriginSettings({
       origin: ORIGIN,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 10000,
       confirmTimeoutSeconds: 30,
       updatedAt: 1
@@ -6445,6 +6455,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     expect(view).not.toBeNull();
     await service.confirmConnectLogin(view!.recordId, TEST_PUB_HEX, "pw");
     await new Promise((r) => setTimeout(r, 30));
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
     const r = getResult();
     if (!r || r.ok !== true) throw new Error("login failed");
     const loginResult = r.result as unknown as Record<string, unknown>;
@@ -7043,6 +7054,8 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
     );
     await new Promise((r) => setTimeout(r, 30));
 
+    await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
+
     const result = getResult();
     expect(result?.ok).toBe(true);
     if (!result || result.ok !== true) return;
@@ -7497,6 +7510,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
         )
       );
       await vi.runAllTimersAsync();
+      await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
       const result = getResult();
       expect(result?.ok).toBe(true);
       // 关键回归（施工单 2026-06-30 003）：child 漏发 `ready` 直接发首条
@@ -7596,6 +7610,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
         )
       );
       await vi.runAllTimersAsync();
+      await vi.waitFor(() => expect(getResult()).toBeTruthy(), {timeout: 5000, interval: 10});
       const result = getResult();
       expect(result?.ok).toBe(true);
       // 关键回归（施工单 2026-06-30 003）：迟到 connect.launch 是合法

@@ -72,6 +72,10 @@ export interface ActiveKeyCryptoDeriveP2pkhAddressResult {
 
 export interface ActiveKeyCrypto {
   getIdentity(): ActiveKeyCryptoIdentity;
+  /** Hardware signs a parsed Connect envelope; software providers retain their existing digest capability. */
+  signConnectEnvelope?(input: {publicKeyHex: string; kind: "identity" | "intent"; envelope: ArrayBuffer; content?: ArrayBuffer; appSessionId: string}): Promise<ActiveKeyCryptoSignDigestResult>;
+  /** Worker hardware provider: parses the exact existing BitFS authentication document. */
+  signBitfsWire?(input:{publicKeyHex:string;kind:number;document:ArrayBuffer},signal?:AbortSignal):Promise<ActiveKeyCryptoSignDigestResult>;
   signDigest(input: ActiveKeyCryptoSignDigestInput): Promise<ActiveKeyCryptoSignDigestResult>;
   deriveP2pkhAddress(
     input: ActiveKeyCryptoDeriveP2pkhAddressInput

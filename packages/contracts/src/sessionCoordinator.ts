@@ -430,6 +430,7 @@ export interface CoordinatorMsFileStateEvent {
 
 /** 受控 crypto 操作白名单。 */
 export type CoordinatorCryptoOperation =
+  | { type: "signConnectEnvelope"; kind: "identity" | "intent"; envelope: Uint8Array; content?: Uint8Array; appSessionId: string }
   | { type: "signDigest"; digestHex: string; format: EcdsaSignatureFormat }
   | { type: "deriveP2pkhAddress"; network: "main" | "test" };
 
@@ -450,7 +451,41 @@ export type CoordinatorChannelOperation =
  */
 export type CoordinatorBackgroundSyncSettings = BackgroundSyncSettings;
 
+export interface WalletPaymentChannel {
+  id: string; owner: string; kind: "app" | "plugin"; network: string; paymentType: string;
+  enabled: boolean; singleLimit: string; defaultSessionLimit: string; revision: number;
+}
+/** 金额 wire 为十进制整数字符串，避免浮点与 BigInt JSON 精度问题。 */
+export type CoordinatorWalletPaymentCommand =
+  | { action: "list" | "pending" }
+  | { action: "register"; id: string; owner: string; kind: "app" | "plugin"; network: string; paymentType: string }
+  | { action: "configure"; channel: WalletPaymentChannel }
+  | { action: "session-open"; id: string; owner: string }
+  | { action: "session-close" | "session-cancel"; id: string }
+  | { action: "answer"; id: string; allow: boolean; raiseSessionLimit?: string }
+  | { action: "sign-p2pkh" | "sign-standard"; rawTxHex: string; prevTransactionHexes: string[]; channelId: string; paymentId: string; sessionId: string | null }
+  | { action: "sign-feepool"; family: "connect" | "bitfs"; role?: "payer" | "cosigner"; stage: "fund" | "state"; authorization?: {documentHex:string;refundTemplateHex:string}; openingRequestHex?:string; rawTxHex: string; prevTransactionHexes: string[]; channelId: string; paymentId: string; sessionId: string | null };
+
+/** 钱包内部 UI 的 USB 控制面；没有 PIN、私钥或任意设备命令。 */
+export type CoordinatorHardwareCommand =
+  | { action: "state" }
+  | { action: "attach" | "recover" | "recover-erased" | "provision" | "recover-import"; leaseId: string; port: MessagePort }
+  | { action: "enroll"; leaseId: string; port: MessagePort; label: string }
+  | { action: "pair"; leaseId: string; allow: boolean }
+  | { action: "disconnect"; leaseId: string };
+export interface CoordinatorHardwareState {
+  status: "disconnected" | "connecting" | "pairing" | "connected";
+  leaseId?: string;
+  pairingCode?: string;
+  activity?: {operation: string; state: "awaiting-user" | "executing" | "completed" | "denied" | "cancelled" | "unknown" | "failed"};
+}
 export type CoordinatorVaultOperation =
+  | { type: "hardware"; command: CoordinatorHardwareCommand }
+  /** Private Vault UI only; no private-key bytes in request or response. */
+  | { type: "migrateToHardware"; sourcePassword: string }
+  | { type: "migrateToSoftware"; newPassword: string }
+  | { type: "migrationState" }
+  | { type: "payment"; command: CoordinatorWalletPaymentCommand }
   /** 读取唯一钱包 Key 的公开摘要；没有列表、没有选择、没有切换。 */
   | { type: "getCurrentKey" }
   | { type: "verifyPassword"; password: string }
@@ -505,6 +540,7 @@ export type CoordinatorValueResult<T> =
 
 /** Crypto 操作结果。 */
 export type CoordinatorCryptoResult =
+  | { type: "signConnectEnvelope"; signatureHex: string; format: "compact" }
   | { type: "signDigest"; signatureHex: string; format: EcdsaSignatureFormat }
   | { type: "deriveP2pkhAddress"; address: string };
 

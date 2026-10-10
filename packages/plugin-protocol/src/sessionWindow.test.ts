@@ -177,11 +177,8 @@ describe("protocolMultipartUploadRepository stores (smoke)", () => {
   it("ProtocolOriginSettingsRecord 默认值归一", () => {
     const rec: ProtocolOriginSettingsRecord = {
       origin: "https://x",
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 30,
       updatedAt: 0

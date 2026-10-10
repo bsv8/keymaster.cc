@@ -1,6 +1,9 @@
+import {paymentRequester, fundingCoin, previousTransactions, cleanupPayments} from '../../../Coding/keymaster/vaultlink-integration/test/transfer-fixture.mjs';
+import {afterEach} from 'vitest';
+afterEach(cleanupPayments);
 import { describe, expect, it, vi } from "vitest";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
-import type { CentralBroadcastService } from "@keymaster/contracts";
+import type { CentralBroadcastService, VaultService } from "@keymaster/contracts";
 import { deriveP2pkhAddress } from "./p2pkhSigner.js";
 import { createCentralBroadcastService } from "./centralBroadcastService.js";
 import { createP2pkhTransferService } from "./p2pkhTransferService.js";
@@ -13,12 +16,12 @@ const FUNDING_TXID = "09".repeat(32);
 function hexToBytes(value: string): Uint8Array { return Uint8Array.from({ length: value.length / 2 }, (_, index) => Number.parseInt(value.slice(index * 2, index * 2 + 2), 16)); }
 
 function makeUtxo(value = 3_000, txid = FUNDING_TXID, vout = 0): P2pkhUtxo {
-  return { id: `coin-${txid}-${vout}`, resourceId: makeResourceId("main"), publicKeyHex: OWNER.publicKeyHex, network: "main", address: OWNER.address, txid, vout, value, height: 1, status: "confirmed", isSpentInMempoolTx: false, syncedAt: "2024-01-01T00:00:00.000Z" };
+  return { id: `coin-${txid}-${vout}`, resourceId: makeResourceId("main"), publicKeyHex: OWNER.publicKeyHex, network: "main", address: OWNER.address, ...fundingCoin(OWNER.publicKeyHex, value, txid, vout), height: 1, status: "confirmed", isSpentInMempoolTx: false, syncedAt: "2024-01-01T00:00:00.000Z" };
 }
 
 function makeVault() {
   return {
-    status: () => "unlocked",
+    status: () => "unlocked", requestPayment: paymentRequester(PRIVATE_KEY),
     createActiveKeyCrypto: async () => ({
       async deriveP2pkhAddress(input: { network: "main" | "test" }) {
         const derived = deriveP2pkhAddress(PRIVATE_KEY, input.network);
@@ -29,7 +32,7 @@ function makeVault() {
         return { publicKeyHex: OWNER.publicKeyHex, format: input.format, signature: signature.buffer.slice(signature.byteOffset, signature.byteOffset + signature.byteLength) };
       }
     })
-  } as never;
+  } as unknown as Pick<VaultService,"status"|"createActiveKeyCrypto"|"requestPayment">;
 }
 
 function makeRepository(resource: P2pkhKeyResource) {
@@ -72,8 +75,12 @@ function makeService(outcome: "accepted" | "already-known" | "isolated" | "not-d
     }
     return { status: "ok" as const, value: { status: outcome }, sessionEpoch: "test-epoch" };
   });
+  const vault = makeVault(), paymentActions: string[] = [];
+  const actualPayment = vault.requestPayment;
+  vault.requestPayment = async command => { paymentActions.push(command.action); return actualPayment(command); };
   const service = createP2pkhTransferService({
-    vault: makeVault(),
+    previousTransactions,
+    vault,
     messageBus: { publish: vi.fn(), subscribe: vi.fn(() => () => undefined) } as never,
     getStore: async () => stateRepository as never,
     loadSpendableUtxos: loadSpendableUtxos as never,
@@ -82,7 +89,7 @@ function makeService(outcome: "accepted" | "already-known" | "isolated" | "not-d
     getActiveKey: () => ({ publicKeyHex: OWNER.publicKeyHex, label: "active", capabilities: ["p2pkh"], createdAt: "now" }),
     getKeyForOwner: async (publicKeyHex) => ({ publicKeyHex, label: "active", capabilities: ["p2pkh"], createdAt: "now" })
   });
-  return { service, stateRepository, broadcast, loadSpendableUtxos };
+  return { service, stateRepository, broadcast, loadSpendableUtxos, paymentActions };
 }
 
 async function prepare(service: ReturnType<typeof makeService>["service"]) {
@@ -93,10 +100,26 @@ describe("ordinary P2PKH Coordinator transfer", () => {
   it("refreshes spendable UTXOs before prepare without any broadcast", async () => {
     const { service, broadcast, loadSpendableUtxos } = makeService();
     const preview = await prepare(service);
-    expect(preview.txid).toMatch(/^[0-9a-f]{64}$/);
+    expect(preview.txid).toBe("");
     expect(loadSpendableUtxos).toHaveBeenCalledTimes(1);
     expect(loadSpendableUtxos).toHaveBeenCalledWith(expect.objectContaining({ ownerPublicKeyHex: OWNER.publicKeyHex }));
     expect(broadcast).not.toHaveBeenCalled();
+  });
+
+  it("preview never authorizes payment; submission signs once and refuses reuse or changed channel", async () => {
+    const {service,paymentActions,broadcast} = makeService();
+    const preview = await prepare(service);
+    expect(paymentActions).toEqual([]);
+    expect(preview.txid).toBe("");
+    await expect(service.submit({...preview,paymentContext:{channelId:"different",sessionId:null}})).rejects.toThrow(/preview changed/i);
+    expect(paymentActions).toEqual([]);
+    const result = await service.submit(preview);
+    expect(result.txid).toMatch(/^[0-9a-f]{64}$/);
+    expect(result.rawTxHex).not.toBe(preview.rawTxHex);
+    expect(paymentActions).toEqual(["register","sign-p2pkh"]);
+    await expect(service.submit(preview)).rejects.toThrow(/already submitted/i);
+    expect(broadcast).toHaveBeenCalledTimes(1);
+    expect(paymentActions.filter(action => action === "sign-p2pkh")).toHaveLength(1);
   });
 
   it.each(["accepted", "already-known"] as const)("promotes %s to local-confirmed", async (outcome) => {
@@ -187,15 +210,17 @@ describe("ordinary P2PKH Coordinator transfer", () => {
 
   it("uses exactly the loader-provided spendable set for selection", async () => {
     const ordinaryTxid = "bb".repeat(32);
-    const { service } = makeService("accepted", undefined, { utxos: [makeUtxo(3_000, ordinaryTxid)] });
+    const coin = makeUtxo(3_000, ordinaryTxid);
+    const { service } = makeService("accepted", undefined, { utxos: [coin] });
     const preview = await prepare(service);
-    expect(preview.allocation.selected.map((input) => input.txid)).toEqual([ordinaryTxid]);
+    expect(preview.allocation.selected.map((input) => input.txid)).toEqual([coin.txid]);
   });
 
   it("rejects before writing when the Coordinator broadcast is unavailable", async () => {
     const { service, stateRepository } = makeService();
     const preview = await prepare(service);
     const gated = createP2pkhTransferService({
+    previousTransactions,
       vault: makeVault(), messageBus: { publish: vi.fn(), subscribe: vi.fn(() => () => undefined) } as never,
       getStore: async () => stateRepository as never,
       loadSpendableUtxos: async () => [makeUtxo()],

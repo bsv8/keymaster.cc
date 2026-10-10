@@ -7,6 +7,7 @@ import type { P2pkhService } from "./p2pkhContracts.js";
 
 type SnapshotInput = { ownerPublicKeyHex: string; network: "main" | "test" };
 export interface WorkerTransferDependencies {
+  requestPayment: import("@keymaster/contracts").VaultService["requestPayment"];
   assertActive(): void;
   session(): { owner?: string; epoch: string; unlocked: boolean };
   loadSettings(owner: string): Promise<void>;
@@ -104,7 +105,8 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
         ...deps.retryOptions(),
       });
       const service = createP2pkhService({
-        vault: { status: deps.vaultStatus, createActiveKeyCrypto: deps.crypto },
+        vault: { status: deps.vaultStatus, createActiveKeyCrypto: deps.crypto, requestPayment: deps.requestPayment },
+        woc: deps.query?.(),
         coordinator, centralBroadcastService: centralService, broadcastWithCoordinator: broadcast,
         walletState: deps.walletState(), storage: deps.storage(), messageBus: createMessageBus(),
       });
@@ -130,7 +132,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     if (protocolStarting) return protocolStarting;
     const owner = currentOwner!; const epoch = currentEpoch!; const token = generation;
     const assertActive = () => { deps.assertActive(); const now = deps.session(); if (generation !== token || !now.unlocked || now.owner !== owner || now.epoch !== epoch) throw new Error("Protocol wallet instance revoked"); };
-    const run = createWorkerProtocolRuntime({ assertActive, owner, storage: deps.storage(), crypto: deps.crypto,
+    const run = createWorkerProtocolRuntime({ requestPayment: deps.requestPayment, assertActive, owner, storage: deps.storage(), crypto: deps.crypto,
       central: central!, transfer, query: () => deps.query?.(), snapshot: async network => { const result = await deps.snapshot({ ownerPublicKeyHex: owner, network }, false); assertActive(); return result.status === "ok" ? result.value : { available: false, state: "unavailable", items: [] }; },
     });
     protocolStarting = run;

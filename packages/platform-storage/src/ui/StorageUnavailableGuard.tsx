@@ -9,13 +9,14 @@
 import type { ReactNode } from "react";
 import { usePluginI18n } from "@keymaster/runtime";
 import { useOptionalPluginCapability } from "webloom-framework/react";
-import { STORAGE_RUNTIME_CONTROLLER_CAPABILITY } from "@keymaster/contracts";
+import { PAGE_UI_RENDERER_CAPABILITY, STORAGE_RUNTIME_CONTROLLER_CAPABILITY } from "@keymaster/contracts";
 
 /** 需要阻断业务界面的本地存储状态。 */
 const BLOCKING_STATUSES = new Set(["corrupt", "unsupported", "degraded"]);
 
 export function StorageUnavailableGuard({ children }: { children: ReactNode }) {
   const { t } = usePluginI18n();
+  const recoveryPages=useOptionalPluginCapability(PAGE_UI_RENDERER_CAPABILITY);
   const controller = useOptionalPluginCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
 
   let status: string | undefined;
@@ -31,14 +32,14 @@ export function StorageUnavailableGuard({ children }: { children: ReactNode }) {
 
   if (status === "corrupt") {
     return (
-      <StorageGate
+      <><StorageGate
         title={t("storage.guard.corrupt.title", { defaultValue: "本地钱包数据无法读取" })}
         message={t("storage.guard.corrupt.body", {
           defaultValue:
             "本机保存的钱包元数据或 Key 文件不完整。为避免覆盖现有数据，系统不会自动创建新钱包。"
               + "如果此前导出了加密 KeyHold 文件，可以在确认不需要本机数据后重置钱包，再从该文件恢复。"
         })}
-      />
+      />{recoveryPages?.renderFrame("wallet-recovery")}</>
     );
   }
   if (status === "unsupported") {

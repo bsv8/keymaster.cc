@@ -50,6 +50,7 @@ async function createHost(input: {
     ? { ...lockedSnapshot(), status, activePublicKeyHex: undefined, walletGeneration: "" }
     : { ...lockedSnapshot(), status };
   const vault = {
+    coldStart: async () => ({ state: "ready" as const, key: { publicKeyHex: "02".padEnd(66, "a"), label: "Primary", backend: "software" as const } }),
     status: () => status,
     walletSnapshot: () => snapshot,
     subscribeWalletState: (handler: (next: VaultLifecycleSnapshot) => void) => {

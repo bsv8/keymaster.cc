@@ -1,3 +1,4 @@
+import {createHardwareChannelAdapter} from "@keymaster/plugin-vault/coordinator";
 import { createForumWorkerService, executeForumWorkerRequest, streamForumAttachment } from "@keymaster/plugin-forum/coordinator";
 import { createMsFileContentService, createMsFileRemoteContentFetcher, createMsFileSellerPublicationEvidence } from "@keymaster/plugin-msfile/coordinator";
 import { readWorkerProtocolProtection } from "@keymaster/plugin-p2pkh/coordinator";
@@ -48,7 +49,7 @@ import { createSatWorkerServices } from "@keymaster/plugin-sat-subscription/coor
 import { createChainHeightTask } from "@keymaster/plugin-woc/coordinator";
 import { SAT_SUBSCRIPTION_SERVICE_CAPABILITY, SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY, STORAGE_FILE_CLIENTS_CAPABILITY, STORAGE_KV_CLIENTS_CAPABILITY, P2PKH_ASSET_READER_CAPABILITY, WOC_BSV21_CAPABILITY, WOC_STAS_CAPABILITY, WOC_1SAT_ORDINALS_CAPABILITY, WOC_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY } from "@keymaster/contracts";
 import { BUILTIN_PLUGIN_DEFINITIONS } from "@keymaster/contracts";
-import { createWorkerCryptoRpc, createWorkerActiveKeyCryptoFactory, createWorkerIdentityProjection, createWalletStateAccess, createWalletStateSource, createWorkerKeySession, signPrivateMessageForFixture } from "@keymaster/plugin-vault/coordinator";
+import { createWorkerCryptoRpc, createWorkerActiveKeyCryptoFactory, createWorkerIdentityProjection, createWalletStateAccess, createWalletStateSource, createWorkerKeySession, signPrivateMessageForFixture, WalletPayments, HardwareWalletPayments } from "@keymaster/plugin-vault/coordinator";
 import { STORAGE_PRIVATE_BROWSE_CAPABILITY, parseStorageBrowsePrivateResponse, removeRetiredPluginIntent, StorageBrowseCoordinator, type StorageBrowsePrivateCommand } from "@keymaster/platform-storage/assembly";
 import { storagePrivateCapabilities } from "./assembly/storagePrivateCapabilities.js";
 // apps/web/src/keymasterSessionCoordinator.worker.ts
@@ -73,7 +74,7 @@ import type {
   StorageOwnerGrant,
   StoragePlatformGrant,
 } from "@keymaster/contracts/storage-internal";
-import type { SessionEpoch, CoordinatorVaultStatus, CoordinatorClientRequest as PublicCoordinatorClientRequest, CoordinatorResponse, CoordinatorTopicEvent, CoordinatorBootstrapSnapshot, CoordinatorTopic, CoordinatorCryptoOperation, CoordinatorBackgroundSyncSettings, CoordinatorTaskSnapshot, CoordinatorVaultOperation, CoordinatorSubscribeTopicsResult, CoordinatorTopicBaseline, AssetDataInvalidationEvent, SessionStateEvent, VaultSealedSecret, P2pkhProviderConfig, P2pkhProviderRegistry, P2pkhTransactionBroadcastProvider, P2pkhUtxoSnapshotResult, WindowP2pExecutorLease, WindowP2pIdentitySignResult, MsFileReadConcurrencySettings, CoordinatorSatStateEvent, CoordinatorChannelOperation, ChannelSubscriptionStatus, CoordinatorContactsPresenceEvent, CoordinatorWorkerUnitStateEvent, CoordinatorWorkerUnitPublicSnapshot, ChannelPrivateMessageEvent, ContactsService, SatWindowLaneOperation, SatWindowLaneSspRequestEvent, SatSubscriptionAdminService, SatSubscriptionService, SatSubscriptionSpiService, WindowP2pExecutorError, CoordinatorAuthorityRecovery, CoordinatorRpcRequest, CoordinatorRpcResponse, CoordinatorRpcCommandRequest, CoordinatorSessionOpenRequest, CoordinatorSessionCloseRequest, CoordinatorSessionBinding, CoordinatorTopicSubscription, SnapshotStore, StorageSnapshotJsonCompatible, PluginStorageDeclaration } from "@keymaster/contracts";
+import type { SessionEpoch, CoordinatorVaultStatus, CoordinatorClientRequest as PublicCoordinatorClientRequest, CoordinatorResponse, CoordinatorTopicEvent, CoordinatorBootstrapSnapshot, CoordinatorTopic, CoordinatorCryptoOperation, CoordinatorCryptoResult, CoordinatorBackgroundSyncSettings, CoordinatorTaskSnapshot, CoordinatorVaultOperation, CoordinatorSubscribeTopicsResult, CoordinatorTopicBaseline, AssetDataInvalidationEvent, SessionStateEvent, VaultSealedSecret, P2pkhProviderConfig, P2pkhProviderRegistry, P2pkhTransactionBroadcastProvider, P2pkhUtxoSnapshotResult, WindowP2pExecutorLease, WindowP2pIdentitySignResult, MsFileReadConcurrencySettings, CoordinatorSatStateEvent, CoordinatorChannelOperation, ChannelSubscriptionStatus, CoordinatorContactsPresenceEvent, CoordinatorWorkerUnitStateEvent, CoordinatorWorkerUnitPublicSnapshot, ChannelPrivateMessageEvent, ContactsService, SatWindowLaneOperation, SatWindowLaneSspRequestEvent, SatSubscriptionAdminService, SatSubscriptionService, SatSubscriptionSpiService, WindowP2pExecutorError, CoordinatorAuthorityRecovery, CoordinatorRpcRequest, CoordinatorRpcResponse, CoordinatorRpcCommandRequest, CoordinatorSessionOpenRequest, CoordinatorSessionCloseRequest, CoordinatorSessionBinding, CoordinatorTopicSubscription, SnapshotStore, StorageSnapshotJsonCompatible, PluginStorageDeclaration } from "@keymaster/contracts";
 /** 可信 Worker 入口内的命令联合；私有浏览不进入公共 transport parser。 */
 type CoordinatorClientRequest = PublicCoordinatorClientRequest | StorageBrowsePrivateCommand;
 
@@ -91,7 +92,7 @@ import {
   COORDINATOR_CRYPTO_RPC_CAPABILITY,
 } from "@keymaster/contracts";
 import { MSFILE_MAX_BLOCK_BYTES, MSFILE_MAX_SEED_BYTES, MSFILE_READ_CONCURRENCY_RECOMMENDED, MSFILE_SELLER_SETTINGS_DEFAULT, normalizeMsFileReadConcurrencySettings, SAT_SUBSCRIPTION_RESOURCE_LIMITS } from "@keymaster/contracts";
-import { bytesToHex, installInsecureContextCryptoFallback, hexToBytes as cryptoHexToBytes, executeVaultOperation as executeOwnedVaultOperation, deriveP2pkhAddress } from "@keymaster/plugin-vault/coordinator";
+import { WalletMigrationFence, createMigrationJournalService, createHardwareToSoftwareMigration, createSoftwareToHardwareMigration, inspectWalletKeyBytes, verifyDeviceMigrationJournal, createAndVerifyMigrationKeyHold, bytesToHex, installInsecureContextCryptoFallback, hexToBytes as cryptoHexToBytes, executeVaultOperation as executeOwnedVaultOperation, deriveP2pkhAddress } from "@keymaster/plugin-vault/coordinator";
 // 不能通过 runtime barrel 导入：它 re-export React hooks，Vite 会把
 // React Refresh 注入 SharedWorker，后者没有 window。
 import { WebLoomError, createMessageBus, definePlugin, startSharedWorkerApp, type UpgradeGate, type UpgradeIoLease, type UpgradeSession, type HandlerCallContext, type PeerController } from "webloom-framework";
@@ -136,8 +137,8 @@ import {
   createIndexedDbWalletStore, createWalletStoreActivity, createStorageDataQueue, STORAGE_DATA_CONCURRENCY, STORAGE_DATA_MAX_QUEUE,
   StorageRuntimeError,
 } from "@keymaster/platform-storage/coordinator";
-import type { WalletStore } from "@keymaster/contracts/storage-internal";
-import { createWalletLifecycleService, createWalletKeyRepository, type WalletKeyRepository } from "@keymaster/plugin-vault/coordinator";
+import { WALLET_MIGRATION_PATH, type WalletStore } from "@keymaster/contracts/storage-internal";
+import { HardwareConnectionOwner, verifyMigratedHardwareLedger, createWalletLifecycleService, createWalletKeyRepository, type WalletKeyRepository } from "@keymaster/plugin-vault/coordinator";
 import type { StoragePrivateRootStore } from "@keymaster/platform-storage/coordinator";
 import { WALLET_LIST_MAX_LIMIT } from "@keymaster/platform-storage/coordinator";
 
@@ -389,8 +390,17 @@ const storageActivity = createWalletStoreActivity(() => {
 let walletStore: WalletStore | undefined;
 /** 固定 `key.json` 的唯一仓储；没有 list/readAll/delete，也没有切换。 */
 let walletKeys: WalletKeyRepository | undefined;
+let activeKeyBackend: "software" | "hardware" | undefined;
+let hardwareEnrollmentInProgress = false;
+let hardwareRecoveryConnection:{migrationId:string;peerId:string}|undefined;
+const hardwareConnections = new HardwareConnectionOwner(() => {
+  if ((!platformStorageReady || !platformRootStore) && !hardwareEnrollmentInProgress && !hardwareRecoveryConnection) throw storageUnavailableError("Hardware connection has no current wallet root");
+}, () => {
+  hardwareRecoveryConnection=undefined;
+  if (activeKeyBackend === "hardware") void performGlobalLock("hardware-disconnected").catch(error => console.warn("Hardware disconnect lock failed", error));
+});
 /** 单钱包生命周期：冷启动、创建/导入、解锁、锁定、改密、改名、导出与重置。 */
-let walletLifecycle: WalletLifecycleService | undefined;
+let walletLifecycle: ReturnType<typeof createWalletLifecycleService> | undefined;
 /** 当前已装配的平台存储根；重置或 Worker 重启后重建。 */
 let platformRootStore: StoragePrivateRootStore | undefined;
 /** Root 安装令牌；不能用 walletGeneration 代替，因为重置后可能复用世代值。 */
@@ -619,6 +629,7 @@ const storageBrowseCoordinator = new StorageBrowseCoordinator({
 
 /** 撤销当前存储根：所有已发放句柄与迟到结果立即失效。 */
 function discardCurrentPlatformStorageBinding(): void {
+  void hardwareConnections.close();
   stopCoordinatorKeyValueMaintenance();
   storageBrowseCoordinator.dropBinding();
   const binding = captureCurrentPlatformStorageBinding();
@@ -927,11 +938,13 @@ async function ensureCoordinatorUpgradeSession(): Promise<void> {
   coordinatorUpgradeSession = handshake.session;
 }
 
+const walletMigrationFence=new WalletMigrationFence();
 async function withCoordinatorFinalIoLease<T>(
   operation: "read" | "write",
   signal: AbortSignal | undefined,
   run: (signal: AbortSignal) => Promise<T>,
   options: {
+    walletMigration?:boolean;
     allowLocalLock?: boolean;
     allowLocalOwnerTransition?: boolean;
     /** 当前 control 已完成本地桶清理，Root 会在 lease 释放后销毁。 */
@@ -941,6 +954,10 @@ async function withCoordinatorFinalIoLease<T>(
     durableLease?: boolean;
   } = {},
 ): Promise<T> {
+  const walletAdmission=await walletMigrationFence.acquire(options.walletMigration===true,signal);
+  try {return await withCoordinatorFinalIoLeaseAdmitted(operation,signal,run,options);}finally{walletAdmission.release();}
+}
+async function withCoordinatorFinalIoLeaseAdmitted<T>(operation:"read"|"write",signal:AbortSignal|undefined,run:(signal:AbortSignal)=>Promise<T>,options:{walletMigration?:boolean;allowLocalLock?:boolean;allowLocalOwnerTransition?:boolean;allowLocalBindingDiscard?:boolean;auditOperation?:FinalIoAuditOperation;durableLease?:boolean}):Promise<T> {
   await ensureCoordinatorUpgradeSession();
   // 共享 read lease 只表示当前 Worker 已持有 Keymaster 的 origin 级
   // authority lock 并通过本地检查；高频只读请求无需重复登记内存计数。
@@ -1355,6 +1372,7 @@ const msfileFundingRuntime = createWorkerFundingRuntime({
   parseTransaction: parseP2pkhTransaction,
 });
 const msfileBitfsRuntime = createBitfsWorkerRuntime({
+  requestPayment: async command => (await currentWalletPayments()).handle(command),
   session: () => ({ vaultStatus: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.activePublicKeyHex, sessionEpoch: coordinatorState.sessionEpoch, runGeneration: coordinatorState.runGeneration }),
   service: () => msfileRuntime,
   ensureService: () => ensureMsfileRuntime(),
@@ -1769,7 +1787,7 @@ async function ensureSatRuntime(expectedInstanceId?: string, storage?: BorrowedM
           const result = await withCoordinatorFinalIoLease(
             "write",
             undefined,
-            () => { vaultKeySession.assert(ownerPublicKeyHex, expectedSessionEpoch); return vaultKeySession.execute({ type: "deriveP2pkhAddress", network }); },
+            () => { assertActiveWalletIdentity(ownerPublicKeyHex, expectedSessionEpoch); return executeActiveWalletCrypto({ type: "deriveP2pkhAddress", network }); },
             { auditOperation: "sat.address.derive" },
           );
           if (result.type !== "deriveP2pkhAddress") throw new Error("Failed to derive the owner payment address");
@@ -2540,6 +2558,7 @@ function fenceCoordinatorPeerSession(
   if (state.status === "revoked") return false;
   const currentBinding = coordinatorSessionBinding(state);
   if (options.binding !== undefined && !sameCoordinatorSessionBinding(currentBinding, options.binding)) return false;
+  void hardwareConnections.closePeer(state.peer.peerId);
   state.sessionGeneration += 1;
   state.sessionOpen = false;
   state.status = options.physical ? "revoked" : "closing";
@@ -2966,6 +2985,31 @@ const vaultKeySession = createWorkerKeySession(() => ({
 }));
 function replaceActivePrivateKey(next: Uint8Array | undefined): void { vaultKeySession.replace(next); }
 function dropActivePrivateKey(): void { vaultKeySession.clear(); }
+let walletPayments: WalletPayments | HardwareWalletPayments | undefined;
+let walletPaymentsOpening: Promise<WalletPayments | HardwareWalletPayments> | undefined;
+async function currentWalletPayments(): Promise<WalletPayments | HardwareWalletPayments> {
+  const owner = coordinatorState.activePublicKeyHex, epoch = coordinatorState.sessionEpoch;
+  const assertActive = () => {
+    if (!owner || coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex !== owner || coordinatorState.sessionEpoch !== epoch) throw new Error("Payment wallet session became stale");
+  };
+  assertActive();
+  if (walletPayments) return walletPayments;
+  if (walletPaymentsOpening) return walletPaymentsOpening;
+  if (activeKeyBackend === "hardware") {
+    walletPayments = new HardwareWalletPayments(hardwareConnections.backend(), assertActive);
+    return walletPayments;
+  }
+  const pending = WalletPayments.open(workerStorageClients.platformFiles("vault", "payments"), owner!, assertActive, async digest => {
+    assertActive();
+    const result = await vaultKeySession.execute({type: "signDigest", digestHex: bytesToHex(digest), format: "der"});
+    assertActive();
+    if (result.type !== "signDigest" || result.format !== "der") throw new Error("Invalid payment signature result");
+    return cryptoHexToBytes(result.signatureHex);
+  });
+  walletPaymentsOpening = pending;
+  try { const ready = await pending; assertActive(); walletPayments = ready; return ready; }
+  finally { if (walletPaymentsOpening === pending) walletPaymentsOpening = undefined; }
+}
 
 /**
  * Peer scope revoke 是生产连接的唯一断开/准入栅栏。
@@ -3221,8 +3265,27 @@ const workerStorageClientCapabilities = createScopedStorageClients({
 let vaultCryptoProviderScope: import("webloom-framework").LifecycleScope | undefined;
 const workerSessionCryptoFactory = createWorkerActiveKeyCryptoFactory({
   summary: coordinatorActiveKeySummary,
+  async signBitfsWire(input,signal) {
+    assertActiveWalletIdentity(input.publicKeyHex);if(activeKeyBackend!=="hardware")throw Error("hardware-profile-required");
+    const signature=await hardwareConnections.backend().signBitfsWire(input.kind,new Uint8Array(input.document),signal);
+    assertActiveWalletIdentity(input.publicKeyHex);return {publicKeyHex:input.publicKeyHex,format:"der",signature:new Uint8Array(signature).buffer};
+  },
+  async signConnectEnvelope(input) {
+    assertActiveWalletIdentity(input.publicKeyHex);
+    if(activeKeyBackend!=="hardware")throw new Error("hardware-profile-required");
+    const signature=await hardwareConnections.backend().signConnectEnvelope(input.kind,new Uint8Array(input.envelope),input.content ? new Uint8Array(input.content) : undefined,input.appSessionId);
+    assertActiveWalletIdentity(input.publicKeyHex);
+    return {publicKeyHex:input.publicKeyHex,format:"compact",signature:signature.slice().buffer as ArrayBuffer};
+  },
   sessionEpoch: () => coordinatorState.sessionEpoch,
-  keySession: vaultKeySession,
+  keySession: {
+    assert: assertActiveWalletIdentity,
+    signDigest: (digest, format, publicKeyHex) => {
+      assertActiveWalletIdentity(publicKeyHex);
+      if (activeKeyBackend === "hardware") throw new Error("hardware-profile-required");
+      return vaultKeySession.signDigest(digest, format, publicKeyHex);
+    },
+  },
   withIoLease(operation, execute) {
     return operation === "sign"
       ? withCoordinatorFinalIoLease("write", undefined, execute, { auditOperation: "vault.digest.sign" })
@@ -3240,6 +3303,7 @@ function createWorkerActiveKeyCrypto(owner: string, providerScope = vaultCryptoP
  * 充值只注入一个内部 Coordinator facade，避免从 SharedWorker 再绕回页面。
  */
 const workerTransferRuntime = createWorkerTransferRuntime({
+  requestPayment: command => executeVaultOperation({type: "payment", command}) as Promise<import("@keymaster/contracts").JSONValue>,
   assertActive: () => {
     assertCoordinatorUnitConstructible("p2pkh.coordinator-worker");
     if (!testDomainUnitReadiness) { if (!p2pkhWorkerPorts) throw new Error("P2PKH Worker instance is unavailable"); p2pkhWorkerPorts.assertActive(); }
@@ -3667,6 +3731,10 @@ function clearStorageRequestSecrets(request: CoordinatorClientRequest): void {
 
 function clearVaultOperationSecrets(operation: CoordinatorVaultOperation): void {
   switch (operation.type) {
+    case "migrateToHardware":
+      operation.sourcePassword="";return;
+    case "migrateToSoftware":
+      operation.newPassword="";return;
     case "verifyPassword":
       operation.password = "";
       return;
@@ -3702,6 +3770,7 @@ async function executeStorageControl(
 
   if (control.type === "status") {
     if (storageStartupFailure) {
+      void hardwareConnections.close();
       const detail = coordinatorAuthorityRecoveryOperationNames.length > 0
         ? `; active final I/O=${coordinatorAuthorityRecoveryOperationNames.join(",")}`
         : "";
@@ -4177,9 +4246,21 @@ const channelCallerId = channelCallerPolicy.callerId;
 const isAllowedOwnerInboxSubscription = channelCallerPolicy.allowsOwnerInboxSubscription;
 
 /** 生成公开消息时间对；同一次签名必须只读取一次系统时钟。 */
+const hardwareChannel = createHardwareChannelAdapter(() => hardwareConnections.backend(), () => {
+  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) throw Error("Vault locked");
+  return coordinatorState.activePublicKeyHex;
+});
+const channelSigner = {
+  signHash: (...args: Parameters<typeof hardwareChannel.signHash>) => activeKeyBackend === "hardware" ? hardwareChannel.signHash(...args) : vaultKeySession.signHash(args[0]),
+  signPublic: (...args: Parameters<typeof hardwareChannel.signPublic>) => activeKeyBackend === "hardware" ? hardwareChannel.signPublic(...args) : vaultKeySession.signPublic(args[0]),
+  signPrivate: (...args: Parameters<typeof hardwareChannel.signPrivate>) => activeKeyBackend === "hardware" ? hardwareChannel.signPrivate(...args) : vaultKeySession.signPrivate(args[0]),
+  seal: (...args: Parameters<typeof hardwareChannel.seal>) => activeKeyBackend === "hardware" ? hardwareChannel.seal(...args) : vaultKeySession.seal(args[0]),
+};
+const openChannelPrivate = (channel: string, envelope: string | Uint8Array, signal?: AbortSignal) =>
+  activeKeyBackend === "hardware" ? hardwareChannel.open(channel, envelope, signal) : vaultKeySession.open(channel, envelope);
 const channelPublications = createChannelPublications({
   session: () => ({ sessionEpoch: coordinatorState.sessionEpoch, activePublicKeyHex: coordinatorState.activePublicKeyHex, vaultStatus: coordinatorState.vaultStatus }),
-  signer: vaultKeySession,
+  signer: channelSigner,
   relations: channelProtocolRelations,
   unknownPublishFailure: isUnknownChannelPublishFailure,
 });
@@ -4449,9 +4530,9 @@ const handleIncomingChannelPublish = createChannelInbound<SatWorkerRuntimeState>
   relations: channelProtocolRelations,
   openPrivate: (event, owner, epoch) => withCoordinatorFinalIoLease(
     "read", undefined,
-    () => {
+    (leaseSignal) => {
       if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.sessionEpoch !== epoch || coordinatorState.activePublicKeyHex !== owner) throw new Error("Channel owner changed before private message decrypt");
-      return vaultKeySession.open(event.channel, event.contentJson);
+      return openChannelPrivate(event.channel, event.contentJson, leaseSignal);
     },
     { allowLocalLock: true, allowLocalOwnerTransition: true, auditOperation: "channel.incoming-decrypt" },
   ),
@@ -4470,7 +4551,7 @@ const executeOwnedChannelOperation = createChannelOperationExecutor<SatWorkerRun
   publishPrivate: publishPrivateEnvelope,
   openPrivate: (owner, envelope, signal) => withCoordinatorFinalIoLease(
     "read", signal,
-    () => vaultKeySession.open(inboxChannel(parsePublicKey(owner)), envelope),
+    (leaseSignal) => openChannelPrivate(inboxChannel(parsePublicKey(owner)), envelope, leaseSignal),
     { allowLocalLock: true, allowLocalOwnerTransition: true, auditOperation: "channel.history-open" },
   ),
   connectSession: getAuthoritativeConnectSession,
@@ -5334,8 +5415,9 @@ function parseUint64Decimal(value: string): bigint {
 }
 
 function currentExecutorPublicKey(): Uint8Array {
-  if (!coordinatorState.activePublicKeyHex || !vaultKeySession.hasKey()) throw new Error("Window P2P executor active key is unavailable");
-  vaultKeySession.assert(coordinatorState.activePublicKeyHex);
+  if (!coordinatorState.activePublicKeyHex) throw new Error("Window P2P executor active key is unavailable");
+  if (activeKeyBackend === "hardware") { hardwareConnections.backend(); }
+  else vaultKeySession.assert(coordinatorState.activePublicKeyHex);
   return validatePublicKey(cryptoHexToBytes(coordinatorState.activePublicKeyHex));
 }
 
@@ -5408,7 +5490,10 @@ async function executeWindowP2pExecutorIdentitySign(
   const signature = await withCoordinatorFinalIoLease(
     "write",
     signal,
-    () => vaultKeySession.signDigest(digest, "der", publicKeyHex),
+    () => activeKeyBackend === "hardware"
+      ? hardwareConnections.backend().signNetworkIdentity(request.kind === "window-p2p.executor.identity.sign-noise" ? "noise" : "peer-record",
+          request.kind === "window-p2p.executor.identity.sign-noise" ? {staticKey:new Uint8Array(request.noiseStaticPublicKey)} : {sequence:request.sequence}, signal)
+      : vaultKeySession.signDigest(digest, "der", publicKeyHex),
     {
       auditOperation: "window-p2p.identity.sign",
       // Window P2P 身份签名只用于建立当前 executor 的本地握手，不会把
@@ -5932,6 +6017,12 @@ async function processRequestCore(
   // Vault identity is a committed in-memory projection. Shell reads must not
   // queue behind an unrelated network operation; their epoch and final read
   // lease checks still run in executeProcessRequest/handleVaultOperation.
+  // USB 配对决定不能排在等待配对的 attach 后面；控制面独立于业务 FIFO。
+  if (request.kind === "vault.operation" && request.operation.type === "hardware") {
+    return handleHardwareConnection(request, actualClientId, requestSignal);
+  }
+  // 钱包付款服务拥有自己的配置队列和预占栅栏。批准/取消必须能越过等待批准的业务请求。
+  if (request.kind === "vault.operation" && request.operation.type === "payment") return executeProcessRequest(request, actualClientId, requestSignal);
   if (request.kind === "vault.operation" && request.operation.type === "getCurrentKey") return executeProcessRequest(request, actualClientId);
   return enqueueCoordinatorRequest(request, actualClientId, requestSignal);
 }
@@ -5947,6 +6038,15 @@ async function processRequest(
   actualClientId = (request as { clientId?: string }).clientId ?? "unknown",
   requestSignal?: AbortSignal,
 ): Promise<CoordinatorResponse> {
+  if (request.kind === "vault.operation" && request.operation.type === "hardware" && (request.operation.command.action === "attach" || request.operation.command.action === "recover" || request.operation.command.action === "recover-erased" || request.operation.command.action === "provision" || request.operation.command.action === "recover-import" || request.operation.command.action === "enroll")) {
+    const port = request.operation.command.port;
+    // authority/取消门禁可能在 handler 之前拒绝；此时仍负责释放已转移端口。
+    try {
+      const response = await processRequestCore(request, actualClientId, requestSignal);
+      if (response.ack.status !== "ok") { try { port.close(); } catch {} }
+      return response;
+    } catch (error) { try { port.close(); } catch {} throw error; }
+  }
   if (request.kind !== "channel.operation") return processRequestCore(request, actualClientId, requestSignal);
   const requestId = request.requestId;
   const key = channelRequestKey(actualClientId, requestId);
@@ -6051,6 +6151,171 @@ async function completeUnlockedBinding(cause: SessionStateEvent["cause"] = "unlo
   resetAutoLockTimer();
 }
 
+/** Worker 验证设备持有权后装配硬件后端；首次绑定另外原子提交公开钱包记录。 */
+async function handleHardwareConnection(
+  request: Extract<CoordinatorClientRequest, { kind: "vault.operation" }>,
+  peerId: string,
+  signal?: AbortSignal,
+): Promise<CoordinatorResponse> {
+  const operation = request.operation;
+  if (operation.type !== "hardware") throw new Error("Invalid hardware operation");
+  const command = operation.command;
+  let connectedByRequest = false;
+  try {
+    if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch) throw new Error("stale-usb-session");
+    if (command.action === "state") {
+      const state = hardwareConnections.state();
+      const activity = state.status === "connected"&&!hardwareConnections.isErasedRecovery()&&!hardwareConnections.isProvisioning() ? await hardwareConnections.backend().activity() : undefined;
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: {...state, ...(activity ? {activity} : {})} };
+    }
+    if (command.action === "disconnect") {
+      if (hardwareConnections.state().leaseId !== command.leaseId) throw new Error("stale-usb-lease");
+      await hardwareConnections.disconnect(peerId, command.leaseId);
+    } else if (command.action === "pair") {
+      hardwareConnections.answer(peerId, command.leaseId, command.allow);
+    } else if(command.action==="provision"||command.action==="recover-import") {
+      if(!walletStore||!walletKeys||hardwareConnections.state().status!=="disconnected")throw Error("migration-provisioning-unavailable");
+      const store=walletStore,keys=walletKeys,epoch=coordinatorState.sessionEpoch,run=coordinatorState.runGeneration;
+      const service=createMigrationJournalService({store:createVaultBootstrapStorage(store).migration,inspectKey:inspectWalletKeyBytes});
+      const journal=await withCoordinatorFinalIoLease("read",signal,()=>service.current(),{auditOperation:"vault.operation"});
+      const recovery=command.action==="recover-import";
+      if(recovery?(!journal||journal.phase==="complete"||journal.source!=="software"||journal.target!=="hardware"||coordinatorState.vaultStatus!=="locked"):
+        (journal&&journal.phase!=="complete"||coordinatorState.vaultStatus!=="unlocked"||activeKeyBackend!=="software"))throw Error("migration-provisioning-unavailable");
+      if(recovery){coordinatorState.walletGeneration=journal!.walletGeneration;hardwareRecoveryConnection={migrationId:journal!.migrationId,peerId};}
+      const assertRecordLive=()=>{if(signal?.aborted||revokedCoordinatorPeerIds.has(peerId)||walletStore!==store||walletKeys!==keys||coordinatorState.sessionEpoch!==epoch||coordinatorState.runGeneration!==run)throw Error("migration-session-revoked");};
+      try{await hardwareConnections.attachProvision({peerId,leaseId:command.leaseId,port:command.port,signal,assertRecordLive,walletGeneration:coordinatorState.walletGeneration!});connectedByRequest=true;assertRecordLive();
+        const state=await hardwareConnections.provision().migrationStatus();assertRecordLive();if(journal&&journal.phase!=="complete"&&state)verifyDeviceMigrationJournal(journal,state);
+        else if(recovery&&journal!.phase!=="prepared")throw Error("migration-device-record-missing");
+      }catch(error){hardwareRecoveryConnection=undefined;await hardwareConnections.closePeer(peerId);throw error;}
+    } else if((command.action==="recover"||command.action==="recover-erased")) {
+      if(!walletStore||!walletKeys||hardwareConnections.state().status!=="disconnected"||coordinatorState.vaultStatus!=="locked")throw Error("migration-recovery-unavailable");
+      const store=walletStore,keys=walletKeys,epoch=coordinatorState.sessionEpoch,run=coordinatorState.runGeneration;
+      const service=createMigrationJournalService({store:createVaultBootstrapStorage(store).migration,inspectKey:inspectWalletKeyBytes});
+      const journal=await withCoordinatorFinalIoLease("read",signal,()=>service.current(),{auditOperation:"vault.operation"});
+      if(!journal||journal.phase==="complete"||journal.source!=="hardware"||journal.target!=="software")throw Error("migration-recovery-unavailable");
+      if(command.action==="recover-erased"&&journal.phase!=="local-committed")throw Error("migration-conflict");
+      const file=await keys.read();if(!file)throw Error("migration-source-missing");
+      coordinatorState.walletGeneration=journal.walletGeneration;
+      hardwareRecoveryConnection={migrationId:journal.migrationId,peerId};
+      const assertRecordLive=()=>{
+        if(signal?.aborted||revokedCoordinatorPeerIds.has(peerId)||walletStore!==store||walletKeys!==keys||coordinatorState.sessionEpoch!==epoch
+          ||coordinatorState.runGeneration!==run||hardwareRecoveryConnection?.migrationId!==journal.migrationId)throw Error("migration-session-revoked");
+      };
+      try {
+        if(command.action==="recover-erased")await hardwareConnections.attachErased({peerId,leaseId:command.leaseId,port:command.port,signal,assertRecordLive,journal});
+        else await hardwareConnections.attach({peerId,leaseId:command.leaseId,port:command.port,signal,assertRecordLive,
+          document:{format:"keymaster.hardware-key",version:1,backend:"vaultlink",wireVersion:2,label:file.document.label,
+            publicKeyHex:journal.publicKeyHex,walletGeneration:journal.walletGeneration,backendGeneration:1}});
+        connectedByRequest=true;assertRecordLive();
+        const state=await (hardwareConnections.isErasedRecovery()?hardwareConnections.erased():hardwareConnections.backend()).migrationStatus();assertRecordLive();
+        if(state && !(journal.phase==="prepared"&&state.phase==="complete"&&state.id!==journal.migrationId))verifyDeviceMigrationJournal(journal,state);
+        else if(journal.phase!=="prepared")throw Error("migration-device-record-missing");
+        // Recovery connection proves the SAME old key, but never installs Root,
+        // ordinary crypto, payment access or owner-session units.
+      }catch(error){hardwareRecoveryConnection=undefined;await hardwareConnections.closePeer(peerId);throw error;}
+    } else if (command.action === "enroll") {
+      if (hardwareEnrollmentInProgress || hardwareConnections.state().status !== "disconnected") throw Error("usb-in-use");
+      const lifecycle = walletLifecycle, keys = walletKeys, store = walletStore;
+      if (!lifecycle || !keys || !store || coordinatorState.vaultStatus !== "uninitialized") throw Error("Hardware enrollment requires an uninitialized wallet");
+      const run = coordinatorState.runGeneration, initialGeneration = coordinatorState.walletGeneration;
+      let bindingEpoch = coordinatorState.sessionEpoch, bindingToken = platformRootToken;
+      let expectedGeneration = initialGeneration;
+      const walletGeneration = crypto.randomUUID();
+      const assertRecordLive = () => {
+        if (signal?.aborted || revokedCoordinatorPeerIds.has(peerId) || walletLifecycle !== lifecycle || walletKeys !== keys || walletStore !== store
+          || coordinatorState.runGeneration !== run || coordinatorState.sessionEpoch !== bindingEpoch || platformRootToken !== bindingToken
+          || coordinatorState.walletGeneration !== expectedGeneration) throw Error("Hardware enrollment was revoked");
+      };
+      if ((await lifecycle.coldStart()).state !== "uninitialized") throw Error("Wallet already has a Key");
+      assertRecordLive(); hardwareEnrollmentInProgress = true;
+      try {
+        await hardwareConnections.enroll({peerId, leaseId: command.leaseId, port: command.port, label: command.label,
+          walletGeneration, assertRecordLive, signal});
+        connectedByRequest = true; assertRecordLive();
+        await assertCoordinatorAuthorityCurrent(); assertRecordLive();
+        const document = hardwareConnections.verifiedDocument();
+        const meta = await withCoordinatorFinalIoLease("write", undefined, () => lifecycle.initializeHardware(document), {
+          allowLocalOwnerTransition: true, auditOperation: "vault.operation",
+        });
+        // initializeHardware 的提交事件只改变此次指定的身份世代。
+        expectedGeneration = walletGeneration;
+        assertRecordLive(); hardwareConnections.backend();
+        revokeStorageSessionGrants(); workerStorageClients.invalidateAll(); dropActivePrivateKey();
+        bindingEpoch = generateEpoch(); coordinatorState.sessionEpoch = bindingEpoch;
+        coordinatorState.activePublicKeyHex = document.publicKeyHex; activeKeyBackend = "hardware";
+        coordinatorState.vaultStatus = "unlocked";
+        setCoordinatorActiveKeySummary({backend: "hardware", publicKeyHex: document.publicKeyHex, label: document.label,
+          capabilities: ["p2pkh", "bsv.standard", "feepool.connect", "feepool.bitfs", "local-secret.v3"], createdAt: meta.createdAt});
+        await installPlatformStorage(); bindingToken = platformRootToken;
+        assertRecordLive(); hardwareConnections.backend();
+        await loadCoordinatorMeta(); await ensureStorageRuntime(); await ensureCoordinatorTasksRegistered();
+        workerWalletState.publish(); await completeUnlockedBinding("initialize"); assertRecordLive();
+      } catch (error) {
+        // 已提交的公开绑定保留；运行装配失败只撤销会话，随后可重新连接。
+        if (connectedByRequest) await performGlobalLock("hardware-enrollment-failed").catch(() => undefined);
+        throw error;
+      } finally { hardwareEnrollmentInProgress = false; }
+    } else {
+      const epoch = coordinatorState.sessionEpoch, run = coordinatorState.runGeneration, token = platformRootToken;
+      let bindingEpoch = epoch;
+      if (coordinatorState.vaultStatus !== "locked") throw new Error("Hardware connection requires a locked wallet");
+      const keys = walletKeys;
+      if (!keys) throw storageUnavailableError("Hardware wallet record is unavailable");
+      const file = await withCoordinatorFinalIoLease("read", undefined, () => keys.read(), { auditOperation: "vault.operation" });
+      if (!file || file.backend !== "hardware" || file.document.walletGeneration !== coordinatorState.walletGeneration) throw new Error("Current wallet is not bound to a hardware Key");
+      const assertRecordLive = () => {
+        if (signal?.aborted || revokedCoordinatorPeerIds.has(peerId) || walletKeys !== keys || platformRootToken !== token
+          || coordinatorState.sessionEpoch !== bindingEpoch || coordinatorState.runGeneration !== run
+          || coordinatorState.walletGeneration !== file.document.walletGeneration) throw new Error("Hardware wallet binding was revoked");
+      };
+      assertRecordLive();
+      await hardwareConnections.attach({ peerId, leaseId: command.leaseId, port: command.port, document: file.document, assertRecordLive, signal });
+      connectedByRequest = true;
+      await assertCoordinatorAuthorityCurrent();
+      assertRecordLive();
+      const current = await withCoordinatorFinalIoLease("read", undefined, () => keys.read(), { auditOperation: "vault.operation" });
+      if (!current || current.revision !== file.revision || current.backend !== "hardware") throw new Error("Hardware record changed during pairing");
+      // 已存在的软件消费账本必须经迁移协议转入设备；不能忽略它而得到空额度。
+      const oldPolicy = await workerStorageClients.platformFiles("vault", "payments").get("payments.json");
+      assertRecordLive();
+      if (oldPolicy) {
+        if (!walletStore) throw storageUnavailableError("Migration store is unavailable");
+        const migration = await withCoordinatorFinalIoLease("read", undefined,
+          () => createVaultBootstrapStorage(walletStore!).migration.get(WALLET_MIGRATION_PATH), { auditOperation: "vault.operation" });
+        assertRecordLive();
+        const actualBank = await hardwareConnections.backend().exportPaymentPolicy();
+        assertRecordLive();
+        await verifyMigratedHardwareLedger(file.document, migration?.bytes, oldPolicy.bytes, actualBank);
+        assertRecordLive();
+      }
+      const snapshot = await requireWalletLifecycle().coldStart();
+      assertRecordLive();
+      if (snapshot.state !== "ready" || snapshot.key?.publicKeyHex !== file.document.publicKeyHex) throw new Error("Hardware identity changed during activation");
+      // 记录核验过程中设备可能已经断线，此时尚未设置 activeKeyBackend，断线回调不会替我们锁定。
+      // 必须重新检查当前连接所有者，不能只根据持久记录把钱包显示为 unlocked。
+      hardwareConnections.backend();
+      revokeStorageSessionGrants(); workerStorageClients.invalidateAll(); dropActivePrivateKey();
+      bindingEpoch = generateEpoch();
+      coordinatorState.sessionEpoch = bindingEpoch;
+      coordinatorState.activePublicKeyHex = file.document.publicKeyHex;
+      activeKeyBackend = "hardware";
+      coordinatorState.vaultStatus = "unlocked";
+      setCoordinatorActiveKeySummary({ backend: "hardware", publicKeyHex: file.document.publicKeyHex, label: file.document.label,
+        capabilities: ["p2pkh", "bsv.standard", "feepool.connect", "feepool.bitfs", "local-secret.v3"], createdAt: snapshot.meta?.createdAt ?? "" });
+      workerWalletState.publish();
+      await completeUnlockedBinding();
+      assertRecordLive(); hardwareConnections.backend();
+    }
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: hardwareConnections.state() };
+  } catch (error) {
+    if (command.action === "attach" || command.action === "recover" || command.action === "recover-erased" || command.action === "provision" || command.action === "recover-import" || command.action === "enroll") {
+      if (connectedByRequest && hardwareConnections.state().leaseId === command.leaseId) await hardwareConnections.closePeer(peerId);
+      try { command.port.close(); } catch { /* transferred port cleanup */ }
+    }
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: error instanceof Error ? error.message : String(error) } };
+  }
+}
+
 async function handleVaultOperation(requestId: string, request: { kind: "vault.operation"; operation: CoordinatorVaultOperation }): Promise<CoordinatorResponse> {
   try {
     // 所有从页面进入的 Vault 仓库读写都必须在最终边界重新登记；仅在
@@ -6064,6 +6329,7 @@ async function handleVaultOperation(requestId: string, request: { kind: "vault.o
       undefined,
       () => executeVaultOperation(request.operation),
       {
+        walletMigration:request.operation.type==="migrateToSoftware"||request.operation.type==="migrateToHardware",
         allowLocalLock: true,
         allowLocalOwnerTransition: true,
         auditOperation: "vault.operation",
@@ -6074,6 +6340,9 @@ async function handleVaultOperation(requestId: string, request: { kind: "vault.o
         durableLease: ioKind === "write",
       },
     );
+    if((request.operation.type==="migrateToSoftware"||request.operation.type==="migrateToHardware")&&!platformRootStore){
+      await installPlatformStorage();await loadCoordinatorMeta();await ensureStorageRuntime();await ensureCoordinatorTasksRegistered();emitStorageState();
+    }
     return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
   } catch (err) {
     markStorageIoFailure(err);
@@ -6089,6 +6358,7 @@ function vaultOperationIoKind(operation: CoordinatorVaultOperation): "read" | "w
     case "verifyPassword":
     case "exportKeyHold":
     case "getCurrentKey":
+    case "migrationState":
       return "read";
     default:
       return "write";
@@ -6123,6 +6393,7 @@ function adoptUnlockedKey(input: {
   sessionEpoch: string;
 }): void {
   // 旧会话的所有 grant 与任务权限先撤销：解锁只授予新身份，不继承旧句柄。
+  activeKeyBackend = "software";
   revokeStorageSessionGrants();
   coordinatorState.walletGeneration = input.walletGeneration;
   // 生命周期已经生成新的会话世代，Coordinator 必须使用它而不是再造一个：
@@ -6144,6 +6415,9 @@ function adoptUnlockedKey(input: {
  * 让已经拿到句柄的迟到写入在任何数据检查之前就被拒绝。
  */
 function revokeWalletGrants(reason: "lock" | "reset"): void {
+  activeKeyBackend = undefined;
+  void hardwareConnections.close();
+  walletPayments?.close(); walletPayments = undefined; walletPaymentsOpening = undefined;
   revokeStorageSessionGrants();
   releaseMsfileRuntime(reason);
   void releaseSatRuntime(reason).catch(() => undefined);
@@ -6162,7 +6436,134 @@ function establishWalletSession(input: {
   coordinatorState.activePublicKeyHex = input.publicKeyHex;
 }
 
+function assertActiveWalletIdentity(publicKeyHex?: string, sessionEpoch?: string): void {
+  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex
+    || (publicKeyHex !== undefined && publicKeyHex.toLowerCase() !== coordinatorState.activePublicKeyHex.toLowerCase())
+    || (sessionEpoch !== undefined && sessionEpoch !== coordinatorState.sessionEpoch)) throw new Error("Wallet identity is stale");
+  if (activeKeyBackend === "hardware") {if(hardwareConnections.backend().isMigrating())throw Error("migration-pending");}
+  else vaultKeySession.assert(publicKeyHex, sessionEpoch);
+}
+
+function hasActiveWalletCrypto(): boolean {
+  if (activeKeyBackend === "hardware") return coordinatorState.vaultStatus === "unlocked" && hardwareConnections.state().status === "connected";
+  return vaultKeySession.hasKey();
+}
+async function executeActiveWalletCrypto(operation: CoordinatorCryptoOperation): Promise<CoordinatorCryptoResult> {
+  assertActiveWalletIdentity();
+  if(operation.type==="signConnectEnvelope") {
+    if(activeKeyBackend!=="hardware")throw new Error("hardware-profile-required");
+    const signature=await hardwareConnections.backend().signConnectEnvelope(operation.kind,operation.envelope,operation.content,operation.appSessionId);
+    assertActiveWalletIdentity();
+    return {type:operation.type,signatureHex:bytesToHex(signature),format:"compact"};
+  }
+  if (activeKeyBackend !== "hardware") return vaultKeySession.execute(operation);
+  // 地址派生只用已经核验的公钥；所有私钥运算必须走明确的设备语义 Profile。
+  if (operation.type === "deriveP2pkhAddress") return {type:operation.type,address:deriveP2pkhAddress(coordinatorState.activePublicKeyHex!,operation.network)};
+  throw new Error("hardware-profile-required");
+}
+
+/** The wallet migration fence is held by handleVaultOperation. No ordinary
+ * Vault crypto runs while the backend is migration-owned. Failure locks the
+ * wallet and leaves exact durable recovery metadata; it never deletes a journal. */
+async function migrateHardwareToSoftware(newPassword:string):Promise<{migrationId:string;phase:"complete";target:"software"}> {
+  const recovery=hardwareRecoveryConnection;
+  if(!recovery)assertActiveWalletIdentity();
+  if((activeKeyBackend!=="hardware"&&!recovery)||!walletStore||!walletKeys)throw Error("hardware-source-required");
+  if(hardwareConnections.isErasedRecovery()){
+    const portal=hardwareConnections.erased(),store=walletStore,keys=walletKeys,epoch=coordinatorState.sessionEpoch;
+    const assertRecovery=()=>{if(walletStore!==store||walletKeys!==keys||coordinatorState.sessionEpoch!==epoch||hardwareRecoveryConnection!==recovery||hardwareConnections.erased()!==portal)throw Error("migration-session-revoked");};
+    try{
+      const service=createMigrationJournalService({store:createVaultBootstrapStorage(store).migration,inspectKey:inspectWalletKeyBytes});
+      const journal=await service.current();assertRecovery();if(!journal||journal.phase!=="local-committed")throw Error("migration-conflict");
+      const receipt=await portal.finishErase();assertRecovery();verifyDeviceMigrationJournal(journal,receipt);
+      if(!["erased","complete"].includes(receipt.phase))throw Error("migration-conflict");
+      await service.finish(journal.migrationId);assertRecovery();
+      const completed=await service.current();assertRecovery();if(!completed)throw Error("migration-conflict");
+      await portal.completeDevice(completed);assertRecovery();
+      coordinatorState.walletGeneration=journal.walletGeneration;await performGlobalLock("backend-migrated");
+      storageColdStartState=await requireWalletLifecycle().coldStart();emitStorageState();workerWalletState.publish();
+      return {migrationId:journal.migrationId,phase:"complete",target:"software"};
+    }catch(error){await performGlobalLock("backend-migration-recovery-required").catch(()=>undefined);storageColdStartState=await requireWalletLifecycle().coldStart();emitStorageState();throw error;}
+  }
+  const backend=hardwareConnections.backend(),store=walletStore,keys=walletKeys;
+  const epoch=coordinatorState.sessionEpoch,run=coordinatorState.runGeneration,token=platformRootToken;
+  const assertExclusive=()=>{
+    if(walletStore!==store||walletKeys!==keys||coordinatorState.sessionEpoch!==epoch||coordinatorState.runGeneration!==run
+      ||platformRootToken!==token||(recovery ? (hardwareRecoveryConnection!==recovery||coordinatorState.vaultStatus!=="locked") : (coordinatorState.vaultStatus!=="unlocked"||activeKeyBackend!=="hardware"))
+      ||hardwareConnections.backend()!==backend||!backend.isMigrating())throw Error("migration-session-revoked");
+  };
+  try {
+    const result=await backend.withMigration(async()=>{
+      assertExclusive();stopCoordinatorOwnerWorkerUnits();revokeStorageSessionGrants();
+      const source=await keys.read();assertExclusive();
+      if(!source)throw Error("hardware-source-required");
+      const service=createMigrationJournalService({store:createVaultBootstrapStorage(store).migration,inspectKey:inspectWalletKeyBytes});
+      const current=await service.current();assertExclusive();
+      if(source.backend!=="hardware"&&!(recovery&&current?.phase==="local-committed"))throw Error("hardware-source-required");
+      const previous=await service.read();assertExclusive();
+      const migrationId=previous&&previous.journal.phase!=="complete"?previous.journal.migrationId:crypto.randomUUID();
+      if(previous?.journal.phase!=="local-committed"&&newPassword.length<8)throw Error("password-too-short");
+      const migration=createHardwareToSoftwareMigration({service,device:backend,assertExclusive,
+        createAndVerifyKeyHold:async(privateKey,publicKeyHex)=>createAndVerifyMigrationKeyHold({privateKey,publicKeyHex,label:source.document.label},newPassword)});
+      return migration.run({migrationId,expectedRevision:source.revision});
+    });
+    coordinatorState.walletGeneration=result.walletGeneration;
+    await performGlobalLock("backend-migrated");
+    storageColdStartState=await requireWalletLifecycle().coldStart();
+    if(storageColdStartState.state!=="ready"||storageColdStartState.key?.backend!=="software")throw Error("migration-activation-failed");
+    emitStorageState();workerWalletState.publish();
+    return {migrationId:result.migrationId,phase:"complete",target:"software"};
+  }catch(error){
+    await performGlobalLock("backend-migration-recovery-required").catch(()=>undefined);
+    storageColdStartState=await requireWalletLifecycle().coldStart();emitStorageState();throw error;
+  }
+}
+
+async function migrateSoftwareToHardware(sourcePassword:string):Promise<{migrationId:string;phase:"complete";target:"hardware"}> {
+  const recovery=hardwareRecoveryConnection;if(!recovery)assertActiveWalletIdentity();
+  if(!walletStore||!walletKeys||!hardwareConnections.isProvisioning()||(!recovery&&activeKeyBackend!=="software"))throw Error("software-source-required");
+  const store=walletStore,keys=walletKeys,portal=hardwareConnections.provision(),epoch=coordinatorState.sessionEpoch,run=coordinatorState.runGeneration;
+  const check=()=>{if(walletStore!==store||walletKeys!==keys||coordinatorState.sessionEpoch!==epoch||coordinatorState.runGeneration!==run||hardwareConnections.provision()!==portal
+    ||(recovery?hardwareRecoveryConnection!==recovery:coordinatorState.vaultStatus!=="unlocked"))throw Error("migration-session-revoked");};
+  try{
+    check();stopCoordinatorOwnerWorkerUnits();revokeStorageSessionGrants();
+    const source=await keys.read();check();if(!source)throw Error("migration-source-missing");
+    const service=createMigrationJournalService({store:createVaultBootstrapStorage(store).migration,inspectKey:inspectWalletKeyBytes});
+    const previous=await service.current();check();
+    const migrationId=previous&&previous.phase!=="complete"?previous.migrationId:crypto.randomUUID();
+    const migration=createSoftwareToHardwareMigration({service,device:portal,assertExclusive:check,
+      sourceBank:()=>service.sourceBank(source.document.publicKeyHex),
+      unlockSource:async()=>{const unlocked=await keys.unlock(sourcePassword);try{check();if(unlocked.revision!==source.revision||unlocked.document.publicKeyHex!==source.document.publicKeyHex)throw Error("migration-source-changed");return unlocked.privateKeyBytes;}catch(e){unlocked.privateKeyBytes.fill(0);throw e;}},
+      hardwareDocument:journal=>new TextEncoder().encode(JSON.stringify({format:"keymaster.hardware-key",version:1,backend:"vaultlink",wireVersion:2,label:source.document.label,
+        publicKeyHex:journal.publicKeyHex,walletGeneration:journal.walletGeneration,backendGeneration:1})),
+    });
+    const completed=await migration.run({migrationId,expectedRevision:source.revision});check();
+    coordinatorState.walletGeneration=completed.walletGeneration;await performGlobalLock("backend-migrated");
+    storageColdStartState=await requireWalletLifecycle().coldStart();if(storageColdStartState.state!=="ready"||storageColdStartState.key?.backend!=="hardware")throw Error("migration-activation-failed");
+    emitStorageState();workerWalletState.publish();return {migrationId,phase:"complete",target:"hardware"};
+  }catch(error){await performGlobalLock("backend-migration-recovery-required").catch(()=>undefined);storageColdStartState=await requireWalletLifecycle().coldStart();emitStorageState();throw error;}
+}
+
 async function executeVaultOperation(operation: CoordinatorVaultOperation): Promise<unknown> {
+  if(operation.type==="migrationState"){
+    if(!walletStore)return null;
+    const service=createMigrationJournalService({store:createVaultBootstrapStorage(walletStore).migration,inspectKey:inspectWalletKeyBytes});
+    const journal=await service.current();
+    return !journal||journal.phase==="complete"?null:{migrationId:journal.migrationId,phase:journal.phase,publicKeyHex:journal.publicKeyHex,passwordRequired:journal.phase!=="local-committed",target:journal.target};
+  }
+  if(operation.type==="migrateToHardware"){try{return await migrateSoftwareToHardware(operation.sourcePassword);}finally{operation.sourcePassword="";}}
+  if(operation.type==="migrateToSoftware"){try{return await migrateHardwareToSoftware(operation.newPassword);}finally{operation.newPassword="";}}
+  if (activeKeyBackend === "hardware") {
+    assertActiveWalletIdentity();
+    const backend = hardwareConnections.backend();
+    if (operation.type === "sealLocalSecret") {
+      try { return await backend.sealLocalSecret(operation.scope, operation.plaintext); }
+      finally { operation.plaintext.fill(0); }
+    }
+    if (operation.type === "openLocalSecret") return backend.openLocalSecret(operation.scope, operation.sealed);
+    if (operation.type === "getCurrentKey") { const key = currentKeySummary(); return key ? {...key, format: "keymaster.hardware-key"} : undefined; }
+  }
+  if (operation.type === "payment") return (await currentWalletPayments()).handle(operation.command);
   const epoch = coordinatorState.sessionEpoch;
   const owner = coordinatorState.activePublicKeyHex;
   return executeOwnedVaultOperation(operation, {
@@ -6280,7 +6681,7 @@ async function handleCrypto(
     };
   }
 
-  if (!vaultKeySession.hasKey()) {
+  if (!hasActiveWalletCrypto()) {
     return {
       requestId,
       sessionEpoch: coordinatorState.sessionEpoch,
@@ -6292,7 +6693,7 @@ async function handleCrypto(
     const result = await withCoordinatorFinalIoLease(
       "write",
       undefined,
-      () => vaultKeySession.execute(request.operation),
+      () => executeActiveWalletCrypto(request.operation),
       {
         auditOperation: "service.crypto.sign",
         // 签名只在 Worker 内计算；结果必须经过下方 epoch 检查以及
@@ -6304,7 +6705,7 @@ async function handleCrypto(
       },
     );
 
-    if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch || coordinatorState.vaultStatus !== "unlocked" || !vaultKeySession.hasKey()) {
+    if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch || coordinatorState.vaultStatus !== "unlocked" || !hasActiveWalletCrypto()) {
       return {
         requestId,
         sessionEpoch: coordinatorState.sessionEpoch,
@@ -6705,7 +7106,7 @@ const { owner: handleCoordinatorOwnerStorageRpc, platform: handleCoordinatorPlat
 const handleCoordinatorCryptoRpc = createWorkerCryptoRpc({
   authorize: call => { requireCoordinatorSessionPeer(call); },
   identity: () => ({ unlocked: coordinatorState.vaultStatus === "unlocked", publicKeyHex: coordinatorState.activePublicKeyHex, sessionEpoch: coordinatorState.sessionEpoch }),
-  keySession: vaultKeySession,
+  keySession: {hasKey:hasActiveWalletCrypto,execute:executeActiveWalletCrypto},
   withIoLease: (signal, execute) => withCoordinatorFinalIoLease("write", signal, execute, {
     auditOperation: "service.crypto.sign",
     durableLease: false,
@@ -6750,7 +7151,7 @@ const COORDINATOR_SESSION_EXPOSURES = [
 /** 当前 owner/session 世代中可向 Window 暴露的 Coordinator 服务。 */
 function coordinatorSessionServicesReady(): boolean {
   return coordinatorState.vaultStatus === "unlocked"
-    && Boolean(coordinatorState.activePublicKeyHex && vaultKeySession.hasKey())
+    && Boolean(coordinatorState.activePublicKeyHex && hasActiveWalletCrypto())
     && Boolean(platformRootStore && platformRootToken)
     && platformStorageReady
     && !storageStartupFailure;
@@ -7049,6 +7450,7 @@ function configureCoordinatorPeer(peer: PeerController): void {
   // select this peer for physical Local I/O.
   peer.scope.onRevoke(() => {
     if (coordinatorPeers.get(peer.peerId) !== state) return;
+    void hardwareConnections.closePeer(peer.peerId);
     revokedCoordinatorPeerIds.add(peer.peerId);
     fenceCoordinatorPeerSession(state, { physical: true });
   });
@@ -7591,6 +7993,7 @@ async function bootstrapWalletStorage(): Promise<void> {
   }
   walletLifecycle = createWalletLifecycleService({
     store: vaultStorage.lifecycle,
+    readMigration: async () => (await vaultStorage.migration.get(WALLET_MIGRATION_PATH))?.bytes,
     keys: walletKeys,
     generateWalletGeneration: () => crypto.randomUUID(),
     generateSessionEpoch: () => generateEpoch(),
@@ -7827,6 +8230,8 @@ export async function __testGetCoordinatorUpgradePartition(): Promise<{ revision
 }
 
 export function __testResetState(): void {
+  activeKeyBackend = undefined;
+  void hardwareConnections.close();
   testDomainUnitReadiness = true;
   stopCoordinatorKeyValueMaintenance();
   storageKeyValueMaintenance.clear();
@@ -8765,6 +9170,7 @@ export async function __testDispatchStorageMessage(clientId: string, request: Co
     return;
   }
   if (request.kind === "disconnect") {
+    void hardwareConnections.closePeer(clientId);
     revokedCoordinatorPeerIds.add(clientId);
     for (const pending of storageRequests.values()) if (pending.clientId === clientId) pending.controller.abort();
     for (const pending of channelRequests.values()) if (pending.clientId === clientId) pending.controller.abort();

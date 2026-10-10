@@ -24,6 +24,7 @@ function fakeP2pkh(): P2pkhServiceForBsv21 {
 
 function fakeProtocolSpend(): ProtocolSpendService & { prepare: ReturnType<typeof vi.fn> } {
   return {
+    async presign(){throw Error("Mint preview must remain unsigned");},
     prepare: vi.fn(async (input) => {
       const totalInput = input.inputs.reduce((sum: number, u: { value: number }) => sum + u.value, 0);
       const totalOutput = input.outputs.reduce((sum: number, o: { value: number }) => sum + o.value, 0);

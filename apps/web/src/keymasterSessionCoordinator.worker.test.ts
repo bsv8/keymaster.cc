@@ -1,7 +1,8 @@
 import { STORAGE_FILE_CLIENTS_CAPABILITY, MSFILE_CONTENT_CAPABILITY, P2PKH_WORKER_PROTOCOL_CAPABILITY, WOC_CAPABILITY } from "@keymaster/contracts";
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { bytesToHex } from "@keymaster/plugin-vault/coordinator";
+import { bytesToHex, deriveP2pkhAddress } from "@keymaster/plugin-vault/coordinator";
+import { openTransactionEvidenceServer } from "../../../Coding/keymaster/vaultlink-integration/test/transaction-evidence-server.mjs";
 import type { CoordinatorClientRequest, CoordinatorResponse, CoordinatorSatEvent, CoordinatorSessionBinding, CoordinatorSessionCloseRequest, CoordinatorSessionOpenRequest, CoordinatorStorageControl, JSONValue } from "@keymaster/contracts";
 import { CHAIN_HEIGHT_SYNC_TASK_ID, COORDINATOR_RPC_CAPABILITY, backgroundSyncDefaultIntervalMs, parseCoordinatorResponseFor } from "@keymaster/contracts";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
@@ -37,7 +38,7 @@ import {
 import { COORDINATOR_WORKER_UNIT_CATALOG } from "./coordinator/workerUnitCatalog.js";
 import { CoordinatorUnitUnavailableError, isCoordinatorUnitUnavailableError } from "./coordinator/workerUnitAvailability.js";
 import { peerIdFromPublicKeyBytes } from "bitcoin-libp2p/identity";
-import { calcTxidFromRawTxHex } from "@keymaster/plugin-p2pkh/coordinator";
+import { calcTxidFromRawTxHex, p2pkhAddressToScriptHex } from "@keymaster/plugin-p2pkh/coordinator";
 import { HASH_REQUEST_CHANNEL, messageIDFromBytes, newMessageID, newSessionID, parsePrivateKey, parsePublicKey, parseSHA256Hash } from "bsv8-channel-protocol";
 import { marshal, newMultiaddrLocator, parseAndVerify, sign } from "bsv8-channel-protocol/hash-request";
 import { parseBodyValue as parseWebrtcBodyValue } from "bsv8-channel-protocol/webrtc-signal";
@@ -49,6 +50,8 @@ function makeTestP2pkhRawTx(inputTxid: string): string {
   return `0100000001${inputTxid}0000000000ffffffff01e8030000000000001976a914${"11".repeat(20)}88ac00000000`;
 }
 import {
+  __testP2pkhProviderConfigGet,
+  __testP2pkhProviderConfigUpdate,
   __testBackgroundRunNow,
   __testCancelByKey,
   __testChangePassword,
@@ -1419,8 +1422,12 @@ describe("Session Coordinator worker", () => {
   });
 
   it("retries a SatSubscription top-up after another submission consumes the same snapshot seq", async () => {
-    const firstCoin = { txid: "aa".repeat(32), vout: 0, value: 100_000, height: 100, status: "confirmed" as const, isSpentInMempoolTx: false };
-    const changeCoin = { txid: "bb".repeat(32), vout: 0, value: 99_000, height: 101, status: "confirmed" as const, isSpentInMempoolTx: false };
+    // 额度核心必须核验完整前序，不能再用虚构 txid 的 UTXO 代替输入证据。
+    const pub = bytesToHex(secp256k1.getPublicKey(Uint8Array.from(TEST_PRIV_2.match(/../gu)!, pair => Number.parseInt(pair, 16)), true));
+    const script = p2pkhAddressToScriptHex(deriveP2pkhAddress(pub, "main"), "main");
+    const firstRaw = `0100000001${"00".repeat(32)}ffffffff020100ffffffff01a08601000000000019${script}00000000`;
+    const firstCoin = { txid: calcTxidFromRawTxHex(firstRaw), vout: 0, value: 100_000, height: 100, status: "confirmed" as const, isSpentInMempoolTx: false };
+    const evidence = new Map([[firstCoin.txid, firstRaw]]);
     // 快照数据源必须在解锁/装配触发后台刷新之前替换，否则在途的真实 WoC
     // 请求会被复用并返回空快照。
     __testSetP2pkhUnspentAllProvider(async () => [firstCoin]);
@@ -1439,7 +1446,11 @@ describe("Session Coordinator worker", () => {
       broadcast,
     });
     __testSetSatBroadcastRetryOverrides({ maxAttempts: 3, deadlineMs: 10_000, initialBackoffMs: 1, maxBackoffMs: 1 });
+    const oldConfig = await __testP2pkhProviderConfigGet("woc");
+    const source = await openTransactionEvidenceServer(evidence);
     try {
+      const configured = await __testP2pkhProviderConfigUpdate("woc", { endpoint: source.endpoint, requestsPerSecond: 100 });
+      expect(configured.ack.status).toBe("accepted");
       const input = {
         assetId: "bsv" as const,
         ownerPublicKeyHex: owner,
@@ -1457,6 +1468,11 @@ describe("Session Coordinator worker", () => {
       expect(broadcast).toHaveBeenCalledTimes(1);
 
       // 模拟 A 的广播已反映到 WoC：B 的旧序号过期，必须重新组合后成功。
+      if (!resultA.txid) throw new Error("Signed broadcast result has no txid");
+      evidence.set(resultA.txid, resultA.rawTxHex);
+      const change = previewA.outputs[1];
+      if (!change) throw new Error("Actual signed transaction has no change output");
+      const changeCoin = { txid: resultA.txid, vout: 1, value: change.value, height: 101, status: "confirmed" as const, isSpentInMempoolTx: false };
       __testSetP2pkhUnspentAllProvider(async () => [changeCoin]);
       const resultB = await service.submitTransfer(previewB);
       expect(resultB).toMatchObject({ status: "local-confirmed", attempts: 2 });
@@ -1466,6 +1482,8 @@ describe("Session Coordinator worker", () => {
       __testSetP2pkhBroadcastProvider(undefined);
       __testSetP2pkhUnspentAllProvider(undefined);
       __testSetSatBroadcastRetryOverrides(undefined);
+      try { await __testP2pkhProviderConfigUpdate("woc", oldConfig); }
+      finally { await source.close(); }
       await __testLock().catch(() => undefined);
       await dispatchStorageControl({ type: "reset-wallet", confirmationLabel: created.label }).catch(() => undefined);
     }

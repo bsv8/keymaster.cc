@@ -73,6 +73,7 @@ function fakeOrdinals(options?: {
 
 function fakeProtocolSpend(): ProtocolSpendService & { prepare: ReturnType<typeof vi.fn> } {
   return {
+    async presign(){throw Error("Ordinary preview must remain unsigned");},
     prepare: vi.fn(async (input) => {
       const totalInput = input.inputs.reduce((sum: number, u: { value: number }) => sum + u.value, 0);
       const totalOutput = input.outputs.reduce((sum: number, o: { value: number }) => sum + o.value, 0);

@@ -7,7 +7,7 @@ import { STORAGE_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contra
 import { StorageUnavailableGuard } from "./ui/StorageUnavailableGuard.js";
 import { createElement } from "react";
 import { StoragePrivateProvider } from "./ui/StoragePrivateContext.js";
-import { I18N_SERVICE_CAPABILITY, BUSINESS_REGISTRY_CAPABILITY, PAGE_UI_REGISTRY_CAPABILITY } from "@keymaster/contracts";
+import { I18N_SERVICE_CAPABILITY, BUSINESS_REGISTRY_CAPABILITY, PAGE_UI_REGISTRY_CAPABILITY, PAGE_UI_RENDERER_CAPABILITY } from "@keymaster/contracts";
 // Storage 平台插件 manifest（单钱包本地存储）。
 //
 // 相对旧实现，这里没有任何存储配置面：没有桶目录、没有 Provider 选择、
@@ -260,6 +260,7 @@ const storagePlatformPluginDefinition = {
       { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
       { capability: BUSINESS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
       { capability: PAGE_UI_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
+      { capability: PAGE_UI_RENDERER_CAPABILITY, sourceRuntime: "window-main", reason: "迁移恢复守卫渲染受限钱包恢复入口" },
       { capability: BREADCRUMB_REGISTRY_CAPABILITY, reason: "为 /settings/storage 提供面包屑" },
     ]),
   }, {

@@ -1,3 +1,4 @@
+import { fundingCoin, previousTransactions, paymentRequester, cleanupPayments } from "../../../Coding/keymaster/vaultlink-integration/test/transfer-fixture.mjs";
 import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
@@ -118,8 +119,11 @@ function makeService(options?: {
   const privHex = options?.claimStore ? "00000000000000000000000000000000000000000000000000000000000000a1" : "00000000000000000000000000000000000000000000000000000000000000aa";
   const owner = deriveP2pkhAddress(privHex, "main");
   const claimStore = options?.claimStore ?? makeClaimStore();
+  const payment=paymentRequester(privHex),paymentActions:string[]=[];
   const service = createP2pkhProtocolSpendService({
+    previousTransactions,
     vault: {
+      requestPayment: async (command: Parameters<typeof payment>[0]) => {paymentActions.push(command.action);return payment(command);},
       status: () => "unlocked",
       createActiveKeyCrypto: async () => ({
         signDigest: async (input: { publicKeyHex: string; digest: ArrayBuffer; format: "der" | "compact" }) => {
@@ -145,7 +149,7 @@ function makeService(options?: {
       return { publicKeyHex: owner.publicKeyHex };
     }
   });
-  return { service, owner, claimStore };
+  return { service, owner, claimStore,paymentActions };
 }
 
 const INTEGRATION_PRIV = "00000000000000000000000000000000000000000000000000000000000000c1";
@@ -191,14 +195,24 @@ async function resetIntegrationRepository(): Promise<void> {
 
 afterEach(async () => {
   await resetIntegrationRepository();
+  await cleanupPayments();
 });
 
 describe("createP2pkhProtocolSpendService", () => {
+  it("unsigned previews allocate no claims or payment budget; submit signs once and rejects changed, canceled and reused tickets",async()=>{
+    const {service,owner,claimStore,paymentActions}=makeService();
+    const input={ownerPublicKeyHex:owner.publicKeyHex,network:"main" as const,inputs:[{...fundingCoin(owner.publicKeyHex,10000,"91".repeat(32)),address:owner.address}],outputs:[{value:1000,scriptHex:"6a"}],changeAddress:owner.address,feeRateSatoshisPerKb:1};
+    const preview=await service.prepare(input);expect(preview.txid).toBe("");expect(preview.previewId).toBeTruthy();expect(claimStore.list()).toHaveLength(0);expect(paymentActions).toHaveLength(0);
+    await expect(service.submit({...preview,changeSatoshis:preview.changeSatoshis-1})).rejects.toThrow("changed");expect(paymentActions).toHaveLength(0);
+    const result=await service.submit(preview);expect(result.txid).toBe(calcTxidFromRawTxHex(result.rawTxHex));expect(result.txid).not.toBe("");expect(paymentActions.filter(x=>x.startsWith("sign-"))).toHaveLength(1);expect(claimStore.list()).toHaveLength(1);
+    await expect(service.submit(preview)).rejects.toThrow("already submitted");
+    const canceled=await service.prepare({...input,inputs:[{...fundingCoin(owner.publicKeyHex,10000,"92".repeat(32)),address:owner.address}]});await service.releasePrepared!(canceled);await expect(service.submit(canceled)).rejects.toThrow("already submitted");expect(paymentActions.filter(x=>x.startsWith("sign-"))).toHaveLength(1);
+  });
   it("accepts a sufficient fee when DER length changes with the change output", async () => {
     const { service, owner } = makeService();
     for (let fixture = 1; fixture <= 24; fixture++) {
-      const preview = await service.prepare({ ownerPublicKeyHex: owner.publicKeyHex, requestingPluginId: "msfile", network: "main",
-        inputs: [{ txid: fixture.toString(16).padStart(64, "0"), vout: 0, value: 5000, address: owner.address }],
+      const preview = await service.presign({ ownerPublicKeyHex: owner.publicKeyHex, requestingPluginId: "msfile", network: "main",
+        inputs: [{ ...fundingCoin(owner.publicKeyHex, 5000, fixture.toString(16).padStart(64, "0")), address: owner.address }],
         outputs: [{ scriptHex: "51", value: 202 }], changeAddress: owner.address, feeRateSatoshisPerKb: 1000 });
       expect(preview.estimatedFeeSatoshis).toBeGreaterThanOrEqual(preview.serializedSizeBytes);
       expect(preview.changeSatoshis + preview.estimatedFeeSatoshis + 202).toBe(5000);
@@ -206,10 +220,10 @@ describe("createP2pkhProtocolSpendService", () => {
   });
   it("prepares and submits arbitrary output plans", async () => {
     const { service, owner, claimStore } = makeService();
-    const preview = await service.prepare({
+    const preview = await service.presign({
       ownerPublicKeyHex: owner.publicKeyHex,
       network: "main",
-      inputs: [{ txid: "11".repeat(32), vout: 0, value: 10_000, address: owner.address }],
+      inputs: [{ ...fundingCoin(owner.publicKeyHex, 10_000, "11".repeat(32), 0), address: owner.address }],
       outputs: [{ value: 1_000, scriptHex: "6a", label: "op-return" }],
       feeRateSatoshisPerKb: 1,
       changeAddress: owner.address
@@ -235,10 +249,10 @@ describe("createP2pkhProtocolSpendService", () => {
 
   it("claims inputs under resourceIdFor(network)", async () => {
     const { service, owner, claimStore } = makeService();
-    const preview = await service.prepare({
+    const preview = await service.presign({
       ownerPublicKeyHex: owner.publicKeyHex,
       network: "main",
-      inputs: [{ txid: "ab".repeat(32), vout: 1, value: 10_000, address: owner.address }],
+      inputs: [{ ...fundingCoin(owner.publicKeyHex, 10_000, "ab".repeat(32), 1), address: owner.address }],
       outputs: [{ value: 1_000, scriptHex: "6a", label: "op-return" }],
       feeRateSatoshisPerKb: 1,
       changeAddress: owner.address
@@ -251,10 +265,12 @@ describe("createP2pkhProtocolSpendService", () => {
 
   it("records the verified input value on protocol claims so balance deducts it immediately", async () => {
     const { stateRepository } = await openIntegrationRepository();
-    const txid = "12".repeat(32);
+    const txid = fundingCoin(INTEGRATION_OWNER.publicKeyHex, 10000, "12".repeat(32)).txid;
     const inputValue = 10_000;
     const service = createP2pkhProtocolSpendService({
+      previousTransactions,
       vault: {
+        requestPayment: paymentRequester(INTEGRATION_PRIV),
         status: () => "unlocked",
         createActiveKeyCrypto: async () => ({
           signDigest: async () => ({
@@ -272,7 +288,7 @@ describe("createP2pkhProtocolSpendService", () => {
       getKeyForOwner: async () => ({ publicKeyHex: INTEGRATION_OWNER.publicKeyHex })
     });
 
-    await service.prepare({
+    await service.presign({
       ownerPublicKeyHex: INTEGRATION_OWNER.publicKeyHex,
       network: "main",
       inputs: [{ txid, vout: 0, value: inputValue, address: INTEGRATION_OWNER.address }],
@@ -299,12 +315,14 @@ describe("createP2pkhProtocolSpendService", () => {
   it("rejects protocol spend when transfer has already claimed the same outpoint, and vice versa", async () => {
     const { stateRepository } = await openIntegrationRepository();
     const resourceId = resourceIdFor("main");
-    const txid = "cd".repeat(32);
+    const txid = fundingCoin(INTEGRATION_OWNER.publicKeyHex, 10000, "cd".repeat(32)).txid;
     const vout = 0;
     await stateRepository.tryClaimInputs({ submissionId: "transfer-submission-1", resourceId, publicKeyHex: INTEGRATION_OWNER.publicKeyHex, network: "main", inputs: [{ txid, vout }] });
 
     const protocolSpendAfterTransfer = createP2pkhProtocolSpendService({
+      previousTransactions,
       vault: {
+        requestPayment: paymentRequester(INTEGRATION_PRIV),
         status: () => "unlocked",
         createActiveKeyCrypto: async () => ({
           signDigest: async () => ({
@@ -322,7 +340,7 @@ describe("createP2pkhProtocolSpendService", () => {
       getKeyForOwner: async () => ({ publicKeyHex: INTEGRATION_OWNER.publicKeyHex })
     });
 
-    await expect(protocolSpendAfterTransfer.prepare({
+    await expect(protocolSpendAfterTransfer.presign({
       ownerPublicKeyHex: INTEGRATION_OWNER.publicKeyHex,
       network: "main",
       inputs: [{ txid, vout, value: 10_000, address: INTEGRATION_OWNER.address }],
@@ -332,7 +350,9 @@ describe("createP2pkhProtocolSpendService", () => {
     })).rejects.toThrow(/already claimed/);
 
     const protocolFirst = createP2pkhProtocolSpendService({
+      previousTransactions,
       vault: {
+        requestPayment: paymentRequester(INTEGRATION_PRIV),
         status: () => "unlocked",
         createActiveKeyCrypto: async () => ({
           signDigest: async () => ({
@@ -350,16 +370,16 @@ describe("createP2pkhProtocolSpendService", () => {
       getKeyForOwner: async () => ({ publicKeyHex: INTEGRATION_OWNER.publicKeyHex })
     });
 
-    await protocolFirst.prepare({
+    await protocolFirst.presign({
       ownerPublicKeyHex: INTEGRATION_OWNER.publicKeyHex,
       network: "main",
-      inputs: [{ txid: `${"ef".repeat(32)}`, vout: 0, value: 10_000, address: INTEGRATION_OWNER.address }],
+      inputs: [{ txid: fundingCoin(INTEGRATION_OWNER.publicKeyHex, 10000, "ef".repeat(32)).txid, vout: 0, value: 10_000, address: INTEGRATION_OWNER.address }],
       outputs: [{ value: 1_000, scriptHex: "6a", label: "op-return" }],
       feeRateSatoshisPerKb: 1,
       changeAddress: INTEGRATION_OWNER.address
     });
 
-    await expect(stateRepository.tryClaimInputs({ submissionId: "transfer-submission-2", resourceId, publicKeyHex: INTEGRATION_OWNER.publicKeyHex, network: "main", inputs: [{ txid: `${"ef".repeat(32)}`, vout: 0 }] })).rejects.toThrow(/already claimed/);
+    await expect(stateRepository.tryClaimInputs({ submissionId: "transfer-submission-2", resourceId, publicKeyHex: INTEGRATION_OWNER.publicKeyHex, network: "main", inputs: [{ txid: fundingCoin(INTEGRATION_OWNER.publicKeyHex, 10000, "ef".repeat(32)).txid, vout: 0 }] })).rejects.toThrow(/already claimed/);
   });
 
   it("rejects the second concurrent prepare for the same funding UTXO", async () => {
@@ -367,13 +387,13 @@ describe("createP2pkhProtocolSpendService", () => {
     const input = {
       ownerPublicKeyHex: owner.publicKeyHex,
       network: "main" as const,
-      inputs: [{ txid: "22".repeat(32), vout: 0, value: 10_000, address: owner.address }],
+      inputs: [{ ...fundingCoin(owner.publicKeyHex, 10_000, "22".repeat(32), 0), address: owner.address }],
       outputs: [{ value: 1_000, scriptHex: "6a", label: "op-return" }],
       feeRateSatoshisPerKb: 1,
       changeAddress: owner.address
     };
 
-    const [first, second] = await Promise.allSettled([service.prepare(input), service.prepare(input)]);
+    const [first, second] = await Promise.allSettled([service.presign(input), service.presign(input)]);
     expect(first.status).toBe("fulfilled");
     expect(second.status).toBe("rejected");
     if (second.status === "rejected") {
@@ -388,10 +408,10 @@ describe("createP2pkhProtocolSpendService", () => {
       })
     });
 
-    const preview = await service.prepare({
+    const preview = await service.presign({
       ownerPublicKeyHex: owner.publicKeyHex,
       network: "main",
-      inputs: [{ txid: "33".repeat(32), vout: 0, value: 10_000, address: owner.address }],
+      inputs: [{ ...fundingCoin(owner.publicKeyHex, 10_000, "33".repeat(32), 0), address: owner.address }],
       outputs: [{ value: 1_000, scriptHex: "6a", label: "op-return" }],
       feeRateSatoshisPerKb: 1,
       changeAddress: owner.address
@@ -400,10 +420,10 @@ describe("createP2pkhProtocolSpendService", () => {
     expect(result.status).toBe("rejected");
     expect(claimStore.list()).toHaveLength(0);
 
-    const retry = await service.prepare({
+    const retry = await service.presign({
       ownerPublicKeyHex: owner.publicKeyHex,
       network: "main",
-      inputs: [{ txid: "33".repeat(32), vout: 0, value: 10_000, address: owner.address }],
+      inputs: [{ ...fundingCoin(owner.publicKeyHex, 10_000, "33".repeat(32), 0), address: owner.address }],
       outputs: [{ value: 1_000, scriptHex: "6a", label: "op-return" }],
       feeRateSatoshisPerKb: 1,
       changeAddress: owner.address
@@ -429,11 +449,11 @@ describe("createP2pkhProtocolSpendService", () => {
       protectedOutpoints,
     });
 
-    const preview = await service.prepare({
+    const preview = await service.presign({
       ownerPublicKeyHex: owner.publicKeyHex,
       requestingPluginId: "token-bsv21",
       network: "main",
-      inputs: [{ txid: protectedTxid, vout: 0, value: 10_000, address: owner.address }],
+      inputs: [{ ...fundingCoin(owner.publicKeyHex, 10_000, protectedTxid, 0), address: owner.address }],
       outputs: [{ value: 1_000, scriptHex: "6a", label: "op-return" }],
       feeRateSatoshisPerKb: 1,
       changeAddress: owner.address
@@ -455,10 +475,10 @@ describe("createP2pkhProtocolSpendService", () => {
       })
     });
 
-    const preview = await service.prepare({
+    const preview = await service.presign({
       ownerPublicKeyHex: owner.publicKeyHex,
       network: "main",
-      inputs: [{ txid: "44".repeat(32), vout: 0, value: 10_000, address: owner.address }],
+      inputs: [{ ...fundingCoin(owner.publicKeyHex, 10_000, "44".repeat(32), 0), address: owner.address }],
       outputs: [{ value: 1_000, scriptHex: "6a", label: "op-return" }],
       feeRateSatoshisPerKb: 1,
       changeAddress: owner.address
@@ -467,10 +487,10 @@ describe("createP2pkhProtocolSpendService", () => {
     expect(result.status).toBe("unknown");
     expect(claimStore.list()).toHaveLength(1);
 
-    await expect(service.prepare({
+    await expect(service.presign({
       ownerPublicKeyHex: owner.publicKeyHex,
       network: "main",
-      inputs: [{ txid: "44".repeat(32), vout: 0, value: 10_000, address: owner.address }],
+      inputs: [{ ...fundingCoin(owner.publicKeyHex, 10_000, "44".repeat(32), 0), address: owner.address }],
       outputs: [{ value: 1_000, scriptHex: "6a", label: "op-return" }],
       feeRateSatoshisPerKb: 1,
       changeAddress: owner.address
@@ -497,13 +517,13 @@ describe("createP2pkhProtocolSpendService", () => {
     };
     const { service, owner, claimStore } = makeService({ protectedOutpoints });
 
-    const preview = await service.prepare({
+    const preview = await service.presign({
       ownerPublicKeyHex: owner.publicKeyHex,
       requestingPluginId: "token-bsv21",
       network: "main",
       inputs: [
-        { txid: "55".repeat(32), vout: 0, value: 10_000, address: owner.address },
-        { txid: "66".repeat(32), vout: 1, value: 5_000, address: owner.address }
+        { ...fundingCoin(owner.publicKeyHex, 10_000, "55".repeat(32), 0), address: owner.address },
+        { ...fundingCoin(owner.publicKeyHex, 5_000, "66".repeat(32), 1), address: owner.address }
       ],
       outputs: [{ value: 1_000, scriptHex: "6a", label: "op-return" }],
       feeRateSatoshisPerKb: 1,
@@ -517,10 +537,10 @@ describe("createP2pkhProtocolSpendService", () => {
 
   it("can mark claims observed-consumed during WOC reconcile", async () => {
     const { service, owner, claimStore } = makeService();
-    const preview = await service.prepare({
+    const preview = await service.presign({
       ownerPublicKeyHex: owner.publicKeyHex,
       network: "main",
-      inputs: [{ txid: "77".repeat(32), vout: 0, value: 10_000, address: owner.address }],
+      inputs: [{ ...fundingCoin(owner.publicKeyHex, 10_000, "77".repeat(32), 0), address: owner.address }],
       outputs: [{ value: 1_000, scriptHex: "6a", label: "op-return" }],
       feeRateSatoshisPerKb: 1,
       changeAddress: owner.address
@@ -548,10 +568,10 @@ describe("createP2pkhProtocolSpendService", () => {
 describe("受控无找零构建", () => {
   it("余额差精确成为矿工费，且不超过确认的预算", async () => {
     const { service, owner } = makeService();
-    const preview = await service.prepare({
+    const preview = await service.presign({
       ownerPublicKeyHex: owner.publicKeyHex,
       network: "main",
-      inputs: [{ txid: "88".repeat(32), vout: 0, value: 1_100, address: owner.address }],
+      inputs: [{ ...fundingCoin(owner.publicKeyHex, 1_100, "88".repeat(32), 0), address: owner.address }],
       outputs: [
         { value: 100, scriptHex: "6a", label: "forum-vout-0" },
         { value: 1, scriptHex: "6a", label: "forum-vout-1" },
@@ -569,10 +589,10 @@ describe("受控无找零构建", () => {
 
   it("矿工费超过确认预算时拒绝构造", async () => {
     const { service, owner } = makeService();
-    await expect(service.prepare({
+    await expect(service.presign({
       ownerPublicKeyHex: owner.publicKeyHex,
       network: "main",
-      inputs: [{ txid: "99".repeat(32), vout: 0, value: 10_000, address: owner.address }],
+      inputs: [{ ...fundingCoin(owner.publicKeyHex, 10_000, "99".repeat(32), 0), address: owner.address }],
       outputs: [{ value: 1_000, scriptHex: "6a" }],
       feeRateSatoshisPerKb: 1,
       noChangeRule: { maxMinerFeeSatoshis: 10, allowZeroValueOutputs: true },
@@ -581,10 +601,10 @@ describe("受控无找零构建", () => {
 
   it("输入不足以覆盖固定输出时拒绝构造", async () => {
     const { service, owner } = makeService();
-    await expect(service.prepare({
+    await expect(service.presign({
       ownerPublicKeyHex: owner.publicKeyHex,
       network: "main",
-      inputs: [{ txid: "aa".repeat(32), vout: 0, value: 100, address: owner.address }],
+      inputs: [{ ...fundingCoin(owner.publicKeyHex, 100, "aa".repeat(32), 0), address: owner.address }],
       outputs: [{ value: 1_000, scriptHex: "6a" }],
       feeRateSatoshisPerKb: 1,
       noChangeRule: { maxMinerFeeSatoshis: 600, allowZeroValueOutputs: true },
@@ -593,10 +613,10 @@ describe("受控无找零构建", () => {
 
   it("允许零值输出：索引费为零时 vout 0 仍然保留", async () => {
     const { service, owner } = makeService();
-    const preview = await service.prepare({
+    const preview = await service.presign({
       ownerPublicKeyHex: owner.publicKeyHex,
       network: "main",
-      inputs: [{ txid: "bb".repeat(32), vout: 0, value: 500, address: owner.address }],
+      inputs: [{ ...fundingCoin(owner.publicKeyHex, 500, "bb".repeat(32), 0), address: owner.address }],
       outputs: [
         { value: 0, scriptHex: "6a", label: "forum-vout-0" },
         { value: 1, scriptHex: "6a", label: "forum-vout-1" },
@@ -610,10 +630,10 @@ describe("受控无找零构建", () => {
 
   it("没有显式声明时仍然拒绝零值输出", async () => {
     const { service, owner } = makeService();
-    await expect(service.prepare({
+    await expect(service.presign({
       ownerPublicKeyHex: owner.publicKeyHex,
       network: "main",
-      inputs: [{ txid: "cc".repeat(32), vout: 0, value: 500, address: owner.address }],
+      inputs: [{ ...fundingCoin(owner.publicKeyHex, 500, "cc".repeat(32), 0), address: owner.address }],
       outputs: [{ value: 0, scriptHex: "6a" }],
       feeRateSatoshisPerKb: 1,
       noChangeRule: { maxMinerFeeSatoshis: 600 },
@@ -622,10 +642,10 @@ describe("受控无找零构建", () => {
 
   it("未声明无找零规则时保留原来的余款拒绝", async () => {
     const { service, owner } = makeService();
-    await expect(service.prepare({
+    await expect(service.presign({
       ownerPublicKeyHex: owner.publicKeyHex,
       network: "main",
-      inputs: [{ txid: "dd".repeat(32), vout: 0, value: 10_000, address: owner.address }],
+      inputs: [{ ...fundingCoin(owner.publicKeyHex, 10_000, "dd".repeat(32), 0), address: owner.address }],
       outputs: [{ value: 1_000, scriptHex: "6a" }],
       feeRateSatoshisPerKb: 1,
     })).rejects.toThrow(/requires changeAddress/);
@@ -633,10 +653,10 @@ describe("受控无找零构建", () => {
 
   it("无找零规则与 changeAddress 互斥", async () => {
     const { service, owner } = makeService();
-    await expect(service.prepare({
+    await expect(service.presign({
       ownerPublicKeyHex: owner.publicKeyHex,
       network: "main",
-      inputs: [{ txid: "ee".repeat(32), vout: 0, value: 1_100, address: owner.address }],
+      inputs: [{ ...fundingCoin(owner.publicKeyHex, 1_100, "ee".repeat(32), 0), address: owner.address }],
       outputs: [{ value: 1_000, scriptHex: "6a" }],
       feeRateSatoshisPerKb: 1,
       changeAddress: owner.address,
@@ -646,10 +666,10 @@ describe("受控无找零构建", () => {
 
   it("无找零模式也照样占用输入并落盘预签名", async () => {
     const { service, owner, claimStore } = makeService();
-    const preview = await service.prepare({
+    const preview = await service.presign({
       ownerPublicKeyHex: owner.publicKeyHex,
       network: "main",
-      inputs: [{ txid: "ef".repeat(32), vout: 0, value: 1_100, address: owner.address }],
+      inputs: [{ ...fundingCoin(owner.publicKeyHex, 1_100, "ef".repeat(32), 0), address: owner.address }],
       outputs: [{ value: 1_000, scriptHex: "6a" }],
       feeRateSatoshisPerKb: 1,
       noChangeRule: { maxMinerFeeSatoshis: 600, allowZeroValueOutputs: true },

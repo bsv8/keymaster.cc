@@ -53,7 +53,9 @@ function resolveSpecifier(specifier, importer) {
     return resolveLocalSpecifier(specifier, importer);
   }
   try {
-    return realpathSync(appRequire.resolve(specifier));
+    // 从实际导入模块解析依赖，才能遍历 pnpm 隔离依赖中的 SDK，而不是漏掉其运行时代码。
+    try { return realpathSync(createRequire(importer).resolve(specifier)); }
+    catch { return realpathSync(appRequire.resolve(specifier)); }
   } catch {
     // ESM-only third-party packages can reject createRequire resolution even
     // though Vite resolves them correctly. We only need to walk workspace

@@ -321,3 +321,13 @@
     border-bottom: 1px solid var(--border);
   }
 }
+
+.vault-topbar-wallet { position: relative; display: flex; align-items: center; gap: 4px; }
+.vault-topbar-wallet__toggle { display: flex; align-items: center; gap: 6px; padding: 8px; border: 0; border-radius: var(--radius); background: transparent; color: var(--text); cursor: pointer; }
+.vault-topbar-wallet__toggle:focus-visible { outline: 2px solid var(--primary); }
+.vault-topbar-wallet__panel { box-sizing: border-box; position: absolute; z-index: 60; top: calc(100% + 8px); right: 0; width: min(440px, calc(100vw - 24px)); max-height: calc(100dvh - 88px); overflow-y: auto; padding: 20px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: 0 12px 32px #0003; }
+.vault-topbar-wallet__public-key { overflow-wrap: anywhere; font-family: monospace; }
+
+@media (max-width: 600px) {
+  .vault-topbar-wallet__panel { position: fixed; top: var(--vault-wallet-top, 64px); right: 12px; left: 12px; width: auto; max-height: calc(100dvh - var(--vault-wallet-top, 64px) - 12px); }
+}

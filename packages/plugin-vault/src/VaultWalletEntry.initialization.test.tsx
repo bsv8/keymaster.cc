@@ -25,6 +25,7 @@ async function createHost(status: "uninitialized" | "locked") {
     ? { status, sessionEpoch: "epoch-1", runGeneration: "run-1", vaultLifecycleRevision: 1, walletGeneration: "" }
     : { status, sessionEpoch: "epoch-1", runGeneration: "run-1", vaultLifecycleRevision: 1, walletGeneration: "wallet-1" };
   const vault = {
+    coldStart: async () => ({ state: "ready" as const, key: { publicKeyHex: "02".padEnd(66, "a"), label: "Primary", backend: "software" as const } }),
     status: () => status,
     walletSnapshot: () => snapshot,
     subscribeWalletState: (handler: (next: VaultLifecycleSnapshot) => void) => {

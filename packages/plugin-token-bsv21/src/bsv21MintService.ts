@@ -65,7 +65,7 @@ export function createBsv21MintService(input: {
     for (const u of sorted) {
       selected.push(u);
       try {
-        await input.protocolSpend.prepare({
+        const quote=await input.protocolSpend.prepare({
           ownerPublicKeyHex,
           network,
           inputs: selected,
@@ -73,6 +73,7 @@ export function createBsv21MintService(input: {
           feeRateSatoshisPerKb,
           changeAddress
         });
+        await input.protocolSpend.releasePrepared?.(quote);
         return selected;
       } catch {
         // keep adding inputs
@@ -85,7 +86,7 @@ export function createBsv21MintService(input: {
     if (!input.historyRepository) return;
     const now = new Date().toISOString();
     await input.historyRepository.put({
-      id: spend.txid,
+      id: spend.previewId??spend.txid,
       createdAt: now,
       updatedAt: now,
       status: "prepared",
@@ -109,7 +110,7 @@ export function createBsv21MintService(input: {
   async function persistFinal(preview: Bsv21MintPreview, result: ProtocolSpendResult, finalTokenId: string): Promise<void> {
     if (!input.historyRepository) return;
     const now = new Date().toISOString();
-    const existing = await input.historyRepository.get(preview.spend.txid).catch(() => undefined);
+    const existing = await input.historyRepository.get(preview.spend.previewId??preview.spend.txid).catch(() => undefined);
     if (existing) {
       await input.historyRepository.put({
         ...existing,
@@ -124,7 +125,7 @@ export function createBsv21MintService(input: {
       return;
     }
     await input.historyRepository.put({
-      id: preview.spend.txid,
+      id: preview.spend.previewId??preview.spend.txid,
       createdAt: now,
       updatedAt: now,
       status: result.status,
@@ -182,9 +183,9 @@ export function createBsv21MintService(input: {
         feeRateSatoshisPerKb: req.feeRateSatoshisPerKb,
         changeAddress
       });
-      await persistDraft(req, payload, spend, `${spend.txid}_0`);
+      await persistDraft(req, payload, spend, spend.txid?`${spend.txid}_0`:"");
       return {
-        tokenId: `${spend.txid}_0`,
+        tokenId: spend.txid?`${spend.txid}_0`:"",
         payload,
         spend
       };

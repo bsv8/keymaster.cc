@@ -131,7 +131,8 @@ function harness(input: {
     submissionId: "submission-1",
   };
   const spend: ProtocolSpendService = {
-    async prepare() {
+    async prepare(){throw Error("Unsigned preview is not used by dependent funding");},
+    async presign() {
       events.push("prepare");
       return preview;
     },
@@ -447,7 +448,8 @@ describe("并发创建同一编号", () => {
   it("条件写冲突会释放本次构造的预签名（不留悬挂占用）", async () => {
     const released: string[] = [];
     const spend = {
-      async prepare() {
+      async prepare(){throw Error("Unsigned preview is not used by dependent funding");},
+    async presign() {
         return {
           ownerPublicKeyHex: OWNER,
           network: "test" as const,

@@ -43,6 +43,8 @@ const CENTRALLY_DECLARED: readonly PluginStorageDeclaration[] = Object.freeze([
 /** 只供 Storage Worker 实现与可信装配使用，不发布给其他插件。 */
 export interface StoragePrivateRootStore extends PlatformRootStore {
   openBrowseStore(): Promise<StorageBrowseWallet>;
+  /** 只交给可信 Worker 装配；普通模块入口不能打开核心额度账本。 */
+  openPlatformFileStore(input: { declaration: PluginStorageDeclaration }): Promise<ModuleFileStore>;
 }
 
 export interface PlatformRootStoreOptions {
@@ -255,6 +257,14 @@ function platformRootMatchesGeneration(live: { walletGeneration: string; session
       }
       if (!centrallyDeclared(declaration)) {
         throw new StorageRuntimeError("storage_forbidden", "Module storage namespace is not centrally authorized");
+      }
+      const binding = bind(declaration);
+      return createModuleFileStore({ store: options.store, binding, isCurrent: gateFor(binding) });
+    },
+    openPlatformFileStore: async (input: { declaration: PluginStorageDeclaration }): Promise<ModuleFileStore> => {
+      const declaration = validatePluginStorageDeclaration(input.declaration);
+      if (declaration.authority !== "platform-only" || declaration.model !== "files" || !centrallyDeclared(declaration)) {
+        throw new StorageRuntimeError("storage_forbidden", "Platform file store requires a centrally declared platform-only files namespace");
       }
       const binding = bind(declaration);
       return createModuleFileStore({ store: options.store, binding, isCurrent: gateFor(binding) });

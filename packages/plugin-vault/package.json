@@ -20,6 +20,7 @@
     "keyhold": "2.1.0",
     "lucide-react": "^0.468.0",
     "webloom-framework": "0.6.0",
-    "bsv8-channel-protocol": "0.6.0"
+    "bsv8-channel-protocol": "0.6.0",
+    "@keymaster/vaultlink-integration": "workspace:*"
   }
 }

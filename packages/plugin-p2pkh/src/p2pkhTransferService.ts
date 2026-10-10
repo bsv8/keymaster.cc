@@ -1,11 +1,8 @@
 // packages/plugin-p2pkh/src/p2pkhTransferService.ts
-// P2PKH 转移业务服务：
-//   - prepareTransfer 生成最终已签名交易快照。
-//   - submitTransfer 先提交该快照；命中序号门禁且确定未派发时，中心服务
-//     才会等待新快照并完整重选输入、重签名、重新提交。
-//   - 预览阶段不写本地提交；只有进入应用内广播流程后才写审计记录。
-// 设计缘由：preview 必须是最终承诺对象，否则用户看到的内容和实际广播的交易
-// 可能不是同一笔，后续无法安全复制 rawTxHex 进行外部广播。
+// P2PKH 转移业务服务：prepare 仅冻结未签名交易；submit 重查 UTXO 后才申请钱包许可。
+// 预览内存票据与返回 DTO 精确绑定；页面不能改收款/金额/渠道后沿用旧批准。
+// 估费使用 DER/P2PKH 长度上界，预览不会产生可广播签名或占用消费额度。
+// 确定未派发的重试继续完整重选输入，未知广播与已签消费不撤销预算。
 //
 // 硬切换 002 收尾：所有签名 / 选币 / owner 真值走 `publicKeyHex`；
 
@@ -29,14 +26,14 @@ import {
   buildP2pkhTx,
   calcTxidFromRawTxHex,
   rawTxHexByteLength,
-  signP2pkhTx,
-  type UnsignedTx
+  serializeTx, attachP2pkhSignatures
 } from "./p2pkhSigner.js";
 import { P2PKH_MSG } from "./p2pkhMessages.js";
 import { parseP2pkhTransaction, p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
 
 export interface P2pkhTransferServiceDeps {
-  vault: Pick<VaultService, "status" | "createActiveKeyCrypto">;
+  vault: Pick<VaultService, "status" | "createActiveKeyCrypto" | "requestPayment">;
+  previousTransactions(network: "main" | "test", inputs: readonly P2pkhUtxo[]): Promise<string[]>;
   messageBus: MessageBus;
   /** 资产数据变更通知器：转账成功后立即通知页面重读。 */
   assetDataNotifier?: AssetDataNotifier;
@@ -96,9 +93,24 @@ function normalizeLoadedUtxos(value: P2pkhUtxo[] | { utxos: P2pkhUtxo[]; utxoBin
 }
 
 export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pkhTransferService {
+  const prepared = new Map<string, {preview: P2pkhTransferPreview; expires: number}>();
+  const remember = (preview: P2pkhTransferPreview): P2pkhTransferPreview => {
+    const now = Date.now();
+    for (const [id, value] of prepared) if (value.expires <= now) prepared.delete(id);
+    if (prepared.size >= 32) throw new Error("Too many pending transfer previews");
+    prepared.set(preview.previewId, {preview:structuredClone(preview),expires:now+120000});
+    return preview;
+  };
+  const claim = (preview: P2pkhTransferPreview): P2pkhTransferPreview => {
+    const entry = prepared.get(preview.previewId);
+    if (!entry || entry.expires <= Date.now()) { prepared.delete(preview.previewId); throw new Error("Transfer preview expired or already submitted"); }
+    if (JSON.stringify(entry.preview) !== JSON.stringify(preview)) throw new Error("Transfer preview changed");
+    prepared.delete(preview.previewId); return structuredClone(entry.preview);
+  };
   return {
     async prepare(input, context) {
       const validated = validateTransferInput(input);
+      const paymentContext = input.paymentContext ? Object.freeze({...input.paymentContext}) : undefined;
       const network = assetIdToNetwork(validated.assetId);
       const owner = await resolveOwnerKeyIdentity(deps, input.ownerPublicKeyHex);
       const stateRepository = await deps.getStore(owner.publicKeyHex);
@@ -133,27 +145,6 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         publicKeyHex: owner.publicKeyHex,
         network
       });
-      const publicKeyHex = owner.publicKeyHex;
-      const signRawTx = async (unsigned: UnsignedTx, selected: P2pkhUtxo[]): Promise<string> =>
-        signP2pkhTx(
-          unsigned,
-          selected,
-          async (digest) => {
-            const r = await activeCrypto.signDigest({
-              publicKeyHex,
-              digest: new Uint8Array(digest).buffer,
-              format: "der"
-            });
-            // P0: 校验回包 format 为 der
-            if (r.format !== "der") {
-              throw new Error(
-                `signDigest (p2pkh) format mismatch: requested "der", got "${r.format}"`
-              );
-            }
-            return new Uint8Array(r.signature);
-          },
-          publicKeyHex
-        );
 
       let bestError: AllocationFailureInfo | undefined;
       const selections = validated.sendAll
@@ -167,21 +158,21 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
           sendAll: validated.sendAll,
           feeRateSatoshisPerKb: validated.feeRateSatoshisPerKb,
           recipientAddress: validated.recipientAddress,
-          changeAddress,
-          signRawTx
+          changeAddress
         });
         if (solution.ok) {
           // 关键（硬切换 002 收尾）：preview 必须携带 owner 信息，让
           // submit 阶段可校验"同一 owner 才能广播"——避免 caller / widget
           // 在 prepare 与 submit 之间切换 owner 导致"用 keyA 准备、
           // 用 keyB 广播"的错位。
-          return {
+          return remember({
             ...solution.preview,
+            ...(paymentContext ? {paymentContext: {...paymentContext}} : {}),
             ownerPublicKeyHex: owner.publicKeyHex,
             previewId: crypto.randomUUID(),
             ...(utxoBinding === undefined ? {} : { utxoBinding }),
             sendAll: validated.sendAll,
-          };
+          });
         }
         bestError = solution.error;
       }
@@ -199,17 +190,17 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
           sendAll: true,
           feeRateSatoshisPerKb: validated.feeRateSatoshisPerKb,
           recipientAddress: validated.recipientAddress,
-          changeAddress,
-          signRawTx
+          changeAddress
         });
         if (feeFromAmount.ok) {
-          return {
+          return remember({
             ...feeFromAmount.preview,
+            ...(paymentContext ? {paymentContext: {...paymentContext}} : {}),
             ownerPublicKeyHex: owner.publicKeyHex,
             previewId: crypto.randomUUID(),
             ...(utxoBinding === undefined ? {} : { utxoBinding }),
             sendAll: validated.sendAll,
-          };
+          });
         }
         bestError = feeFromAmount.error;
       }
@@ -262,6 +253,22 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
           return { submissionId: "", result: { status: "not-dispatched", reason: "snapshot-stale", currentSeq: currentBinding?.seq }, localInputClaimIds: [], preview: currentPreview };
         }
         validateFinalTransferPreview(currentPreview, { candidates, expectedChangeAddress });
+        const frozen = claim(currentPreview);
+        if (options?.signal?.aborted) throw new Error("Transfer signing cancelled");
+        const unsigned = buildP2pkhTx({allocation:frozen.allocation,recipientAddress:frozen.recipientAddress,changeAddress:frozen.changeAddress});
+        const context = frozen.paymentContext;
+        const channelId = context?.channelId ?? (network === "main" ? "p2pkh.transfer.main" : "p2pkh.transfer.test");
+        if (!context) await deps.vault.requestPayment({action:"register",id:channelId,owner:"p2pkh",kind:"plugin",network,paymentType:"p2pkh"});
+        const previous = await deps.previousTransactions(network,frozen.allocation.selected);
+        if (options?.signal?.aborted) throw new Error("Transfer signing cancelled");
+        const signatures = await deps.vault.requestPayment({action:"sign-p2pkh",rawTxHex:frozen.rawTxHex,prevTransactionHexes:previous,
+          channelId,paymentId:crypto.randomUUID(),sessionId:context?.sessionId??null});
+        if (!signatures || typeof signatures !== "object" || Array.isArray(signatures) || !Array.isArray(signatures.signatures) || signatures.signatures.some(v=>typeof v!=="string")) throw new Error("Invalid wallet payment response");
+        if (options?.signal?.aborted) throw new Error("Transfer cancelled after signing; payment quota remains occupied");
+        const rawTxHex = attachP2pkhSignatures(unsigned,signatures.signatures as string[],owner.publicKeyHex);
+        const signedSize = rawTxHexByteLength(rawTxHex);
+        if (signedSize > frozen.serializedSizeBytes) throw new Error("P2PKH signature exceeded fee size bound");
+        currentPreview = {...frozen,rawTxHex,txid:calcTxidFromRawTxHex(rawTxHex),serializedSizeBytes:signedSize};
         const submissionId = crypto.randomUUID();
         const now = new Date().toISOString();
         const localInputClaimIds: string[] = [];
@@ -321,10 +328,12 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
             amountSatoshis: preview.amountSatoshis,
             feeRateSatoshisPerKb: preview.feeRateSatoshisPerKb,
             sendAll: preview.sendAll,
+            paymentContext: preview.paymentContext,
           }, { retry: true, signal: options?.signal });
           first = false;
           latestPreview = currentPreview;
           const attempt = await submitPrepared(currentPreview, submitOnce);
+          latestPreview = attempt.preview;
           latestSubmissionId = attempt.submissionId;
           latestLocalInputClaimIds = attempt.localInputClaimIds;
           if (currentPreview.sendAll && attempt.result.status === "not-dispatched" && (attempt.result.reason === "snapshot-stale" || attempt.result.reason === "snapshot-consumed")) {
@@ -357,8 +366,8 @@ function validateFinalTransferPreview(
   preview: P2pkhTransferPreview,
   input: { candidates: P2pkhUtxo[]; expectedChangeAddress: string }
 ): void {
-  const parsed = parseP2pkhTransaction(preview.rawTxHex, preview.txid);
-  if (rawTxHexByteLength(preview.rawTxHex) !== preview.serializedSizeBytes) {
+  const parsed = parseP2pkhTransaction(preview.rawTxHex);
+  if (preview.txid !== "" || rawTxHexByteLength(preview.rawTxHex) + parsed.inputs.length * 108 !== preview.serializedSizeBytes) {
     throw new Error("Preview serialized size does not match raw transaction");
   }
   if (preview.changeAddress !== input.expectedChangeAddress) {
@@ -457,142 +466,35 @@ async function solveForSelectedInputs(params: {
   feeRateSatoshisPerKb: number;
   recipientAddress: string;
   changeAddress: string;
-  signRawTx: (unsigned: UnsignedTx, selected: P2pkhUtxo[]) => Promise<string>;
 }): Promise<SolveResult> {
   const totalInputSatoshis = params.selected.reduce((sum, u) => sum + u.value, 0);
   let feeSatoshis = 1;
-
   for (let round = 0; round < 12; round++) {
-    // “全部”不是把一个预先填入的数字送出去；它使用全部可用输入，并让
-    // 最终收款输出等于 inputs - final fee。因此构建/签名后的实际 fee
-    // 始终从收款额扣除，不会因没有额外找零来支付 fee 而失败。
-    const recipientSatoshis = params.sendAll
-      ? totalInputSatoshis - feeSatoshis
-      : params.amountSatoshis;
+    const recipientSatoshis = params.sendAll ? totalInputSatoshis - feeSatoshis : params.amountSatoshis;
     const changeSatoshis = params.sendAll ? 0 : totalInputSatoshis - recipientSatoshis - feeSatoshis;
-    if (recipientSatoshis <= 0 || changeSatoshis < 0) {
-      return {
-        ok: false,
-        error: {
-          available: totalInputSatoshis,
-          amountSatoshis: recipientSatoshis,
-          feeSatoshis,
-          required: params.sendAll ? feeSatoshis + 1 : recipientSatoshis + feeSatoshis,
-          reason: "insufficient"
-        }
-      };
-    }
-    const allocation = {
-      requestedSatoshis: recipientSatoshis,
-      feeReserveSatoshis: feeSatoshis,
-      selected: params.selected,
-      totalInputSatoshis,
-      changeSatoshis
-    };
-    const unsigned = buildP2pkhTx({
-      allocation,
-      recipientAddress: params.recipientAddress,
-      changeAddress: params.changeAddress
-    });
-    const rawTxHex = await params.signRawTx(unsigned, params.selected);
-    const serializedSizeBytes = rawTxHexByteLength(rawTxHex);
-    const nextFeeSatoshis = Math.max(1, Math.ceil((serializedSizeBytes * params.feeRateSatoshisPerKb) / 1000));
-    // DER 签名长度会随待签名内容变动 1 byte；“全部”在两种金额之间
-    // 迭代时可能因此出现相邻 fee 来回跳。只要本轮预留 fee 不低于
-    // 重新估算值，就接受这一轮（多出的 1 sat 仍归矿工），避免假性
-    // insufficient 错误。
-    if (nextFeeSatoshis === feeSatoshis || (params.sendAll && nextFeeSatoshis <= feeSatoshis)) {
-      const outputs = [
-        { address: params.recipientAddress, value: recipientSatoshis },
-        ...(changeSatoshis > 0 ? [{ address: params.changeAddress, value: changeSatoshis }] : [])
-      ];
-      return {
-        ok: true,
-        preview: {
-          ownerPublicKeyHex: "", // 硬切换 002 收尾：solve 阶段无法直接拿 owner，由 prepare 入口在 spread 时补 ownerPublicKeyHex
-          assetId: params.assetId,
-          network: assetIdToNetworkMap[params.assetId],
-          recipientAddress: params.recipientAddress,
-          amountSatoshis: recipientSatoshis,
-          feeRateSatoshisPerKb: params.feeRateSatoshisPerKb,
-          allocation,
-          changeAddress: params.changeAddress,
-          outputs,
-          estimatedFeeSatoshis: feeSatoshis,
-          serializedSizeBytes,
-          txid: calcTxidFromRawTxHex(rawTxHex),
-          rawTxHex,
-          previewId: ""
-        }
-      };
-    }
-    feeSatoshis = nextFeeSatoshis;
+    if (recipientSatoshis <= 0 || changeSatoshis < 0) return {ok: false, error: {
+      available: totalInputSatoshis, amountSatoshis: recipientSatoshis, feeSatoshis,
+      required: params.sendAll ? feeSatoshis + 1 : recipientSatoshis + feeSatoshis, reason: "insufficient",
+    }};
+    const allocation = {requestedSatoshis: recipientSatoshis, feeReserveSatoshis: feeSatoshis,
+      selected: params.selected, totalInputSatoshis, changeSatoshis};
+    const unsigned = buildP2pkhTx({allocation, recipientAddress: params.recipientAddress, changeAddress: params.changeAddress});
+    // 仅计算 DER/P2PKH 解锁脚本长度上界；估费阶段不调用私钥，不产生可广播签名。
+    const bound = serializeTx(unsigned).length + unsigned.inputs.length * 108;
+    const requiredFee = Math.max(1, Math.ceil(bound * params.feeRateSatoshisPerKb / 1000));
+    if (feeSatoshis < requiredFee) { feeSatoshis = requiredFee; continue; }
+    const rawTxHex = Array.from(serializeTx(unsigned),b=>b.toString(16).padStart(2,"0")).join("");
+    const serializedSizeBytes = bound;
+    return {ok: true, preview: {
+      ownerPublicKeyHex: "", assetId: params.assetId, network: assetIdToNetworkMap[params.assetId],
+      recipientAddress: params.recipientAddress, amountSatoshis: recipientSatoshis,
+      feeRateSatoshisPerKb: params.feeRateSatoshisPerKb, allocation, changeAddress: params.changeAddress,
+      outputs: [{address: params.recipientAddress, value: recipientSatoshis},
+        ...(changeSatoshis > 0 ? [{address: params.changeAddress, value: changeSatoshis}] : [])],
+      estimatedFeeSatoshis: feeSatoshis, serializedSizeBytes, txid: "", rawTxHex, previewId: "",
+    }};
   }
-
-  const stableRecipientSatoshis = params.sendAll ? totalInputSatoshis - feeSatoshis : params.amountSatoshis;
-  const stableChangeSatoshis = params.sendAll ? 0 : totalInputSatoshis - stableRecipientSatoshis - feeSatoshis;
-  if (stableRecipientSatoshis <= 0 || stableChangeSatoshis < 0) {
-    return {
-      ok: false,
-      error: {
-        available: totalInputSatoshis,
-        amountSatoshis: stableRecipientSatoshis,
-        feeSatoshis,
-        required: params.sendAll ? feeSatoshis + 1 : stableRecipientSatoshis + feeSatoshis,
-        reason: "insufficient"
-      }
-    };
-  }
-  const stableAllocation = {
-    requestedSatoshis: stableRecipientSatoshis,
-    feeReserveSatoshis: feeSatoshis,
-    selected: params.selected,
-    totalInputSatoshis,
-    changeSatoshis: stableChangeSatoshis
-  };
-  const stableUnsigned = buildP2pkhTx({
-    allocation: stableAllocation,
-    recipientAddress: params.recipientAddress,
-    changeAddress: params.changeAddress
-  });
-  const stableRawTxHex = await params.signRawTx(stableUnsigned, params.selected);
-  const serializedSizeBytes = rawTxHexByteLength(stableRawTxHex);
-  const estimatedFeeSatoshis = Math.max(1, Math.ceil((serializedSizeBytes * params.feeRateSatoshisPerKb) / 1000));
-  if (estimatedFeeSatoshis !== feeSatoshis) {
-    return {
-      ok: false,
-      error: {
-        available: totalInputSatoshis,
-        amountSatoshis: stableRecipientSatoshis,
-        feeSatoshis: estimatedFeeSatoshis,
-        required: params.sendAll ? estimatedFeeSatoshis + 1 : stableRecipientSatoshis + estimatedFeeSatoshis,
-        reason: "insufficient"
-      }
-    };
-  }
-  const outputs = [
-    { address: params.recipientAddress, value: stableRecipientSatoshis },
-    ...(stableChangeSatoshis > 0 ? [{ address: params.changeAddress, value: stableChangeSatoshis }] : [])
-  ];
-  return {
-    ok: true,
-    preview: {
-      ownerPublicKeyHex: "", // 硬切换 002 收尾：solve 阶段拿不到 owner，由 prepare 入口补 ownerPublicKeyHex
-      assetId: params.assetId,
-      network: assetIdToNetworkMap[params.assetId],
-      recipientAddress: params.recipientAddress,
-      amountSatoshis: stableRecipientSatoshis,
-      feeRateSatoshisPerKb: params.feeRateSatoshisPerKb,
-      allocation: stableAllocation,
-      changeAddress: params.changeAddress,
-      outputs,
-      estimatedFeeSatoshis,
-      serializedSizeBytes,
-      txid: calcTxidFromRawTxHex(stableRawTxHex),
-      rawTxHex: stableRawTxHex,
-      previewId: ""
-    }
-  };
+  throw new Error("P2PKH fee calculation did not converge");
 }
 
 function validateTransferInput(input: P2pkhTransferInput): {

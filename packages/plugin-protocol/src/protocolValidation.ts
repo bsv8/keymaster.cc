@@ -37,6 +37,7 @@ import type {
   MethodParams,
   P2pkhTransferAssetId,
   P2pkhTransferParams,
+  PaymentChannelRegisterParams,
   ProtocolErrorCode,
   ProtocolMethod,
   ProtocolRequestMessage,
@@ -115,6 +116,8 @@ function validateParams(
       return validateCipherDecryptParams(raw);
     case "p2pkh.transfer":
       return validateP2pkhTransferParams(raw);
+    case "payment.channel.register":
+      return validatePaymentChannelRegisterParams(raw);
     case "feepool.prepare":
       return validateFeepoolPrepareParams(raw);
     case "feepool.commit":
@@ -249,7 +252,8 @@ function validateP2pkhTransferParams(raw: unknown): P2pkhTransferParams {
   // 施工单 2026-06-28 002 硬切换：资金 owner 取自 session 绑定 owner，
   // 不再读取全局 active key。缺 `connectSessionId` 直接 invalid_request。
   const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
-  return { recipientAddress, amountSatoshis, feeRateSatoshisPerKb, assetId, connectSessionId };
+  const channelId = expectPaymentChannelId(obj.channelId);
+  return { channelId, recipientAddress, amountSatoshis, feeRateSatoshisPerKb, assetId, connectSessionId };
 }
 
 function validateFeepoolPrepareParams(raw: unknown): FeepoolPrepareParams {
@@ -260,7 +264,20 @@ function validateFeepoolPrepareParams(raw: unknown): FeepoolPrepareParams {
   const assetId = expectPublicAssetId(obj.assetId, "assetId");
   // 施工单 2026-06-28 002 硬切换：feepool 必须绑定 session / owner。
   const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
-  return { counterpartyPublicKeyHex, amountSatoshis, assetId, connectSessionId };
+  return { channelId: expectPaymentChannelId(obj.channelId), counterpartyPublicKeyHex, amountSatoshis, assetId, connectSessionId };
+}
+
+function expectPaymentChannelId(raw: unknown): string {
+  const id = expectNonEmptyString(raw, "channelId");
+  if (id.length > 96 || !/^[a-z][a-z0-9.-]+$/.test(id)) throw new ProtocolValidationError("invalid_request", "Invalid payment channelId");
+  return id;
+}
+function validatePaymentChannelRegisterParams(raw: unknown): PaymentChannelRegisterParams {
+  const obj = expectObject(raw, "payment.channel.register params");
+  const channelName = expectNonEmptyString(obj.channelName, "channelName");
+  if (!/^[a-z][a-z0-9.-]{0,31}$/.test(channelName)) throw new ProtocolValidationError("invalid_request", "Invalid channelName");
+  if (obj.paymentType !== "p2pkh" && obj.paymentType !== "feepool.connect") throw new ProtocolValidationError("invalid_request", "Unsupported paymentType");
+  return {channelName, paymentType: obj.paymentType, assetId: expectPublicAssetId(obj.assetId, "assetId"), connectSessionId: expectNonEmptyString(obj.connectSessionId, "connectSessionId")};
 }
 
 function validateFeepoolCommitParams(raw: unknown): FeepoolCommitParams {
@@ -295,6 +312,7 @@ function validateFeepoolCommitParams(raw: unknown): FeepoolCommitParams {
   const assetId = expectPublicAssetId(obj.assetId, "assetId");
   return {
     operationId,
+    channelId: expectPaymentChannelId(obj.channelId),
     counterpartyPublicKeyHex,
     assetId,
     connectSessionId,

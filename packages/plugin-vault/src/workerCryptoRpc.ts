@@ -5,7 +5,7 @@ import type { WorkerKeyIdentity, createWorkerKeySession } from "./workerKeySessi
 export interface WorkerCryptoRpcDependencies {
   authorize(call: HandlerCallContext): void;
   identity(): WorkerKeyIdentity;
-  keySession: ReturnType<typeof createWorkerKeySession>;
+  keySession: Pick<ReturnType<typeof createWorkerKeySession>, "hasKey" | "execute">;
   withIoLease(signal: AbortSignal, execute: () => Promise<CoordinatorCryptoResult>): Promise<CoordinatorCryptoResult>;
 }
 /** Only operation DTOs cross the realm boundary. */

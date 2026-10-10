@@ -96,7 +96,8 @@ const BITFS_FUNDING_MIN_OUTPUT_SATOSHIS = 546;
  */
 function createMsfileBitfsProtocolSpend(): ProtocolSpendService {
   return {
-    async prepare(input) {
+    async prepare(){throw Error("BitFS funding requires explicit presign");},
+    async presign(input) {
       return await deps.executor({
         type: "lane",
         laneId: "msfile",

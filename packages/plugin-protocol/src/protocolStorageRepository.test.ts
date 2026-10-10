@@ -66,12 +66,9 @@ function makeRecord(
 function makeOrigin(origin: string, max: number): ProtocolOriginSettingsRecord {
   return {
     origin,
-    p2pkhAutoApproveEnabled: max > 0,
-    p2pkhAutoApproveMaxSatoshis: max,
-    identityAutoApproveEnabled: false,
+    identityAutoApproveEnabled: true,
     cipherAutoApproveEnabled: false,
-    feePoolAutoSignMaxSatoshis: 0,
-    feePoolDefaultFundSatoshis: 10000,
+    feePoolDefaultFundSatoshis: max,
       confirmTimeoutSeconds: 30,
     updatedAt: 1
   };
@@ -213,8 +210,8 @@ describe("openProtocolStorageRepository", () => {
     await db.putOrigin(rec);
     const got = await db.getOrigin("https://origin-a.com");
     expect(got?.origin).toBe("https://origin-a.com");
-    expect(got?.p2pkhAutoApproveMaxSatoshis).toBe(50000);
-    expect(got?.p2pkhAutoApproveEnabled).toBe(true);
+    expect(got?.feePoolDefaultFundSatoshis).toBe(50000);
+    expect(got?.identityAutoApproveEnabled).toBe(true);
   });
 
   it("getOrigin returns null when missing", async () => {
@@ -230,7 +227,7 @@ describe("openProtocolStorageRepository", () => {
     await db.putOrigin({ ...makeOrigin(origin, 999), updatedAt: 2 });
     const list = await db.listOrigins();
     const found = list.find((r) => r.origin === origin);
-    expect(found?.p2pkhAutoApproveMaxSatoshis).toBe(999);
+    expect(found?.feePoolDefaultFundSatoshis).toBe(999);
     expect(found?.updatedAt).toBe(2);
   });
 
@@ -240,8 +237,8 @@ describe("openProtocolStorageRepository", () => {
     await db.putOrigin(makeOrigin("https://l-o-b.com", 100));
     const list = await db.listOrigins();
     const map = new Map(list.map((r) => [r.origin, r]));
-    expect(map.get("https://l-o-a.com")?.p2pkhAutoApproveMaxSatoshis).toBe(0);
-    expect(map.get("https://l-o-b.com")?.p2pkhAutoApproveMaxSatoshis).toBe(100);
+    expect(map.get("https://l-o-a.com")?.feePoolDefaultFundSatoshis).toBe(0);
+    expect(map.get("https://l-o-b.com")?.feePoolDefaultFundSatoshis).toBe(100);
   });
 
   /* ============== 施工单 002 硬切换：feePools store ============== */
@@ -325,11 +322,8 @@ describe("openProtocolStorageRepository", () => {
     const origin = `https://roundtrip-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.example`;
     const rec: ProtocolOriginSettingsRecord = {
       origin,
-      p2pkhAutoApproveEnabled: true,
-      p2pkhAutoApproveMaxSatoshis: 5000,
       identityAutoApproveEnabled: true,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 10000,
       confirmTimeoutSeconds: 30,
       updatedAt: 1
@@ -338,7 +332,7 @@ describe("openProtocolStorageRepository", () => {
     const got = await db.getOrigin(origin);
     expect(got?.identityAutoApproveEnabled).toBe(true);
     expect(got?.cipherAutoApproveEnabled).toBe(false);
-    expect(got?.p2pkhAutoApproveMaxSatoshis).toBe(5000);
+    expect(got?.feePoolDefaultFundSatoshis).toBe(10000);
   });
 
   /* ============== 施工单 003：confirmTimeoutSeconds 字段 ============== */
@@ -348,11 +342,8 @@ describe("openProtocolStorageRepository", () => {
     const origin = `https://ct-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.example`;
     const rec: ProtocolOriginSettingsRecord = {
       origin,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 12,
       updatedAt: 1

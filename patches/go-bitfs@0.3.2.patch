@@ -1,6 +1,8 @@
+diff --git a/dist/evidence.d.ts b/dist/evidence.d.ts
+index 1f23eb7169089db6bef78601a3bc88d476a246ac..39676c04df9ffac04f1231068a4b50ddc915f0d6 100644
 --- a/dist/evidence.d.ts
 +++ b/dist/evidence.d.ts
-@@ -31,15 +31,15 @@
+@@ -31,15 +31,15 @@ export interface BuyerOpeningEvidence {
      fundingTransactionRaw: Uint8Array;
  }
  /**
@@ -19,7 +21,7 @@
  }
  /** 一次已签授权的普通证据包：exact Kind 1 报价与买方 exact Kind 5 授权。 */
  export interface BuyerAuthorizationEvidence {
-@@ -167,6 +167,8 @@
+@@ -167,6 +167,8 @@ export interface VerifyCompletedCloseArtifactInput {
      pool: BuyerPoolEvidence;
      /** 卖方发来的 exact Kind 13 关池响应。 */
      responseRaw: Uint8Array;
@@ -28,9 +30,20 @@
  }
  /** 构造 exact Kind 10 所需的本地证据。 */
  export interface RetrievalRequestInput {
+diff --git a/dist/pool.js b/dist/pool.js
+index dd5617db53e2e0509fef105ec564c56147942211..ebeb033892ed9f5488e214a80abb5799f9925d53 100644
 --- a/dist/pool.js
 +++ b/dist/pool.js
-@@ -325,7 +325,7 @@
+@@ -67,7 +67,7 @@ export class MultisigPoolEngine {
+         const digest = forkIDAllDigest(unsignedRaw, 0, BigInt(poolOutputSatoshis), this.#lockingScript);
+         let der;
+         try {
+-            der = new Uint8Array(await signer.sign({ purpose: 'transaction', wireKind: 0, digest: copy(digest) }, signal));
++            der = new Uint8Array(await signer.sign({ purpose: 'transaction', wireKind: 0, digest: copy(digest), transactionRaw: copy(unsignedRaw) }, signal));
+         }
+         catch {
+             throw new WireError('signer_unavailable', 0, 'signature', 'Signer 无法完成交易签名');
+@@ -325,7 +325,7 @@ export class MultisigPoolEngine {
          const state = await buildArbitratedPoolState({
              protocol: MultisigPoolProtocol, version: MultisigPoolVersion, previousState: previousTx,
              sequence: paymentSequence, sellerAmount: amountNumber(sellerAmountAfterSatoshis, 'seller_amount_after_satoshis'),
@@ -39,9 +52,30 @@
              roles: this.#roles, feeRate: amountNumber(opening.minerFeeRateSatoshisPerKilobyte, 'miner_fee_rate_satoshis_per_kilobyte')
          });
          return fromHex(state.toHex());
+diff --git a/dist/protocol.d.ts b/dist/protocol.d.ts
+index fbeeb66facb52ecfd49bb48d1d0f541a0a9f9429..80d33f6394afa3a0d7e18291a4ae7faf4272dca9 100644
+--- a/dist/protocol.d.ts
++++ b/dist/protocol.d.ts
+@@ -8,6 +8,14 @@ export interface SigningRequest {
+     wireKind: number;
+     /** 已构造好的 32 字节摘要。 */
+     digest: Uint8Array;
++    /** transaction 签名携带 exact 未签名原文；钱包必须自行核验前序证据与摘要。 */
++    transactionRaw?: Uint8Array;
++    /** wire_message 签名携带 exact 认证文档，硬件自行解析并重建域摘要。 */
++    documentCBOR?: Uint8Array;
++    /** 卖方 Kind 2 预签时携带 exact 开池请求，设备核验模板和买方签名。 */
++    openingRequestRaw?: Uint8Array;
++    /** Kind 5 携带 SDK 已核验的开池与本次未签交易，用于钱包额度核算。 */
++    authorizationContext?: { unsignedTransactionRaw: Uint8Array; fundingTransactionRaw: Uint8Array; refundTemplateRaw: Uint8Array };
+ }
+ /** 唯一密钥操作端口；不暴露私钥、seed、WIF 或自定义 verifier。 */
+ export interface Signer {
+diff --git a/dist/steps.d.ts b/dist/steps.d.ts
+index 4e0457d49468767d4c30d491dd301d7f053550a2..6b8e13105a9935d81b7a707f1c7706f49829ab64 100644
 --- a/dist/steps.d.ts
 +++ b/dist/steps.d.ts
-@@ -53,6 +53,10 @@
+@@ -53,6 +53,10 @@ export declare function verifySellerFunding(rawKind4: Uint8Array, opening: Selle
   * seed 或满足授权价格；调用方仍须把同一请求与池证据传给 PrepareDelivery。
   */
  export declare function inspectSellerDeliveryRequest(facts: Readonly<PureFunctionFacts>, input: InspectDeliveryRequestInput): Promise<DeliveryRequestSummary>;
@@ -52,9 +86,11 @@
  /**
   * 卖方交付：完成 quote/opening/时序/序号/容量/价格/payload 全量校验后签署
   * exact Kind 6，返回待发送报文与普通证据包。Send 之前必须先持久化 payload
+diff --git a/dist/steps.js b/dist/steps.js
+index 4f1f721b4038956baac4c3020eabc26adab7d96b..262382e365c027af72fa5bcc7aecc88d7495bd31 100644
 --- a/dist/steps.js
 +++ b/dist/steps.js
-@@ -94,7 +94,8 @@
+@@ -94,7 +94,8 @@ async function preflightSellerDelivery(facts, quote, checkpoint, rawKind5) {
      checkContentRequestTiming(authorization, quoteTerms, now);
      if (!equal(previous.refundTemplateTxId, details.refundTemplateTxId) || previous.paymentSequence + 1 !== authorization.paymentSequence)
          throw new WireError('state_conflict', 0, 'payment_sequence', '付款序号不是上一状态加一');
@@ -64,7 +100,7 @@
      if (authorization.sellerAmountAfterSatoshis < previous.sellerAmountSatoshis)
          throw new WireError('invalid_evidence', 6, 'seller_amount_after_satoshis', '授权金额不能倒退');
      await checkPaymentCapacity(opening, previous, authorization.paymentSequence, authorization.sellerAmountAfterSatoshis);
-@@ -127,6 +128,27 @@
+@@ -127,6 +128,27 @@ export async function inspectSellerDeliveryRequest(facts, input) {
          contentHashes: preflight.contentHashes.map(copyBytes)
      };
  }
@@ -92,7 +128,7 @@
  /**
   * 卖方交付：完成 quote/opening/时序/序号/容量/价格/payload 全量校验后签署
   * exact Kind 6，返回待发送报文与普通证据包。Send 之前必须先持久化 payload
-@@ -449,7 +471,8 @@
+@@ -449,7 +471,8 @@ export async function prepareBuyerContentRequest(facts, input, signer) {
          throw new WireError('invalid_evidence', 5, 'supported_arbiter_public_keys', '开池仲裁方不在报价白名单内');
      if (!equal(previous.refundTemplateTxId, details.refundTemplateTxId) || previous.paymentSequence >= FINAL_POOL_SEQUENCE - 1)
          throw new WireError('state_conflict', 0, 'payment_sequence', '付款序号陈旧');
@@ -102,7 +138,7 @@
      const targetSequence = previous.paymentSequence + 1;
      const hashes = input.contentHashes.map(copyBytes);
      const price = await contentHashesPriceSatoshis(terms, hashes, input.seed);
-@@ -499,12 +522,15 @@
+@@ -499,12 +522,15 @@ export async function verifyBuyerDelivery(facts, input, signer) {
      const effectiveSeed = await verifyContentPayloads(quoteTerms, hashes, payloads, input.seed);
      if (previous.paymentSequence + 1 !== authorization.paymentSequence || previous.paymentSequence >= FINAL_POOL_SEQUENCE - 1)
          throw new WireError('state_conflict', 0, 'payment_sequence', '付款序号陈旧');
@@ -120,7 +156,7 @@
      const engine = new MultisigPoolEngine({ buyerPublicKey: opening.buyerPublicKey, sellerPublicKey: opening.sellerPublicKey, arbiterPublicKey: opening.arbiterPublicKey });
      const buyerSignature = await engine.signRole(bound, 'buyer', unsigned, details.poolOutputSatoshis);
      const outbound = encodePaymentUpdate(requestID, buyerSignature);
-@@ -526,7 +552,11 @@
+@@ -526,7 +552,11 @@ async function prepareBuyerCloseArtifactData(facts, input, signer) {
          throw new WireError('unauthorized', 0, 'buyer_public_key', 'Signer 与开池买方不一致');
      const details = await deriveOpeningDetails(opening);
      checkRefundNotExpired(facts, details.refundLockTime);
@@ -133,7 +169,7 @@
      validatePoolCloseTransactionRaw(unsignedRaw);
      const unsigned = await parseUnsignedPayment(unsignedRaw, opening);
      if (unsigned.paymentSequence !== FINAL_POOL_SEQUENCE)
-@@ -547,7 +577,7 @@
+@@ -547,7 +577,7 @@ export async function prepareBuyerCloseArtifact(facts, input, signer) {
  /** 买方验收卖方完整关闭交易，返回完整交易原文；不声称已广播或已确认。 */
  export async function verifyBuyerCompletedClose(input) {
      const checkpoint = await buyerPoolCheckpoint(input.pool);
@@ -142,7 +178,7 @@
  }
  /** 严格解析 Kind 13、核对费用池关联 ID 并验证完整关闭交易。 */
  export async function verifyBuyerCompletedCloseArtifact(input) {
-@@ -556,13 +586,26 @@
+@@ -556,13 +586,26 @@ export async function verifyBuyerCompletedCloseArtifact(input) {
      const details = await deriveOpeningDetails(checkpoint.opening);
      if (!equal(details.refundTemplateTxId, response.refundTemplateTxID))
          throw new WireError('state_conflict', 13, 'refund_template_txid', '关池响应属于另一个费用池');
@@ -171,7 +207,7 @@
      await new MultisigPoolEngine({ buyerPublicKey: opening.buyerPublicKey, sellerPublicKey: opening.sellerPublicKey, arbiterPublicKey: opening.arbiterPublicKey }).verifyCompletedFinalPayment(state, opening);
      return await verifySignedTransaction(closeRaw, opening);
  }
-@@ -774,15 +817,49 @@
+@@ -774,15 +817,49 @@ export async function verifyArbiterCustody(rawKind8, rawKind9) {
  async function buyerPoolCheckpoint(evidence) {
      const opening = cloneOpening(evidence.opening);
      await verifyOpening(opening);
@@ -223,3 +259,52 @@
  }
  async function sellerPoolCheckpoint(evidence) {
      const opening = cloneOpening(evidence.opening);
+diff --git a/dist/protocol.js b/dist/protocol.js
+--- a/dist/protocol.js
++++ b/dist/protocol.js
+@@ -45,7 +45,7 @@ export async function signWireDocument(signer, kind, documentCBOR, signal) {
+     const digest = wireSignatureDigest(kind, documentCBOR);
+     let signature;
+     try {
+-        signature = new Uint8Array(await signer.sign({ purpose: 'wire_message', wireKind: kind, digest: new Uint8Array(digest) }, signal));
++        signature = new Uint8Array(await signer.sign({ purpose: 'wire_message', wireKind: kind, digest: new Uint8Array(digest), documentCBOR: new Uint8Array(documentCBOR) }, signal));
+     }
+     catch (error) {
+         if (isAborted(signal) || (error instanceof DOMException && error.name === 'AbortError'))
+diff --git a/dist/steps.js b/dist/steps.js
+--- a/dist/steps.js
++++ b/dist/steps.js
+@@ -488,7 +488,17 @@ export async function prepareBuyerContentRequest(facts, input, signer) {
+         contentHashes: hashes,
+         deliveryDeadlineUnixSeconds: input.deliveryDeadline
+     };
+-    const outbound = await createContentRequest(bound, authorization);
++    const unsigned = checkpoint.buyerLocal
++        ? await buildBuyerLocalState(opening, previous, targetSequence, sellerAmountAfter, 0)
++        : await buildPaymentUpdate(opening, previous, targetSequence, sellerAmountAfter);
++    const authorizingSigner = { publicKey: () => bound.publicKey(), sign: (request, signal) =>
++        bound.sign({ ...request, authorizationContext: {
++            unsignedTransactionRaw: copyBytes(unsigned),
++            fundingTransactionRaw: copyBytes(opening.fundingTransactionRaw),
++            refundTemplateRaw: copyBytes(opening.refundTemplateRaw)
++        } }, signal)
++    };
++    const outbound = await createContentRequest(authorizingSigner, authorization);
+     return { outbound, authorization: { rawKind1: copyBytes(input.quoteRaw), rawKind5: outbound.bytes() } };
+ }
+ /**
+diff --git a/dist/steps.js b/dist/steps.js
+--- a/dist/steps.js
++++ b/dist/steps.js
+@@ -42,7 +42,10 @@ export async function prepareSellerPresign(rawKind2, signer) {
+     const engine = new MultisigPoolEngine({ buyerPublicKey: request.buyerPublicKey, sellerPublicKey: request.sellerPublicKey, arbiterPublicKey: request.arbiterPublicKey });
+     const terms = await engine.deriveRefundTerms(request.refundTemplateRaw, request.minerFeeRateSatoshisPerKilobyte);
+     engine.verifyRole('buyer', request.refundTemplateRaw, terms.poolOutputSatoshis, request.buyerRefundSignature);
+-    const sellerRefundSignature = await engine.signRole(bound, 'seller', request.refundTemplateRaw, terms.poolOutputSatoshis);
++    const presigningSigner = { publicKey: () => bound.publicKey(), sign: (signingRequest, signal) =>
++        bound.sign({ ...signingRequest, openingRequestRaw: copyBytes(rawKind2) }, signal)
++    };
++    const sellerRefundSignature = await engine.signRole(presigningSigner, 'seller', request.refundTemplateRaw, terms.poolOutputSatoshis);
+     const outbound = encodeRefundPresignResponse(terms.refundTemplateTxId, sellerRefundSignature);
+     return { outbound, opening: { rawKind2: copyBytes(rawKind2), rawKind3: outbound.bytes() } };
+ }

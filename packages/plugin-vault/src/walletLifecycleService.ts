@@ -34,6 +34,8 @@ import {
 } from "@keymaster/contracts";
 import * as secp256k1 from "@noble/secp256k1";
 import type { WalletVaultLifecycleStore } from "@keymaster/contracts/storage-internal";
+import { validateHardwareKeyDocument, type HardwareKeyDocumentV1 } from "@keymaster/vaultlink-integration";
+import { parseMigrationJournal, type MigrationJournal } from "@keymaster/vaultlink-integration/migration";
 import type { WalletKeyRepository } from "./walletKeyRepository.js";
 import { createKeyHoldDocument, serializeKeyHoldDocument } from "./keyholdDocument.js";
 import { StorageRuntimeError, storageErrorCode, WALLET_INITIALIZATION_PATH } from "@keymaster/contracts/storage-internal";
@@ -42,6 +44,8 @@ import { StorageRuntimeError, storageErrorCode, WALLET_INITIALIZATION_PATH } fro
 const SESSION_EPOCH_PATTERN = /^[0-9a-f-]{36}$/u;
 
 export interface WalletLifecycleDeps {
+  /** Fixed-path public migration record; only the trusted bootstrap port can read it. */
+  readMigration?: () => Promise<Uint8Array | undefined>;
   /** 正式本地介质。 */
   store: WalletVaultLifecycleStore;
   /** 固定路径的单 Key 仓储；只用于解锁、改密、改名和导出。 */
@@ -137,6 +141,8 @@ function userFacingError(input: {
 export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletLifecycleService & {
   /** 当前钱包身份世代；未初始化时为空串。 */
   walletGeneration(): string;
+  /** Worker 内部：调用方已完成设备配对与持有权证明。 */
+  initializeHardware(document: HardwareKeyDocumentV1): Promise<WalletMetaV1>;
   /** 校验某个 grant 的世代是否仍然是当前的。 */
   isGrantLive(input: { walletGeneration: string; sessionEpoch: string; runGeneration: string }): boolean;
   /** 撤销指定 App 的授权并清空它的独立目录。 */
@@ -181,6 +187,18 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
    * 可恢复的数据。
    */
   async function coldStart(): Promise<WalletColdStartSnapshot> {
+    let migration: MigrationJournal | undefined;
+    try {
+      const bytes = await deps.readMigration?.();
+      if (bytes) migration = parseMigrationJournal(bytes);
+    } catch {
+      walletGeneration = "";
+      return { state: "corrupt", reason: "Backend migration record is unreadable; recovery is required" };
+    }
+    if (migration && migration.phase !== "complete") {
+      walletGeneration = migration.walletGeneration;
+      return { state: "corrupt", reason: `Backend migration ${migration.migrationId} is unfinished (${migration.phase}); recover this migration before unlocking` };
+    }
     const metaRecord = await deps.store.readMeta();
     let meta: WalletMetaV1 | undefined;
     let metaCorrupt = false;
@@ -207,11 +225,20 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
       const keyHold = await deps.keys.read();
       if (keyHold) {
         keyPresent = true;
-        key = { publicKeyHex: keyHold.document.publicKeyHex, label: keyHold.document.label };
+        key = { publicKeyHex: keyHold.document.publicKeyHex, label: keyHold.document.label, backend: keyHold.backend };
+        if (keyHold.backend === "hardware" && keyHold.document.walletGeneration !== meta?.walletGeneration) {
+          keyCorrupt = true;
+        }
       }
     } catch {
       keyPresent = true;
       keyCorrupt = true;
+    }
+
+    if (migration && (!meta?.initialized || migration.walletGeneration !== meta.walletGeneration
+      || migration.publicKeyHex !== key?.publicKeyHex || migration.target !== key?.backend)) {
+      walletGeneration = meta?.walletGeneration ?? "";
+      return { state: "corrupt", ...(meta ? { meta } : {}), reason: "Completed backend migration does not match the current wallet" };
     }
 
     if (!metaRecord && !keyPresent) {
@@ -280,6 +307,24 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
    * 失败或取消时整批 abort，IndexedDB 里不会留下可被当作完整钱包使用的
    * 半成品。
    */
+  async function initializeHardware(candidate: HardwareKeyDocumentV1): Promise<WalletMetaV1> {
+    const document = validateHardwareKeyDocument(candidate);
+    secp256k1.Point.fromHex(document.publicKeyHex);
+    if ((await coldStart()).state !== "uninitialized") throw new StorageRuntimeError("storage_conflict", "Wallet already has a Key");
+    const createdAt = new Date(now()).toISOString();
+    const meta: WalletMetaV1 = {format: WALLET_META_FORMAT, version: 1, schemaVersion: WALLET_CURRENT_SCHEMA_VERSION,
+      initialized: true, walletGeneration: document.walletGeneration, createdAt};
+    await deps.store.batch({operations: [
+      {type: "put", path: "key.json", bytes: encode(document), contentType: "application/json"},
+      {type: "put", path: WALLET_META_PATH, bytes: encode(meta), contentType: "application/json"},
+      {type: "put", path: WALLET_INITIALIZATION_PATH, bytes: encode({format: "keymaster.wallet-initialization", version: 1,
+        initializedAt: createdAt, walletGeneration: document.walletGeneration}), contentType: "application/json"},
+    ], conditions: [{path: "key.json", ifNoneMatch: true}]});
+    walletGeneration = document.walletGeneration;
+    emit({type: "initialized", walletGeneration});
+    return meta;
+  }
+
   async function initialize(plan: WalletInitializePlan): Promise<WalletInitializeResult> {
     let draft: WalletInitializePlan["firstKey"];
     try {
@@ -592,6 +637,7 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
   return {
     coldStart,
     initialize,
+    initializeHardware,
     unlock,
     verifyPassword,
     lock,

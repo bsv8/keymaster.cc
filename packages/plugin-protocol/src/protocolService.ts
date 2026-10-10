@@ -1,4 +1,5 @@
 import { requireUnlockedWalletIdentity } from "@keymaster/contracts";
+import { authenticateAppWallet, appPaymentChannelId } from "@keymaster/vaultlink-integration";
 import { createProviderDispatch } from "./providerDispatch.js";
 import type { AppStorageBinding, AppStorageClient } from "@keymaster/contracts";
 // packages/plugin-protocol/src/protocolService.ts
@@ -118,6 +119,8 @@ import {
   type SessionRuntimeBootstrap,
   type P2pkhProtocolAdapter,
   type P2pkhTransferAssetId,
+  type PaymentChannelRegisterParams,
+  type PaymentChannelRegisterResult,
   type P2pkhTransferParams,
   type P2pkhTransferResult,
   type ProtocolClosingMessage,
@@ -176,6 +179,8 @@ import { buildAppBootstrapPayload } from "./sessionWindowBootstrap.js";
 import { installLauncherBootstrapRegistry } from "@keymaster/contracts";
 import type { FeepoolPendingOpsMap } from "./feepoolOperations.js";
 import {
+  feePoolInputTxids,
+  type FeePoolTransactionSigner,
   sdkBuildBaseTx,
   sdkBuildInitialDraftSpendTx,
   sdkClientSignInitialSpendTx,
@@ -266,11 +271,8 @@ function normalizeOriginSettings(
 ): ProtocolOriginSettingsRecord {
   return {
     origin,
-    p2pkhAutoApproveEnabled: rec?.p2pkhAutoApproveEnabled ?? false,
-    p2pkhAutoApproveMaxSatoshis: rec?.p2pkhAutoApproveMaxSatoshis ?? 0,
     identityAutoApproveEnabled: rec?.identityAutoApproveEnabled ?? false,
     cipherAutoApproveEnabled: rec?.cipherAutoApproveEnabled ?? false,
-    feePoolAutoSignMaxSatoshis: rec?.feePoolAutoSignMaxSatoshis ?? 0,
     feePoolDefaultFundSatoshis: rec?.feePoolDefaultFundSatoshis ?? 0,
     confirmTimeoutSeconds:
       rec?.confirmTimeoutSeconds && rec.confirmTimeoutSeconds > 0
@@ -421,6 +423,7 @@ interface RequestRecord {
    * 非 ready 的）。只在 `method === "connect.login"` 时有值。
    */
   connectLoginCandidates?: Array<{ publicKeyHex: string; label: string }>;
+  connectAuthBackend?: "software" | "hardware";
   /**
    * `connect.login` 用户在 UI 选定的那把 key 公钥 hex。用户在 confirming
    * 视图点"确认选 key"时由 `confirmConnectLogin` 写入；执行阶段读此字段。
@@ -999,6 +1002,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     for (const sessionId of sessionIds) {
       void storageController?.abortSession(sessionId);
       void msfileService?.abortSession(sessionId);
+      void this.deps.vault.requestPayment({action:"session-cancel",id:sessionId}).catch(() => {});
     }
     // 把所有未终态 request 强制收尾为 rejected（不发 result 给 opener）。
     for (const [, rec] of this.requestsByRecordId) {
@@ -1570,10 +1574,12 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!rec) return;
     if (rec.method !== "connect.login") return;
     if (rec.phase !== "waiting_unlock_manual" && rec.phase !== "confirming") return;
+    if (rec.connectAuthSubmittedAt) return;
     const candidates = rec.connectLoginCandidates ?? [];
     if (!candidates.some((c) => c.publicKeyHex === ownerPublicKeyHex)) {
       return;
     }
+    if (rec.connectAuthBackend === "hardware" && this.lockStateValue === "locked") throw new Error("Connect and unlock RocKey on the device before continuing");
     if (this.lockStateValue === "locked") {
       this.authUnlockInProgress = recordId;
       rec.connectAuthSubmittedAt = Date.now();
@@ -1589,12 +1595,14 @@ export class ProtocolServiceImpl implements ProtocolService {
     } else {
       rec.connectAuthSubmittedAt = Date.now();
       try {
-        await this.deps.vault.verifyPassword(password);
+        await authenticateAppWallet(this.deps.vault, ownerPublicKeyHex, password, this.deps.walletState);
       } catch (err) {
         rec.connectAuthSubmittedAt = undefined;
         throw err;
       }
     }
+    // 认证 RPC 在等待期间允许取消；旧结果不能重新把已拒绝请求排入执行队列。
+    if (rec.cancelRequested || (rec.phase !== "waiting_unlock_manual" && rec.phase !== "confirming")) return;
     rec.connectLoginSelected = ownerPublicKeyHex;
     // 关键（施工单 2026-06-28 002 硬切换）：login record 在用户点确认时
     // 立即把 ownerPublicKeyHex 落到 rec；executeConnectLogin 之后建的
@@ -1623,9 +1631,11 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!rec) return;
     if (rec.method !== "connect.resume") return;
     if (rec.phase !== "waiting_unlock_manual" && rec.phase !== "confirming") return;
+    if (rec.connectAuthSubmittedAt) return;
     if (!rec.connectResumeSnapshot) {
       return;
     }
+    if (rec.connectAuthBackend === "hardware" && this.lockStateValue === "locked") throw new Error("Connect and unlock RocKey on the device before continuing");
     if (this.lockStateValue === "locked") {
       this.authUnlockInProgress = recordId;
       rec.connectAuthSubmittedAt = Date.now();
@@ -1641,12 +1651,13 @@ export class ProtocolServiceImpl implements ProtocolService {
     } else {
       rec.connectAuthSubmittedAt = Date.now();
       try {
-        await this.deps.vault.verifyPassword(password);
+        await authenticateAppWallet(this.deps.vault, rec.connectResumeSnapshot.ownerPublicKeyHex, password, this.deps.walletState);
       } catch (err) {
         rec.connectAuthSubmittedAt = undefined;
         throw err;
       }
     }
+    if (rec.cancelRequested || (rec.phase !== "waiting_unlock_manual" && rec.phase !== "confirming")) return;
     this.clearConfirmTimeout(recordId);
     this.setRecordPhase(recordId, "queued");
     rec.enteredPhaseAt = Date.now();
@@ -2000,7 +2011,8 @@ export class ProtocolServiceImpl implements ProtocolService {
       !input.appOrigin ||
       !input.appUrl ||
       !input.publicKeyHex ||
-      !input.password
+      typeof input.password !== "string" ||
+      (!input.password && this.deps.walletState.snapshot().activeKeyIdentity?.backend !== "hardware")
     ) {
       throw new Error("launchAppView: missing app fields");
     }
@@ -2062,6 +2074,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
 
     let sessionWindowNavigated = false;
+    let stagedAppViewSessionId: string | undefined;
     try {
     // 5) 校验目标 key ready。
     const key = this.requireCurrentOwnerKey(input.publicKeyHex);
@@ -2094,17 +2107,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       lastUsedAt: now,
       revokedAt: null
     };
-    try {
-      await this.deps.storageRepository.putConnectSessionAndRevokeOriginPeers(sessionRecord);
-    } catch (err) {
-      // Session 真值必须先落库再导航；存储失败时关闭预开的空白窗口，
-      // 并统一转换为 typed error，UI 不应展示底层 grant/OPFS 文案。
-      throw new LaunchAppViewError(
-        "session_storage_unavailable",
-        "launchAppView: session storage unavailable"
-      );
-    }
-    // 8) 用受控 appView session capability 组装 `SessionRuntimeBootstrap`。
+    // 8) 先认证并获得专属 capability，再落库；失败不能吊销仍有效的旧 App 会话。
     let sessionRuntimeBootstrap: SessionRuntimeBootstrap;
     try {
       const crypto = await this.deps.vault.createAppViewSession({
@@ -2112,6 +2115,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         publicKeyHex: input.publicKeyHex,
         password: input.password
       });
+      stagedAppViewSessionId = sessionId;
       const identity = crypto.getIdentity();
       sessionRuntimeBootstrap = {
         ownerPublicKeyHex: identity.publicKeyHex,
@@ -2126,6 +2130,13 @@ export class ProtocolServiceImpl implements ProtocolService {
         "launchAppView: failed to export owner runtime bootstrap"
       );
     }
+    try {
+      await this.deps.storageRepository.putConnectSessionAndRevokeOriginPeers(sessionRecord);
+    } catch (err) {
+      throw new LaunchAppViewError("session_storage_unavailable", "launchAppView: session storage unavailable");
+    }
+    // 存储等待期间断线/锁定，旧 capability 也不能用来导航或建立可执行会话。
+    sessionRuntimeBootstrap.crypto.getIdentity();
     // 9) 生成新 launchToken。
     const launchToken = this.deps.generateId
       ? `launch-${this.deps.generateId()}`
@@ -2196,6 +2207,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     };
     } finally {
       if (!sessionWindowNavigated) {
+        if (stagedAppViewSessionId) this.deps.vault.disposeAppViewSession(stagedAppViewSessionId, "AppView launch did not complete");
         try {
           popup.close();
         } catch {
@@ -2330,6 +2342,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         recordId: resume.recordId,
         canSubmit: !resume.connectAuthSubmittedAt,
         submitted: Boolean(resume.connectAuthSubmittedAt),
+        backend: resume.connectAuthBackend ?? "software",
         login: null,
         resume: {
           recordId: resume.recordId,
@@ -2345,6 +2358,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         recordId: login.recordId,
         canSubmit: !login.connectAuthSubmittedAt && (login.connectLoginCandidates?.length ?? 0) > 0,
         submitted: Boolean(login.connectAuthSubmittedAt),
+        backend: login.connectAuthBackend ?? "software",
         login: {
           recordId: login.recordId,
           availableKeys: login.connectLoginCandidates ?? []
@@ -3127,6 +3141,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       // 单 Key 本地钱包：候选列表最多只有一个元素——当前唯一 Key。
       // connect.login 不再让用户在多把 Key 之间选择。
       const current = this.requireCurrentOwnerKey(this.deps.walletState.snapshot().activePublicKeyHex ?? "");
+      rec.connectAuthBackend = current?.backend ?? "software";
       rec.connectLoginCandidates = current
         ? [{ publicKeyHex: current.publicKeyHex, label: current.label }]
         : [];
@@ -3171,6 +3186,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       if (!key) {
         return { code: "user_rejected", reason: "internal_error" };
       }
+      rec.connectAuthBackend = key.backend ?? "software";
     } catch (err) {
       return { code: "user_rejected", reason: "internal_error" };
     }
@@ -3187,8 +3203,8 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 判断新 request 是否命中 auto-approve / auto-sign。
    *
    * 命中条件（与旧实现一致，但**不**依赖当前 lockState）：
-   *   - p2pkh.transfer：p2pkhAutoApproveEnabled + amount <= max；
-   *   - feepool.prepare / feepool.commit：feePoolAutoSignMaxSatoshis > 0 + amount <= max；
+   *   - 付款直接进入执行阶段，再由钱包核心核算渠道单笔/App 会话累计额度。
+   *     这里的 true 只跳过站点级重复确认，不授予签名或免除核心批准。
    *   - identity.get / cipher.*：originCache 命中相应 auto-approve 配置；
    *     cache miss 时先 await getOriginSettingsCached 兜底一次（不翻案）。
    *
@@ -3209,20 +3225,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     origin: string,
     _rec: RequestRecord
   ): Promise<boolean> {
-    if (parsed.method === "p2pkh.transfer") {
-      return this.isP2pkhAutoApprovedSync(parsed.params as P2pkhTransferParams, origin);
-    }
-    if (parsed.method === "feepool.prepare") {
-      const amount = (parsed.params as FeepoolPrepareParams).amountSatoshis;
-      return this.isFeepoolAutoSignedSync(amount, origin);
-    }
-    if (parsed.method === "feepool.commit") {
-      const opId = (parsed.params as FeepoolCommitParams).operationId;
-      const op = this.pendingOps.get(opId);
-      const amount = op ? op.amountSatoshis : null;
-      if (amount === null || amount <= 0) return false;
-      return this.isFeepoolAutoSignedSync(amount, origin);
-    }
+    if (parsed.method === "payment.channel.register" || parsed.method === "p2pkh.transfer" || parsed.method === "feepool.prepare" || parsed.method === "feepool.commit") return true;
     if (
       parsed.method === "identity.get" ||
       parsed.method === "cipher.encrypt" ||
@@ -3253,15 +3256,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     return false;
   }
 
-  private isP2pkhAutoApprovedSync(params: P2pkhTransferParams, origin: string): boolean {
-    if (!this.deps.storageRepository) return false;
-    const rec = this.originCache.get(origin) ?? null;
-    if (!rec) return false;
-    if (!rec.p2pkhAutoApproveEnabled) return false;
-    if (params.amountSatoshis <= 0) return false;
-    return params.amountSatoshis <= rec.p2pkhAutoApproveMaxSatoshis;
-  }
-
   private isIdentityAutoApprovedSync(origin: string): boolean {
     if (!this.deps.storageRepository) return false;
     const rec = this.originCache.get(origin) ?? null;
@@ -3274,15 +3268,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     const rec = this.originCache.get(origin) ?? null;
     if (!rec) return false;
     return rec.cipherAutoApproveEnabled === true;
-  }
-
-  private isFeepoolAutoSignedSync(amountSatoshis: number, origin: string): boolean {
-    if (!this.deps.storageRepository) return false;
-    const rec = this.originCache.get(origin) ?? null;
-    if (!rec) return false;
-    if (rec.feePoolAutoSignMaxSatoshis <= 0) return false;
-    if (amountSatoshis <= 0) return false;
-    return amountSatoshis <= rec.feePoolAutoSignMaxSatoshis;
   }
 
   private async getOriginSettingsCached(origin: string): Promise<ProtocolOriginSettingsRecord | null> {
@@ -3830,6 +3815,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   private readonly providerDispatch = createProviderDispatch<RequestRecord, MethodResult | null>({
+    "payment.channel.register": rec => this.executePaymentChannelRegister(rec),
     "identity.get": rec => this.executeIdentityGet(rec),
     "intent.sign": rec => this.executeIntentSign(rec),
     "cipher.encrypt": rec => this.executeCipherEncrypt(rec),
@@ -4028,7 +4014,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       projection.map(([name, val]) => [name, valToCbor(val)])
     ];
     const envelopeCbor = cborEncode(envelopeInput);
-    const signature = await this.signWithSessionOwner(session, envelopeCbor);
+    const signature = await this.signWithSessionOwner(session, envelopeCbor, "identity");
 
     return {
       identityEnvelope: toBinaryField(envelopeCbor, "application/cbor"),
@@ -4059,7 +4045,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       contentSha256,
       publicKeyBytes
     ]);
-    const signature = await this.signWithSessionOwner(session, envelopeCbor);
+    const signature = await this.signWithSessionOwner(session, envelopeCbor, "intent", new Uint8Array(params.content.bytes));
     return {
       signedEnvelope: toBinaryField(envelopeCbor, "application/cbor"),
       signature: toBinaryField(signature)
@@ -4375,9 +4361,20 @@ export class ProtocolServiceImpl implements ProtocolService {
    */
   private async signWithSessionOwner(
     session: ConnectSessionRecord,
-    bytes: Uint8Array
+    bytes: Uint8Array,
+    kind: "identity" | "intent",
+    content?: Uint8Array
   ): Promise<Uint8Array> {
     const resolution = await this.resolveOwnerRuntime(session);
+    if(resolution.crypto.signConnectEnvelope) {
+      resolution.crypto.getIdentity();
+      // cborg can return Node Buffer in the native host; Buffer.slice() aliases a larger slab.
+      // Construct an ordinary Uint8Array so only the exact envelope enters the capability.
+      const result=await resolution.crypto.signConnectEnvelope({publicKeyHex:resolution.ownerPublicKeyHex,kind,envelope:new Uint8Array(bytes).buffer as ArrayBuffer,...(content ? {content:new Uint8Array(content).buffer as ArrayBuffer} : {}),appSessionId:session.sessionId});
+      resolution.crypto.getIdentity();
+      if(result.format!=="compact"||result.signature.byteLength!==64||result.publicKeyHex!==resolution.ownerPublicKeyHex)throw new Error("Invalid Connect signature result");
+      return new Uint8Array(result.signature);
+    }
     return signCompactSecp256k1(async (digest) => {
       const result = await resolution.crypto.signDigest({
         publicKeyHex: resolution.ownerPublicKeyHex,
@@ -5004,6 +5001,24 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /* ============== p2pkh.transfer ============== */
+
+  private async paymentOwner(session: ConnectSessionRecord): Promise<string> {
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(session.origin)));
+    return "connect." + Array.from(digest, b => b.toString(16).padStart(2, "0")).join("");
+  }
+  private async executePaymentChannelRegister(rec: RequestRecord): Promise<PaymentChannelRegisterResult> {
+    const params = rec.params as PaymentChannelRegisterParams;
+    const session = await this.requireConnectSession(rec, params.connectSessionId);
+    this.assertSessionOwnerIsActive(session);
+    const owner = await this.paymentOwner(session);
+    const network = params.assetId === "bsv-testnet" ? "test" : "main";
+    const channelId = await appPaymentChannelId(owner, params.channelName, params.paymentType, network);
+    // 注册只建立零额度渠道。owner 不取 App 自报，额度仍只由钱包设置/设备确认。
+    await this.deps.vault.requestPayment({action: "register", id: channelId, owner, kind: "app", network, paymentType: params.paymentType});
+    await this.requireConnectSession(rec, params.connectSessionId);
+    this.assertSessionOwnerIsActive(session);
+    return {channelId};
+  }
   /* ============== p2pkh.transfer ============== */
 
   private async executeP2pkhTransferAndFinalize(rec: RequestRecord): Promise<void> {
@@ -5036,6 +5051,11 @@ export class ProtocolServiceImpl implements ProtocolService {
       this.assertSessionOwnerIsActive(session);
       const publicAssetId = params.assetId ?? "bsv-mainnet";
       const internalAssetId = toInternalP2pkhAssetId(publicAssetId);
+      // 渠道按 App 来源稳定注册；同一次 Connect 连接的所有渠道共享 sessionId。
+      // 这里只建立零额度渠道，免确认额度只能由钱包设置提高。
+      const paymentOwner = await this.paymentOwner(session);
+      const paymentChannelId = params.channelId;
+      await this.deps.vault.requestPayment({action: "session-open", id: session.sessionId, owner: paymentOwner});
       const card = this.feedCommands.find((c) => c.id === rec.recordId);
       if (card) {
         card.recipientAddress = params.recipientAddress;
@@ -5045,6 +5065,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         card.updatedAt = Date.now();
       }
       const preview = await p2pkhService.prepareTransfer({
+        paymentContext: {channelId: paymentChannelId, sessionId: session.sessionId},
         assetId: internalAssetId,
         ownerPublicKeyHex,
         recipientAddress: params.recipientAddress,
@@ -5147,19 +5168,26 @@ export class ProtocolServiceImpl implements ProtocolService {
       // 行为一致，都返回同一份 owner capability。
       const resolution = await this.resolveOwnerRuntime(session);
       const clientPublicKeyHex = resolution.ownerPublicKeyHex;
-      const signDigest = async (digest: Uint8Array) => {
-        const result = await resolution.crypto.signDigest({
-          publicKeyHex: clientPublicKeyHex,
-          digest: digest.buffer.slice(digest.byteOffset, digest.byteOffset + digest.byteLength) as ArrayBuffer,
-          format: "der"
-        });
-        // P0: FeePool 路径校验回包 format 为 der
-        if (result.format !== "der") {
-          throw new Error(
-            `signDigest (FeePool) format mismatch: requested "der", got "${result.format}"`
-          );
-        }
-        return new Uint8Array(result.signature);
+      const sourceCache=new Map<string,string>();
+      const network=publicAssetId==='bsv-testnet'?'test':'main';
+      const source=async(txid:string)=>{
+        const cached=sourceCache.get(txid);if(cached)return cached;
+        const adapter=this.currentP2pkhService();
+        if(!adapter?.getRawTransaction)throw new Error('Fee pool previous transaction evidence unavailable');
+        const raw=await adapter.getRawTransaction(network,txid);sourceCache.set(txid,raw);return raw;
+      };
+      const paymentOwner=await this.paymentOwner(session);
+      const channelId=params.channelId;
+      let registered: Promise<void> | undefined;
+      const signTransaction=(stage:'fund'|'state'):FeePoolTransactionSigner=>async rawTxHex=>{
+        // 证据缺失时立即失败，不允许利用 self-reported 金额或 generic digest 绕过额度。
+        const prevTransactionHexes=await Promise.all(feePoolInputTxids(rawTxHex).map(source));
+        registered??=(async()=>{
+          await this.deps.vault.requestPayment({action:'session-open',id:session.sessionId,owner:paymentOwner});
+        })();await registered;
+        const result=await this.deps.vault.requestPayment({action:'sign-feepool',family:'connect',stage,rawTxHex,prevTransactionHexes,channelId,paymentId:crypto.randomUUID(),sessionId:session.sessionId});
+        if(!result||typeof result!=='object'||Array.isArray(result)||!Array.isArray(result.signatures)||result.signatures.some(s=>typeof s!=='string'))throw new Error('Invalid wallet fee pool response');
+        return result.signatures as string[];
       };
       const operationId = this.nextRecordId();
       const preparedAt = Date.now();
@@ -5194,13 +5222,14 @@ export class ProtocolServiceImpl implements ProtocolService {
         }
         const baseResp = await this.buildAndMaybeBuildBaseTx(
           prior,
-          signDigest,
+          signTransaction('fund'),
           clientPublicKeyHex,
           params.counterpartyPublicKeyHex,
           poolAmount,
           ownerPublicKeyHex,
           internalAssetId
         );
+        sourceCache.set(baseResp.baseTxid,baseResp.baseTxHex);
         baseTxHex = baseResp.baseTxHex;
         baseTxOutputIndex = baseResp.baseTxOutputIndex;
         draftTotalAmount = baseResp.amount;
@@ -5216,7 +5245,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         const clientSig = await sdkClientSignInitialSpendTx({
           txHex: initialDraft.txHex,
           totalAmount: draftTotalAmount,
-          signDigest,
+          signTransaction: signTransaction('state'),
           clientPublicKeyHex,
           serverPublicKeyHex: params.counterpartyPublicKeyHex
         });
@@ -5236,7 +5265,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         const clientSig = await sdkClientSignUpdatedSpendTx({
           txHex: loaded.txHex,
           sourceSatoshis: prior.totalAmount,
-          signDigest,
+          signTransaction: signTransaction('state'),
           clientPublicKeyHex,
           serverPublicKeyHex: params.counterpartyPublicKeyHex
         });
@@ -5267,7 +5296,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         const closeClientSig = await sdkClientSignUpdatedSpendTx({
           txHex: closeLoaded.txHex,
           sourceSatoshis: prior.totalAmount,
-          signDigest,
+          signTransaction: signTransaction('state'),
           clientPublicKeyHex,
           serverPublicKeyHex: params.counterpartyPublicKeyHex
         });
@@ -5275,13 +5304,14 @@ export class ProtocolServiceImpl implements ProtocolService {
         closeClientSignBytes = closeClientSig;
         const baseResp = await this.buildAndMaybeBuildBaseTx(
           prior,
-          signDigest,
+          signTransaction('fund'),
           clientPublicKeyHex,
           params.counterpartyPublicKeyHex,
           newPoolAmount,
           ownerPublicKeyHex,
           internalAssetId
         );
+        sourceCache.set(baseResp.baseTxid,baseResp.baseTxHex);
         baseTxHex = baseResp.baseTxHex;
         baseTxOutputIndex = baseResp.baseTxOutputIndex;
         draftTotalAmount = baseResp.amount;
@@ -5297,7 +5327,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         const newClientSig = await sdkClientSignInitialSpendTx({
           txHex: newInitialDraft.txHex,
           totalAmount: draftTotalAmount,
-          signDigest,
+          signTransaction: signTransaction('state'),
           clientPublicKeyHex,
           serverPublicKeyHex: params.counterpartyPublicKeyHex
         });
@@ -5311,6 +5341,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       // 四元组校验 op，禁止跨 session / 跨 owner 复用 operationId。
       this.pendingOps.set(operationId, {
         operationId,
+        channelId: params.channelId,
         origin: rec.origin,
         connectSessionId: rec.connectSessionId,
         ownerPublicKeyHex,
@@ -5399,7 +5430,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    */
   private async buildAndMaybeBuildBaseTx(
     prior: ProtocolFeePoolRecord | null,
-    signDigest: (digest: Uint8Array) => Promise<Uint8Array>,
+    signTransaction: FeePoolTransactionSigner,
     clientPublicKeyHex: string,
     serverPublicKeyHex: string,
     poolAmount: number,
@@ -5430,7 +5461,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     const resp = await sdkBuildBaseTx({
       clientUtxos: utxos.map((u) => ({ txid: u.txid, vout: u.vout, satoshis: u.value })),
-      signDigest,
+      signTransaction,
       clientPublicKeyHex,
       serverPublicKeyHex,
       feepoolAmount: poolAmount,
@@ -5471,6 +5502,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       if (op.origin !== rec.origin) {
         throw localFailure("cross_origin_operation", "operationId from a different origin");
       }
+      if (op.channelId !== params.channelId) throw localFailure("internal_error", "operationId bound to a different payment channel");
       if (op.connectSessionId !== session.sessionId) {
         throw localFailure("internal_error", "operationId from a different connect session");
       }

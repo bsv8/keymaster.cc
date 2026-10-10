@@ -1225,10 +1225,10 @@ async freezeContent(configId, markdown, options): Promise<{ seedHashHex: string;
         ...(rechecked.parentTipPrice === undefined ? {} : { parentTipPriceSatoshis: forumAmountToBigInt(rechecked.parentTipPrice) ?? 0n }),
       });
 
-      // 5. prepare 只构造并签名，不派发；这一步结束仍未产生不可逆副作用。
+      // 5. 显式 presign 产生已授权签名和持久占用，尚未广播；后续必须对账同一提交。
       //    受控无找零：输入超出固定输出的差额必须精确成为矿工费，且不超过
       //    用户确认的预算。零值输出是固定位置协议输出的一部分（索引费为 0 的 vout 0）。
-      const preview = await spend.prepare({
+      const preview = await spend.presign({
         ownerPublicKeyHex: recheckedTask.ownerPublicKeyHex,
         requestingPluginId: "forum",
         network: recheckedTask.network,

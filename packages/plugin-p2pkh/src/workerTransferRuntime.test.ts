@@ -13,6 +13,7 @@ function fixture() {
   const service = { onVaultUnlocked: vi.fn(() => startup), onVaultLocked: vi.fn(), dispose: vi.fn() };
   mocks.create.mockReturnValue(service);
   const deps: WorkerTransferDependencies = {
+    requestPayment: async () => { throw new Error("unused"); },
     assertActive: () => undefined,
     session: () => ({ owner: "owner", epoch, unlocked: true }),
     loadSettings: async () => undefined,

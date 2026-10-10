@@ -51,6 +51,7 @@ vi.mock("@keymaster/runtime", () => ({
       subscribe: () => () => {}, revision: () => 0,
       renderFrame: (slot: string, children?: ReactNode) => {
         if (slot === "storage-guard") return children;
+        if (slot === "wallet-guard") return <div data-testid="wallet-guard">{children}</div>;
         if (slot === "protocol-popup") return <div data-testid="protocol-popup">protocol</div>;
         if (slot === "unlocked-shell") return <div data-testid="unlocked-shell">unlocked</div>;
         if (slot === "wallet-entry") return <div data-testid="locked-shell">locked</div>;
@@ -75,6 +76,7 @@ vi.mock("webloom-framework/react", () => ({
       subscribe: () => () => {}, revision: () => 0,
       renderFrame: (slot: string, children?: ReactNode) => {
         if (slot === "storage-guard") return children;
+        if (slot === "wallet-guard") return <div data-testid="wallet-guard">{children}</div>;
         if (slot === "protocol-popup") return <div data-testid="protocol-popup">protocol</div>;
         if (slot === "unlocked-shell") return <div data-testid="unlocked-shell">unlocked</div>;
         if (slot === "wallet-entry") return <div data-testid="locked-shell">locked</div>;
@@ -128,6 +130,7 @@ describe("App protocol path", () => {
     setPath("/protocol/v1/popup");
     render(<App />);
     expect(screen.getByTestId("protocol-popup")).toBeTruthy();
+    expect(screen.getByTestId("wallet-guard")).toBeTruthy();
   });
 
   it("renders ProtocolPopupPage at /protocol/v1/popup when vault locked", () => {
@@ -136,6 +139,7 @@ describe("App protocol path", () => {
     render(<App />);
     // 关键：locked 状态也走协议入口，不被 LockedShell 吃掉。
     expect(screen.getByTestId("protocol-popup")).toBeTruthy();
+    expect(screen.getByTestId("wallet-guard")).toBeTruthy();
     expect(screen.queryByTestId("locked-shell")).toBeNull();
   });
 
@@ -144,6 +148,7 @@ describe("App protocol path", () => {
     setPath("/protocol/v1/popup");
     render(<App />);
     expect(screen.getByTestId("protocol-popup")).toBeTruthy();
+    expect(screen.getByTestId("wallet-guard")).toBeTruthy();
     expect(screen.queryByTestId("locked-shell")).toBeNull();
   });
 

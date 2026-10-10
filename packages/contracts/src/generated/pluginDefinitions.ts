@@ -372,6 +372,15 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "capability": {
               "kind": "local",
+              "id": "page.ui.renderer",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "迁移恢复守卫渲染受限钱包恢复入口"
+          },
+          {
+            "capability": {
+              "kind": "local",
               "id": "breadcrumb.registry",
               "version": "1"
             },
@@ -541,7 +550,8 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             "identity.get",
             "intent.sign",
             "cipher.encrypt",
-            "cipher.decrypt"
+            "cipher.decrypt",
+            "payment.channel.register"
           ]
         },
         "permissions": [],
@@ -571,7 +581,15 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
         "privateProvides": [],
         "dependencies": [],
         "permissions": [],
-        "storages": []
+        "storages": [
+          {
+            "moduleId": "vault",
+            "purposeId": "payments",
+            "authority": "platform-only",
+            "model": "files",
+            "schemaVersion": 1
+          }
+        ]
       }
     ]
   },

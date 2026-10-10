@@ -1,4 +1,6 @@
-import { useEffect, type ReactNode } from "react";
+import { useCallback, useEffect, type ReactNode } from "react";
+import {PaymentApprovalDialog} from "@keymaster/vaultlink-integration/ui";
+import {useInternalVault} from "./VaultInternalContext.js";
 import { usePluginCapability } from "webloom-framework/react";
 import { usePluginI18n, useResourceView } from "@keymaster/runtime";
 import { Button, EmptyState, PageHeader } from "@keymaster/ui";
@@ -6,6 +8,12 @@ import { VAULT_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { useVaultResources } from "./VaultResourceContext.js";
 import type { VaultKeyResourceState } from "./manifest.js";
 export type WalletGuard = { kind: "normal" } | { kind: "needs-repair"; publicKeyHex?: string } | { kind: "diagnostic"; error: string };
+function PaymentApprovals() {
+  const vault = useInternalVault();
+  const {t} = usePluginI18n();
+  const execute = useCallback((command: import("@keymaster/contracts").CoordinatorWalletPaymentCommand) => vault.payment(command), [vault]);
+  return <PaymentApprovalDialog execute={execute} text={(key,fallback)=>t(`vault.${key}`,{defaultValue:fallback})}/>;
+}
 export function VaultWalletGuard({ children, sendActivity }: { children?: ReactNode; sendActivity(): void }) {
   const resources = useVaultResources();
   const vault = usePluginCapability(VAULT_SERVICE_CAPABILITY);
@@ -21,7 +29,7 @@ export function VaultWalletGuard({ children, sendActivity }: { children?: ReactN
     return () => { for (const event of events) window.removeEventListener(event, activity); };
   }, [status, sendActivity]);
   if (!guard.data) return <p role="status">{t("common.status.loading", { defaultValue: "Loading…" })}</p>;
-  if (guard.data.kind === "normal") return <>{children}</>;
+  if (guard.data.kind === "normal") return <>{children}{status === "unlocked" ? <PaymentApprovals/> : null}</>;
   if (guard.data.kind === "diagnostic") return <div className="app-shell--diagnostic">
     <PageHeader title={t("shell.appShell.diagnostic.title", { defaultValue: "无法读取钱包 Key" })} />
     <EmptyState title={t("shell.appShell.diagnostic.errorTitle", { defaultValue: "读取失败" })} description={guard.data.error}

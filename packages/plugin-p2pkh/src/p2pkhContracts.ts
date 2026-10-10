@@ -334,6 +334,8 @@ export interface P2pkhProtocolSubmission {
  * `ownerPublicKeyHex` 是 session / caller 视角的 owner 真值，本参数
  */
 export interface P2pkhTransferInput {
+  /** 调用方注册的支付渠道；App 必须携带同一连接的会话，重试不得丢失。 */
+  paymentContext?: { channelId: string; sessionId: string | null };
   assetId: P2pkhAssetId;
   /** session / caller 视角的 owner public key hex；UTXO 选币 / 签名 key / resourceId 全按该 owner 走。 */
   ownerPublicKeyHex: string;
@@ -351,6 +353,7 @@ export interface P2pkhTransferInput {
  * 签名 key 与该 owner 一致——owner 变了就拒绝广播。
  */
 export interface P2pkhTransferPreview {
+  paymentContext?: { channelId: string; sessionId: string | null };
   assetId: P2pkhAssetId;
   network: BsvNetwork;
   ownerPublicKeyHex: string;
@@ -361,8 +364,11 @@ export interface P2pkhTransferPreview {
   changeAddress: string;
   outputs: Array<{ address: string; value: number }>;
   estimatedFeeSatoshis: number;
+  /** 签名后序列化大小上限；预览不会为了估费调用私钥。 */
   serializedSizeBytes: number;
+  /** 预览尚未签名，无最终链上 txid，固定为空；提交结果返回真实 txid。 */
   txid: string;
+  /** 未签名交易；不能用于广播，不含私钥签名。 */
   rawTxHex: string;
   /** 本次准备的内存标识；重试时用于区分每一轮提交。 */
   previewId: string;
@@ -407,6 +413,8 @@ export interface P2pkhTransactionDetail {
 
 /** P2PKH 服务契约：plugin-p2pkh 内部使用，对应 capability "p2pkh.service"。 */
 export interface P2pkhService {
+  /** 完整前序证据的链上读接口；缺失时费用池不能退回盲签摘要。 */
+  getRawTransaction?(network: "main" | "test", txid: string): Promise<string>;
   /** 全局余额只读广播；所有余额展示/offer 都从此快照取值。 */
   readonly balanceBroadcaster: BalanceBroadcaster;
   syncStatus(): P2pkhSyncStatus;

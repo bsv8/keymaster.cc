@@ -19,3 +19,19 @@ export { createWorkerAutoLock } from "./workerAutoLock.js";
 export { executeWorkerUnlock } from "./workerUnlock.js";
 
 export { createWalletStateAccess, createWalletStateSource } from "./walletStateAccess.js";
+
+// VLP 连接只供钱包协调器使用，不向普通插件暴露 USB 或盲签接口。
+export { HardwareConnectionOwner, VaultLinkHardwareBackend, vaultLinkSupport } from "@keymaster/vaultlink-integration";
+export { createHardwareChannelAdapter } from "@keymaster/vaultlink-integration";
+export { WalletPayments, HardwareWalletPayments } from "@keymaster/vaultlink-integration";
+export type { WalletContext as VaultLinkWalletContext, PaymentInput as VaultLinkPaymentInput } from "@keymaster/vaultlink-integration";
+
+export { verifyMigratedHardwareLedger } from "@keymaster/vaultlink-integration/migration";
+export { inspectWalletKeyBytes } from "./walletKeyRepository.js";
+export { createAndVerifyMigrationKeyHold } from "./migrationKeyHold.js";
+export { createMigrationJournalService, createHardwareToSoftwareMigration } from "@keymaster/vaultlink-integration/migration";
+export {WalletMigrationFence} from '@keymaster/vaultlink-integration/migration';
+
+export {verifyDeviceMigrationJournal} from '@keymaster/vaultlink-integration/migration';
+
+export {createSoftwareToHardwareMigration} from "@keymaster/vaultlink-integration/migration";
