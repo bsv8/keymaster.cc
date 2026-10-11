@@ -130,6 +130,49 @@ function isCancellation(cause: unknown): boolean {
     || (cause instanceof DOMException && cause.name === "AbortError");
 }
 
+/**
+ * 列表只显示截断的 Seed Hash；这个按钮把完整 64 位 hash 写入剪贴板，
+ * 方便粘贴到「通过 Seed 获取文件」等页面。剪贴板不可用时明确失败。
+ */
+function SeedHashCopyButton({ seedHashHex }: { seedHashHex: string }) {
+  const { t } = usePluginI18n();
+  const [result, setResult] = useState<"idle" | "copied" | "failed">("idle");
+
+  const copy = useCallback(async () => {
+    if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
+      setResult("failed");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(seedHashHex);
+      setResult("copied");
+    } catch {
+      setResult("failed");
+    }
+  }, [seedHashHex]);
+
+  useEffect(() => {
+    if (result === "idle") return undefined;
+    const timer = window.setTimeout(() => setResult("idle"), 1600);
+    return () => window.clearTimeout(timer);
+  }, [result]);
+
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      onClick={() => { void copy(); }}
+      aria-label={t("msfile.bucket.action.copySeed", { defaultValue: "复制完整 Seed Hash" })}
+    >
+      {result === "copied"
+        ? t("msfile.bucket.action.copied", { defaultValue: "已复制" })
+        : result === "failed"
+          ? t("msfile.bucket.action.copyFailed", { defaultValue: "复制失败" })
+          : t("msfile.bucket.action.copy", { defaultValue: "复制" })}
+    </Button>
+  );
+}
+
 function BucketPageUnavailable() {
   const { t } = usePluginI18n();
   return (
@@ -898,7 +941,12 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
             {
               key: "seed",
               header: t("msfile.bucket.column.seed", { defaultValue: "Seed Hash" }),
-              render: (entry) => <code title={entry.seedHashHex}>{shortHex(entry.seedHashHex)}</code>,
+              render: (entry) => (
+                <span className="msfile-bucket__seed">
+                  <code title={entry.seedHashHex}>{shortHex(entry.seedHashHex)}</code>
+                  <SeedHashCopyButton seedHashHex={entry.seedHashHex} />
+                </span>
+              ),
             },
             {
               key: "name",

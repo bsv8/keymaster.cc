@@ -106,6 +106,21 @@ describe("MsFileBucketPage", () => {
     await waitFor(() => expect(service.list).toHaveBeenCalledTimes(1));
   });
 
+  it("copies the full seed hash from the row", async () => {
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    try {
+      const service = makeService({ list: vi.fn(async () => [entryWithMeta()]) });
+      await renderPage(service);
+      await screen.findByText("abc.txt");
+      fireEvent.click(screen.getByRole("button", { name: "复制完整 Seed Hash" }));
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith(HASH));
+      await screen.findByText("已复制");
+    } finally {
+      Reflect.deleteProperty(navigator, "clipboard");
+    }
+  });
+
   it("marks a missing seed and disables content actions", async () => {
     const service = makeService({ list: vi.fn(async () => [{ ...entryWithMeta(), seedPresent: false }]) });
     await renderPage(service);
