@@ -915,8 +915,11 @@ export function createKeymasterPluginHost(
       }
       runtimeIdentity = { ...next };
       // 先撤销旧实例，再等待清理；只在新钱包/会话条件就绪后重建。
-      // 存储尚未绑定时维持 blocked，等待下一次带世代的身份事件。
-      const storageReadyForIdentity = next.walletGeneration !== undefined;
+      // Window 存储代理也提供未初始化钱包的状态与创建入口；重置后必须
+      // 在空身份下重建，否则 storage.status 和 storage-guard 会永久缺失。
+      // Worker 的数据运行时仍然需要已经绑定的钱包世代。
+      const storageReadyForIdentity = next.walletGeneration !== undefined
+        || (hostRuntime === "window-main" && next.vaultStatus === "uninitialized");
       // 全部旧实例同步围栏后才开始等待，避免新会话消费者短暂读取
       // 尚未撤销的旧会话提供方，或在提供方异步重建期间提前启动。
       await Promise.all(toSuspend.map(item => coreHost!.revoke(item.pluginId, "runtime identity changed")));
