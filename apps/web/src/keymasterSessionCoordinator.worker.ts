@@ -1958,9 +1958,12 @@ function releaseStoragePortSlot(clientId: string): void {
 function emitStorageState(): void {
   storageStateTail = storageStateTail.then(async () => {
     const runtimeStatus = storageController?.status();
-    const status: StorageRuntimeControllerStatus = storageStartupFailure
-      ? "degraded"
-      : runtimeStatus ?? (storageColdStartState?.state === "ready" ? "locked" : "uninitialized");
+    // 未完成迁移没有可写 runtime，但必须发布 corrupt 才能展示恢复入口。
+    // 不能把「runtime 不存在」解释成未初始化，也不能用旧 runtime 掩盖冷启动结论。
+    const coldStatus = coordinatorStorageStatus();
+    const status: StorageRuntimeControllerStatus = ["corrupt", "unsupported", "degraded"].includes(coldStatus)
+      ? coldStatus
+      : runtimeStatus ?? coldStatus;
     const summary = await storageController?.summary().catch(() => null) ?? null;
     const revision = storageRevision + 1;
     const state: CoordinatorStorageStateEvent = {
@@ -6171,8 +6174,6 @@ async function handleHardwareConnection(
     if (command.action === "disconnect") {
       if (hardwareConnections.state().leaseId !== command.leaseId) throw new Error("stale-usb-lease");
       await hardwareConnections.disconnect(peerId, command.leaseId);
-    } else if (command.action === "pair") {
-      hardwareConnections.answer(peerId, command.leaseId, command.allow);
     } else if(command.action==="provision"||command.action==="recover-import") {
       if(!walletStore||!walletKeys||hardwareConnections.state().status!=="disconnected")throw Error("migration-provisioning-unavailable");
       const store=walletStore,keys=walletKeys,epoch=coordinatorState.sessionEpoch,run=coordinatorState.runGeneration;
@@ -6521,7 +6522,9 @@ async function migrateHardwareToSoftware(newPassword:string):Promise<{migrationI
 
 async function migrateSoftwareToHardware(sourcePassword:string):Promise<{migrationId:string;phase:"complete";target:"hardware"}> {
   const recovery=hardwareRecoveryConnection;if(!recovery)assertActiveWalletIdentity();
-  if(!walletStore||!walletKeys||!hardwareConnections.isProvisioning()||(!recovery&&activeKeyBackend!=="software"))throw Error("software-source-required");
+  if(!walletStore||!walletKeys||(!recovery&&activeKeyBackend!=="software"))throw Error("software-source-required");
+  // 连接未验证与源钱包错误分开报告，不能把配对中的设备当作导入通道。
+  if(!hardwareConnections.isProvisioning()||hardwareConnections.state().status!=="connected")throw Error("hardware-provision-required");
   const store=walletStore,keys=walletKeys,portal=hardwareConnections.provision(),epoch=coordinatorState.sessionEpoch,run=coordinatorState.runGeneration;
   const check=()=>{if(walletStore!==store||walletKeys!==keys||coordinatorState.sessionEpoch!==epoch||coordinatorState.runGeneration!==run||hardwareConnections.provision()!==portal
     ||(recovery?hardwareRecoveryConnection!==recovery:coordinatorState.vaultStatus!=="unlocked"))throw Error("migration-session-revoked");};
@@ -7855,10 +7858,17 @@ async function initializeCoordinatorInternal(skipStorageBootstrap = false, propa
     try {
       await bootstrapWalletStorage();
     } catch (error) {
-      // IndexedDB 打不开、事务/配额失败或版本升级失败都属于 Storage 可用性
-      // 问题：Vault 保持 booting，页面可重试；不升级成 Vault fatal，也不回退
-      // 到 localStorage，更不自动清库。
-      storageStartupFailure = true;
+      // 格式错误（包括未完成迁移）保留 coldStart 结论，页面才能进入恢复。
+      // 只有数据库打开/事务等宿主故障才是 degraded；两种情况均不清库。
+      const code = error && typeof error === "object" && "code" in error
+        ? (error as { code?: unknown }).code : undefined;
+      storageStartupFailure = code !== "storage_wallet_corrupt" && code !== "storage_wallet_unsupported";
+      if (!storageStartupFailure) {
+        // 恢复连接只允许 locked；保持 booting 会让入口可见却无法连接原设备。
+        // locked 不安装业务 Root，也不恢复私钥或普通签名能力。
+        coordinatorState.vaultStatus = "locked";
+        coordinatorState.activePublicKeyHex = undefined;
+      }
       emitStorageState();
       publishSessionState("bootstrap");
       if (propagateFailure) throw error;
@@ -9504,6 +9514,15 @@ export async function __testBootstrapWalletStorage(): Promise<WalletColdStartSna
 /** 测试专用：读取当前冷启动结论；uninitialized 时也能在没有 Root 的情况下回答。 */
 export async function __testColdStart(): Promise<WalletColdStartSnapshot> {
   return await (walletLifecycle ?? requireWalletLifecycle()).coldStart();
+}
+
+/** 测试专用：保留持久化记录，重启后执行正式初始化错误处理与状态发布。 */
+export async function __testColdBootCoordinator(): Promise<CoordinatorStorageStateEvent | undefined> {
+  __testResetState();
+  discardCurrentPlatformStorageBinding();
+  await initializeCoordinator();
+  await storageStateTail;
+  return lastStorageState;
 }
 
 /**

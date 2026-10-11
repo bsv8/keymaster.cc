@@ -1261,23 +1261,24 @@ function parseVaultOperation(value: unknown): CoordinatorVaultOperation {
     case "migrationState":
       if(Object.keys(operation).length!==1)throw new TypeError("Invalid migration state request");return {type};
     case "migrateToHardware":
-
       if(Object.keys(operation).length!==2)throw new TypeError("Invalid migration request fields");
-      return {type,sourcePassword:password("sourcePassword")};
+      // 本地已经提交硬件 KeyHold 后，恢复只核实原设备与迁移回执，没有
+      // 软件密文可以再解密。允许空密码通过 DTO；是否需要解密由日志阶段决定。
+      if(typeof operation.sourcePassword!=="string"||operation.sourcePassword.length>4_096)throw new TypeError("Coordinator Vault operation.sourcePassword is invalid");
+      return {type,sourcePassword:operation.sourcePassword};
     case "migrateToSoftware":
       if(Object.keys(operation).length!==2)throw new TypeError("Invalid migration request fields");
       return {type,newPassword:password("newPassword")};
     case "hardware": {
       const command = expectRecord(operation.command, "hardware.command");
-      const action = enumValue(command.action, ["state", "attach", "recover", "recover-erased", "provision", "recover-import", "enroll", "pair", "disconnect"] as const, "hardware.action");
-      const allowed = action === "state" ? ["action"] : (action === "attach"||action === "recover"||action === "recover-erased"||action === "provision"||action === "recover-import") ? ["action", "leaseId", "port"] : action === "enroll" ? ["action", "leaseId", "port", "label"] : action === "pair" ? ["action", "leaseId", "allow"] : ["action", "leaseId"];
+      const action = enumValue(command.action, ["state", "attach", "recover", "recover-erased", "provision", "recover-import", "enroll", "disconnect"] as const, "hardware.action");
+      const allowed = action === "state" ? ["action"] : (action === "attach"||action === "recover"||action === "recover-erased"||action === "provision"||action === "recover-import") ? ["action", "leaseId", "port"] : action === "enroll" ? ["action", "leaseId", "port", "label"] : ["action", "leaseId"];
       if (Object.keys(command).length !== allowed.length || Object.keys(command).some(key => !allowed.includes(key))) throw new TypeError("Invalid hardware command fields");
       if (action === "state") return { type, command: { action } };
       const leaseId = text(command.leaseId, "hardware.leaseId", 36);
       if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(leaseId)) throw new TypeError("Invalid USB lease");
       if (action === "enroll") return {type, command: {action, leaseId, port: messagePortValue(command.port, "hardware.port"), label: text(command.label, "hardware.label", 64)}};
       if (action === "attach"||action === "recover"||action === "recover-erased"||action === "provision"||action === "recover-import") return { type, command: { action, leaseId, port: messagePortValue(command.port, "hardware.port") } };
-      if (action === "pair") return { type, command: { action, leaseId, allow: booleanValue(command.allow, "hardware.allow") } };
       return { type, command: { action, leaseId } };
     }
     case "payment": {

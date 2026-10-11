@@ -44,7 +44,8 @@ test('actual RocKey Channel interoperates bidirectionally with Channel SDK 0.6.0
   await assert.rejects(backend.signNetworkIdentity('noise',{staticKey,digest:new Uint8Array(32)}));
   await assert.rejects(backend.signNetworkIdentity('peer-record',{sequence:'1',addresses:[]}));
   const identityAbort=new AbortController();identityAbort.abort();await assert.rejects(backend.signNetworkIdentity('noise',{staticKey},identityAbort.signal),/identity-cancelled/);
-  assert.match(log,/review:identity.noise-proof/);assert.match(log,/review:identity.peer-record/);
+  assert.equal((log.match(/auto-approved:identity.noise-proof/g)??[]).length,1);
+  assert.doesNotMatch(log,/review:identity.noise-proof/);assert.match(log,/review:identity.peer-record/);
   const adapter=createHardwareChannelAdapter(()=>backend,()=>owner),now=Date.now();
   const pub=await adapter.signPublic({channel:'forum.demo',message_id:newMessageID(),issued_at_ms:now,expires_at_ms:now+60000,body:{'😀':1e-7,'漢字':0.000001,large:1e21,negative:-3.141592653589793}});
   assert.deepEqual(canonicalJson(verifyPublic(pub.channel,marshalPublic(pub)).body),canonicalJson(pub.body));

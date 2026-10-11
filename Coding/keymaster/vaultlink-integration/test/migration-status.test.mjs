@@ -38,7 +38,8 @@ test('actual RocKey encrypted endpoint returns public migration progress and blo
           assert.deepEqual(await readFile(path),Buffer.from(bank));assert.doesNotMatch(log,/review:/);
         }else {
           assert.ok((await backend.signNetworkIdentity('noise',{staticKey:new Uint8Array(32).fill(7)})).length>0);
-          assert.match(log,/review:identity.noise-proof/);
+          assert.match(log,/auto-approved:identity.noise-proof/);
+          assert.doesNotMatch(log,/review:identity.noise-proof/);
         }
         assert.deepEqual(await readFile(marker),Buffer.from(bytes));
       }finally{

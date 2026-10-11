@@ -847,6 +847,9 @@ it("migration request/result boundaries reject private material and forged recov
 it('software migration and provisioning remain strict private DTOs and target-bound results',()=>{
  const operation={type:'migrateToHardware',sourcePassword:'source-password'};
  expect(parse(COORDINATOR_RPC_CAPABILITY.request,{kind:'vault.operation',operation,expectedSessionEpoch:'epoch-1'})).toMatchObject({operation});
+ expect(parse(COORDINATOR_RPC_CAPABILITY.request,{kind:'vault.operation',operation:{...operation,sourcePassword:''},expectedSessionEpoch:'epoch-1'})).toMatchObject({operation:{sourcePassword:''}});
+ for(const sourcePassword of [undefined,null,123,'x'.repeat(4097)])expect(()=>parse(COORDINATOR_RPC_CAPABILITY.request,{kind:'vault.operation',operation:{...operation,sourcePassword},expectedSessionEpoch:'epoch-1'})).toThrow();
+ expect(()=>parse(COORDINATOR_RPC_CAPABILITY.request,{kind:'vault.operation',operation:{type:'migrateToSoftware',newPassword:''},expectedSessionEpoch:'epoch-1'})).toThrow();
  for(const extra of [{pin:'12345678'},{privateKey:new Uint8Array(32)},{approved:true}])expect(()=>parse(COORDINATOR_RPC_CAPABILITY.request,{kind:'vault.operation',operation:{...operation,...extra},expectedSessionEpoch:'epoch-1'})).toThrow();
  const request=rpcRequest('vault.operation',{operation}),migrationId='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
  expect(parseCoordinatorResponseFor(request,{ack:{status:'ok'},sessionEpoch:'epoch-2',operationResult:{migrationId,phase:'complete',target:'hardware'}})).toMatchObject({operationResult:{target:'hardware'}});

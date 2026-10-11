@@ -80,9 +80,12 @@ async function connectVerifiedHost(transport, generations, expectedPublicKey, ve
         // 未绑定只接受本次 ACK 的候选 Key；候选尚未认证，不向调用者发布。
         const identity = expectedPublicKey?.slice() ?? parseAck(ack).publicKey.slice();
         keys = await h.acceptAck(ack, identity);
+        // PAIR_CONFIRM 是展示/核对请求，不代表主机已批准。先送到设备，
+        // 否则固件等该帧才显示码、主机等用户核对码，形成相互等待。
+        await link.send(await keys.send.seal(Type.PAIR_CONFIRM, encode({ code: keys.pairingCode })));
+        // 两端都同意后才发持有权挑战；主机拒绝会关闭并擦除本次链路。
         if (!(await confirmPairing(keys.pairingCode)))
             fail("pairing-denied");
-        await link.send(await keys.send.seal(Type.PAIR_CONFIRM, encode({ code: keys.pairingCode })));
         let f = await link.read(60000); // 用户在设备核对配对码的时间，不是业务免确认授权。
         if (f.type !== Type.PAIR_OK)
             fail("bad-pair");
@@ -140,14 +143,15 @@ export async function acceptDevice(transport, key, deviceRunId, connectionId, co
             seq: 0,
             payload: encode(result.ack),
         });
-        if (!(await confirmPairing(keys.pairingCode)))
-            fail("pairing-denied");
         const pairFrame = await link.read();
         if (pairFrame.type !== Type.PAIR_CONFIRM)
             fail("bad-pair");
         const pair = object(decode(await keys.receive.open(pairFrame)), ["code"]);
         if (pair.code !== keys.pairingCode)
             fail("bad-pair");
+        // 与固件 Endpoint 一致：认证 PAIR_CONFIRM 后才打开设备核对页。
+        if (!(await confirmPairing(keys.pairingCode)))
+            fail("pairing-denied");
         await link.send(await keys.send.seal(Type.PAIR_OK, encode({ paired: true })));
         const proofFrame = await link.read();
         if (proofFrame.type !== Type.POSSESSION_PROVE)

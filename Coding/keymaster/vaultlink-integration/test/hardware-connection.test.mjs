@@ -11,7 +11,7 @@ import { HardwareConnectionOwner } from '../dist/index.js';
 
 // 实际 C++ Endpoint、真实 MessageChannel、真实配对/持有权密码学。
 // 设备上的决定仍来自公开 HostApproval 适配，不是实体按键验收。
-test('hardware connection owner: actual C++ proof, peer-scoped pairing, occupied lease, revoke and wrong key', async () => {
+test('hardware connection owner: actual C++ proof, device-only pairing, occupied lease, revoke and wrong key', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'rockey-connection-'));
   const root = process.env.ROCKEY_ROOT ?? join(fileURLToPath(new URL('../../../../../', import.meta.url)), 'Rockey');
   const prefix = process.env.VLP_MBEDTLS_PREFIX ?? '/opt/homebrew/opt/mbedtls@3';
@@ -20,7 +20,7 @@ test('hardware connection owner: actual C++ proof, peer-scoped pairing, occupied
   assert.equal(compiled.status, 0, compiled.stderr);
   const pub = '0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798';
   try {
-    for (const mode of ['allow', 'enroll', 'device-close', 'revoke', 'deny', 'wrong-key']) {
+    for (const mode of ['allow', 'enroll', 'device-close', 'revoke', 'cancel', 'wrong-key']) {
       const device = spawn(exe, [join(dir, mode)]);
       const exited = once(device, 'exit'); let stderr = '';
       device.stderr.setEncoding('utf8'); device.stderr.on('data', s => stderr += s);
@@ -51,34 +51,28 @@ test('hardware connection owner: actual C++ proof, peer-scoped pairing, occupied
       const pending = mode === 'enroll' ? owner.enroll({peerId: 'control-page', leaseId, port: channel.port2, label: 'New RocKey', walletGeneration: document.walletGeneration, signal: controller.signal, assertRecordLive() {}}) : owner.attach({ peerId: 'control-page', leaseId, port: channel.port2, document, signal: controller.signal, assertRecordLive() {} });
       const settled = pending.then(value => ({ value }), error => ({ error }));
       try {
-        if (mode === 'wrong-key') {
+        if (mode === 'revoke') controller.abort();
+        else if(mode==='cancel') await owner.disconnect('control-page',leaseId);
+        if (mode === 'wrong-key'||mode==='revoke'||mode==='cancel') {
           const result = await settled;
           assert.ok(result.error); assert.equal(owner.state().status, 'disconnected');
         } else {
-          const deadline = Date.now() + 4000;
-          while (owner.state().status !== 'pairing' && Date.now() < deadline) await new Promise(r => setTimeout(r, 5));
-          assert.equal(owner.state().status, 'pairing', stderr);
-          assert.match(owner.state().pairingCode, /^\d{6}$/);
-          assert.throws(() => owner.answer('another-page', leaseId, true), /stale-usb-pairing/);
+          // No browser answer: the real device approval/proof completes the connection.
+          const result=await settled;
+          assert.equal(result.value.status,'connected');
+          assert.equal(owner.verifiedDocument().publicKeyHex,pub);
+          assert.equal(owner.state().pairingCode,undefined);
           const duplicate = new MessageChannel();
-          await assert.rejects(owner.attach({ peerId: 'another-page', leaseId: crypto.randomUUID(), port: duplicate.port2, document, assertRecordLive() {} }), /usb-in-use/);
+          await assert.rejects(owner.attach({peerId:'another-page',leaseId:crypto.randomUUID(),port:duplicate.port2,document,assertRecordLive(){}}),/usb-in-use/);
           duplicate.port1.close();
-          assert.equal(owner.state().status, 'pairing');
-          if (mode === 'revoke') controller.abort(); else owner.answer('control-page', leaseId, mode === 'allow' || mode === 'enroll' || mode === 'device-close');
-          const result = await settled;
-          if (mode === 'allow' || mode === 'enroll' || mode === 'device-close') {
-            assert.equal(result.value.status, 'connected');
-            assert.equal(owner.verifiedDocument().publicKeyHex, pub);
-            assert.equal(owner.state().pairingCode, undefined);
-            assert.throws(() => owner.disconnect('another-page', leaseId), /stale-usb-lease/);
-            await owner.closePeer('another-page'); assert.equal(owner.state().status, 'connected');
-            if (mode === 'device-close') {
-              device.stdin.end();
-              const until = Date.now() + 2000;
-              while (owner.state().status !== 'disconnected' && Date.now() < until) await new Promise(r => setTimeout(r, 5));
-            } else await owner.closePeer('control-page');
-          } else assert.ok(result.error);
-          assert.equal(owner.state().status, 'disconnected');
+          assert.throws(()=>owner.disconnect('another-page',leaseId),/stale-usb-lease/);
+          await owner.closePeer('another-page');assert.equal(owner.state().status,'connected');
+          if(mode==='device-close'){
+            device.stdin.end();
+            const until=Date.now()+2000;
+            while(owner.state().status!=='disconnected'&&Date.now()<until)await new Promise(r=>setTimeout(r,5));
+          }else await owner.closePeer('control-page');
+          assert.equal(owner.state().status,'disconnected');
         }
       } finally {
         await owner.close(); channel.port1.close(); channel.port2.close(); device.stdin.end();

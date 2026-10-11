@@ -471,7 +471,6 @@ export type CoordinatorHardwareCommand =
   | { action: "state" }
   | { action: "attach" | "recover" | "recover-erased" | "provision" | "recover-import"; leaseId: string; port: MessagePort }
   | { action: "enroll"; leaseId: string; port: MessagePort; label: string }
-  | { action: "pair"; leaseId: string; allow: boolean }
   | { action: "disconnect"; leaseId: string };
 export interface CoordinatorHardwareState {
   status: "disconnected" | "connecting" | "pairing" | "connected";

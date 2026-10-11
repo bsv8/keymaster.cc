@@ -16,8 +16,6 @@ self.addEventListener("message", async (event: MessageEvent) => {
       value = await owner.enroll({ ...input, peerId, assertRecordLive: guard });
       payments = new HardwareWalletPayments(owner.backend(), guard);
     } else if (action === "state") value = owner.state();
-    else if (action === "pair")
-      value = owner.answer(peerId, input.leaseId, input.allow);
     else if (action === "document") value = owner.verifiedDocument();
     else if (action === "payment") {
       if (!payments) throw Error("hardware-disconnected");

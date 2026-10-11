@@ -5,13 +5,15 @@ import { openWindowUsbBridge } from "./usb-bridge.js";
 import type { HardwareConnectionState } from "./hardware-connection.js";
 
 type Command = {action: "enroll"; port: MessagePort; leaseId: string; label: string} | { action: "state" } | { action: "attach"|"recover"|"recover-erased"|"provision"|"recover-import"; port: MessagePort; leaseId: string }
-  | { action: "pair"; leaseId: string; allow: boolean } | { action: "disconnect"; leaseId: string };
-export function HardwareConnectionPanel({ execute, text, enrollmentLabel, preserveConnectionOnUnmount, recovery, erasedRecovery, provisioning }: {
+  | { action: "disconnect"; leaseId: string };
+export function HardwareConnectionPanel({ execute, text, enrollmentLabel, preserveConnectionOnUnmount, recovery, erasedRecovery, provisioning, onStateChange }: {
   execute(command: Command): Promise<HardwareConnectionState>;
   text(key: string, fallback: string): string;
   enrollmentLabel?: string;
   recovery?:boolean;
   provisioning?:boolean;
+  /** 父流程只有在设备确认配对与持有权证明完成后才能开放迁移。 */
+  onStateChange?(state: HardwareConnectionState): void;
   /** User reports the old hardware key is already erased. The Worker still
    * requires a validated local-committed journal and a separate receipt-only connection. */
   erasedRecovery?:boolean;
@@ -25,6 +27,7 @@ export function HardwareConnectionPanel({ execute, text, enrollmentLabel, preser
   const generation = useRef(0);
   const transferred = useRef(false);
   const preserve = useRef(preserveConnectionOnUnmount); preserve.current = preserveConnectionOnUnmount;
+  useEffect(() => { onStateChange?.(state); }, [state, onStateChange]);
   useEffect(() => {
     const captured = ++generation.current;
     let reading = false;
@@ -61,11 +64,6 @@ export function HardwareConnectionPanel({ execute, text, enrollmentLabel, preser
       if (generation.current === captured) setError(e instanceof Error ? e.message : String(e));
     } finally { if (generation.current === captured) setBusy(false); }
   }
-  async function decide(allow: boolean) {
-    if (!state.leaseId) return;
-    try { await execute({ action: "pair", leaseId: state.leaseId, allow }); }
-    catch (e) { setError(e instanceof Error ? e.message : String(e)); }
-  }
   async function disconnect() {
     const current = bridge.current; bridge.current = undefined;
     try { if (state.leaseId) await execute({ action: "disconnect", leaseId: state.leaseId }); }
@@ -75,9 +73,7 @@ export function HardwareConnectionPanel({ execute, text, enrollmentLabel, preser
   return <div>
     <p>{text("instructions", "先在设备上输入 PIN 解锁 RocKey，再连接 USB 并核对两端配对码。")}</p>
     {state.status === "pairing" ? <div>
-      <p>{text("pairing", "确认设备显示相同的配对码：")} <strong>{state.pairingCode}</strong></p>
-      <Button onClick={() => void decide(true)}>{text("match", "配对码相同")}</Button>
-      <Button variant="ghost" onClick={() => void decide(false)}>{text("deny", "取消")}</Button>
+      <p>{text("pairing", "核对两端配对码，在 RocKey 上长按确认：")} <strong>{state.pairingCode}</strong></p>
     </div> : state.status === "connected" ? <p role="status">{text("connected", "RocKey 已验证连接。")}</p>
       : <Button onClick={() => void connect()} loading={busy} disabled={busy || state.status !== "disconnected"}>{text("connect", "连接 RocKey")}</Button>}
     {state.leaseId ? <Button variant="ghost" onClick={() => void disconnect()}>{text("disconnect", "断开连接")}</Button> : null}

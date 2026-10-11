@@ -36,7 +36,7 @@
     "dist/requests.d.ts": "cf5e486596fe70f7cf51389e465203f4be545b6ca4269a21569f641e3ee9e8e7",
     "dist/requests.js": "b3f49cb5fafb2daa8209f651269fafe9d8db5c9ffdc7bbdd2415d032f89d4700",
     "dist/session.d.ts": "48b5e59850f649965a046d8f2e4813b987520417c739bfaff6ae1503058e5921",
-    "dist/session.js": "3038a41fdb89e778b8789c22f9eaf51fb7ce02c362b2af08324c99d73dd4f80b",
+    "dist/session.js": "8c0eff745a107ecf7e76bc73ff513f519435b088740fa6bcef69258a44dd5d44",
     "dist/standard.d.ts": "9f364bfde08f6c5fd3a92feb7a88da8c54e4573743765bed0a9606316832ce01",
     "dist/standard.js": "1a4489344f088e3d04d4e82d98f8f222acdff1751660402145d58532fa384159",
     "dist/transport.d.ts": "ca3a22832be1c30f0efe14751fe1428a1743c0b1ebc7a8b69f2ab81cad13ffeb",
@@ -58,5 +58,11 @@
     "dist/migration.js": "f80702fc4d4bf91efaf369503fd16a3836c3a22515b9d5ea1f4e448f7d4dd789",
     "dist/secret-value.js": "b0b13f4c7a6cedaa09cf6372c810d197f29d521e0e224eae4d9f1272ced55c40",
     "dist/secret-value.d.ts": "1b5a138fd71249e50fd69752876e0a579da67dd1b4ec5bab8e13d5a3cb3107ae"
+  },
+  "sourceOverrides": {
+    "reason": "配对展示请求先于浏览器人工确认；sourceCommit 之后的工作区修正",
+    "files": {
+      "src/session.ts": "c5f0c9acf5aa7870825fb50ac420bbd8d9228304a2f7e96efb39f0ceadfe9085"
+    }
   }
 }

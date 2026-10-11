@@ -24,7 +24,7 @@ test("USB 控制 RPC 不接收 PIN 或附加字段，配对决定必须为布尔
   const request = { kind: "vault.operation", expectedSessionEpoch: "current", operation: { type: "hardware", command: { action: "state" } } };
   expect(() => COORDINATOR_RPC_CAPABILITY.request.parse(request)).not.toThrow();
   expect(() => COORDINATOR_RPC_CAPABILITY.request.parse({ ...request, operation: { type: "hardware", command: { action: "state", pin: "1234" } } })).toThrow();
-  expect(() => COORDINATOR_RPC_CAPABILITY.request.parse({ ...request, operation: { type: "hardware", command: { action: "pair", leaseId: crypto.randomUUID(), allow: "yes" } } })).toThrow();
+  expect(() => COORDINATOR_RPC_CAPABILITY.request.parse({ ...request, operation: { type: "hardware", command: { action: "pair", leaseId: crypto.randomUUID(), allow: true } } })).toThrow();
 });
 
 test.each(["attach", "enroll", "attach-close"] as const)("正式 Coordinator：%s、真实 C++ 配对、独立控制面、错页面拒绝与全局锁撤销", async mode => {
@@ -88,17 +88,6 @@ test.each(["attach", "enroll", "attach-close"] as const)("正式 Coordinator：%
     });
     const pending = invoke(mode !== "enroll" ? { action: "attach", port: channel.port2, leaseId }
       : {action: "enroll", port: channel.port2, leaseId, label: "RocKey fixture"});
-    let state: CoordinatorResponse;
-    const deadline = Date.now() + 5000;
-    do {
-      state = await invoke({ action: "state" });
-      if ((state.operationResult as { status?: string })?.status === "pairing") break;
-      await new Promise(r => setTimeout(r, 10));
-    } while (Date.now() < deadline);
-    expect(state!.operationResult).toMatchObject({ status: "pairing", leaseId });
-    expect((state!.operationResult as { pairingCode: string }).pairingCode).toMatch(/^\d{6}$/u);
-    expect((await invoke({ action: "pair", leaseId, allow: true }, "another-page")).ack.status).toBe("error");
-    expect((await invoke({ action: "pair", leaseId, allow: true })).ack.status).toBe("ok");
     const attached = await pending;
     if (mode === "attach-close") {
       const deadline = Date.now() + 2000;
@@ -241,6 +230,7 @@ test.each(["attach", "enroll", "attach-close"] as const)("正式 Coordinator：%
         expect(result).toMatchObject({amount:"300",fee:"10"}); expect(result.signatures[0]).toMatch(/41$/);
       }
       expect((stderr.match(/review:tx.p2pkh-payment/g)??[]).length).toBe(1);
+      await expect.poll(()=>(stderr.match(/auto-approved:tx.p2pkh-payment/g)??[]).length).toBe(1);
       expect(await vault({type:"payment",command:{action:"pending"}})).toEqual([]);
       const sealed = await vault({type:"sealLocalSecret",scope:"storage.test",plaintext:new Uint8Array(32).fill(7)}) as Extract<import("@keymaster/contracts").CoordinatorVaultOperation,{type:"openLocalSecret"}>["sealed"];
       expect(await vault({type:"openLocalSecret",scope:"storage.test",sealed})).toEqual(new Uint8Array(32).fill(7));

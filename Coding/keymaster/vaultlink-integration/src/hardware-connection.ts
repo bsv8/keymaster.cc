@@ -21,7 +21,6 @@ export class HardwareConnectionOwner {
     erased?:ErasedMigrationConnection;
     provision?:ProvisionMigrationConnection;
     backend?: VaultLinkHardwareBackend; document?: HardwareKeyDocumentV1; state: HardwareConnectionState;
-    rejectPairing?: () => void; answerPairing?: (allow: boolean) => void;
     assertActive(): void;
   };
   private readonly hostRunGeneration = crypto.getRandomValues(new Uint32Array(1))[0]! || 1;
@@ -81,16 +80,11 @@ export class HardwareConnectionOwner {
         slot.assertActive();
         const walletGeneration = new DataView(digest.buffer).getUint32(0) || 1;
         const context = {generations: {walletGeneration, backendGeneration: record?.backendGeneration ?? 1, hostRunGeneration: this.hostRunGeneration}, assertActive: slot.assertActive};
-        const confirmPairing = (code: string): Promise<boolean> => {
+        const confirmPairing = async (code: string): Promise<boolean> => {
           slot.assertActive(); slot.state = { status: "pairing", leaseId: slot.leaseId, pairingCode: code };
-          return new Promise<boolean>(resolve => {
-            // 与设备握手期限配合；控制页关闭/锁定会提前拒绝，绝不默认同意。
-            const timer = setTimeout(() => finish(false), 20_000);
-            const finish = (allow: boolean) => {
-              clearTimeout(timer); slot.answerPairing = undefined; slot.rejectPairing = undefined; resolve(allow);
-            };
-            slot.answerPairing = finish; slot.rejectPairing = () => finish(false);
-          });
+          // 浏览器只展示核对码。这里继续握手并不完成配对：SDK 仍须等待
+          // RocKey 的人工 PAIR_OK 和持有权证明；关闭租约会中断等待。
+          return true;
         };
         let backend: VaultLinkHardwareBackend|undefined;
         if("provision" in input)slot.provision=await ProvisionMigrationConnection.connect(transport,context,confirmPairing);
@@ -118,14 +112,6 @@ export class HardwareConnectionOwner {
     }
   }
 
-  answer(peerId: string, leaseId: string, allow: boolean): HardwareConnectionState {
-    this.assertAuthority();
-    const slot = this.current;
-    if (!slot || slot.peerId !== peerId || slot.leaseId !== leaseId || !slot.answerPairing) throw new Error("stale-usb-pairing");
-    slot.assertActive(); slot.answerPairing(allow);
-    return this.state();
-  }
-
   closePeer(peerId: string): Promise<void> { return this.current?.peerId === peerId ? this.close() : Promise.resolve(); }
   disconnect(peerId: string, leaseId: string): Promise<void> {
     if (this.current?.peerId !== peerId || this.current.leaseId !== leaseId) throw new Error("stale-usb-lease");
@@ -135,7 +121,7 @@ export class HardwareConnectionOwner {
     const slot = this.current;
     if (!slot) return;
     // 先撤销，后停止 I/O；迟到验签结果不能重新装配代理。
-    this.current = undefined; slot.rejectPairing?.(); this.disconnected();
+    this.current = undefined; this.disconnected();
     await slot.backend?.close().catch(() => {});
     await slot.erased?.close().catch(()=>{});
     await slot.provision?.close().catch(()=>{});
