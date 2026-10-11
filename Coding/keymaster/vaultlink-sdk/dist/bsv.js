@@ -248,9 +248,9 @@ export class DeviceIdentityKey {
             fail("locked");
         return secp256k1.sign(digest, this.key, { prehash: false, lowS: true }).toDERRawBytes();
     }
-    async signConnectEnvelope(kind, body, signal, authorize) {
+    async signConnectEnvelope(kind, body, signal, authorize, network = "main") {
         const { inspectConnectEnvelope } = await import("./connect-envelope.js");
-        const review = await inspectConnectEnvelope(kind, structuredClone(body), this.publicKey());
+        const review = await inspectConnectEnvelope(kind, structuredClone(body), this.publicKey(), network);
         const digest = review.digest.slice();
         if (!(await authorize(structuredClone(review))))
             fail("denied");

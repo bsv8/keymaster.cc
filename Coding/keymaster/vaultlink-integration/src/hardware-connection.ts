@@ -35,7 +35,7 @@ export class HardwareConnectionOwner {
 
   provision():ProvisionMigrationConnection{const slot=this.current;if(!slot?.provision||slot.state.status!=="connected")throw Error("hardware-disconnected");slot.assertActive();return slot.provision;}
   isProvisioning():boolean{return this.current?.provision!==undefined;}
-  attachProvision(input:{peerId:string;leaseId:string;port:MessagePort;walletGeneration:string;signal?:AbortSignal;assertRecordLive():void}):Promise<HardwareConnectionState>{return this.open({...input,provision:true});}
+  attachProvision(input:{peerId:string;leaseId:string;port:MessagePort;walletGeneration:string;bsvNetwork:"main"|"test";signal?:AbortSignal;assertRecordLive():void}):Promise<HardwareConnectionState>{return this.open({...input,provision:true});}
   erased():ErasedMigrationConnection{const slot=this.current;if(!slot?.erased||slot.state.status!=="connected")throw Error("hardware-disconnected");slot.assertActive();return slot.erased;}
   isErasedRecovery():boolean{return this.current?.erased!==undefined;}
   attachErased(input:{peerId:string;leaseId:string;port:MessagePort;journal:MigrationJournal;signal?:AbortSignal;assertRecordLive():void}):Promise<HardwareConnectionState>{return this.open({...input,erasedJournal:input.journal});}
@@ -54,7 +54,7 @@ export class HardwareConnectionOwner {
     assertRecordLive(): void;
   }): Promise<HardwareConnectionState> { return this.open(input); }
   private async open(input: {peerId: string; leaseId: string; port: MessagePort; signal?: AbortSignal;
-    assertRecordLive(): void} & ({document: HardwareKeyDocumentV1} | {label: string; walletGeneration: string} | {erasedJournal:MigrationJournal} | {provision:true;walletGeneration:string})): Promise<HardwareConnectionState> {
+    assertRecordLive(): void} & ({document: HardwareKeyDocumentV1} | {label: string; walletGeneration: string} | {erasedJournal:MigrationJournal} | {provision:true;walletGeneration:string;bsvNetwork:"main"|"test"})): Promise<HardwareConnectionState> {
     let transferred = false;
     try {
       this.assertAuthority(); input.assertRecordLive();
@@ -87,15 +87,15 @@ export class HardwareConnectionOwner {
           return true;
         };
         let backend: VaultLinkHardwareBackend|undefined;
-        if("provision" in input)slot.provision=await ProvisionMigrationConnection.connect(transport,context,confirmPairing);
+        if("provision" in input)slot.provision=await ProvisionMigrationConnection.connect(transport,{...context,bsvNetwork:input.bsvNetwork},confirmPairing);
         else if("erasedJournal" in input)slot.erased=await ErasedMigrationConnection.connect(transport,{...context,journal:input.erasedJournal},confirmPairing);
-        else if (record) { backend = await VaultLinkHardwareBackend.connect(transport, {...context, publicKeyHex: record.publicKeyHex}, confirmPairing); slot.document = record; }
+        else if (record) { backend = await VaultLinkHardwareBackend.connect(transport, {...context, publicKeyHex: record.publicKeyHex,bsvNetwork:record.bsvNetwork}, confirmPairing); slot.document = record; }
         else {
           const verified = await VaultLinkHardwareBackend.enroll(transport, context, confirmPairing);
           backend = verified.backend;
           if (!("label" in input)) { await backend.close(); throw Error("invalid-enrollment"); }
           try { slot.document = validateHardwareKeyDocument({format: "keymaster.hardware-key", version: 1, backend: "vaultlink", wireVersion: 2,
-            label: input.label, walletGeneration: input.walletGeneration, backendGeneration: 1, publicKeyHex: verified.publicKeyHex}); }
+            bsvNetwork:verified.bsvNetwork,label: input.label, walletGeneration: input.walletGeneration, backendGeneration: 1, publicKeyHex: verified.publicKeyHex}); }
           catch (error) { await backend.close(); throw error; }
         }
         slot.assertActive(); slot.backend = backend;

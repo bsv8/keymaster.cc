@@ -276,6 +276,57 @@ describe("IndexedDB wallet store", () => {
     }
   });
 
+  it("rejects operations closed while awaiting a cached database connection", async () => {
+    const store = createIndexedDbWalletStore({ databaseName: uniqueDatabaseName("close-race") });
+    await store.put("contacts/saved.json", bytes("saved"));
+    const pending = Promise.allSettled([
+      store.list({ prefix: "contacts/" }),
+      store.get("contacts/saved.json"),
+      store.put("contacts/new.json", bytes("new")),
+    ]);
+    store.close();
+    for (const result of await pending) {
+      expect(result.status).toBe("rejected");
+      if (result.status === "rejected") expect(result.reason).toMatchObject({ code: "storage_unavailable" });
+    }
+  });
+
+  it("invalidates the cached connection when another client upgrades the database", async () => {
+    const databaseName = uniqueDatabaseName("external-upgrade");
+    const store = createIndexedDbWalletStore({ databaseName });
+    await store.put("contacts/saved.json", bytes("saved"));
+    const upgraded = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(databaseName, 2);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    try {
+      await expect(store.list({ prefix: "contacts/" })).rejects.toMatchObject({ code: "storage_wallet_unsupported" });
+      await expect(store.put("contacts/new.json", bytes("new"))).rejects.toMatchObject({ code: "storage_wallet_unsupported" });
+    } finally {
+      store.close();
+      upgraded.close();
+    }
+  });
+
+  it("does not recreate a deleted wallet database through an old session", async () => {
+    const databaseName = uniqueDatabaseName("external-delete");
+    const store = createIndexedDbWalletStore({ databaseName });
+    await store.put("contacts/saved.json", bytes("saved"));
+    await new Promise<void>((resolve, reject) => {
+      const request = indexedDB.deleteDatabase(databaseName);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+    try {
+      await expect(store.list({ prefix: "contacts/" })).rejects.toMatchObject({ code: "storage_unavailable" });
+      await expect(store.put("contacts/new.json", bytes("new"))).rejects.toMatchObject({ code: "storage_unavailable" });
+      expect((await indexedDB.databases()).some(database => database.name === databaseName)).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
   it("rejects a malformed cursor instead of silently restarting the list", async () => {
     const store = createIndexedDbWalletStore({ databaseName: uniqueDatabaseName("cursor-bad") });
     try {

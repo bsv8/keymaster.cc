@@ -1,3 +1,4 @@
+import { sameNetworkIdentity } from "@keymaster/contracts";
 import type { OwnerAppStorageGrant, SessionEpoch } from "@keymaster/contracts";
 import type { StorageOwnerGrant, StoragePlatformGrant } from "@keymaster/contracts/storage-internal";
 export interface StorageGrantSessionFacts {
@@ -9,7 +10,7 @@ export interface StorageGrantSessionFacts {
 }
 export interface StorageGrantAuthorityDependencies {
   session(): StorageGrantSessionFacts;
-  appSession(id: string): Promise<{ origin: string; appIdentity: OwnerAppStorageGrant["appIdentity"]; ownerPublicKeyHex: string; revokedAt: number | null } | null>;
+  appSession(id: string): Promise<{ origin: string; appIdentity: OwnerAppStorageGrant["appIdentity"]; networkIdentity: import("@keymaster/contracts").NetworkIdentity; ownerPublicKeyHex: string; revokedAt: number | null } | null>;
 }
 /** Worker-only authorization state. Grants stay tied to the issuing page and
  * wallet/session/run generation; a retained grant is never a new namespace.
@@ -49,6 +50,7 @@ export function createStorageGrantAuthority(deps: StorageGrantAuthorityDependenc
     if (apps.get(id) !== grant) throw identityError("Storage grant was revoked during session lookup");
     const facts = deps.session();
     if (!authoritative || authoritative.revokedAt !== null
+      || !authoritative.networkIdentity || !sameNetworkIdentity(authoritative.networkIdentity, grant.context)
       || authoritative.origin !== grant.context.transportOrigin
       || JSON.stringify(authoritative.appIdentity) !== JSON.stringify(grant.context.appIdentity)
       || grant.context.sessionEpoch !== facts.sessionEpoch

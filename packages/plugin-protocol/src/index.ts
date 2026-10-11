@@ -9,7 +9,7 @@ export { openProtocolStorageRepository, type ProtocolStorageStores } from "./sto
 export { PROTOCOL_STORAGE_DECLARATIONS, PROTOCOL_STORAGE_PURPOSES } from "./storage/protocolStorageDeclarations.js";
 export { ProtocolValidationError, parseRequestMessage, assertMainnetP2pkhAddress, assertCompressedPubkeyHex } from "./protocolValidation.js";
 export { cborEncode, cborDecode, type CborValue, type CborMap } from "./protocolCbor.js";
-export { sha256Bytes, signCompactSecp256k1, verifyCompactSecp256k1, deriveSiteKey, aesGcmEncrypt, aesGcmDecrypt, CIPHER_CONTEXT_V1 } from "./protocolCrypto.js";
+export { sha256Bytes, signCompactSecp256k1, verifyCompactSecp256k1, deriveSiteKey, aesGcmEncrypt, aesGcmDecrypt, CIPHER_CONTEXT_V2 } from "./protocolCrypto.js";
 export { buildClaimProjection, buildClaimProjectionFromParams, resolveClaims, resolveBuiltinClaim, type BuiltinClaimContext, type ClaimResolver, type CborProjectionEntry } from "./protocolClaims.js";
 
 export { APP_IDENTITY_DOMAIN_V1, AppIdentityValidationError, canonicalizeJson, identityDigestBytes, identityPayload, isVerifiedAppIdentitySnapshot, verifyAppIdentityProof } from "./appIdentity.js";

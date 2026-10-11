@@ -10,33 +10,34 @@ import { createMigrationJournalService, parseMigrationJournal, verifyMigratedHar
 import { validateHardwareKeyDocument } from "../src/hardware-key-record.js";
 import { WalletPayments, type PaymentChannelDTO } from "../src/wallet-payments.js";
 import { parseStoredPaymentPolicy } from "../src/policy-storage.js";
+const POLICY_PATH="main/0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798/"+WALLET_PAYMENT_POLICY_PATH;
 const encode = (x: unknown) => new TextEncoder().encode(JSON.stringify(x));
 
 async function prepare(databaseName: string) {
   const store = createIndexedDbWalletStore({ databaseName });
   const key = new Uint8Array(32); key[31] = 1;
   const repo = createWalletKeyRepository(createVaultBootstrapStorage(store).keys);
-  const source = await repo.create({ label: "保持身份", privateKeyBytes: key, password: "original-password" }); key.fill(0);
+  const source = await repo.create({bsvNetwork: "main" as const,  label: "保持身份", privateKeyBytes: key, password: "original-password" }); key.fill(0);
   const walletGeneration = crypto.randomUUID();
   const meta = { format: WALLET_META_FORMAT, version: 1, schemaVersion: WALLET_CURRENT_SCHEMA_VERSION, initialized: true, walletGeneration, createdAt: new Date().toISOString() };
   await store.put(WALLET_META_PATH, encode(meta));
   const business = encode({ contacts: [source.document.publicKeyHex], usedSatoshis: "250" });
   await store.put("contacts/existing", business);
-  const root = createPlatformRootStore({ store, generations: () => ({ walletGeneration, sessionEpoch: "migration-test", runGeneration: "migration-test" }) });
+  const root = createPlatformRootStore({identity: {bsvNetwork:"main",publicKeyHex:"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"},  store, generations: () => ({ walletGeneration, sessionEpoch: "migration-test", runGeneration: "migration-test" }) });
   const files = await root.openPlatformFileStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.vaultPayments });
-  const core = await WalletPayments.open(files, source.document.publicKeyHex, () => {}, async () => { throw new Error("This test must not sign transactions"); });
+  const core = await WalletPayments.open(files, source.document.publicKeyHex, () => {}, async () => { throw new Error("This test must not sign transactions"); }, "main");
   await core.handle({ action: "register", id: "app.main", owner: "app.example", kind: "app", network: "main", paymentType: "p2pkh" });
   const channels = await core.handle({ action: "list" }) as PaymentChannelDTO[];
   await core.handle({ action: "configure", channel: { ...channels[0]!, revision: channels[0]!.revision + 1, singleLimit: "18446744073709551615", defaultSessionLimit: "1000" } });
   await core.handle({ action: "session-open", id: "app.connection.1", owner: "app.example" });
   await core.handle({ action: "session-close", id: "app.connection.1" });
-  const storedPolicy = (await store.get(WALLET_PAYMENT_POLICY_PATH))!;
+  const storedPolicy = (await store.get(POLICY_PATH))!;
   const bank = encodePaymentPolicy(parseStoredPaymentPolicy(storedPolicy.bytes, source.document.publicKeyHex), source.document.publicKeyHex);
   const policyHash = hex(await sha256(bank));
   files.close();
   const migrationId = crypto.randomUUID();
   const service = createMigrationJournalService({ store: createVaultBootstrapStorage(store).migration, inspectKey: inspectWalletKeyBytes });
-  const target = encode({ format: "keymaster.hardware-key", version: 1, backend: "vaultlink", wireVersion: 2, label: source.document.label, publicKeyHex: source.document.publicKeyHex, walletGeneration, backendGeneration: 1 });
+  const target = encode({bsvNetwork: "main" as const,  format: "keymaster.hardware-key", version: 1, backend: "vaultlink", wireVersion: 2, label: source.document.label, publicKeyHex: source.document.publicKeyHex, walletGeneration, backendGeneration: 1 });
   return { store, repo, source, meta, business, policyHash, bank, storedPolicy, migrationId, service, target };
 }
 
@@ -62,7 +63,7 @@ test("真实 IndexedDB：迁移记录跨重启保留，设备确认之前不能�
     expect((await service.read())?.journal).toMatchObject({ phase: "local-committed", targetHash: hex(await sha256(p.target)) });
     expect((await createWalletKeyRepository(reopened).read())?.backend).toBe("hardware");
     expect((await reopened.get("contacts/existing"))?.bytes).toEqual(p.business);
-    expect((await reopened.get(WALLET_PAYMENT_POLICY_PATH))?.bytes).toEqual(p.storedPolicy.bytes);
+    expect((await reopened.get(POLICY_PATH))?.bytes).toEqual(p.storedPolicy.bytes);
     expect((await reopened.get(WALLET_META_PATH))?.bytes).toEqual(encode(p.meta));
     await service.finish(p.migrationId);
     expect((await service.read())?.journal.phase).toBe("complete");
@@ -82,14 +83,14 @@ test("真实 IndexedDB：迁移记录跨重启保留，设备确认之前不能�
     // export. The actual device PIN/export/erase flow has a separate gate.
     const privateKey = new Uint8Array(32); privateKey[31] = 1;
     try {
-      const keyHold = await createKeyHoldDocument({ label: "保持身份", privateKey }, "new-software-password");
+      const keyHold = await createKeyHoldDocument({bsvNetwork: "main" as const,  label: "保持身份", privateKey }, "new-software-password");
       await service.commitLocal(next.migrationId, new TextEncoder().encode(serializeKeyHoldDocument(keyHold)), p.bank);
       await service.finish(next.migrationId);
       const repository = createWalletKeyRepository(reopened);
       await expect(repository.unlock("original-password")).rejects.toBeDefined();
       const unlocked = await repository.unlock("new-software-password");
       expect(unlocked.privateKeyBytes).toEqual(privateKey); unlocked.privateKeyBytes.fill(0);
-      expect((await reopened.get(WALLET_PAYMENT_POLICY_PATH))?.bytes).toEqual(p.storedPolicy.bytes);
+      expect((await reopened.get(POLICY_PATH))?.bytes).toEqual(p.storedPolicy.bytes);
       expect((await reopened.get("contacts/existing"))?.bytes).toEqual(p.business);
     } finally { privateKey.fill(0); }
   } finally { reopened.close(); }

@@ -20,8 +20,8 @@ export interface GlobalBalanceSnapshot {
   /** 快照归属 owner：小写压缩公钥 hex；空串表示无 active key。 */
   publicKeyHex: string;
   /** 生成快照时的 testnet 开关；消费方以此值为准。 */
-  includeTestnet: boolean;
-  /** 网络余额表；testnet 仅在 includeTestnet=true 时出现。 */
+  bsvNetwork: "main" | "test";
+  /** 网络余额表；testnet 仅在 bsvNetwork=true 时出现。 */
   balances: Partial<Record<BalanceNetworkKey, P2pkhBalance>>;
   /** 窗口内单调递增版本；只有快照内容变化时才递增。 */
   revision: number;
@@ -39,7 +39,7 @@ export interface BalanceBroadcaster {
 export function emptyGlobalBalanceSnapshot(): GlobalBalanceSnapshot {
   return {
     publicKeyHex: "",
-    includeTestnet: false,
+    bsvNetwork: "main",
     balances: {},
     revision: 0,
   };

@@ -10,21 +10,21 @@
 //   - 钱包已有 Key 时，创建/导入入口不能覆盖它；更换身份必须先重置钱包。
 //   - 短公钥属于 UI 显示格式，由 UI 调 `formatShortPublicKey(publicKeyHex)`
 //     现算，不是 KeyRef 字段。
-//   - `address` 与 `network` 只是兼容展示字段，不是身份真值；业务插件需要
-//     地址时从 P2PKH resource 派生，网络由具体 plugin / resource 持有。
+//   - 身份根是 bsvNetwork + publicKeyHex；address 仅为身份网络派生的展示值。
 
 import { defineCapability, type LifecycleScope, type PluginConsumer } from "webloom-framework";
 import type { ActiveKeyCrypto } from "./activeKeyCrypto.js";
 import type { CoordinatorCommandResult } from "./sessionCoordinator.js";
 
-export type BsvNetwork = "main" | "test";
+import type { NetworkIdentity, BsvNetwork } from "./networkIdentity.js";
+export type { BsvNetwork, NetworkIdentity } from "./networkIdentity.js";
 
 /** 唯一钱包 Key 的公开元数据。
  *
- * `publicKeyHex` 是平台唯一身份根字段，ready 记录必填。它同时是 `key.json`
+ * `bsvNetwork + publicKeyHex` 是平台身份根，ready 记录必填。它同时是 `key.json`
  * 里的声明值与公钥派生结果，两者必须一致。
  */
-export interface KeyRef {
+export interface KeyRef extends NetworkIdentity {
   /** 平台公开身份根字段：压缩公钥 hex；ready 记录必填。 */
   publicKeyHex: string;
   /** 人类可读标签。 */
@@ -42,11 +42,7 @@ export interface KeyRef {
    * 时应从 P2PKH resource 按 `publicKeyHex + network` 派生。
    */
   address?: string;
-  /**
-   * 兼容字段：导入时推断的网络。**不是身份真值。** 网络由具体 plugin /
-   * resource 持有。
-   */
-  network?: BsvNetwork;
+
 }
 
 /** Vault 服务的唯一 typed capability 身份。 */
@@ -67,7 +63,7 @@ export const VAULT_SERVICE_CAPABILITY = defineCapability<VaultService>({
  */
 export type VaultStatus = "booting" | "uninitialized" | "locked" | "unlocked";
 
-export interface KeyIdentity {
+export interface KeyIdentity extends NetworkIdentity {
   /** 已提交的执行后端；旧软件身份省略时仍按软件处理。 */
   backend?: "software" | "hardware";
   publicKeyHex: string;
@@ -192,11 +188,11 @@ export const VAULT_WALLET_STATE_CAPABILITY = defineCapability<VaultWalletStateAc
 export function requireUnlockedWalletIdentity(snapshot: Readonly<VaultLifecycleSnapshot>): KeyIdentity {
   if (snapshot.status !== "unlocked" || !snapshot.activePublicKeyHex) throw new Error("Active key is unavailable");
   const identity = snapshot.activeKeyIdentity;
-  return identity ? { ...identity, capabilities: [...identity.capabilities] }
-    : { publicKeyHex: snapshot.activePublicKeyHex, label: "", capabilities: [], createdAt: "" };
+  if (!identity || (identity.bsvNetwork !== "main" && identity.bsvNetwork !== "test") || identity.publicKeyHex !== snapshot.activePublicKeyHex) throw new Error("Network identity is unavailable");
+  return { ...identity, capabilities: [...identity.capabilities] };
 }
 /** 同一公钥再次解锁、Worker 重启、钱包重置都属于不同会话。 */
 export function sameWalletSession(a: Readonly<VaultLifecycleSnapshot>, b: Readonly<VaultLifecycleSnapshot>): boolean {
-  return a.status === b.status && a.activePublicKeyHex === b.activePublicKeyHex
+  return a.status === b.status && a.activeKeyIdentity?.bsvNetwork === b.activeKeyIdentity?.bsvNetwork && a.activePublicKeyHex === b.activePublicKeyHex
     && a.sessionEpoch === b.sessionEpoch && a.runGeneration === b.runGeneration && a.walletGeneration === b.walletGeneration;
 }

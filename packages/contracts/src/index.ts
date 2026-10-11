@@ -9,6 +9,7 @@
 export * from "./plugin.js";
 export { capabilityDescriptor } from "webloom-framework";
 export * from "./vault.js";
+export * from "./networkIdentity.js";
 export * from "./keyImport.js";
 export * from "./transfer.js";
 export * from "./p2pkhAddress.js";

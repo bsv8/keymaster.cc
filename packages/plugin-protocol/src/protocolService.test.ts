@@ -74,7 +74,7 @@ function makeFakeOpener(): FakeWindow {
   };
 }
 
-function makeVaultStub(publicKeyHex: string): VaultService & { subscribeWalletState(handler: (snapshot: { status: "locked" | "unlocked" }) => void): () => void } {
+function makeVaultStub(publicKeyHex: string, bsvNetwork: "main" | "test" = "main"): VaultService & { subscribeWalletState(handler: (snapshot: { status: "locked" | "unlocked" }) => void): () => void } {
   // 施工单 2026-06-30 003：vault 内部 state 驱动 status() 返回；lock() /
   // unlock() 翻转后调用方（popup page vault.onStatusChange）会再调
   // `service.setVaultLockState(...)`，让 service 端的 `computeLockState()`
@@ -83,7 +83,7 @@ function makeVaultStub(publicKeyHex: string): VaultService & { subscribeWalletSt
   const listeners = new Set<(s: "locked" | "unlocked") => void>();
   const lifecycleListeners = new Set<(snapshot: { status: "locked" | "unlocked" }) => void>();
   return {
-    requestPayment: paymentRequester(TEST_PRIV_HEX),
+    requestPayment: paymentRequester(TEST_PRIV_HEX, bsvNetwork),
     status: () => (state.locked ? "locked" : "unlocked"),
     walletSnapshot: () => ({ status: state.locked ? "locked" as const : "unlocked" as const, sessionEpoch: "test-epoch", vaultLifecycleRevision: 1 }),
     subscribeWalletState: (h: (snapshot: { status: "locked" | "unlocked" }) => void) => {
@@ -98,7 +98,7 @@ function makeVaultStub(publicKeyHex: string): VaultService & { subscribeWalletSt
     // stub 按新签名接收 publicKeyHex 后返回 capability。这里 publicKeyHex
     // 形状不影响 stub 行为（fixture 都是同一把 TEST_PUB_HEX），但契约要对。
     createActiveKeyCrypto: async () => ({
-      getIdentity: () => ({
+      getIdentity: () => ({bsvNetwork: "main" as const,
         sessionId: "session-a",
         publicKeyHex: TEST_PUB_HEX,
         label: "test",
@@ -117,7 +117,7 @@ function makeVaultStub(publicKeyHex: string): VaultService & { subscribeWalletSt
       openSealed: () => null
     }),
     unlockKeymasterSession: async () => ({
-      getIdentity: () => ({
+      getIdentity: () => ({bsvNetwork: "main" as const,
         sessionId: "session-a",
         publicKeyHex: TEST_PUB_HEX,
         label: "test",
@@ -136,7 +136,7 @@ function makeVaultStub(publicKeyHex: string): VaultService & { subscribeWalletSt
       openSealed: () => null
     }),
     createAppViewSession: async () => ({
-      getIdentity: () => ({
+      getIdentity: () => ({bsvNetwork: "main" as const,
         sessionId: "session-app",
         publicKeyHex: TEST_PUB_HEX,
         label: "test",
@@ -157,7 +157,7 @@ function makeVaultStub(publicKeyHex: string): VaultService & { subscribeWalletSt
     disposeAppViewSession: () => undefined,
     disposeAllAppViewSessions: () => undefined,
     listKeys: async () => [
-      {
+      {bsvNetwork: "main" as const,
         publicKeyHex: TEST_PUB_HEX,
         label: "Key A",
         format: "generated",
@@ -207,7 +207,7 @@ function makeVaultStub(publicKeyHex: string): VaultService & { subscribeWalletSt
 // VaultWalletState stub：与 makeVaultStub 配套使用，cipher.* / connect.* 测试
 // 默认返回"单 key ready"，让 ownerPublicKeyHex 查 key 路径可以跑通。
 function makeWalletStateStub(publicKeyHex: string): VaultWalletState {
-  const identity = {
+  const identity = {bsvNetwork: "main" as const,
     publicKeyHex,
     label: "Key A",
     capabilities: ["p2pkh"],
@@ -356,7 +356,7 @@ function makeFakeMultipartUploadRepositoryWithSession(
     async putConnectSession() { /* noop */ },
     async getConnectSession(sessionId: string) {
       if (sessionId) {
-        return {
+        return {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
           sessionId,
           origin: ORIGIN,
           ownerPublicKeyHex: TEST_PUB_HEX,
@@ -403,7 +403,7 @@ function makeService(publicKeyHex = TEST_PUB_HEX, storageRepository: ProtocolSto
   let resultMessage: ProtocolResultMessage | null = null;
   const posted: ServiceHarness["posted"] = { ready: 0, result: [], closing: [] };
   const deps: ProtocolServiceDeps = {
-    vault: makeVaultStub(publicKeyHex),
+    vault: makeVaultStub(publicKeyHex, extra.walletState?.snapshot().activeKeyIdentity?.bsvNetwork ?? "main"),
     walletState: makeWalletStateStub(publicKeyHex),
     resolveOpener: () => opener as unknown as Window,
     postReady: () => {
@@ -432,7 +432,7 @@ function makeService(publicKeyHex = TEST_PUB_HEX, storageRepository: ProtocolSto
   // 用 `void` + .catch 容错：failing storageRepository 测试会抛错，吞掉即可。
   if (storageRepository) {
     const db = storageRepository as ReturnType<typeof makeFakeMultipartUploadRepository>;
-    void db.putConnectSession({
+    void db.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: publicKeyHex },
       sessionId: "sess-test",
       origin: ORIGIN,
       ownerPublicKeyHex: publicKeyHex,
@@ -442,7 +442,7 @@ function makeService(publicKeyHex = TEST_PUB_HEX, storageRepository: ProtocolSto
       lastUsedAt: Date.now(),
       revokedAt: null
     }).catch(() => undefined);
-    void db.putConnectSession({
+    void db.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: publicKeyHex },
       sessionId: "sess-fresh",
       origin: "https://fresh.example",
       ownerPublicKeyHex: publicKeyHex,
@@ -454,7 +454,7 @@ function makeService(publicKeyHex = TEST_PUB_HEX, storageRepository: ProtocolSto
     }).catch(() => undefined);
     // 切换 origin 测试常用 ORIGIN_FRESH / origin-a.example / origin-b.example / other.example。
     // 默认 seed 这些 origin 下的 sess-* session，避免每个测试单独 setup。
-    void db.putConnectSession({
+    void db.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: publicKeyHex },
       sessionId: "sess-origin-a",
       origin: "https://origin-a.example",
       ownerPublicKeyHex: publicKeyHex,
@@ -464,7 +464,7 @@ function makeService(publicKeyHex = TEST_PUB_HEX, storageRepository: ProtocolSto
       lastUsedAt: Date.now(),
       revokedAt: null
     }).catch(() => undefined);
-    void db.putConnectSession({
+    void db.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: publicKeyHex },
       sessionId: "sess-origin-b",
       origin: "https://origin-b.example",
       ownerPublicKeyHex: publicKeyHex,
@@ -474,7 +474,7 @@ function makeService(publicKeyHex = TEST_PUB_HEX, storageRepository: ProtocolSto
       lastUsedAt: Date.now(),
       revokedAt: null
     }).catch(() => undefined);
-    void db.putConnectSession({
+    void db.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: publicKeyHex },
       sessionId: "sess-other",
       origin: "https://other.example",
       ownerPublicKeyHex: publicKeyHex,
@@ -528,7 +528,7 @@ async function seedConnectSession(
   origin: string = ORIGIN
 ): Promise<void> {
   const now = Date.now();
-  await storageRepository.putConnectSession({
+  await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: ownerPublicKeyHex },
     sessionId,
     origin,
     ownerPublicKeyHex,
@@ -584,7 +584,7 @@ describe("ProtocolServiceImpl", () => {
     const { service, opener } = makeService();
     service.startSession();
     const event = makeEvent(
-      {
+      {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
         v: PROTOCOL_VERSION,
         type: "request",
         id: "req-1",
@@ -603,7 +603,7 @@ describe("ProtocolServiceImpl", () => {
     const { service, opener, getResult } = makeService();
     service.startSession();
     const event = makeEvent(
-      {
+      {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
         v: PROTOCOL_VERSION,
         type: "request",
         id: "req-2",
@@ -637,7 +637,7 @@ describe("ProtocolServiceImpl", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-3",
@@ -665,7 +665,7 @@ describe("ProtocolServiceImpl", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-id",
@@ -691,7 +691,7 @@ describe("ProtocolServiceImpl", () => {
     const decoded = cborDecode(new Uint8Array(result.identityEnvelope.bytes)) as unknown[];
     expect(Array.isArray(decoded)).toBe(true);
     const arr = decoded as unknown[];
-    expect(arr[0]).toBe(PROTOCOL_VERSION);
+    expect(arr[0]).toBe(2);
     expect(arr[1]).toBe("req-id");
     expect(arr[2]).toBe(ORIGIN);
     expect(arr[3]).toBe(1000);
@@ -719,7 +719,7 @@ describe("ProtocolServiceImpl", () => {
     const content = new TextEncoder().encode("note body");
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "enc-1",
@@ -737,7 +737,7 @@ describe("ProtocolServiceImpl", () => {
     if (!r1 || r1.ok !== true) return;
     const enc = r1.result as { nonce: { bytes: ArrayBuffer }; cipherbytes: { bytes: ArrayBuffer } };
 
-    const siteKey = deriveSiteKey(TEST_PUB_HEX, ORIGIN);
+    const siteKey = deriveSiteKey(TEST_PUB_HEX, ORIGIN, "main");
     const plain = aesGcmDecrypt(siteKey, new Uint8Array(enc.nonce.bytes), new Uint8Array(enc.cipherbytes.bytes));
     const decoded = cborDecode(plain) as unknown[];
     expect(decoded[0]).toBe(PROTOCOL_VERSION);
@@ -752,7 +752,7 @@ describe("ProtocolServiceImpl", () => {
     const content = new TextEncoder().encode("body");
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "enc-2",
@@ -777,7 +777,7 @@ describe("ProtocolServiceImpl", () => {
     const opener2 = evil.opener;
     await evil.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "dec-2",
@@ -815,7 +815,7 @@ describe("ProtocolServiceImpl", () => {
     s2.startSession();
     await s2.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-no-key",
@@ -839,7 +839,7 @@ describe("ProtocolServiceImpl", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-ok-1",
@@ -865,7 +865,7 @@ describe("ProtocolServiceImpl", () => {
 
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-A",
@@ -882,7 +882,7 @@ describe("ProtocolServiceImpl", () => {
 
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-B",
@@ -911,7 +911,7 @@ describe("ProtocolServiceImpl", () => {
     await seedConnectSession(storageRepository, "sess-concurrent", TEST_PUB_HEX);
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-first",
@@ -933,7 +933,7 @@ describe("ProtocolServiceImpl", () => {
     await new Promise((r) => setTimeout(r, 2));
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-second",
@@ -971,7 +971,7 @@ describe("ProtocolServiceImpl", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-A",
@@ -985,7 +985,7 @@ describe("ProtocolServiceImpl", () => {
     await new Promise((r) => setTimeout(r, 2));
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-B",
@@ -1026,7 +1026,7 @@ describe("ProtocolServiceImpl", () => {
     // **必须**是内存活卡的 phase（confirming），不是 DB 旧的（approved）。
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "live-confirming",
@@ -1065,7 +1065,7 @@ describe("ProtocolServiceImpl", () => {
     // 触发另一次同 origin 的 request：acceptRequest 会触发 loadHistoryForOrigin。
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "live-other",
@@ -1092,7 +1092,7 @@ describe("ProtocolServiceImpl", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "persist-after-terminal",
@@ -1144,7 +1144,7 @@ describe("ProtocolServiceImpl", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fresh-live",
@@ -1222,7 +1222,7 @@ describe("ProtocolServiceImpl", () => {
           else if (sessionId === "sess-origin-b") origin = "https://origin-b.example";
           else if (sessionId === "sess-other") origin = "https://other.example";
           else if (sessionId === "sess-fresh") origin = "https://fresh.example";
-          return {
+          return {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
             sessionId,
             origin,
             ownerPublicKeyHex: TEST_PUB_HEX,
@@ -1248,7 +1248,7 @@ describe("ProtocolServiceImpl", () => {
     // 第一条 request 来自 origin-a：触发 loadHistoryForOrigin（挂住）。
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "from-a",
@@ -1267,7 +1267,7 @@ describe("ProtocolServiceImpl", () => {
     // 切换到 origin-b：第二条 request 触发新一轮 loadHistoryForOrigin（同步返回）。
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "from-b",
@@ -1357,7 +1357,7 @@ describe("ProtocolServiceImpl", () => {
           else if (sessionId === "sess-origin-b") origin = "https://origin-b.example";
           else if (sessionId === "sess-other") origin = "https://other.example";
           else if (sessionId === "sess-fresh") origin = "https://fresh.example";
-          return {
+          return {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
             sessionId,
             origin,
             ownerPublicKeyHex: TEST_PUB_HEX,
@@ -1383,7 +1383,7 @@ describe("ProtocolServiceImpl", () => {
     // 第一条 request 来自 origin-a:触发 in-flight load (挂住)。
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "from-a",
@@ -1400,7 +1400,7 @@ describe("ProtocolServiceImpl", () => {
     // 旧 origin 的 in-flight。
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "from-b",
@@ -1416,7 +1416,7 @@ describe("ProtocolServiceImpl", () => {
     // 同一 origin 不再发起重复读取:连发两条 from-b 也只调一次 listB。
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "from-b2",
@@ -1445,7 +1445,7 @@ describe("ProtocolServiceImpl", () => {
     // 在 origin-a 处理一条 request 并 confirm,使其进入终态 (approved)。
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "from-a",
@@ -1465,7 +1465,7 @@ describe("ProtocolServiceImpl", () => {
     // 切换到 origin-b：新 origin 的第一条 request 触发切 origin。
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "from-b",
@@ -1502,7 +1502,7 @@ describe("ProtocolServiceImpl", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "from-a",
@@ -1518,7 +1518,7 @@ describe("ProtocolServiceImpl", () => {
     // 切到 origin-b
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "from-b",
@@ -1533,7 +1533,7 @@ describe("ProtocolServiceImpl", () => {
     // 再切回 origin-a:旧 origin 的内存 record 仍在 requestsByRecordId。
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "from-a-2",
@@ -1568,8 +1568,8 @@ describe("ProtocolServiceImpl", () => {
     let currentActiveKey = initialOwner;
     const dynamicWalletState = {
       ...makeWalletStateStub(initialOwner),
-      snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: currentActiveKey }))(), () => ({
-        publicKeyHex: "k1",
+      snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: currentActiveKey }))(), () => ({bsvNetwork: "main" as const,
+        publicKeyHex: currentActiveKey,
         label: "Key A",
         capabilities: ["p2pkh"],
         createdAt: new Date().toISOString()
@@ -1584,7 +1584,7 @@ describe("ProtocolServiceImpl", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: initialOwner },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-key1",
@@ -1627,7 +1627,7 @@ describe("ProtocolServiceImpl", () => {
     nonce2[0] = 1;
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "dec-1",
@@ -1647,7 +1647,7 @@ describe("ProtocolServiceImpl", () => {
     await new Promise((r) => setTimeout(r, 2));
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "dec-2",
@@ -1682,7 +1682,7 @@ describe("ProtocolServiceImpl", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "r-A",
@@ -1696,7 +1696,7 @@ describe("ProtocolServiceImpl", () => {
     await new Promise((r) => setTimeout(r, 2));
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "r-B",
@@ -1730,7 +1730,7 @@ describe("ProtocolServiceImpl", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-origin-A",
@@ -1769,7 +1769,7 @@ describe("ProtocolServiceImpl", () => {
     // 切换 origin：再来一条来自 OTHER 的 request。
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-origin-B",
@@ -1794,7 +1794,7 @@ describe("ProtocolServiceImpl", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-close-1",
@@ -1831,7 +1831,7 @@ describe("ProtocolServiceImpl", () => {
     s2.startSession();
     await s2.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-closing-fail",
@@ -1911,7 +1911,7 @@ describe("ProtocolServiceImpl", () => {
       service.startSession();
       await service.handleMessage(
         makeEvent(
-          {
+          {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
             v: PROTOCOL_VERSION,
             type: "request",
             id: "req-db-fail",
@@ -1941,7 +1941,7 @@ describe("ProtocolServiceImpl", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "duplicated-request-id",
@@ -1960,7 +1960,7 @@ describe("ProtocolServiceImpl", () => {
     // 复用同一 requestId：DB 应有两条不同记录。
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "duplicated-request-id",
@@ -1995,7 +1995,7 @@ describe("ProtocolServiceImpl", () => {
       service.startSession();
       await service.handleMessage(
         makeEvent(
-          {
+          {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
             v: PROTOCOL_VERSION,
             type: "request",
             id: "req-command-history-write-fail",
@@ -2028,7 +2028,7 @@ describe("ProtocolServiceImpl", () => {
       }
     });
     const { service } = makeService(TEST_PUB_HEX, repository);
-    const session: ConnectSessionRecord = {
+    const session: ConnectSessionRecord = {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-last-used-write-fail",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -2077,7 +2077,7 @@ describe("ProtocolServiceImpl", () => {
     const OTHER = "https://other.example";
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-OTHER",
@@ -2145,7 +2145,7 @@ describe("ProtocolServiceImpl", () => {
           else if (sessionId === "sess-other") origin = "https://other.example";
           else if (sessionId === "sess-fresh") origin = "https://fresh.example";
           else if (sessionId === "sess-keep") origin = "https://new.example";
-          return {
+          return {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
             sessionId,
             origin,
             ownerPublicKeyHex: TEST_PUB_HEX,
@@ -2174,7 +2174,7 @@ describe("ProtocolServiceImpl", () => {
       const NEW_ORIGIN = "https://new.example";
       await service.handleMessage(
         makeEvent(
-          {
+          {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
             v: PROTOCOL_VERSION,
             type: "request",
             id: "req-keep",
@@ -2210,6 +2210,7 @@ describe("ProtocolServiceImpl", () => {
 
   function makeP2pkhServiceStub() {
     return {
+      isAssetEnabled: (assetId: string) => assetId === "bsv",
       async listUtxos() {
         return [{ txid: "00".repeat(32), vout: 0, value: 100000 }];
       },
@@ -2256,7 +2257,7 @@ describe("ProtocolServiceImpl", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "p2pkh-manual",
@@ -2305,7 +2306,7 @@ describe("ProtocolServiceImpl", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "p2pkh-auto",
@@ -2337,6 +2338,7 @@ describe("ProtocolServiceImpl", () => {
 
   it("p2pkh insufficient balance: site receives user_rejected, opener messages hide balance", async () => {
     const p2pkhStub = {
+      isAssetEnabled: (assetId: string) => assetId === "bsv",
       async listUtxos() {
         return [{ txid: "00".repeat(32), vout: 0, value: 100000 }];
       },
@@ -2355,7 +2357,7 @@ describe("ProtocolServiceImpl", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "p2pkh-insufficient",
@@ -2395,7 +2397,7 @@ describe("ProtocolServiceImpl", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "p2pkh-bad-addr",
@@ -2416,7 +2418,7 @@ describe("ProtocolServiceImpl", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "p2pkh-bad-amt",
@@ -2477,7 +2479,7 @@ describe("ProtocolServiceImpl", () => {
     let resultMessage: ProtocolResultMessage | null = null;
     const fakeStorage = makeFakeMultipartUploadRepository();
     // 施工单 2026-06-28 002 硬切换：feepool.* 业务方法也需要 connectSessionId。
-    await fakeStorage.putConnectSession({
+    await fakeStorage.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-test",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -2550,7 +2552,7 @@ describe("ProtocolServiceImpl", () => {
     h.service.startSession();
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fp-create",
@@ -2598,7 +2600,7 @@ describe("ProtocolServiceImpl", () => {
     h.service.startSession();
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fp-overflow",
@@ -2628,7 +2630,7 @@ describe("ProtocolServiceImpl", () => {
     h.service.startSession();
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fp-create-noconf",
@@ -2678,7 +2680,7 @@ describe("ProtocolServiceImpl", () => {
     h.service.startSession();
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fp-spend",
@@ -2736,7 +2738,7 @@ describe("ProtocolServiceImpl", () => {
     h.service.startSession();
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fp-cnr",
@@ -2783,7 +2785,7 @@ describe("ProtocolServiceImpl", () => {
     h.service.startSession();
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fp-commit-create",
@@ -2805,7 +2807,7 @@ describe("ProtocolServiceImpl", () => {
     const opId = (preparedResult.result as { operationId: string }).operationId;
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fp-commit",
@@ -2852,7 +2854,7 @@ describe("ProtocolServiceImpl", () => {
     h.service.startSession();
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fp-unknown",
@@ -2887,7 +2889,7 @@ describe("ProtocolServiceImpl", () => {
     h.service.startSession();
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fp-cross-prep",
@@ -2908,7 +2910,7 @@ describe("ProtocolServiceImpl", () => {
     const EVIL = "https://evil.example";
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fp-cross-commit",
@@ -2959,7 +2961,7 @@ describe("ProtocolServiceImpl", () => {
     h.service.startSession();
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fp-autosign",
@@ -2999,7 +3001,7 @@ describe("ProtocolServiceImpl", () => {
     h.service.startSession();
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fp-prepare",
@@ -3022,7 +3024,7 @@ describe("ProtocolServiceImpl", () => {
     // 在 op 还在 pendingOps 里的时候发出 commit（auto-sign 内联）：
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fp-commit-autosign",
@@ -3074,7 +3076,7 @@ describe("ProtocolServiceImpl", () => {
     h.service.startSession();
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fe-v4-1",
@@ -3094,7 +3096,7 @@ describe("ProtocolServiceImpl", () => {
     const opId = (prep.result as { operationId: string }).operationId;
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fe-v4-1c",
@@ -3130,7 +3132,7 @@ describe("ProtocolServiceImpl", () => {
 
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fe-v4-2a",
@@ -3146,7 +3148,7 @@ describe("ProtocolServiceImpl", () => {
     let opId = (h.lastResult() as unknown as { ok: true; result: { operationId: string } }).result.operationId;
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fe-v4-2ac",
@@ -3169,7 +3171,7 @@ describe("ProtocolServiceImpl", () => {
 
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fe-v4-2b",
@@ -3185,7 +3187,7 @@ describe("ProtocolServiceImpl", () => {
     opId = (h.lastResult() as unknown as { ok: true; result: { operationId: string } }).result.operationId;
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fe-v4-2bc",
@@ -3235,7 +3237,7 @@ describe("ProtocolServiceImpl", () => {
     h.service.startSession();
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fe-v4-3",
@@ -3255,7 +3257,7 @@ describe("ProtocolServiceImpl", () => {
     const opId = (prep.result as { operationId: string }).operationId;
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fe-v4-3c",
@@ -3311,7 +3313,7 @@ describe("ProtocolServiceImpl", () => {
     h.service.startSession();
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fe-v5-close",
@@ -3331,7 +3333,7 @@ describe("ProtocolServiceImpl", () => {
     const opId = (prep.result as { operationId: string }).operationId;
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fe-v5-close-c",
@@ -3369,7 +3371,7 @@ describe("ProtocolServiceImpl", () => {
     h.service.startSession();
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fe-v4-4",
@@ -3385,7 +3387,7 @@ describe("ProtocolServiceImpl", () => {
     const opId = (h.lastResult() as unknown as { ok: true; result: { operationId: string } }).result.operationId;
     await h.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fe-v4-4c",
@@ -3464,7 +3466,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
           else if (sessionId === "sess-origin-b") origin = "https://origin-b.example";
           else if (sessionId === "sess-other") origin = "https://other.example";
           else if (sessionId === "sess-fresh") origin = "https://fresh.example";
-          return {
+          return {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
             sessionId,
             origin,
             ownerPublicKeyHex: TEST_PUB_HEX,
@@ -3555,7 +3557,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "id-auto-sync",
@@ -3591,7 +3593,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     service.startSession();
     await seedConnectSession(storageRepository, "sess-enc-auto", TEST_PUB_HEX);
     // 重写 seed 后的 session 的 origin 为 ORIGIN_FRESH，避免 invalid_origin。
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-enc-auto",
       origin: ORIGIN_FRESH,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -3603,7 +3605,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     });
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "enc-auto-sync",
@@ -3640,7 +3642,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     service.startSession();
     // cipher.* 现在强制要求 connectSessionId；为这条 auto-approve 测试
     // 预先 seed 一条 ORIGIN_FRESH 下的 session。
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-dec-auto",
       origin: ORIGIN_FRESH,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -3653,7 +3655,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     // 先发 encrypt 拿到 nonce / cipherbytes。
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "enc-pre",
@@ -3675,7 +3677,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     // 重新发起 decrypt(同 origin cache 命中)。
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "dec-auto-sync",
@@ -3712,7 +3714,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     // 是 "phase 永远不在 confirming 出现过",UI 不会闪 confirm 浮层)。
     await second.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "id-fresh",
@@ -3739,7 +3741,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "id-empty-db",
@@ -3788,7 +3790,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "id-locked",
@@ -3815,7 +3817,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "id-no-db",
@@ -3845,7 +3847,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "sign-1",
@@ -3886,7 +3888,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     // aud 故意写错 → executeIdentityGet 内部 throw protocolError("invalid_origin", ...)。
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "id-aud-bad",
@@ -3940,7 +3942,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     });
     service.startSession();
     // cipher.* 现在强制要求 connectSessionId；预先 seed 一条 ORIGIN_FRESH 下的 session。
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-dec-bad",
       origin: ORIGIN_FRESH,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -3953,7 +3955,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     // 故意用非法 nonce / cipherbytes → executeCipherDecrypt 内部 throw protocolError("decrypt_failed", ...)。
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "dec-bad",
@@ -3993,7 +3995,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
       const storageRepository = makeFakeMultipartUploadRepository();
       const { service, opener, getResult } = makeService(TEST_PUB_HEX, storageRepository, { appCatalogResolver: resolver });
       service.startSession();
-      await service.handleMessage(makeEvent({ v: PROTOCOL_VERSION, type: "request", id: "login-gate", method: "connect.login", params: { text: "login" } }, ORIGIN, opener));
+      await service.handleMessage(makeEvent({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },  v: PROTOCOL_VERSION, type: "request", id: "login-gate", method: "connect.login", params: { text: "login" } }, ORIGIN, opener));
       const view = service.connectLoginRecord();
       expect(view).not.toBeNull();
       await service.confirmConnectLogin(view!.recordId, TEST_PUB_HEX, "pw");
@@ -4009,7 +4011,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
       storageController: { status: () => "unconfigured" } as never
     });
     service.startSession();
-    await service.handleMessage(makeEvent({ v: PROTOCOL_VERSION, type: "request", id: "login-storage-gate", method: "connect.login", params: { text: "login", appIdentity: STORAGE_PROOF } }, ORIGIN, opener));
+    await service.handleMessage(makeEvent({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },  v: PROTOCOL_VERSION, type: "request", id: "login-storage-gate", method: "connect.login", params: { text: "login", appIdentity: STORAGE_PROOF } }, ORIGIN, opener));
     const view = service.connectLoginRecord();
     await service.confirmConnectLogin(view!.recordId, TEST_PUB_HEX, "pw");
     await new Promise((r) => setTimeout(r, 30));
@@ -4024,7 +4026,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "login-1",
@@ -4065,7 +4067,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "login-a",
@@ -4078,7 +4080,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     );
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "login-b",
@@ -4092,7 +4094,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     // 有效 resume 只应当收掉同 origin 的 login-b，不影响 origin-a 的 login-a。
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "resume-b",
@@ -4112,7 +4114,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     // 再切回 origin-a，确认 login-a 仍然存在且未被误伤。
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "probe-a",
@@ -4137,7 +4139,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     const { service, opener, getResult, storageRepository } = makeService();
     service.startSession();
     const sessionId = "sess-resume-1";
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId,
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -4149,7 +4151,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     });
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "resume-1",
@@ -4184,7 +4186,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     deps.vault.status = () => "locked" as const;
     service.startSession();
     const sessionId = "sess-resume-locked";
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId,
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -4196,7 +4198,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     });
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "resume-locked",
@@ -4231,7 +4233,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     const { service, opener, getResult, storageRepository } = makeService();
     service.startSession();
     const sessionId = "sess-revoked";
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId,
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -4244,7 +4246,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     });
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "resume-revoked",
@@ -4279,7 +4281,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     deps.vault.status = () => "locked" as const;
     service.startSession();
     const sessionId = "sess-revoked-locked";
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId,
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -4292,7 +4294,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     });
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "resume-revoked-locked",
@@ -4342,7 +4344,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     });
     service.startSession();
     const sessionId = "sess-logout-1";
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId,
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -4354,7 +4356,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     });
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "logout-1",
@@ -4401,7 +4403,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     }) as typeof deps.vault.lock;
     service.startSession();
     const sessionId = "sess-logout-lockfail";
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId,
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -4413,7 +4415,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     });
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "logout-lockfail",
@@ -4452,7 +4454,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     const content = new TextEncoder().encode("body");
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "cipher-no-session",
@@ -4467,7 +4469,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     // request 也不会建 record。snapshot 应保持 waiting。
     await new Promise((r) => setTimeout(r, 10));
     expect(service.snapshot().phase).toBe("waiting");
-    expect(getResult()).toBeNull();
+    expect(getResult()).toMatchObject({ok:false,error:{code:"invalid_request"}});
   });
 
   it("cipher.decrypt：sessionId 不存在 → fail-fast（不进 confirming）", async () => {
@@ -4477,7 +4479,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "cipher-no-exist",
@@ -4515,7 +4517,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "cipher-no-exist-locked",
@@ -4551,7 +4553,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     service.startSession();
     const EVIL = "https://evil.com";
     // 把 session 真值的 origin 写成 EVIL，但 event.origin 是 ORIGIN。
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-cross",
       origin: EVIL,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -4563,7 +4565,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     });
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "cipher-cross",
@@ -4593,7 +4595,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     const { service, opener, getResult, storageRepository } = makeService();
     service.startSession();
     const sessionId = "sess-deleted-key";
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "02" + "11".repeat(32) },
       sessionId,
       origin: ORIGIN,
       // ownerPublicKeyHex 用 fake stub 不会识别的值（getKey 返回 undefined）。
@@ -4606,7 +4608,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     });
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "resume-deleted",
@@ -4636,7 +4638,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     service.startSession();
     const sessionId = "sess-stable";
     // session 绑定的 ownerPublicKeyHex === TEST_PUB_HEX（key1）。
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId,
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -4649,7 +4651,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     const content = new TextEncoder().encode("note body");
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "enc-stable",
@@ -4671,7 +4673,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     if (!r || r.ok !== true) return;
     const enc = r.result as { nonce: { bytes: ArrayBuffer }; cipherbytes: { bytes: ArrayBuffer } };
     // 解密方用 session 绑定 key 的 siteKey 派生，必须能解出原文。
-    const siteKey = deriveSiteKey(TEST_PUB_HEX, ORIGIN);
+    const siteKey = deriveSiteKey(TEST_PUB_HEX, ORIGIN, "main");
     const plain = aesGcmDecrypt(siteKey, new Uint8Array(enc.nonce.bytes), new Uint8Array(enc.cipherbytes.bytes));
     const decoded = cborDecode(plain) as unknown[];
     expect(new TextDecoder().decode(decoded[2] as Uint8Array)).toBe("note body");
@@ -4682,7 +4684,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     const { service, opener, getResult, storageRepository } = makeService();
     service.startSession();
     const sessionId = "sess-then-logout";
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId,
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -4695,7 +4697,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     // 1. logout
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "logout-x",
@@ -4711,7 +4713,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     // 2. 立即 resume：fail-fast（不接受 revoke 后再 resume）。
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "resume-x",
@@ -4763,7 +4765,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-cancel-1",
@@ -4811,7 +4813,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-cancel-2",
@@ -4845,7 +4847,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-cancel-3",
@@ -4901,7 +4903,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     expect(service.confirmDeadlineMs()).toBeNull();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-deadline",
@@ -4946,7 +4948,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     second.service.startSession();
     await second.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-fresh-timeout",
@@ -4994,7 +4996,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     second.service.startSession();
     await second.service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-no-extend",
@@ -5045,7 +5047,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
       // 是测"DB 慢但不阻塞 timer 启动"的边界。
       async getConnectSession(sessionId: string) {
         if (sessionId) {
-          return {
+          return {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
             sessionId,
             origin: ORIGIN,
             ownerPublicKeyHex: TEST_PUB_HEX,
@@ -5068,7 +5070,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-slow",
@@ -5119,7 +5121,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
       // 施工单 2026-06-28 002 硬切换：sess-test 返回 valid session。
       async getConnectSession(sessionId: string) {
         if (sessionId) {
-          return {
+          return {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
             sessionId,
             origin: ORIGIN,
             ownerPublicKeyHex: TEST_PUB_HEX,
@@ -5143,7 +5145,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     const phaseStartMs = Date.now();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-slow-clamp",
@@ -5217,7 +5219,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
       // 让 timer 逻辑生效。
       async getConnectSession(id: string) {
         if (id === "sess-test") {
-          return {
+          return {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
             sessionId: "sess-test",
             origin: ORIGIN,
             ownerPublicKeyHex: TEST_PUB_HEX,
@@ -5241,7 +5243,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
       service.startSession();
       await service.handleMessage(
         makeEvent(
-          {
+          {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
             v: PROTOCOL_VERSION,
             type: "request",
             id: "req-late-clamp",
@@ -5317,7 +5319,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-default-timeout",
@@ -5349,7 +5351,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-cfg-timeout",
@@ -5378,7 +5380,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-timeout",
@@ -5420,7 +5422,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-race",
@@ -5470,7 +5472,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-confirm-race",
@@ -5496,7 +5498,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-end",
@@ -5542,7 +5544,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     await service.setOriginSettings(currentOriginConfig!);
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-no-hot-update",
@@ -5605,6 +5607,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
 
   function makeP2pkhServiceStub002() {
     return {
+      isAssetEnabled: (assetId: string) => assetId === "bsv",
       async listUtxos() {
         return [{ txid: "00".repeat(32), vout: 0, value: 100000 }];
       },
@@ -5656,7 +5659,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
       const { service, opener } = makeService();
       service.startSession();
       const event = makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: `no-session-${method}`,
@@ -5717,7 +5720,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
       const { service, opener } = makeService();
       service.startSession();
       const event = makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: `no-session-${method}`,
@@ -5768,7 +5771,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "no-session",
@@ -5795,7 +5798,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
 
   it("session 已 revoke → fail-fast：feepool.prepare 不进 confirming", async () => {
     const { service, opener, storageRepository } = makeService();
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-revoked",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -5809,7 +5812,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fp-revoked",
@@ -5832,7 +5835,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
 
   it("session origin 不匹配 → fail-fast：cipher.decrypt 不进 confirming", async () => {
     const { service, opener, storageRepository } = makeService();
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-cross",
       origin: "https://evil.com",
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -5845,7 +5848,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "dec-cross",
@@ -5874,6 +5877,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     const prepareTransfer = vi.fn(makeP2pkhServiceStub002().prepareTransfer);
     const submitTransfer = vi.fn(makeP2pkhServiceStub002().submitTransfer);
     const p2pkh = {
+      isAssetEnabled: (assetId: string) => assetId === "bsv",
       listUtxos: vi.fn(async () => [{ txid: "00".repeat(32), vout: 0, value: 100000 }]),
       prepareTransfer,
       submitTransfer
@@ -5881,7 +5885,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     const otherActive = "02" + "cc".repeat(32);
     const otherWalletState: VaultWalletState = {
       ...makeWalletStateStub(otherActive),
-      snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: otherActive }))(), () => ({
+      snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: otherActive }))(), () => ({bsvNetwork: "main" as const,
         publicKeyHex: otherActive,
         label: "C",
         capabilities: ["p2pkh"],
@@ -5894,7 +5898,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
       p2pkhService: p2pkh as never,
       walletState: otherWalletState
     });
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-mismatch",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -5907,7 +5911,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "p2pkh-mismatch",
@@ -5943,7 +5947,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     const otherActive = "02" + "dd".repeat(32);
     const otherWalletState: VaultWalletState = {
       ...makeWalletStateStub(otherActive),
-      snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: otherActive }))(), () => ({
+      snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: otherActive }))(), () => ({bsvNetwork: "main" as const,
         publicKeyHex: otherActive,
         label: "D",
         capabilities: ["p2pkh"],
@@ -5952,13 +5956,14 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
 
     };
     const p2pkh = {
+      isAssetEnabled: (assetId: string) => assetId === "bsv",
       listUtxos: vi.fn(async () => [{ txid: "00".repeat(32), vout: 0, value: 100000 }])
     };
     const { service, opener, storageRepository } = makeService(otherActive, undefined, {
       p2pkhService: p2pkh as never,
       walletState: otherWalletState
     });
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-fp-mismatch",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -5971,7 +5976,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fp-mismatch",
@@ -6004,7 +6009,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     const { service, opener, storageRepository } = makeService(TEST_PUB_HEX, undefined, {
       p2pkhService: p2pkh as never
     });
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-stable",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -6017,7 +6022,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "p2pkh-stable",
@@ -6035,7 +6040,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     await service.confirmByUser();
     await new Promise((res) => setTimeout(res, 30));
     const card = service.feedSnapshot().commands.find((c) => c.requestId === "p2pkh-stable");
-    expect(card?.decision).toBe("approved");
+    await vi.waitFor(()=>expect(service.feedSnapshot().commands.find(c=>c.requestId==="p2pkh-stable")?.decision).toBe("approved"));
     expect(card?.ownerPublicKeyHex).toBe(TEST_PUB_HEX);
     expect(card?.connectSessionId).toBe("sess-stable");
   });
@@ -6045,7 +6050,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     const { service, opener, storageRepository } = makeService(TEST_PUB_HEX, undefined, {
       getP2pkhService: () => p2pkh as never
     });
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-late-p2pkh",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -6061,7 +6066,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     p2pkh = makeP2pkhServiceStub002();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "p2pkh-late-capability",
@@ -6100,7 +6105,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     const { service, opener, getResult, storageRepository } = makeService(TEST_PUB_HEX, undefined, {
       p2pkhService: p2pkh as never
     });
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-asset-off",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -6113,7 +6118,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "p2pkh-testnet-off",
@@ -6134,10 +6139,9 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     const r = getResult();
     expect(r?.ok).toBe(false);
     if (r && !r.ok) expect(r.error.code).toBe("asset_not_enabled");
-    expect(assetQueries).toEqual(["bsvtest"]);
+    expect(assetQueries).toEqual([]);
     const card = service.feedSnapshot().commands.find((c) => c.requestId === "p2pkh-testnet-off");
-    expect(card?.errorCode).toBe("asset_not_enabled");
-    expect(card?.decision).toBe("failed");
+    expect(card).toBeUndefined();
     // fail-fast 不进 confirming。
     expect(service.snapshot().phase).toBe("waiting");
   });
@@ -6184,9 +6188,10 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
       }
     };
     const { service, opener, getResult, storageRepository } = makeService(TEST_PUB_HEX, undefined, {
-      p2pkhService: p2pkh as never
+      p2pkhService: p2pkh as never,
+      walletState: {...makeWalletStateStub(TEST_PUB_HEX), snapshot:()=>({...makeWalletStateStub(TEST_PUB_HEX).snapshot(),activeKeyIdentity:{...makeWalletStateStub(TEST_PUB_HEX).snapshot().activeKeyIdentity!,bsvNetwork:"test"}})}
     });
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "test" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-asset-on",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -6199,7 +6204,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "test" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "p2pkh-testnet-on",
@@ -6242,7 +6247,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     const { service, opener, getResult, storageRepository } = makeService(TEST_PUB_HEX, undefined, {
       p2pkhService: p2pkh as never
     });
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-fee-off",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -6255,7 +6260,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "feepool-testnet-off",
@@ -6277,7 +6282,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     expect(r?.ok).toBe(false);
     if (r && !r.ok) expect(r.error.code).toBe("asset_not_enabled");
     const card = service.feedSnapshot().commands.find((c) => c.requestId === "feepool-testnet-off");
-    expect(card?.errorCode).toBe("asset_not_enabled");
+    expect(card).toBeUndefined();
   });
 
   it("feepool.prepare / commit 的 poolKey 绑定当前 owner 与资产维度，不跨 counterparty 串池", async () => {
@@ -6286,7 +6291,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     // owner 公钥写进 key（它是证据与身份核对字段），并按 counterparty 与
     // asset 分段，因此不同交易对手/资产各自建池，互不可见。
     const { service, opener, storageRepository, deps } = makeService(TEST_PUB_HEX);
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-ownerA",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -6298,7 +6303,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     });
     // 另一个交易对手的 session（同一 owner）。
     const counterpartyB = "02" + "ab".repeat(32);
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-counterpartyB",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -6320,7 +6325,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     // 另一个 counterparty 发 prepare：应走 create 路径，看不到既有 prior。
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fp-counterpartyB",
@@ -6353,7 +6358,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     const { service, opener, storageRepository, deps } = makeService(TEST_PUB_HEX, undefined, {
       p2pkhService: p2pkh as never
     });
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-A",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -6365,7 +6370,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     });
     // 第二个 session：同一个唯一 Key，但属于另一个 Connect 会话。跨会话
     // 的 operationId 仍然不可复用，这正是这个测试要守的不变量。
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-B",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -6387,7 +6392,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     // sess-A 下 prepare。
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fp-old",
@@ -6410,7 +6415,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     void service.feedSnapshot().commands.find((c) => c.requestId === "fp-old");
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "fc-stale",
@@ -6440,7 +6445,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     service.startSession();
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "login-002",
@@ -6948,7 +6953,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
     service.startSession();
     const now = Date.now();
     const sessionId = "sess-launch-gate";
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId,
       origin: "https://justnote.apps.bsv8.com",
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -6969,15 +6974,15 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       connectSessionId: sessionId, ownerPublicKeyHex: TEST_PUB_HEX, resolvedClaims: {}, resolvedAt: now, consumed: false
     });
     const source = {} as Window;
-    await service.handleMessage(makeEvent({ v: PROTOCOL_VERSION, type: "request", id: "launch-missing", method: "connect.launch", params: { launchToken: "missing", appIdentity: VALID_PROOF } }, "https://justnote.apps.bsv8.com", source));
+    await service.handleMessage(makeEvent({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },  v: PROTOCOL_VERSION, type: "request", id: "launch-missing", method: "connect.launch", params: { launchToken: "missing", appIdentity: VALID_PROOF } }, "https://justnote.apps.bsv8.com", source));
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(getResult()?.ok).toBe(false);
     expect(internals.launchTokensByToken.get("launch-gate")?.consumed).toBe(false);
-    await service.handleMessage(makeEvent({ v: PROTOCOL_VERSION, type: "request", id: "launch-no-proof", method: "connect.launch", params: { launchToken: "launch-gate" } }, "https://justnote.apps.bsv8.com", source));
-    await service.handleMessage(makeEvent({ v: PROTOCOL_VERSION, type: "request", id: "launch-bad-signature", method: "connect.launch", params: { launchToken: "launch-gate", appIdentity: { ...VALID_PROOF, signature: "00".repeat(64) } } }, "https://justnote.apps.bsv8.com", source));
+    await service.handleMessage(makeEvent({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },  v: PROTOCOL_VERSION, type: "request", id: "launch-no-proof", method: "connect.launch", params: { launchToken: "launch-gate" } }, "https://justnote.apps.bsv8.com", source));
+    await service.handleMessage(makeEvent({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },  v: PROTOCOL_VERSION, type: "request", id: "launch-bad-signature", method: "connect.launch", params: { launchToken: "launch-gate", appIdentity: { ...VALID_PROOF, signature: "00".repeat(64) } } }, "https://justnote.apps.bsv8.com", source));
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(internals.launchTokensByToken.get("launch-gate")?.consumed).toBe(false);
-    await service.handleMessage(makeEvent({ v: PROTOCOL_VERSION, type: "request", id: "launch-mismatch", method: "connect.launch", params: { launchToken: "launch-gate", appIdentity: STORAGE_PROOF } }, "https://justnote.apps.bsv8.com", source));
+    await service.handleMessage(makeEvent({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },  v: PROTOCOL_VERSION, type: "request", id: "launch-mismatch", method: "connect.launch", params: { launchToken: "launch-gate", appIdentity: STORAGE_PROOF } }, "https://justnote.apps.bsv8.com", source));
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(getResult()?.ok).toBe(false);
     expect(internals.launchTokensByToken.get("launch-gate")?.consumed).toBe(false);
@@ -6989,7 +6994,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
     });
     service.startSession();
     const now = Date.now();
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-appview",
       origin: "https://justnote.apps.bsv8.com",
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -7017,7 +7022,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-diag"
     };
     internals.currentAppClientSource = null;
-    internals.launchTokensByToken.set("launch-diag", {
+    internals.launchTokensByToken.set("launch-diag", {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       appId: "justnote",
       appOrigin: "https://justnote.apps.bsv8.com",
       appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-diag",
@@ -7028,7 +7033,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       consumed: false
     });
     internals.ownerRuntimesBySessionId.set("sess-appview", {
-      runtime: {
+      runtime: {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
         ownerPublicKeyHex: TEST_PUB_HEX,
         ownerLabel: "Key A",
         privateKeyHex: privHex,
@@ -7041,7 +7046,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
     const appSource = {} as Window;
     await service.handleMessage(
       makeEvent(
-        {
+        {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
           v: PROTOCOL_VERSION,
           type: "request",
           id: "connect-launch-1",
@@ -7444,7 +7449,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       });
       service.startSession();
       const now = Date.now();
-      await storageRepository.putConnectSession({
+      await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
         sessionId: "sess-appview-stop",
         origin: "https://justnote.apps.bsv8.com",
         ownerPublicKeyHex: TEST_PUB_HEX,
@@ -7470,7 +7475,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
         appOrigin: "https://justnote.apps.bsv8.com",
         appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-stop"
       };
-      internals.launchTokensByToken.set("launch-stop", {
+      internals.launchTokensByToken.set("launch-stop", {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
         appId: "justnote",
         appOrigin: "https://justnote.apps.bsv8.com",
         appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-stop",
@@ -7481,7 +7486,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
         consumed: false
       });
       internals.ownerRuntimesBySessionId.set("sess-appview-stop", {
-        runtime: {
+        runtime: {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
           ownerPublicKeyHex: TEST_PUB_HEX,
           ownerLabel: "Key A",
           privateKeyHex: TEST_PRIV_HEX,
@@ -7498,7 +7503,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       const before = childMessages.length;
       await service.handleMessage(
         makeEvent(
-          {
+          {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
             v: PROTOCOL_VERSION,
             type: "request",
             id: "connect-launch-stop",
@@ -7544,7 +7549,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       });
       service.startSession();
       const now = Date.now();
-      await storageRepository.putConnectSession({
+      await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
         sessionId: "sess-appview-late",
         origin: "https://justnote.apps.bsv8.com",
         ownerPublicKeyHex: TEST_PUB_HEX,
@@ -7569,7 +7574,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
         appOrigin: "https://justnote.apps.bsv8.com",
         appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-late"
       };
-      internals.launchTokensByToken.set("launch-late", {
+      internals.launchTokensByToken.set("launch-late", {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
         appId: "justnote",
         appOrigin: "https://justnote.apps.bsv8.com",
         appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-late",
@@ -7580,7 +7585,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
         consumed: false
       });
       internals.ownerRuntimesBySessionId.set("sess-appview-late", {
-        runtime: {
+        runtime: {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
           ownerPublicKeyHex: TEST_PUB_HEX,
           ownerLabel: "Key A",
           privateKeyHex: TEST_PRIV_HEX,
@@ -7598,7 +7603,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
 
       await service.handleMessage(
         makeEvent(
-          {
+          {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
             v: PROTOCOL_VERSION,
             type: "request",
             id: "connect-launch-late",
@@ -7664,7 +7669,7 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
       // 直接走 applyLauncherBootstrap 路径：构造合法 bootstrap payload 并应用。
       const sessionId = "sess-lockstate-after-bootstrap";
       const now = Date.now();
-      await storageRepository.putConnectSession({
+      await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
         sessionId,
         origin: "https://justnote.apps.bsv8.com",
         ownerPublicKeyHex: TEST_PUB_HEX,
@@ -7677,7 +7682,7 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
       const internals = service as unknown as {
         applyLauncherBootstrap: (p: unknown) => Promise<void>;
       };
-      await internals.applyLauncherBootstrap({
+      await internals.applyLauncherBootstrap({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
         app: {
           appId: "justnote",
           appOrigin: "https://justnote.apps.bsv8.com",
@@ -7688,13 +7693,13 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
         resolvedClaims: {},
         resolvedAt: now,
         launchToken: "launch-ls",
-        sessionRuntimeBootstrap: {
+        sessionRuntimeBootstrap: {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
           ownerPublicKeyHex: TEST_PUB_HEX,
           ownerLabel: "Key A",
           capabilities: [],
           createdAt: now,
           crypto: {
-            getIdentity: () => ({
+            getIdentity: () => ({bsvNetwork: "main" as const,
               sessionId: "sess-lockstate-after-bootstrap",
               publicKeyHex: TEST_PUB_HEX,
               label: "Key A",
@@ -7720,7 +7725,7 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
       });
 
       const replaceReasons: string[] = [];
-      await internals.applyLauncherBootstrap({
+      await internals.applyLauncherBootstrap({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
         app: {
           appId: "justnote",
           appOrigin: "https://justnote.apps.bsv8.com",
@@ -7731,13 +7736,13 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
         resolvedClaims: {},
         resolvedAt: now + 1,
         launchToken: "launch-ls-2",
-        sessionRuntimeBootstrap: {
+        sessionRuntimeBootstrap: {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
           ownerPublicKeyHex: TEST_PUB_HEX,
           ownerLabel: "Key A",
           capabilities: [],
           createdAt: now + 1,
           crypto: {
-            getIdentity: () => ({
+            getIdentity: () => ({bsvNetwork: "main" as const,
               sessionId: "sess-lockstate-after-bootstrap",
               publicKeyHex: TEST_PUB_HEX,
               label: "Key A",
@@ -7800,7 +7805,7 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
       service.startSession();
       const sessionId = "sess-reset-bootstrap";
       const now = Date.now();
-      await storageRepository.putConnectSession({
+      await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
         sessionId,
         origin: "https://justnote.apps.bsv8.com",
         ownerPublicKeyHex: TEST_PUB_HEX,
@@ -7813,7 +7818,7 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
       const internals = service as unknown as {
         applyLauncherBootstrap: (p: unknown) => Promise<void>;
       };
-      await internals.applyLauncherBootstrap({
+      await internals.applyLauncherBootstrap({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
         app: {
           appId: "justnote",
           appOrigin: "https://justnote.apps.bsv8.com",
@@ -7824,13 +7829,13 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
         resolvedClaims: {},
         resolvedAt: now,
         launchToken: "launch-reset",
-        sessionRuntimeBootstrap: {
+        sessionRuntimeBootstrap: {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
           ownerPublicKeyHex: TEST_PUB_HEX,
           ownerLabel: "Key A",
           capabilities: [],
           createdAt: now,
           crypto: {
-            getIdentity: () => ({
+            getIdentity: () => ({bsvNetwork: "main" as const,
               sessionId: "sess-reset-bootstrap",
               publicKeyHex: TEST_PUB_HEX,
               label: "Key A",
@@ -7891,7 +7896,7 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
     // 预放 session + owner key ready（让 request 不走 fail-fast）
     const sessionId = "sess-relock-cs";
     const now = Date.now();
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId,
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -7971,7 +7976,7 @@ describe("ProtocolServiceImpl 首条合法 child 协议消息（施工单 2026-0
       service.startSession();
       const now = Date.now();
       const sessionId = "sess-cipher-first";
-      await storageRepository.putConnectSession({
+      await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
         sessionId,
         origin: "https://justnote.apps.bsv8.com",
         ownerPublicKeyHex: TEST_PUB_HEX,
@@ -7996,7 +8001,7 @@ describe("ProtocolServiceImpl 首条合法 child 协议消息（施工单 2026-0
         appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-cipher-first"
       };
       internals.ownerRuntimesBySessionId.set(sessionId, {
-        runtime: {
+        runtime: {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
           ownerPublicKeyHex: TEST_PUB_HEX,
           ownerLabel: "Key A",
           privateKeyHex: TEST_PRIV_HEX,
@@ -8013,7 +8018,7 @@ describe("ProtocolServiceImpl 首条合法 child 协议消息（施工单 2026-0
       // 关键：首条 request 是 cipher.decrypt（不是 connect.launch）。
       await service.handleMessage(
         makeEvent(
-          {
+          {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
             v: PROTOCOL_VERSION,
             type: "request",
             id: "cipher-decrypt-first",
@@ -8122,7 +8127,7 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
       service.startSession();
       const now = Date.now();
       const sessionId = "sess-locked-runtime-ready";
-      await storageRepository.putConnectSession({
+      await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
         sessionId,
         origin: "https://justnote.apps.bsv8.com",
         ownerPublicKeyHex: TEST_PUB_HEX,
@@ -8145,7 +8150,7 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
         appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-locked-ready"
       };
       const token = "launch-locked-ready";
-      internals.launchTokensByToken.set(token, {
+      internals.launchTokensByToken.set(token, {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
         appId: "justnote",
         appOrigin: "https://justnote.apps.bsv8.com",
         appUrl: "https://justnote.apps.bsv8.com/?launchToken=" + token,
@@ -8156,7 +8161,7 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
         consumed: false
       });
       internals.ownerRuntimesBySessionId.set(sessionId, {
-        runtime: {
+        runtime: {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
           ownerPublicKeyHex: TEST_PUB_HEX,
           ownerLabel: "Key A",
           privateKeyHex: TEST_PRIV_HEX,
@@ -8173,7 +8178,7 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
       } as unknown as Window;
       await service.handleMessage(
         makeEvent(
-          {
+          {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
             v: PROTOCOL_VERSION,
             type: "request",
             id: "connect-launch-locked-ready",
@@ -8208,7 +8213,7 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
         source: "bootstrap_runtime" | "vault_runtime";
       }>;
     };
-    const session: ConnectSessionRecord = {
+    const session: ConnectSessionRecord = {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-unlock",
       origin: "https://x",
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -8237,7 +8242,7 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
       }>;
     };
     internals.ownerRuntimesBySessionId.set("sess-boot", {
-      runtime: {
+      runtime: {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
         ownerPublicKeyHex: TEST_PUB_HEX,
         ownerLabel: "Key A",
         privateKeyHex: TEST_PRIV_HEX,
@@ -8246,7 +8251,7 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
       },
       createdAt: 0
     });
-    const session: ConnectSessionRecord = {
+    const session: ConnectSessionRecord = {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-boot",
       origin: "https://x",
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -8275,7 +8280,7 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
     const internals = service as unknown as {
       resolveOwnerRuntime: (s: ConnectSessionRecord) => Promise<unknown>;
     };
-    const session: ConnectSessionRecord = {
+    const session: ConnectSessionRecord = {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-appview",
       origin: "https://x",
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -8304,7 +8309,7 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
     });
     service.startSession();
     const now = Date.now();
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-old-owner",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -8361,7 +8366,7 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
     });
     service.startSession();
     const now = Date.now();
-    await storageRepository.putConnectSession({
+    await storageRepository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
       sessionId: "sess-key-ok",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -8457,7 +8462,7 @@ function priceRequest(
   method: "price.get" | "price.subscribe" | "price.unsubscribe",
   connectSessionId: string
 ) {
-  return {
+  return {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX },
     v: PROTOCOL_VERSION,
     type: "request" as const,
     id,
@@ -8474,7 +8479,7 @@ function priceChangedEvents(opener: FakeWindow): PriceValue[] {
 }
 
 async function loginPriceSession(harness: ServiceHarness): Promise<string> {
-  await harness.service.handleMessage(makeEvent({
+  await harness.service.handleMessage(makeEvent({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
     v: PROTOCOL_VERSION,
     type: "request",
     id: "login-price",
@@ -8561,7 +8566,7 @@ describe("ProtocolServiceImpl price.*", () => {
     reader.set({ amount: "46.00", unit: "USDT", updatedAtMs: 222 });
     expect(priceChangedEvents(harness.opener)).toHaveLength(1);
 
-    await harness.service.handleMessage(makeEvent({
+    await harness.service.handleMessage(makeEvent({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
       v: PROTOCOL_VERSION,
       type: "request",
       id: "logout-price",

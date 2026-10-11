@@ -16,8 +16,7 @@ export type P2pkhWorkerTaskDefinition = BackgroundTaskDefinition & { syncPolicy:
 export function createP2pkhWorkerTaskDefinitions(deps: P2pkhWorkerTaskDependencies): readonly P2pkhWorkerTaskDefinition[] {
   const history = createP2pkhCoordinatorTasks(deps);
   const keyScope = () => {
-    const publicKeyHex = deps.walletState.snapshot().activePublicKeyHex;
-    return publicKeyHex ? { publicKeyHex } : undefined;
+    return deps.walletState.snapshot().activeKeyIdentity;
   };
   return [
     {

@@ -292,7 +292,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
             await stateRepository.abortUnattemptedLocalSubmission?.({ submissionId, reason: result.reason });
             return { submissionId, result, localInputClaimIds: [], preview: currentPreview };
           }
-          deps.assetDataNotifier?.emit({ providerId: "p2pkh", publicKeyHex: owner.publicKeyHex, revision: Date.now(), kinds: ["utxo", "submission", "balance"] });
+          deps.assetDataNotifier?.emit({ providerId: "p2pkh", publicKeyHex: owner.publicKeyHex, networkIdentity: owner, revision: Date.now(), kinds: ["utxo", "submission", "balance"] });
           return { submissionId, result, localInputClaimIds, preview: currentPreview };
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);

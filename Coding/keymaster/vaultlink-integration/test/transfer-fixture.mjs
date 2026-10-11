@@ -30,7 +30,7 @@ export function rememberTransaction(rawHex) {
   const txid=Buffer.from(digest).reverse().toString('hex');previous.set(txid,rawHex);return txid;
 }
 export async function previousTransactions(_network, inputs) { return inputs.map(i=>{const raw=previous.get(i.txid);if(!raw)throw Error('missing real transaction fixture');return raw;}); }
-export function paymentRequester(privateKeyHex) {
+export function paymentRequester(privateKeyHex, bsvNetwork = "main") {
   let opening;
   const execute = async command=>{
     if(!opening)opening=(async()=>{
@@ -41,12 +41,12 @@ export function paymentRequester(privateKeyHex) {
         async get(){try{const bytes=new Uint8Array(await readFile(file));return {bytes,revision:createHash('sha256').update(bytes).digest('hex')};}catch(e){if(e.code==='ENOENT')return;throw e;}},
         async put(_path,bytes,condition){const old=await this.get();if(condition.ifNoneMatch&&old||condition.ifRevision&&condition.ifRevision!==old?.revision)throw Error('revision-conflict');await writeFile(file+'.tmp',bytes);await rename(file+'.tmp',file);return {revision:createHash('sha256').update(bytes).digest('hex')};},
       };
-      return WalletPayments.open(files,hex(key.publicKey()),()=>{},async digest=>secp256k1.sign(digest,unhex(privateKeyHex),{prehash:false,lowS:true,format:'der'}));
+      return WalletPayments.open(files,hex(key.publicKey()),()=>{},async digest=>secp256k1.sign(digest,unhex(privateKeyHex),{prehash:false,lowS:true,format:'der'}), bsvNetwork);
     })();
     const wallet=await opening;
     if (command.action === "session-open") {
       // 转账回归的用户预置渠道。产品请求不能靠这种宿主 fixture 代填编号。
-      for (const network of ["main", "test"]) for (const paymentType of ["p2pkh", "feepool.connect"]) {
+      for (const network of [bsvNetwork]) for (const paymentType of ["p2pkh", "feepool.connect"]) {
         const id = "pay." + createHash("sha256").update(JSON.stringify(["keymaster.app-payment-channel.v1", command.owner, "default", paymentType, network])).digest("hex");
         const channel = await wallet.handle({action: "register", id, owner: command.owner, kind: "app", network, paymentType});
         if (channel.revision === 1) await wallet.handle({action: "configure", channel: {...channel, singleLimit: "100000000", defaultSessionLimit: "100000000", revision: 2}});

@@ -108,6 +108,7 @@ export interface KeyImportWizardProps {
 
 /** importer 解析后的 Key 草稿；不包含桶密码或导入源密码。 */
 export interface InitialSetupImportedKeyDraft {
+  bsvNetwork: BsvNetwork;
   /** 页面显示标签。 */
   label: string;
   /** 临时私钥材料，只在最终提交前留在内存。 */

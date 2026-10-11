@@ -82,7 +82,7 @@ interface MountHandle {
 const TEST_PUB_HEX = "0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798";
 
 function makeVaultWalletState(): VaultWalletState {
-  const key: KeyIdentity = {
+  const key: KeyIdentity = {bsvNetwork: "main" as const,
     publicKeyHex: TEST_PUB_HEX,
     label: "Key A",
     capabilities: ["p2pkh"],

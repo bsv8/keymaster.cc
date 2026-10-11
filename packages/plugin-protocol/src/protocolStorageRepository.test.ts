@@ -107,7 +107,7 @@ describe("openProtocolStorageRepository", () => {
     const stores = createProtocolStores("routing");
     const db = openBoundProtocolStorageRepository(stores);
     await db.putOrigin(makeOrigin("https://routing.example", 1));
-    await db.putConnectSession({
+    await db.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "02" + "11".repeat(32) },
       sessionId: "routing-session",
       origin: "https://routing.example",
       ownerPublicKeyHex: "02" + "11".repeat(32),
@@ -361,7 +361,7 @@ describe("Protocol V1 session records", () => {
   // material and launch tokens stay in the current Session Window memory.
   it("connect session records contain authorization truth but no runtime material", async () => {
     const db = await openProtocolStorageRepository();
-    await db.putConnectSession({
+    await db.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "ee".repeat(33) },
       sessionId: "sess-schema-v8-clean",
       origin: "https://clean",
       ownerPublicKeyHex: "ee".repeat(33),

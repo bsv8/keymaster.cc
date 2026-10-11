@@ -166,7 +166,7 @@ function openIntegrationStore(publicKeyHex: string): import("./storage/testSuppo
 
 function makeIntegrationWalletState(publicKeyHex: string): VaultWalletState {
   return {
-    snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: publicKeyHex }))(), () => ({
+    snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: publicKeyHex }))(), () => ({bsvNetwork: "main" as const,
       publicKeyHex,
       label: "integration",
       capabilities: ["p2pkh"],

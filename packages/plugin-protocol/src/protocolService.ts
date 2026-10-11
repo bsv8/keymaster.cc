@@ -1,3 +1,4 @@
+import { validateNetworkIdentity, sameNetworkIdentity, type NetworkIdentity } from "@keymaster/contracts";
 import { requireUnlockedWalletIdentity } from "@keymaster/contracts";
 import { authenticateAppWallet, appPaymentChannelId } from "@keymaster/vaultlink-integration";
 import { createProviderDispatch } from "./providerDispatch.js";
@@ -357,6 +358,7 @@ export interface ProtocolServiceDeps {
  * 历史都对应一个 RequestRecord；recordId 与 transport requestId 解耦。
  */
 interface RequestRecord {
+  networkIdentity: NetworkIdentity;
   /** service 内部稳定主键；与 transport requestId 解耦。 */
   recordId: string;
   /** 顶层 request 报文的 id（transport 关联）。 */
@@ -700,7 +702,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    */
   private readonly channelSessionBySource: Map<
     Window,
-    { origin: string; sessionId: string; ownerPublicKeyHex: string; epoch: number }
+    { origin: string; sessionId: string; networkIdentity: NetworkIdentity; ownerPublicKeyHex: string; epoch: number }
   > = new Map();
   /** 每个 Connect session 的虚拟精确频道集合。物理订阅由 Coordinator 统一复用。 */
   private readonly channelSubscriptionsBySessionId: Map<string, string[]> = new Map();
@@ -1222,6 +1224,11 @@ export class ProtocolServiceImpl implements ProtocolService {
       parsed = parseRequestMessage(event.data);
     } catch (err) {
       if (err instanceof ProtocolValidationError) {
+        const raw=event.data as {id?:unknown;method?:unknown;networkIdentity?:unknown};
+        try {
+          const identity=validateNetworkIdentity(raw.networkIdentity);
+          if(typeof raw.id === "string" && typeof raw.method === "string" && this.isAllowedRequestSource(event,raw.method as ProtocolMethod) && event.source) this.postMessage(event.source as Window,event.origin,{v:PROTOCOL_VERSION,type:"result",id:raw.id,networkIdentity:identity,ok:false,error:{code:err.code,message:err.message}});
+        } catch { /* 非法身份或未经绑定的来源不进入协议会话。 */ }
         return;
       }
       return;
@@ -2099,6 +2106,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const sessionRecord: ConnectSessionRecord = {
       sessionId,
       origin: input.appOrigin,
+      networkIdentity: validateNetworkIdentity(key),
       ownerPublicKeyHex: key.publicKeyHex,
       ownerLabel: key.label,
       claimsSnapshot: resolvedClaims,
@@ -2118,6 +2126,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       stagedAppViewSessionId = sessionId;
       const identity = crypto.getIdentity();
       sessionRuntimeBootstrap = {
+        networkIdentity: validateNetworkIdentity(identity),
         ownerPublicKeyHex: identity.publicKeyHex,
         ownerLabel: key.label,
         capabilities: Array.isArray(key.capabilities) ? key.capabilities : [],
@@ -2157,6 +2166,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       appOrigin: input.appOrigin,
       appUrl: appUrlWithLaunchToken,
       connectSessionId: sessionId,
+      networkIdentity: validateNetworkIdentity(key),
       ownerPublicKeyHex: key.publicKeyHex,
       resolvedClaims: resolvedClaims as Record<string, unknown>,
       resolvedAt: now,
@@ -2662,7 +2672,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    */
   private async acceptRequest(
     event: MessageEvent,
-    parsed: { id: string; method: ProtocolMethod; params: MethodParams<ProtocolMethod> }
+    parsed: { id: string; networkIdentity: NetworkIdentity; method: ProtocolMethod; params: MethodParams<ProtocolMethod> }
   ): Promise<void> {
     // origin 切换：触发历史载入 + 立即清空旧 origin 视图（施工单 2026-06-27
     // origin 切换：触发历史载入 + 立即清空旧 origin 视图（施工单 2026-06-27
@@ -2692,6 +2702,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const rec: RequestRecord = {
       recordId,
       transportRequestId: parsed.id,
+      networkIdentity: parsed.networkIdentity,
       source,
       origin,
       method,
@@ -2998,15 +3009,15 @@ export class ProtocolServiceImpl implements ProtocolService {
   /**
    * accept 阶段解析并检查本次请求的资产（施工单 2026-09-18 001）。
    *
-   * 设计缘由：`bsv-testnet` 只有在 p2pkh 设置开启 testnet 后才可用；
+   * 设计缘由：付款资产必须属于当前完整身份的网络；
    * 未开启时 fail-fast `asset_not_enabled`，而不是等 prepare 抛错后被
    * 统一折叠成 user_rejected（caller 无法区分"用户拒绝"与"资产未开启"）。
    */
   private preCheckP2pkhAsset(
     assetId: P2pkhTransferAssetId | undefined
   ): { code: ProtocolErrorCode; reason: ProtocolFailureReason } | null {
-    const publicAssetId = assetId ?? "bsv-mainnet";
-    if (publicAssetId !== "bsv-testnet") return null;
+    if (this.lockStateValue === "locked") return null;
+    const publicAssetId = assetId ?? (this.deps.walletState.snapshot().activeKeyIdentity?.bsvNetwork === "test" ? "bsv-testnet" : "bsv-mainnet");
     const p2pkhService = this.currentP2pkhService();
     if (!p2pkhService || !p2pkhService.isAssetEnabled(toInternalP2pkhAssetId(publicAssetId))) {
       return { code: "asset_not_enabled", reason: "asset_not_enabled" };
@@ -3221,7 +3232,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 解锁直接执行，但解锁后应直接入队"的语义相反。
    */
   private async tryAutoApprove(
-    parsed: { id: string; method: ProtocolMethod; params: MethodParams<ProtocolMethod> },
+    parsed: { id: string; networkIdentity: NetworkIdentity; method: ProtocolMethod; params: MethodParams<ProtocolMethod> },
     origin: string,
     _rec: RequestRecord
   ): Promise<boolean> {
@@ -3769,6 +3780,9 @@ export class ProtocolServiceImpl implements ProtocolService {
   private async runRequest(rec: RequestRecord): Promise<void> {
     rec.abortController = new AbortController();
     try {
+      const boot = rec.connectSessionId ? this.ownerRuntimesBySessionId.get(rec.connectSessionId)?.runtime : undefined;
+      const activeIdentity = boot?.networkIdentity ?? this.requireCurrentOwnerKey(rec.networkIdentity.publicKeyHex);
+      if (!activeIdentity || !sameNetworkIdentity(activeIdentity, rec.networkIdentity)) throw new ProtocolValidationError("invalid_request", "Network identity mismatch");
       const result = await this.dispatch(rec);
       this.rememberChannelSessionFromResult(rec, result);
       if (
@@ -3890,7 +3904,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const summary = await service.summary();
     if (!summary.walletGeneration) throw protocolError("storage_unavailable", "Storage requires an initialized wallet");
     const lifecycle = this.deps.walletState.snapshot();
-    return this.deps.bindAppStorage({ connectSessionId: session.sessionId, transportOrigin: rec.origin,
+    return this.deps.bindAppStorage({ ...session.networkIdentity, connectSessionId: session.sessionId, transportOrigin: rec.origin,
       appIdentity: session.appIdentity, sessionEpoch: lifecycle.sessionEpoch,
       walletGeneration: summary.walletGeneration, runGeneration: lifecycle.runGeneration,
     });
@@ -4004,14 +4018,15 @@ export class ProtocolServiceImpl implements ProtocolService {
     });
 
     const envelopeInput: CborValue[] = [
-      PROTOCOL_VERSION,
+      2,
       rec.transportRequestId,
       params.aud,
       params.iat,
       params.exp,
       params.text,
       publicKeyBytes,
-      projection.map(([name, val]) => [name, valToCbor(val)])
+      projection.map(([name, val]) => [name, valToCbor(val)]),
+      session.networkIdentity.bsvNetwork
     ];
     const envelopeCbor = cborEncode(envelopeInput);
     const signature = await this.signWithSessionOwner(session, envelopeCbor, "identity");
@@ -4035,7 +4050,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const publicKeyBytes = await this.fetchPublicKeyBytesWithSession(session);
     const contentSha256 = sha256Bytes(new Uint8Array(params.content.bytes));
     const envelopeCbor = cborEncode([
-      PROTOCOL_VERSION,
+      2,
       rec.transportRequestId,
       params.aud,
       params.iat,
@@ -4043,7 +4058,8 @@ export class ProtocolServiceImpl implements ProtocolService {
       params.text,
       params.contentType,
       contentSha256,
-      publicKeyBytes
+      publicKeyBytes,
+      session.networkIdentity.bsvNetwork
     ]);
     const signature = await this.signWithSessionOwner(session, envelopeCbor, "intent", new Uint8Array(params.content.bytes));
     return {
@@ -4172,6 +4188,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       throw localFailure("internal_error", "connect session not found / revoked");
     }
     // 施工单 2026-06-30 002 硬切换：session 真值上不再带 runtime 来源。
+    if (!session.networkIdentity || session.networkIdentity.publicKeyHex.toLowerCase() !== session.ownerPublicKeyHex.toLowerCase() || !sameNetworkIdentity(session.networkIdentity, rec.networkIdentity)) throw localFailure("session_owner_mismatch", "Connect network identity mismatch");
     // 业务路径一律走 `resolveOwnerRuntime(session)`；accept 阶段
     // 不再为 `runtimeBinding === "vault"` 这条已删除的旧路径预校验
     // owner key——执行阶段 `resolveOwnerRuntime` 走 `bootstrap_runtime`
@@ -4202,7 +4219,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         "connect session owner is not bound to current active key: no active key"
       );
     }
-    if (active !== session.ownerPublicKeyHex) {
+    if (active !== session.ownerPublicKeyHex || !this.deps.walletState.snapshot().activeKeyIdentity || !sameNetworkIdentity(this.deps.walletState.snapshot().activeKeyIdentity!, session.networkIdentity)) {
       throw localFailure(
         "session_owner_mismatch",
         `connect session owner is not bound to current active key: session=${session.ownerPublicKeyHex}, active=${active}`
@@ -4282,7 +4299,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (bootEntry) {
       const runtime = bootEntry.runtime;
       // 公钥比较统一 toLowerCase：launcher 端可能用大小写不一。
-      if (runtime.ownerPublicKeyHex.toLowerCase() !== session.ownerPublicKeyHex.toLowerCase()) {
+      if (runtime.ownerPublicKeyHex.toLowerCase() !== session.ownerPublicKeyHex.toLowerCase() || !sameNetworkIdentity(runtime.networkIdentity, session.networkIdentity)) {
         throw localFailure(
           "internal_error",
           "owner runtime ownerPublicKeyHex mismatch"
@@ -4331,7 +4348,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     session: ConnectSessionRecord,
     exactOrigin: string
   ): Promise<Uint8Array> {
-    return deriveSiteKey(session.ownerPublicKeyHex, exactOrigin);
+    return deriveSiteKey(session.ownerPublicKeyHex, exactOrigin, session.networkIdentity.bsvNetwork);
   }
 
   /**
@@ -4465,6 +4482,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const record: ConnectSessionRecord = {
       sessionId,
       origin: rec.origin,
+      networkIdentity: validateNetworkIdentity(key),
       ownerPublicKeyHex: key.publicKeyHex,
       ownerLabel: key.label,
       claimsSnapshot: resolvedClaims,
@@ -4480,6 +4498,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     await this.deps.storageRepository.putConnectSessionAndRevokeOriginPeers(record);
     return {
       connectSessionId: sessionId,
+      networkIdentity: validateNetworkIdentity(key),
       ownerPublicKeyHex: key.publicKeyHex,
       resolvedClaims: resolvedClaims,
       resolvedAt: now,
@@ -4516,6 +4535,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     await storageRepository.putConnectSession(next);
     return {
       connectSessionId: session.sessionId,
+      networkIdentity: session.networkIdentity,
       ownerPublicKeyHex: session.ownerPublicKeyHex,
       resolvedClaims: session.claimsSnapshot,
       resolvedAt: now,
@@ -4707,6 +4727,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.launchTokensByToken.set(params.launchToken, { ...record, consumed: true });
     return {
       connectSessionId: session.sessionId,
+      networkIdentity: session.networkIdentity,
       ownerPublicKeyHex: session.ownerPublicKeyHex,
       resolvedClaims: session.claimsSnapshot,
       resolvedAt: now,
@@ -4764,6 +4785,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       this.channelQuotaBySessionId.delete(previous.sessionId);
     }
     this.channelSessionBySource.set(rec.source, {
+      networkIdentity: rec.networkIdentity,
       origin: rec.origin,
       sessionId: value.connectSessionId,
       ownerPublicKeyHex: value.ownerPublicKeyHex,
@@ -5012,6 +5034,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.assertSessionOwnerIsActive(session);
     const owner = await this.paymentOwner(session);
     const network = params.assetId === "bsv-testnet" ? "test" : "main";
+    if (network !== session.networkIdentity.bsvNetwork) throw localFailure("asset_not_enabled", "Payment network differs from session identity");
     const channelId = await appPaymentChannelId(owner, params.channelName, params.paymentType, network);
     // 注册只建立零额度渠道。owner 不取 App 自报，额度仍只由钱包设置/设备确认。
     await this.deps.vault.requestPayment({action: "register", id: channelId, owner, kind: "app", network, paymentType: params.paymentType});
@@ -5049,7 +5072,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       // 失败语义。提前在协议层以「session is no longer bound to
       // active key」显式 fail-closed，让 caller / UI 拿到明确错误。
       this.assertSessionOwnerIsActive(session);
-      const publicAssetId = params.assetId ?? "bsv-mainnet";
+      const publicAssetId = params.assetId ?? (session.networkIdentity.bsvNetwork === "test" ? "bsv-testnet" : "bsv-mainnet");
       const internalAssetId = toInternalP2pkhAssetId(publicAssetId);
       // 渠道按 App 来源稳定注册；同一次 Connect 连接的所有渠道共享 sessionId。
       // 这里只建立零额度渠道，免确认额度只能由钱包设置提高。
@@ -5128,7 +5151,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       // 挡掉时只会冒出「Key storage is not ready」这种偶发错误，不适
       // 合作为协议失败语义。
       this.assertSessionOwnerIsActive(session);
-      const publicAssetId = params.assetId ?? "bsv-mainnet";
+      const publicAssetId = params.assetId ?? (session.networkIdentity.bsvNetwork === "test" ? "bsv-testnet" : "bsv-mainnet");
       const internalAssetId = toInternalP2pkhAssetId(publicAssetId);
       // 施工单 2026-09-18 001：池 key 带上资产维度；mainnet 保持旧 3 段
       // key 形状（不迁移历史池），testnet 追加 `::bsv-testnet`。
@@ -5514,7 +5537,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       }
       // 施工单 2026-09-18 001：commit 的资产必须与 prepare 一致；缺省
       // `bsv-mainnet`，禁止跨资产复用 operationId。
-      const publicAssetId = params.assetId ?? "bsv-mainnet";
+      const publicAssetId = params.assetId ?? (session.networkIdentity.bsvNetwork === "test" ? "bsv-testnet" : "bsv-mainnet");
       if (op.assetId !== publicAssetId) {
         throw localFailure("internal_error", "operationId bound to a different asset");
       }
@@ -5705,6 +5728,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const message: ProtocolResultMessage = {
       v: PROTOCOL_VERSION,
       type: "result",
+      networkIdentity: rec.networkIdentity,
       id: rec.transportRequestId,
       ok: true,
       result
@@ -5722,6 +5746,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const message: ProtocolResultMessage = {
       v: PROTOCOL_VERSION,
       type: "result",
+      networkIdentity: rec.networkIdentity,
       id: rec.transportRequestId,
       ok: false,
       error: { code, message: errorMessage }
@@ -5731,7 +5756,9 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   private postEventMessage(target: Window, origin: string, message: ProtocolEventMessage): void {
     try {
-      target.postMessage(message, origin);
+      const identity = this.channelSessionBySource.get(target)?.networkIdentity;
+      if (!identity) return;
+      target.postMessage({ ...message, networkIdentity: validateNetworkIdentity(identity) }, origin);
     } catch {
     }
   }

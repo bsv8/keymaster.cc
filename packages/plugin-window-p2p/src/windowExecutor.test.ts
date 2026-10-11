@@ -235,7 +235,7 @@ describe("WindowP2pExecutor lifecycle", () => {
     await expect(executor.start()).resolves.toBe(true);
     workerPort!.onmessage = (event: MessageEvent) => messages.push(event);
     workerPort!.start();
-    workerPort!.postMessage({
+    workerPort!.postMessage({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
       type: "request",
       leaseId: "lease-a",
       requestId: "request-direct-wire",

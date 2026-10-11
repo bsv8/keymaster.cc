@@ -61,6 +61,7 @@ const getCurrentKeyFailureWithResult: CoordinatorRpcResponseForRequest<typeof ge
   sessionEpoch: "epoch-1",
   ack: { status: "locked" },
   operationResult: {
+    bsvNetwork: "main",
     publicKeyHex: "02" + "11".repeat(32),
     label: "key",
     capabilities: [],

@@ -4,7 +4,7 @@ import { VAULT_WALLET_STATE_CAPABILITY, type PluginContext, type VaultLifecycleS
 import { createFixtureHost } from "@keymaster/runtime/test-support";
 import { createWalletStateAccess, createWalletStateSource } from "./walletStateAccess.js";
 const KEY = "02" + "ab".repeat(32);
-const initial = (): VaultLifecycleSnapshot => ({ status: "unlocked", activePublicKeyHex: KEY, activeKeyIdentity: { publicKeyHex: KEY, label: "Primary", capabilities: ["p2pkh"], createdAt: "today" }, sessionEpoch: "epoch-1", runGeneration: "run-1", walletGeneration: "wallet-1", vaultLifecycleRevision: 1 });
+const initial = (): VaultLifecycleSnapshot => ({ status: "unlocked", activePublicKeyHex: KEY, activeKeyIdentity: {bsvNetwork: "main" as const,  publicKeyHex: KEY, label: "Primary", capabilities: ["p2pkh"], createdAt: "today" }, sessionEpoch: "epoch-1", runGeneration: "run-1", walletGeneration: "wallet-1", vaultLifecycleRevision: 1 });
 async function fixture() {
   let committed = initial();
   const source = createWalletStateSource(() => committed);

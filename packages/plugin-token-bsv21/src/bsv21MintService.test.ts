@@ -14,7 +14,7 @@ function fakeWalletState(): VaultWalletState {
 function fakeP2pkh(): P2pkhServiceForBsv21 {
   return {
     listResources: async () => [{ publicKeyHex: ACTIVE_PK, address: "1BoatSLRHtKNngkdXEeobR76b53LETtpyT", network: "main" }],
-    getGlobalSettings: () => ({ includeTestnet: false }),
+    getGlobalSettings: () => ({ bsvNetwork: "main" }),
     listUtxos: async () => [
       { txid: "small", vout: 0, value: 103, address: "1BoatSLRHtKNngkdXEeobR76b53LETtpyT" },
       { txid: "large", vout: 1, value: 200, address: "1BoatSLRHtKNngkdXEeobR76b53LETtpyT" }

@@ -1,3 +1,4 @@
+import { requireUnlockedWalletIdentity } from "@keymaster/contracts";
 import { sameWalletSession } from "@keymaster/contracts";
 import { authenticateAppWallet } from "@keymaster/vaultlink-integration";
 import type { InternalVaultService } from "./internalVaultService.js";
@@ -69,6 +70,7 @@ function mapVaultStatus(status: SessionStateSnapshot["vaultStatus"]): VaultStatu
 
 function toKeyRef(view: CoordinatorVaultKeyView): KeyRef {
   return {
+    bsvNetwork: view.bsvNetwork,
     publicKeyHex: view.publicKeyHex,
     label: view.label,
     format: view.format,
@@ -76,7 +78,7 @@ function toKeyRef(view: CoordinatorVaultKeyView): KeyRef {
     createdAt: view.createdAt,
     ...(view.source === undefined ? {} : { source: view.source }),
     ...(view.address === undefined ? {} : { address: view.address }),
-    ...(view.network === undefined ? {} : { network: view.network }),
+
   };
 }
 
@@ -334,7 +336,7 @@ export class VaultServiceCoordinator implements InternalVaultService {
       }
     };
     return {
-      getIdentity: () => { guard(); return { publicKeyHex, label: "", capabilities: [], createdAt: "", sessionId }; },
+      getIdentity: () => { guard(); return { ...requireUnlockedWalletIdentity(issuedSession), sessionId }; },
       ...(issuedSession.activeKeyIdentity?.backend === "hardware" ? {async signConnectEnvelope(input: Parameters<NonNullable<ActiveKeyCrypto["signConnectEnvelope"]>>[0]) {
         guard();
         if(input.publicKeyHex!==publicKeyHex)throw new Error("session_key_mismatch");

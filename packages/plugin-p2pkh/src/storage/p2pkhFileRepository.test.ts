@@ -19,13 +19,13 @@ describe("P2PKH 文件仓储", () => {
     const repository = createP2pkhFileRepository(store as never);
 
     await expect(repository.readSetting()).resolves.toEqual({
-      includeTestnet: false,
+
       feeRateSatoshisPerKb: { low: 60, medium: 120, high: 180 },
       providerConfigs: {},
     });
 
     await repository.writeSetting({
-      includeTestnet: true,
+
       feeRateSatoshisPerKb: { low: 60, medium: 150, high: 180 },
       providerConfigs: { woc: { endpoint: "https://woc-proxy.example.invalid/v1/bsv" } },
     });
@@ -33,7 +33,7 @@ describe("P2PKH 文件仓储", () => {
     // 默认值不落盘：low/high 与默认相同被省略。
     expect(written.feeRateSatoshisPerKb).toEqual({ medium: 150 });
     await expect(repository.readSetting()).resolves.toMatchObject({
-      includeTestnet: true,
+
       feeRateSatoshisPerKb: { low: 60, medium: 150, high: 180 },
     });
   });
@@ -45,14 +45,14 @@ describe("P2PKH 文件仓储", () => {
       store.__encode(JSON.stringify({
         format: "keymaster.p2pkh-setting",
         version: 1,
-        includeTestnet: true,
+
         providers: { main: { syncProviderId: "junglebus" } },
         providerConfigs: { junglebus: { endpoint: "wss://example" }, woc: { requestsPerSecond: 3 } },
       })),
     );
     const repository = createP2pkhFileRepository(store as never);
     await expect(repository.readSetting()).resolves.toEqual({
-      includeTestnet: true,
+
       feeRateSatoshisPerKb: { low: 60, medium: 120, high: 180 },
       providerConfigs: { woc: { requestsPerSecond: 3 } },
     });
@@ -60,12 +60,12 @@ describe("P2PKH 文件仓储", () => {
 
   it("损坏的设置文件按默认处理", async () => {
     const store = createMemoryOwnerFileStore();
-    store.__files.set("setting.json", store.__encode(JSON.stringify({ format: "keymaster.p2pkh-setting", version: 1, includeTestnet: true, unknownField: 1 })));
+    store.__files.set("setting.json", store.__encode(JSON.stringify({ format: "keymaster.p2pkh-setting", version: 1, bsvNetwork: "test", unknownField: 1 })));
     const repository = createP2pkhFileRepository(store as never);
     // 未知字段被忽略，有效字段仍然生效。
-    await expect(repository.readSetting()).resolves.toMatchObject({ includeTestnet: true });
+    await expect(repository.readSetting()).resolves.toMatchObject({ feeRateSatoshisPerKb: { medium: 120 } });
     store.__files.set("setting.json", store.__encode("not-json"));
-    await expect(repository.readSetting()).resolves.toMatchObject({ includeTestnet: false });
+    await expect(repository.readSetting()).resolves.toMatchObject({ feeRateSatoshisPerKb: { medium: 120 } });
   });
 
   it("历史按网络整文件替换", async () => {

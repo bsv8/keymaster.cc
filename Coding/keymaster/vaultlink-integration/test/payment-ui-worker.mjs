@@ -14,7 +14,7 @@ let signs=0;
 const wallet=await WalletPayments.open({
   async get(){try{const bytes=new Uint8Array(await readFile(file));return {bytes,revision:rev(bytes)};}catch(e){if(e.code==='ENOENT')return;throw e;}},
   async put(_path,bytes,condition){const old=await this.get();if(condition.ifNoneMatch&&old||condition.ifRevision&&condition.ifRevision!==old?.revision)throw Error('revision-conflict');await writeFile(file+'.tmp',bytes);await rename(file+'.tmp',file);return {revision:rev(bytes)};},
-},hex(key.publicKey()),()=>{},async digest=>{signs++;return secp256k1.sign(digest,secret,{prehash:false,lowS:true,format:'der'});});
+},hex(key.publicKey()),()=>{},async digest=>{signs++;return secp256k1.sign(digest,secret,{prehash:false,lowS:true,format:'der'});}, "main");
 await wallet.handle({action:'register',id:'channel',owner:'app',kind:'app',network:'main',paymentType:'p2pkh'});
 await wallet.handle({action:'configure',channel:{id:'channel',owner:'app',kind:'app',network:'main',paymentType:'p2pkh',enabled:true,singleLimit:'400',defaultSessionLimit:'500',revision:2}});
 await wallet.handle({action:'session-open',id:'connection',owner:'app'});

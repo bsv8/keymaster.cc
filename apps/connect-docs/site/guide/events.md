@@ -2,6 +2,7 @@
 
 ```ts
 const keymaster = new KeymasterConnectClient({
+  networkIdentity: { bsvNetwork: "main", publicKeyHex: selectedPublicKeyHex },
   targetOrigin: keymasterDeploymentOrigin,
   onEvent(event) {
     if (event.event === "channel.message_received") {

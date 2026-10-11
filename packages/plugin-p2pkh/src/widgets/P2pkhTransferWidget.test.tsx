@@ -18,13 +18,13 @@ const mocks = vi.hoisted(() => ({
   serviceAvailable: true,
   balanceSnapshot: {
     publicKeyHex: "02bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    includeTestnet: false,
+    bsvNetwork: "main",
     balances: { mainnet: { total: 1234, available: true } },
     revision: 1,
   } as GlobalBalanceSnapshot,
   context: {
     activePublicKeyHex: "02bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    identity: {
+    identity: {bsvNetwork: "main" as const,
       publicKeyHex: "02bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       label: "Owner",
       capabilities: [],
@@ -45,7 +45,7 @@ vi.mock("@keymaster/runtime", () => ({
   usePluginHost: () => ({ resourceStore: {} }),
   useOptionalResourceSelector: (_store: unknown, resourceId: string, _args: readonly string[], _selector: unknown, fallback: unknown) => {
     if (resourceId === "p2pkh.transfer-context") return mocks.context;
-    if (resourceId === "p2pkh.settings") return { includeTestnet: false };
+    if (resourceId === "p2pkh.settings") return { bsvNetwork: "main" };
     if (resourceId === "p2pkh.balance") return mocks.balanceSnapshot;
     return fallback;
   }
@@ -58,7 +58,7 @@ vi.mock("webloom-framework/react", () => ({
   },
   useOptionalResourceSelector: (_store: unknown, resourceId: string, _args: readonly string[], _selector: unknown, fallback: unknown) => {
     if (resourceId === "p2pkh.transfer-context") return mocks.context;
-    if (resourceId === "p2pkh.settings") return { includeTestnet: false };
+    if (resourceId === "p2pkh.settings") return { bsvNetwork: "main" };
     if (resourceId === "p2pkh.balance") return mocks.balanceSnapshot;
     return fallback;
   }
@@ -114,7 +114,7 @@ describe("P2pkhTransferWidget 收款地址只读", () => {
     mocks.serviceAvailable = true;
     mocks.balanceSnapshot = {
       publicKeyHex: mocks.context.activePublicKeyHex,
-      includeTestnet: false,
+      bsvNetwork: "main",
       balances: { mainnet: { total: 1234, available: true } },
       revision: 1,
     };
@@ -154,7 +154,7 @@ describe("P2pkhTransferWidget 收款地址只读", () => {
   it("T13：收款网络切到 testnet 后参考值只读取 testnet 键", () => {
     mocks.balanceSnapshot = {
       publicKeyHex: mocks.context.activePublicKeyHex,
-      includeTestnet: true,
+      bsvNetwork: "test",
       balances: {
         mainnet: { total: 1234, available: true },
         testnet: { total: 5678, available: true },
@@ -169,7 +169,7 @@ describe("P2pkhTransferWidget 收款地址只读", () => {
   it("T14：余额未知或 testnet 未启用时不显示 0 余额", () => {
     mocks.balanceSnapshot = {
       publicKeyHex: mocks.context.activePublicKeyHex,
-      includeTestnet: false,
+      bsvNetwork: "main",
       balances: { mainnet: { total: 0, available: false } },
       revision: 3,
     };
@@ -185,7 +185,7 @@ describe("P2pkhTransferWidget 收款地址只读", () => {
 
     mocks.balanceSnapshot = {
       publicKeyHex: mocks.context.activePublicKeyHex,
-      includeTestnet: false,
+      bsvNetwork: "main",
       balances: { mainnet: { total: 4321, available: true } },
       revision: 4,
     };

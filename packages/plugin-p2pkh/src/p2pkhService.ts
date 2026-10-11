@@ -1,5 +1,5 @@
 import { sameWalletSession } from "@keymaster/contracts";
-import { requireUnlockedWalletIdentity } from "@keymaster/contracts";
+import { sameNetworkIdentity, requireUnlockedWalletIdentity } from "@keymaster/contracts";
 // packages/plugin-p2pkh/src/p2pkhService.ts
 // P2PKH 服务实现（2026-09-20 UTXO / 历史解耦后）。
 //
@@ -100,7 +100,7 @@ function sameP2pkhBalance(left: P2pkhBalance | undefined, right: P2pkhBalance | 
 }
 
 function sameGlobalBalanceContent(left: GlobalBalanceSnapshot, right: GlobalBalanceSnapshot): boolean {
-  if (left.publicKeyHex !== right.publicKeyHex || left.includeTestnet !== right.includeTestnet) return false;
+  if (left.publicKeyHex !== right.publicKeyHex || left.bsvNetwork !== right.bsvNetwork) return false;
   const keys = new Set([...Object.keys(left.balances), ...Object.keys(right.balances)]);
   for (const key of keys) {
     if (!sameP2pkhBalance(left.balances[key as keyof GlobalBalanceSnapshot["balances"]], right.balances[key as keyof GlobalBalanceSnapshot["balances"]])) return false;
@@ -109,7 +109,7 @@ function sameGlobalBalanceContent(left: GlobalBalanceSnapshot, right: GlobalBala
 }
 
 function sameGlobalSettings(left: P2pkhGlobalSettings, right: P2pkhGlobalSettings): boolean {
-  if (left.includeTestnet !== right.includeTestnet) return false;
+  if (left.bsvNetwork !== right.bsvNetwork) return false;
   const a = resolveP2pkhFeeRateSatoshisPerKb(left);
   const b = resolveP2pkhFeeRateSatoshisPerKb(right);
   return a.low === b.low && a.medium === b.medium && a.high === b.high;
@@ -200,11 +200,11 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
   let disposed = false;
   const isCurrentInstance = () => !disposed && !deps.signal?.aborted;
   function publish<T>(type: string, payload: T): void {
-    if (isCurrentInstance()) deps.messageBus.publish(type, payload);
+    if (isCurrentInstance()) { const identity=deps.walletState.snapshot().activeKeyIdentity; deps.messageBus.publish(type, identity && payload && typeof payload === "object" ? {...payload,networkIdentity:{bsvNetwork:identity.bsvNetwork,publicKeyHex:identity.publicKeyHex}} : payload); }
   }
   let activeIdentity: ReadyKeyIdentity | undefined;
   let cachedSettings: P2pkhGlobalSettings = {
-    includeTestnet: deps.coordinator?.getBootstrapSnapshot().p2pkhSettings?.includeTestnet === true
+    bsvNetwork: deps.walletState.snapshot().activeKeyIdentity?.bsvNetwork ?? "main"
   };
   const settingsListeners = new Set<(s: P2pkhGlobalSettings) => void>();
   let balanceSnapshot = emptyGlobalBalanceSnapshot();
@@ -252,6 +252,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     // offer 不会停留在“失效事件先到、余额重算后到”造成的旧值上。
     deps.assetDataNotifier?.emit({
       providerId: "p2pkh",
+      networkIdentity: published.publicKeyHex ? {bsvNetwork:published.bsvNetwork,publicKeyHex:published.publicKeyHex} : undefined,
       ...(published.publicKeyHex ? { publicKeyHex: published.publicKeyHex } : {}),
       revision: published.revision,
       kinds: ["balance"],
@@ -263,18 +264,18 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     const empty = emptyGlobalBalanceSnapshot();
     publishBalanceSnapshot({
       publicKeyHex: empty.publicKeyHex,
-      includeTestnet: empty.includeTestnet,
+      bsvNetwork: empty.bsvNetwork,
       balances: empty.balances,
     });
   }
 
   function setCachedSettingsAndEmit(next: P2pkhGlobalSettings): void {
     if (sameGlobalSettings(cachedSettings, next)) return;
-    const includeTestnetChanged = cachedSettings.includeTestnet !== next.includeTestnet;
+    const bsvNetworkChanged = cachedSettings.bsvNetwork !== next.bsvNetwork;
     cachedSettings = next;
     publish(P2PKH_MSG.SETTINGS_CHANGED, next);
     for (const l of [...settingsListeners]) l(next);
-    if (includeTestnetChanged) void refreshBalanceSnapshot();
+    if (bsvNetworkChanged) void refreshBalanceSnapshot();
   }
 
   /** 详情页懒加载缓存：只存解析结果，不落盘；上限 32 条。 */
@@ -341,7 +342,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     const ownerHex = filter?.ownerPublicKeyHex ?? getVaultLifecycleSnapshot().activePublicKeyHex;
     if (!ownerHex) return [];
     const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : filter?.resourceId ? (/^p2pkh:test$/.test(filter.resourceId) ? "test" : "main") : undefined;
-    const networks = network ? [network] : (getCurrentSettings().includeTestnet ? ["main", "test"] as const : ["main"] as const);
+    const networks = network ? [network] : (getCurrentSettings().bsvNetwork === "test" ? ["test"] as const : ["main"] as const);
     const rows: P2pkhUtxo[] = [];
     for (const current of networks) {
       const snapshot = await requireUtxoSnapshot({ ownerPublicKeyHex: ownerHex, network: current }, "get");
@@ -353,7 +354,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       rows.push(...utxos);
     }
     const settings = getCurrentSettings();
-    const visible = settings.includeTestnet ? rows : rows.filter((u) => u.network === "main");
+    const visible = rows.filter((u) => u.network === settings.bsvNetwork);
     return canonicalizeP2pkhUtxos(filterUtxos(visible, filter));
   }
 
@@ -436,6 +437,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       }
       const key = requireUnlockedWalletIdentity(deps.walletState.snapshot());
       return {
+        bsvNetwork: key.bsvNetwork,
         publicKeyHex: key.publicKeyHex,
         label: key.label,
         capabilities: key.capabilities,
@@ -461,15 +463,14 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
   }
 
   function getCurrentSettings(): P2pkhGlobalSettings {
-    return cachedSettings;
+    return { ...cachedSettings, bsvNetwork: deps.walletState.snapshot().activeKeyIdentity?.bsvNetwork ?? cachedSettings.bsvNetwork };
   }
 
   async function listAllResources(): Promise<P2pkhKeyResource[]> {
     const stateRepository = await ensureRepository();
     const all = await stateRepository.listAddresses();
     const settings = getCurrentSettings();
-    if (settings.includeTestnet) return all;
-    return all.filter((r) => r.network === "main");
+    return all.filter((r) => r.network === settings.bsvNetwork);
   }
 
   function getVaultLifecycleSnapshot() {
@@ -526,15 +527,15 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     const session = deps.walletState.snapshot();
     const generation = ++balanceRefreshGeneration;
     const active = getVaultLifecycleSnapshot().activePublicKeyHex?.trim().toLowerCase() ?? "";
-    const includeTestnet = getCurrentSettings().includeTestnet;
+    const bsvNetwork = getCurrentSettings().bsvNetwork;
     if (!active || deps.vault.status() !== "unlocked") {
       clearBalanceSnapshot();
       return;
     }
 
-    const networks = includeTestnet ? (["main", "test"] as const) : (["main"] as const);
+    const networks = bsvNetwork === "test" ? (["test"] as const) : (["main"] as const);
     const sameOwner = balanceSnapshot.publicKeyHex === active;
-    const sameOwnerAndSettings = sameOwner && balanceSnapshot.includeTestnet === includeTestnet;
+    const sameOwnerAndSettings = sameOwner && balanceSnapshot.bsvNetwork === bsvNetwork;
     const requiresProjection = !sameOwnerAndSettings
       || networks.some((network) => !Object.prototype.hasOwnProperty.call(balanceSnapshot.balances, BALANCE_NETWORK_KEYS[network]));
     if (requiresProjection) {
@@ -545,7 +546,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
         const existing = sameOwner ? balanceSnapshot.balances[key] : undefined;
         return [key, existing ?? unknownP2pkhBalance()];
       })) as GlobalBalanceSnapshot["balances"];
-      publishBalanceSnapshot({ publicKeyHex: active, includeTestnet, balances: projectedBalances });
+      publishBalanceSnapshot({ publicKeyHex: active, bsvNetwork, balances: projectedBalances });
     }
     const values = await Promise.all(networks.map(async (network) => {
       try {
@@ -563,12 +564,12 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     // 异步读取期间可能发生 owner/settings 切换；旧结果不能覆盖新 owner。
     if (!isCurrentInstance() || generation !== balanceRefreshGeneration || !sameWalletSession(session, deps.walletState.snapshot())) return;
     const currentOwner = getVaultLifecycleSnapshot().activePublicKeyHex?.trim().toLowerCase() ?? "";
-    if (!currentOwner || currentOwner !== active || getCurrentSettings().includeTestnet !== includeTestnet || deps.vault.status() !== "unlocked") {
+    if (!currentOwner || currentOwner !== active || getCurrentSettings().bsvNetwork !== bsvNetwork || deps.vault.status() !== "unlocked") {
       return;
     }
     publishBalanceSnapshot({
       publicKeyHex: active,
-      includeTestnet,
+      bsvNetwork,
       balances: Object.fromEntries(values) as GlobalBalanceSnapshot["balances"],
     });
   }
@@ -595,15 +596,15 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
   async function ensureBalanceSnapshotReady(): Promise<void> {
     const active = getVaultLifecycleSnapshot().activePublicKeyHex?.trim().toLowerCase() ?? "";
     if (!active) return;
-    const includeTestnet = getCurrentSettings().includeTestnet;
+    const bsvNetwork = getCurrentSettings().bsvNetwork;
     const hasMainnet = Object.prototype.hasOwnProperty.call(balanceSnapshot.balances, "mainnet");
     const hasTestnet = Object.prototype.hasOwnProperty.call(balanceSnapshot.balances, "testnet");
     // “未知”只是占位，不是一个已完成的缓存命中。真实 WoC 刷新可能先
     // 完成 UTXO 快照、再到达余额消费方；若这里只检查 map 形状，余额资源
     // 会永久停留在 available=false，直到下一次无关事件再次触发刷新。
-    const requiredNetworks = includeTestnet ? ["mainnet", "testnet"] as const : ["mainnet"] as const;
+    const requiredNetworks = bsvNetwork === "test" ? ["testnet"] as const : ["mainnet"] as const;
     const hasUnavailableBalance = requiredNetworks.some((network) => balanceSnapshot.balances[network]?.available !== true);
-    if (balanceSnapshot.publicKeyHex !== active || balanceSnapshot.includeTestnet !== includeTestnet || !hasMainnet || hasTestnet !== includeTestnet || hasUnavailableBalance) {
+    if (balanceSnapshot.publicKeyHex !== active || balanceSnapshot.bsvNetwork !== bsvNetwork || hasMainnet !== (bsvNetwork === "main") || hasTestnet !== (bsvNetwork === "test") || hasUnavailableBalance) {
       await refreshBalanceSnapshot();
     }
     if (balanceRefreshInFlight) await balanceRefreshInFlight;
@@ -737,11 +738,11 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     const state = getVaultLifecycleSnapshot();
     if (!state.activePublicKeyHex) return;
     if (!activeIdentity) return;
-    const includeTestnet = getCurrentSettings().includeTestnet;
+    const bsvNetwork = getCurrentSettings().bsvNetwork;
     let rehydrateError: unknown;
     try {
       await getOrCreateAddress("main");
-      if (includeTestnet) {
+      if (bsvNetwork === "test") {
         await getOrCreateAddress("test");
       }
     } catch (err) {
@@ -757,6 +758,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     if (isCurrentInstance() && deps.assetDataNotifier) {
       deps.assetDataNotifier.emit({
         providerId: "p2pkh",
+        networkIdentity: state.activeKeyIdentity ? {bsvNetwork:state.activeKeyIdentity.bsvNetwork,publicKeyHex:state.activePublicKeyHex} : undefined,
         publicKeyHex: state.activePublicKeyHex,
         revision: Date.now(),
         kinds: ["resource", "balance"],
@@ -764,7 +766,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     }
     // 冷启动余额可见性：地址资源就绪后主动刷新一次内存 UTXO 快照。
     // 失败只保留“未知/不可用”，不写 0；成功由 Worker 发布 data-changed。
-    for (const network of includeTestnet ? ["main", "test"] as const : ["main"] as const) {
+    for (const network of bsvNetwork === "test" ? ["test"] as const : ["main"] as const) {
       void deps.coordinator?.p2pkhUtxosRefresh({ ownerPublicKeyHex: state.activePublicKeyHex, network }).catch(() => undefined);
     }
     void refreshBalanceSnapshot();
@@ -783,8 +785,8 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
   // 合并进 bootstrap cache，这里只读取事件，不发起额外 RPC。
   trackCoordinatorSubscribe("background.snapshot", (event) => {
     if (event?.type !== "background.snapshot.changed" || !event.p2pkhSettings) return;
-    const includeTestnet = event.p2pkhSettings.includeTestnet === true;
-    setCachedSettingsAndEmit({ ...cachedSettings, includeTestnet });
+    const bsvNetwork = event.p2pkhSettings.bsvNetwork;
+    setCachedSettingsAndEmit({ ...cachedSettings, bsvNetwork });
   });
   // session.state 先于 walletState 异步回调到达时，也要立即清掉旧 owner 的余额。
   trackCoordinatorSubscribe("session.state", (event) => {
@@ -805,9 +807,9 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     messageBusUnsubs.push(
       deps.assetDataNotifier.subscribe((event) => {
         if (event.providerId === "p2pkh") {
-          const active = getVaultLifecycleSnapshot().activePublicKeyHex?.trim().toLowerCase() ?? "";
-          const eventOwner = event.publicKeyHex?.trim().toLowerCase() ?? "";
-          if (event.kinds.includes("balance") && active && eventOwner === active) {
+          const active = getVaultLifecycleSnapshot().activeKeyIdentity;
+          if (!active || !event.networkIdentity || !sameNetworkIdentity(active, event.networkIdentity)) return;
+          if (event.kinds.includes("balance")) {
             void refreshBalanceSnapshot();
           }
           for (const l of dataChangedListeners) {
@@ -852,12 +854,10 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       const stateRepository = await ensureRepository();
       const all = await stateRepository.listAddresses();
       const settings = getCurrentSettings();
-      const filtered = settings.includeTestnet
-        ? all
-        : all.filter((r) => r.network === "main");
+      const filtered = all.filter((r) => r.network === settings.bsvNetwork);
       if (!assetId) return filtered;
       const network = assetIdToNetwork(assetId);
-      if (!settings.includeTestnet && network === "test") return [];
+      if (network !== settings.bsvNetwork) return [];
       return filtered.filter((r) => r.network === network);
     },
 
@@ -893,8 +893,8 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     },
 
     isAssetEnabled(assetId) {
-      if (assetId === "bsv") return true;
-      if (assetId === "bsvtest") return getCurrentSettings().includeTestnet;
+      if (assetId === "bsv") return getCurrentSettings().bsvNetwork === "main";
+      if (assetId === "bsvtest") return getCurrentSettings().bsvNetwork === "test";
       return false;
     },
 
@@ -903,33 +903,33 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       const stateRepository = ownerHex ? await ensureRepositoryForOwner(ownerHex) : await ensureRepository();
       const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : filter?.resourceId ? (/^p2pkh:test$/.test(filter.resourceId) ? "test" : "main") : undefined;
       const rows = await stateRepository.listHistory({ network, resourceId: filter?.resourceId, limit: filter?.limit });
-      return getCurrentSettings().includeTestnet ? rows : rows.filter((row) => row.network === "main");
+      return rows.filter((row) => row.network === getCurrentSettings().bsvNetwork);
     },
     async listHistoryPage(filter) {
       const ownerHex = filter?.ownerPublicKeyHex;
       const stateRepository = ownerHex ? await ensureRepositoryForOwner(ownerHex) : await ensureRepository();
       const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : filter?.resourceId ? (/^p2pkh:test$/.test(filter.resourceId) ? "test" : "main") : undefined;
       const page = await stateRepository.listHistoryPage({ network, resourceId: filter?.resourceId, cursor: filter?.cursor, limit: filter?.limit });
-      return { items: getCurrentSettings().includeTestnet ? page.items : page.items.filter((row) => row.network === "main"), ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
+      return { items: page.items.filter((row) => row.network === getCurrentSettings().bsvNetwork), ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
     },
     async listLocalTransactions(filter) {
       const ownerHex = filter?.ownerPublicKeyHex;
       const stateRepository = ownerHex ? await ensureRepositoryForOwner(ownerHex) : await ensureRepository();
       const rows = await stateRepository.listLocalTransactions(filter?.resourceId, filter?.limit);
       const visible = filter?.includeResolvedLocalTransactions ? rows : rows.filter((row) => row.chainResolution !== "chain-confirmed");
-      return getCurrentSettings().includeTestnet ? visible.filter((row) => !filter?.assetId || row.network === assetIdToNetwork(filter.assetId)) : visible.filter((row) => row.network === "main");
+      return visible.filter((row) => row.network === getCurrentSettings().bsvNetwork && (!filter?.assetId || row.network === assetIdToNetwork(filter.assetId)));
     },
     async listLocalTransactionsPage(filter) {
       const ownerHex = filter?.ownerPublicKeyHex;
       const stateRepository = ownerHex ? await ensureRepositoryForOwner(ownerHex) : await ensureRepository();
       const page = await stateRepository.listLocalTransactionsPage({ resourceId: filter?.resourceId, cursor: filter?.cursor, limit: filter?.limit });
       const visible = filter?.includeResolvedLocalTransactions ? page.items : page.items.filter((row) => row.chainResolution !== "chain-confirmed");
-      const items = getCurrentSettings().includeTestnet ? visible : visible.filter((row) => row.network === "main");
+      const items = visible.filter((row) => row.network === getCurrentSettings().bsvNetwork);
       const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : undefined;
       return { items: network ? items.filter((row) => row.network === network) : items, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
     },
     async getBalanceBreakdown(network) {
-      const target = network ?? "main";
+      const target = network ?? getCurrentSettings().bsvNetwork;
       await ensureBalanceSnapshotReady();
       return balanceSnapshot.balances[BALANCE_NETWORK_KEYS[target]]?.breakdown
         ? { ...balanceSnapshot.balances[BALANCE_NETWORK_KEYS[target]]!.breakdown! }
@@ -942,7 +942,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
         throw new Error("P2PKH provider requires an assetId");
       }
       const settings = getCurrentSettings();
-      if (!settings.includeTestnet && request.assetId === "bsvtest") {
+      if (assetIdToNetwork(request.assetId) !== settings.bsvNetwork) {
         throw new P2pkhAllocationError({
           required: request.amountSatoshis,
           available: 0,
@@ -974,7 +974,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
         );
       }
       const settings = getCurrentSettings();
-      if (!settings.includeTestnet && input.assetId === "bsvtest") {
+      if (assetIdToNetwork(input.assetId) !== settings.bsvNetwork) {
         return Promise.reject(new Error("Testnet is not enabled in P2PKH settings"));
       }
       return transfer.prepare(input);
@@ -986,7 +986,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
         );
       }
       const settings = getCurrentSettings();
-      if (!settings.includeTestnet && preview.assetId === "bsvtest") {
+      if (assetIdToNetwork(preview.assetId) !== settings.bsvNetwork) {
         return Promise.reject(new Error("Testnet is not enabled in P2PKH settings"));
       }
       const controller = new AbortController();
@@ -997,7 +997,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     },
 
     getGlobalSettings() {
-      return cachedSettings;
+      return { ...cachedSettings, bsvNetwork: deps.walletState.snapshot().activeKeyIdentity?.bsvNetwork ?? cachedSettings.bsvNetwork };
     },
     onGlobalSettingsChange(handler) {
       settingsListeners.add(handler);
@@ -1007,13 +1007,13 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       const prev = cachedSettings;
       if (deps.coordinator?.p2pkhSettingsUpdate) {
         const result = await deps.coordinator.p2pkhSettingsUpdate({
-          includeTestnet: settings.includeTestnet,
+          bsvNetwork: settings.bsvNetwork,
           ...(settings.feeRateSatoshisPerKb === undefined ? {} : { feeRateSatoshisPerKb: settings.feeRateSatoshisPerKb })
         });
         if (result.status !== "accepted" && result.status !== "ok") throw new Error("Coordinator rejected P2PKH network settings");
       }
       setCachedSettingsAndEmit(settings);
-      if (!prev.includeTestnet && settings.includeTestnet) {
+      if (prev.bsvNetwork !== settings.bsvNetwork) {
         try {
           await rehydrateResources();
         } catch (err) {

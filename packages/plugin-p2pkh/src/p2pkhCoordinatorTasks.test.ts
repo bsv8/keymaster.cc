@@ -4,7 +4,7 @@ import { createP2pkhStateRepository, disposeP2pkhStateRepository, openP2pkhState
 import { createMemoryOwnerFileStore } from "./storage/testSupport/memoryOwnerFileStore.js";
 
 const OWNER = "02" + "11".repeat(32);
-const resource = {
+const resource = {bsvNetwork: "main" as const,
   resourceId: "p2pkh:main",
   publicKeyHex: OWNER,
   label: "test",

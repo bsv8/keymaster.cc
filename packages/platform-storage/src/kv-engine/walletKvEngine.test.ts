@@ -9,7 +9,7 @@ function uniqueDatabaseName(label: string): string {
 }
 
 function bindingFor(label: string, overrides: Partial<StorageNamespaceBinding> = {}): StorageNamespaceBinding {
-  return {
+  return {bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
     ...CENTRAL_STORAGE_DECLARATIONS.bsvPrice,
     walletGeneration: "wallet-generation-" + label,
     sessionEpoch: "session-epoch-" + label,
@@ -35,12 +35,29 @@ async function collectPaths(store: WalletStore, prefix: string): Promise<string[
 }
 
 describe("wallet K-V engine garbage collection", () => {
+  it("isolates the same public key and logical K-V key across main/test, including deletion and garbage collection", async () => {
+    const store = createIndexedDbWalletStore({ databaseName: uniqueDatabaseName("network-isolation") });
+    const main = createKeyValueStore({ store, binding: bindingFor("identity") });
+    const test = createKeyValueStore({ store, binding: bindingFor("identity", { bsvNetwork: "test" }) });
+    try {
+      await main.put("identity-note", { value: "main" });
+      expect(await test.get("identity-note")).toBeUndefined();
+      await test.put("identity-note", { value: "test" });
+      expect((await main.get("identity-note"))?.value).toEqual({ value: "main" });
+      expect((await test.get("identity-note"))?.value).toEqual({ value: "test" });
+      await main.delete("identity-note");
+      await main.collectGarbage({ minAgeMs: 0 });
+      expect((await test.get("identity-note"))?.value).toEqual({ value: "test" });
+      expect((await collectPaths(store, "test/")).length).toBeGreaterThan(0);
+    } finally { main.close(); test.close(); store.close(); }
+  });
+
   it("reclaims the value object a delete detached from every head", async () => {
     const store = createIndexedDbWalletStore({ databaseName: uniqueDatabaseName("orphan") });
     try {
       const kv = createKeyValueStore({ store, binding: bindingFor("orphan") });
       await kv.put("note", { text: "hello" }, { partition: "settings" });
-      const prefix = "bsv-price/settings/.keymaster/values/";
+      const prefix = "main/0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798/bsv-price/settings/.keymaster/values/";
       expect(await collectPaths(store, prefix)).toHaveLength(1);
 
       await kv.delete("note", { partition: "settings" });
@@ -63,7 +80,7 @@ describe("wallet K-V engine garbage collection", () => {
       // 相同内容写进同一个 partition：内容去重让同一 head 内两条引用共用一个 value object。
       await kv.put("a", { text: "shared" }, { partition: "left" });
       await kv.put("b", { text: "shared" }, { partition: "left" });
-      const prefix = "bsv-price/settings/.keymaster/values/";
+      const prefix = "main/0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798/bsv-price/settings/.keymaster/values/";
       expect(await collectPaths(store, prefix)).toHaveLength(1);
 
       // 只从 left 删掉一条引用；b 仍引用同一个 value object。
@@ -86,7 +103,7 @@ describe("wallet K-V engine garbage collection", () => {
       // 去重只在 partition 内进行：value envelope 里记了归属 partition，跨 partition
       // 共享同一个对象会让另一方读到时归属校验失败。
       await kv.put("note", { text: "hello" }, { partition: "right" });
-      const prefix = "bsv-price/settings/.keymaster/values/";
+      const prefix = "main/0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798/bsv-price/settings/.keymaster/values/";
       expect(await collectPaths(store, prefix)).toHaveLength(2);
 
       // 删掉 left 的引用后只有 left 那份成了孤儿，right 的必须留下。
@@ -108,7 +125,7 @@ describe("wallet K-V engine garbage collection", () => {
       const kv = createKeyValueStore({ store, binding: bindingFor("overwrite") });
       await kv.put("note", { text: "v1" }, { partition: "settings" });
       await kv.put("note", { text: "v2" }, { partition: "settings" });
-      const prefix = "bsv-price/settings/.keymaster/values/";
+      const prefix = "main/0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798/bsv-price/settings/.keymaster/values/";
       expect(await collectPaths(store, prefix)).toHaveLength(2);
 
       const result = await kv.collectGarbage({ minAgeMs: 0 });
@@ -134,13 +151,13 @@ describe("wallet K-V engine garbage collection", () => {
       clock = 1_500;
       const young = await kv.collectGarbage({ minAgeMs: 1_000 });
       expect(young).toMatchObject({ scanned: 1, candidates: 0, deleted: 0 });
-      expect(await collectPaths(store, "bsv-price/settings/.keymaster/values/")).toHaveLength(1);
+      expect(await collectPaths(store, "main/0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798/bsv-price/settings/.keymaster/values/")).toHaveLength(1);
 
       // 超过门槛后才回收。
       clock = 2_500;
       const old = await kv.collectGarbage({ minAgeMs: 1_000 });
       expect(old).toMatchObject({ candidates: 1, deleted: 1, failed: 0 });
-      expect(await collectPaths(store, "bsv-price/settings/.keymaster/values/")).toEqual([]);
+      expect(await collectPaths(store, "main/0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798/bsv-price/settings/.keymaster/values/")).toEqual([]);
       kv.close();
     } finally {
       store.close();
@@ -155,7 +172,7 @@ describe("wallet K-V engine garbage collection", () => {
         await kv.put(`note-${index}`, { text: `v-${index}` }, { partition: "settings" });
         await kv.put(`note-${index}`, { text: `v-${index}-replaced` }, { partition: "settings" });
       }
-      const prefix = "bsv-price/settings/.keymaster/values/";
+      const prefix = "main/0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798/bsv-price/settings/.keymaster/values/";
       expect(await collectPaths(store, prefix)).toHaveLength(10);
 
       const first = await kv.collectGarbage({ minAgeMs: 0, maxDeletes: 3 });
@@ -201,7 +218,7 @@ describe("wallet K-V engine garbage collection", () => {
       await kv.put("note", { text: "v2" }, { partition: "settings" });
       await kv.delete("note", { partition: "settings" });
 
-      const prefix = "bsv-price/settings/.keymaster/values/";
+      const prefix = "main/0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798/bsv-price/settings/.keymaster/values/";
       // v1 被覆盖写换下、v2 被 delete 摘掉，两个都是孤儿。
       const result = await kv.collectGarbage({ minAgeMs: 0 });
       expect(result).toMatchObject({ candidates: 2, deleted: 1, failed: 1 });
@@ -221,11 +238,11 @@ describe("wallet K-V engine garbage collection", () => {
     try {
       const kv = createKeyValueStore({ store, binding: bindingFor("foreign") });
       // 同前缀下的未知对象：本引擎没写过，宁可保留也不猜。
-      await store.put("bsv-price/settings/.keymaster/values/not-a-value-object", new TextEncoder().encode("garbage"));
+      await store.put("main/0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798/bsv-price/settings/.keymaster/values/not-a-value-object", new TextEncoder().encode("garbage"));
 
       const result = await kv.collectGarbage({ minAgeMs: 0 });
       expect(result).toMatchObject({ scanned: 1, candidates: 0, deleted: 0 });
-      expect(await store.get("bsv-price/settings/.keymaster/values/not-a-value-object")).toBeDefined();
+      expect(await store.get("main/0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798/bsv-price/settings/.keymaster/values/not-a-value-object")).toBeDefined();
 
       kv.close();
       await expect(kv.collectGarbage({ minAgeMs: 0 })).rejects.toThrow();

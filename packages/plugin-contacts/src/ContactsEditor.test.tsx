@@ -38,7 +38,7 @@ function makeFakeWalletState(): TestWalletState {
     for (const listener of listeners) listener(active);
   };
   return {
-    snapshot: () => walletStateFixtureSnapshot((() => active)(), () => ({
+    snapshot: () => walletStateFixtureSnapshot((() => active)(), () => ({bsvNetwork: "main" as const,
       publicKeyHex: INITIAL_KEY,
       label: "test",
       capabilities: [],

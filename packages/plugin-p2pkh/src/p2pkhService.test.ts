@@ -8,11 +8,11 @@ import type { P2pkhKeyResource } from "./p2pkhContracts.js";
 
 const OWNER = "02" + "11".repeat(32);
 const ADDRESS = "1BoatSLRHtKNngkdXEeobR76b53LETtpyT";
-const resource: P2pkhKeyResource = { resourceId: "p2pkh:main", publicKeyHex: OWNER, label: "test", address: ADDRESS, network: "main", createdAt: new Date(0).toISOString(), generation: 0 };
+const resource: P2pkhKeyResource = {  resourceId: "p2pkh:main", publicKeyHex: OWNER, label: "test", address: ADDRESS, network: "main", createdAt: new Date(0).toISOString(), generation: 0 };
 
-function walletState(): VaultWalletState {
+function walletState(network: "main" | "test" = "main"): VaultWalletState {
   return {
-    snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: OWNER }))(), () => ({ publicKeyHex: OWNER, label: "test", capabilities: ["p2pkh"], createdAt: new Date(0).toISOString() })),
+    snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: OWNER }))(), () => ({bsvNetwork: network,  publicKeyHex: OWNER, label: "test", capabilities: ["p2pkh"], createdAt: new Date(0).toISOString() })),
 
     subscribe: () => () => undefined,
   } as unknown as VaultWalletState;
@@ -28,11 +28,11 @@ function snapshot(items: P2pkhUtxoSnapshotResult["items"] = []): P2pkhUtxoSnapsh
   return { available: true, state: "fresh", seq: 1, syncedAt: "2026-09-20T00:00:00.000Z", items };
 }
 
-function coordinatorWithSnapshot(items: P2pkhUtxoSnapshotResult["items"], includeTestnet = false) {
+function coordinatorWithSnapshot(items: P2pkhUtxoSnapshotResult["items"], bsvNetwork = false) {
   let result = snapshot(items);
   const topicListeners = new Map<string, Set<(event: unknown) => void>>();
   return {
-    getBootstrapSnapshot: () => ({ p2pkhSettings: { includeTestnet } }),
+    getBootstrapSnapshot: () => ({ p2pkhSettings: { bsvNetwork } }),
     p2pkhUtxosGet: vi.fn(async () => ({ status: "ok" as const, value: result })),
     p2pkhUtxosRefresh: vi.fn(async () => ({ status: "ok" as const, value: result })),
     p2pkhBroadcast: vi.fn(async () => ({ status: "ok" as const, value: { status: "accepted" } })),
@@ -174,19 +174,19 @@ describe("P2PKH service (snapshot + history)", () => {
 
     const testnetService = createP2pkhService({
       vault,
-      walletState: walletState(),
+      walletState: walletState("test"),
       messageBus,
       storage: createMemoryOwnerFileStore() as never,
       coordinator: coordinatorWithSnapshot([{ txid: "02".repeat(32), vout: 0, value: 300, height: 0, status: "unconfirmed", isSpentInMempoolTx: false }], true) as never,
     });
-    await testnetService.getResourceBalance(resource.resourceId);
+    await testnetService.getResourceBalance("p2pkh:test");
     const bothNetworks = testnetService.balanceBroadcaster.getSnapshot();
-    expect(Object.keys(bothNetworks.balances).sort()).toEqual(["mainnet", "testnet"]);
+    expect(Object.keys(bothNetworks.balances).sort()).toEqual(["testnet"]);
     expect(bothNetworks.balances.testnet).toMatchObject({ total: 300, available: true });
     testnetService.dispose?.();
   });
 
-  it("T04：切换全局 testnet 设置时立即增删 testnet map 键", async () => {
+  it("T04：设置广播不能改变身份的网络", async () => {
     const storage = createMemoryOwnerFileStore();
     const coordinator = coordinatorWithSnapshot([{ txid: "03".repeat(32), vout: 0, value: 700, height: 10, status: "confirmed", isSpentInMempoolTx: false }]);
     const service = createP2pkhService({ vault, walletState: walletState(), messageBus, storage: storage as never, coordinator: coordinator as never });
@@ -196,14 +196,14 @@ describe("P2PKH service (snapshot + history)", () => {
 
     coordinator.emitTopic("background.snapshot", {
       type: "background.snapshot.changed",
-      p2pkhSettings: { includeTestnet: true },
+      p2pkhSettings: { bsvNetwork: "test" },
     });
     await service.getResourceBalance("p2pkh:test");
-    expect(Object.keys(service.balanceBroadcaster.getSnapshot().balances).sort()).toEqual(["mainnet", "testnet"]);
+    expect(Object.keys(service.balanceBroadcaster.getSnapshot().balances).sort()).toEqual(["mainnet"]);
 
     coordinator.emitTopic("background.snapshot", {
       type: "background.snapshot.changed",
-      p2pkhSettings: { includeTestnet: false },
+      p2pkhSettings: { bsvNetwork: "main" },
     });
     await service.getResourceBalance(resource.resourceId);
     expect(Object.keys(service.balanceBroadcaster.getSnapshot().balances)).toEqual(["mainnet"]);
@@ -222,13 +222,13 @@ describe("P2PKH service (snapshot + history)", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     const before = service.balanceBroadcaster.getSnapshot();
     coordinator.setSnapshot(snapshot([{ txid: "05".repeat(32), vout: 0, value: 400, height: 11, status: "confirmed", isSpentInMempoolTx: false }]));
-    notifier.emit({ providerId: "p2pkh", publicKeyHex: OWNER, revision: 99, kinds: ["utxo", "balance"] });
+    notifier.emit({ networkIdentity: {bsvNetwork: "main", publicKeyHex: OWNER}, providerId: "p2pkh", publicKeyHex: OWNER, revision: 99, kinds: ["utxo", "balance"] });
 
     await vi.waitFor(() => expect(service.balanceBroadcaster.getSnapshot().balances.mainnet?.total).toBe(400));
     const after = service.balanceBroadcaster.getSnapshot();
     expect(after.revision).toBeGreaterThan(before.revision);
     expect(onDataChanged).toHaveBeenCalled();
-    expect(notifier.emit).toHaveBeenCalledWith(expect.objectContaining({ providerId: "p2pkh", publicKeyHex: OWNER, kinds: ["balance"] }));
+    expect(notifier.emit).toHaveBeenCalledWith(expect.objectContaining({ networkIdentity: {bsvNetwork: "main", publicKeyHex: OWNER}, providerId: "p2pkh", publicKeyHex: OWNER, kinds: ["balance"] }));
     expect(coordinator.p2pkhUtxosRefresh).not.toHaveBeenCalled();
     service.dispose?.();
   });
@@ -253,7 +253,7 @@ describe("P2PKH service (snapshot + history)", () => {
     await service.getResourceBalance(resource.resourceId);
     expect(service.balanceBroadcaster.getSnapshot().revision).toBe(ready.revision);
 
-    notifier.emit({ providerId: "p2pkh", publicKeyHex: "03" + "22".repeat(32), revision: 100, kinds: ["balance"] });
+    notifier.emit({ networkIdentity: {bsvNetwork: "main", publicKeyHex: "03" + "22".repeat(32)}, providerId: "p2pkh", publicKeyHex: "03" + "22".repeat(32), revision: 100, kinds: ["balance"] });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(service.balanceBroadcaster.getSnapshot().revision).toBe(ready.revision);
 

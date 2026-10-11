@@ -107,13 +107,16 @@ export class WalletPayments {
     private publicKeyHex: string,
     private assertActive: () => void,
     private signDigest: (digest: Uint8Array) => Promise<Uint8Array>,
+    private network: "main" | "test",
   ) {}
   static async open(
     files: PaymentFileStore,
     publicKeyHex: string,
     assertActive: () => void,
     signDigest: (digest: Uint8Array) => Promise<Uint8Array>,
+    network: "main" | "test",
   ): Promise<WalletPayments> {
+    if(network!=="main"&&network!=="test")throw Error("network-identity-required");
     let revision: string | undefined;
     const store: PolicyStore = {
       async load() {
@@ -123,7 +126,9 @@ export class WalletPayments {
         if (!file) return null;
         revision = file.revision;
         // 保留整数精度及承诺字节；损坏文件必须报错，不能当成初始空账本。
-        return parseStoredPaymentPolicy(file.bytes, publicKeyHex);
+        const snapshot = parseStoredPaymentPolicy(file.bytes, publicKeyHex);
+        if(snapshot.channels.some(channel=>channel.network!==network))throw Error("network-identity-mismatch");
+        return snapshot;
       },
       async save(snapshot) {
         assertActive();
@@ -143,6 +148,7 @@ export class WalletPayments {
       publicKeyHex,
       assertActive,
       signDigest,
+      network,
     );
   }
   close() {
@@ -246,6 +252,7 @@ export class WalletPayments {
     }
     const assertRequest=()=>{this.assertActive();if(requestToken?.revoked)throw Error("payment-cancelled");};
     const snapshot = await this.gate.snapshot();
+    if(snapshot.channels.some(channel=>channel.network!==this.network))throw Error("network-identity-mismatch");
     this.assertActive();
     if (requestToken && "sessionId" in command) {
       const session = snapshot.sessions.find(s => s.id === command.sessionId && s.active);
@@ -257,6 +264,7 @@ export class WalletPayments {
     }
     if (command.action === "list") return snapshot.channels.map(dto);
     if (command.action === "register") {
+      if(command.network!==this.network)throw Error("network-identity-mismatch");
       const existing = snapshot.channels.find((c) => c.id === command.id);
       if (existing) {
         if (
@@ -287,6 +295,7 @@ export class WalletPayments {
       return dto(config);
     }
     if (command.action === "configure") {
+      if(command.channel.network!==this.network)throw Error("network-identity-mismatch");
       const c = {
         ...command.channel,
         singleLimit: money(command.channel.singleLimit),
@@ -324,7 +333,7 @@ export class WalletPayments {
     const isStandard = command.action === "sign-standard";
     if (c.paymentType !== (isPool ? `feepool.${command.family}${command.role === "cosigner" ? ".cosigner" : ""}` : isStandard ? "bsv.standard" : "p2pkh"))
       throw Error("unsupported");
-    if (c.network !== "main" && c.network !== "test")
+    if (c.network !== this.network)
       throw Error("unsupported-network");
     const raw = bytes(command.rawTxHex),
       previous = command.prevTransactionHexes.map(bytes),

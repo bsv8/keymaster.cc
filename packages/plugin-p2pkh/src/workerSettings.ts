@@ -2,13 +2,14 @@ import type { BorrowedModuleFileStore, CoordinatorClientRequest, CoordinatorResp
 import { createP2pkhFileRepository } from "./storage/p2pkhFileRepository.js";
 export interface WorkerSettingsDependencies {
   storage(): BorrowedModuleFileStore;
+  network(): "main" | "test";
   session(): { sessionEpoch: string; activePublicKeyHex?: string };
-  projection: { p2pkhSettings: { includeTestnet: boolean }; p2pkhProviderConfigs?: Record<string, Record<string, unknown>> };
+  projection: { p2pkhSettings: { bsvNetwork: "main" | "test" }; p2pkhProviderConfigs?: Record<string, Record<string, unknown>> };
   beforeWrite(): void;
   clearSnapshots(): void;
   reschedule(): Promise<void>;
   taskSnapshots(): CoordinatorTaskSnapshot[];
-  publishSnapshot(event: { type: "background.snapshot.changed"; snapshots: CoordinatorTaskSnapshot[]; p2pkhSettings: { includeTestnet: boolean } }): void;
+  publishSnapshot(event: { type: "background.snapshot.changed"; snapshots: CoordinatorTaskSnapshot[]; p2pkhSettings: { bsvNetwork: "main" | "test" } }): void;
   woc(): WocService | undefined;
 }
 
@@ -30,7 +31,7 @@ async function loadP2pkhSettingForOwner(ownerPublicKeyHex: string | undefined): 
   try {
     const setting = await repository().readSetting();
     if (generation !== revision || deps.session().sessionEpoch !== epoch || deps.session().activePublicKeyHex?.toLowerCase() !== owner) throw new Error("P2PKH settings load became stale");
-    deps.projection.p2pkhSettings = { includeTestnet: setting.includeTestnet };
+    deps.projection.p2pkhSettings = { bsvNetwork: deps.network() };
     // 旧 providerConfigs 中的 junglebus 等配置已由解析器丢弃。
     deps.projection.p2pkhProviderConfigs = structuredClone(setting.providerConfigs);
     p2pkhSettingOwner = owner;
@@ -45,13 +46,12 @@ function resetP2pkhSettingsRuntime(): void {
   revision += 1;
   p2pkhSettingOwner = undefined;
   deps.projection.p2pkhProviderConfigs = {};
-  deps.projection.p2pkhSettings = { includeTestnet: false };
   deps.clearSnapshots();
 }
 
 /** 读-改-写 setting.json；failure 时调用方不得更新内存镜像。 */
 async function writeP2pkhSettingFile(patch: {
-  includeTestnet?: boolean;
+  bsvNetwork?: "main" | "test";
   feeRateSatoshisPerKb?: Partial<Record<"low" | "medium" | "high", number>>;
   providerConfigs?: Record<string, Record<string, unknown>>;
 }): Promise<void> {
@@ -63,7 +63,6 @@ async function writeP2pkhSettingFile(patch: {
   const current = await store.readSetting();
   assertFresh();
   await store.writeSetting({
-    includeTestnet: patch.includeTestnet ?? current.includeTestnet,
     feeRateSatoshisPerKb: {
       ...current.feeRateSatoshisPerKb,
       ...(patch.feeRateSatoshisPerKb ?? {})
@@ -77,8 +76,8 @@ async function handleP2pkhSettingsUpdate(
   requestId: string,
   request: Extract<CoordinatorClientRequest, { kind: "p2pkh.settings.update" }>
 ): Promise<CoordinatorResponse> {
-  if (typeof request.settings.includeTestnet !== "boolean") {
-    return { requestId, sessionEpoch: deps.session().sessionEpoch, ack: { status: "validation-error", message: "Invalid P2PKH network settings" } };
+  if (request.settings.bsvNetwork !== deps.network()) {
+    return { requestId, sessionEpoch: deps.session().sessionEpoch, ack: { status: "validation-error", message: "Identity network is immutable" } };
   }
   if (request.settings.feeRateSatoshisPerKb !== undefined) {
     for (const value of Object.values(request.settings.feeRateSatoshisPerKb)) {
@@ -89,15 +88,15 @@ async function handleP2pkhSettingsUpdate(
   }
   // 先写 owner 的 setting.json,成功后才更新内存镜像。
   await writeP2pkhSettingFile({
-    includeTestnet: request.settings.includeTestnet,
+    bsvNetwork: request.settings.bsvNetwork,
     ...(request.settings.feeRateSatoshisPerKb === undefined ? {} : { feeRateSatoshisPerKb: request.settings.feeRateSatoshisPerKb })
   });
-  deps.projection.p2pkhSettings = { includeTestnet: request.settings.includeTestnet };
+  deps.projection.p2pkhSettings = { bsvNetwork: request.settings.bsvNetwork };
   await deps.reschedule();
   deps.publishSnapshot( {
     type: "background.snapshot.changed",
     snapshots: deps.taskSnapshots(),
-    // 设置写入成功后随同快照广播，窗口无需再发起 RPC 才能收敛 testnet 开关。
+    // 设置写入成功后随同快照广播，窗口无需再发起 RPC 才能收敛身份网络投影。
     p2pkhSettings: deps.projection.p2pkhSettings,
   });
   return { requestId, sessionEpoch: deps.session().sessionEpoch, ack: { status: "accepted" } };

@@ -88,7 +88,7 @@ async function setupManifest() {
   const messageBusListeners = new Map<string, Array<(payload: unknown) => void>>();
 
   // assetDataNotifier 需要真正存储 handler，以便测试中手动 emit
-  const dataNotifierListeners: Array<(event: { providerId: string; kinds: string[]; publicKeyHex?: string }) => void> = [];
+  const dataNotifierListeners: Array<(event: { providerId: string; kinds: string[]; networkIdentity?: import("@keymaster/contracts").NetworkIdentity; publicKeyHex?: string }) => void> = [];
 
   const ctx = {
     scope: { state: "active" },
@@ -103,7 +103,7 @@ async function setupManifest() {
         case "p2pkh.service":
           return {
             listResources: vi.fn().mockResolvedValue([]),
-            getGlobalSettings: () => ({ includeTestnet: false }),
+            getGlobalSettings: () => ({ bsvNetwork: "main" }),
             onGlobalSettingsChange: onGlobalSettingsChangeFn,
           };
         case "woc.bsv21.service":
@@ -112,7 +112,7 @@ async function setupManifest() {
           return {};
         case "vault.wallet-state":
           return { bind: () => ({
-            snapshot: () => ({ activePublicKeyHex: "pk1" }),
+            snapshot: () => ({ activePublicKeyHex: "pk1", activeKeyIdentity: { bsvNetwork: "main", publicKeyHex: "pk1" } }),
             subscribe: onActiveChangeFn,
             isInitializing: () => false,
             openOwnerAppStore: vi.fn(),
@@ -141,7 +141,7 @@ async function setupManifest() {
         case "asset.dataNotifier":
           return {
             emit: vi.fn(),
-            subscribe: vi.fn((handler: (event: { providerId: string; kinds: string[]; publicKeyHex?: string }) => void) => {
+            subscribe: vi.fn((handler: (event: { providerId: string; kinds: string[]; networkIdentity?: import("@keymaster/contracts").NetworkIdentity; publicKeyHex?: string }) => void) => {
               dataNotifierListeners.push(handler);
               return () => {
                 const idx = dataNotifierListeners.indexOf(handler);
@@ -238,7 +238,7 @@ describe("bsv21TokenPlugin.setup", () => {
     mockDbListResult = [];
     const { dataNotifierListeners, triggerFn } = await setupManifest();
 
-    dataNotifierListeners.forEach((h) => h({
+    dataNotifierListeners.forEach((h) => h({ networkIdentity: {bsvNetwork: "main", publicKeyHex: "pk1"},
       providerId: "p2pkh",
       kinds: ["resource"],
       publicKeyHex: "pk1",
@@ -254,7 +254,7 @@ describe("bsv21TokenPlugin.setup", () => {
     mockDbListResult = [{ origin: "tok1", network: "main", address: "addr1" }];
     const { dataNotifierListeners, triggerFn } = await setupManifest();
 
-    dataNotifierListeners.forEach((h) => h({
+    dataNotifierListeners.forEach((h) => h({ networkIdentity: {bsvNetwork: "main", publicKeyHex: "pk1"},
       providerId: "p2pkh",
       kinds: ["resource"],
       publicKeyHex: "pk1",
@@ -268,7 +268,7 @@ describe("bsv21TokenPlugin.setup", () => {
   it("p2pkh resource 事件不匹配 active key 时不触发", async () => {
     const { dataNotifierListeners, triggerFn } = await setupManifest();
 
-    dataNotifierListeners.forEach((h) => h({
+    dataNotifierListeners.forEach((h) => h({ networkIdentity: {bsvNetwork: "main", publicKeyHex: "pk_other"},
       providerId: "p2pkh",
       kinds: ["resource"],
       publicKeyHex: "pk_other",
@@ -285,7 +285,7 @@ describe("bsv21TokenPlugin.setup", () => {
       finish = () => mode === "resolve" ? resolve([]) : reject(new Error("owner revoked"));
     });
     const { ctx, triggerFn: trigger, dataNotifierListeners } = await setupManifest();
-    dataNotifierListeners.forEach(handler => handler({ providerId: "p2pkh", kinds: ["resource"], publicKeyHex: "pk1" }));
+    dataNotifierListeners.forEach(handler => handler({ networkIdentity: {bsvNetwork: "main", publicKeyHex: "pk1"}, providerId: "p2pkh", kinds: ["resource"], publicKeyHex: "pk1" }));
     ctx.scope.state = "stopping";
     finish();
     await mockPendingList.catch(() => {});

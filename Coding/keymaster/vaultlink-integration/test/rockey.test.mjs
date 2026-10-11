@@ -29,7 +29,7 @@ test('Keymaster SDK interoperates with actual RocKey C++ payment service: config
  const secret=new Uint8Array(32);secret[31]=1;const key=new DeviceIdentityKey(secret);const publicKeyHex=hex(key.publicKey());
  let backend;
  try{
-  backend=await VaultLinkHardwareBackend.connect(bridged,{publicKeyHex,generations:{walletGeneration:1,backendGeneration:1,hostRunGeneration:1},assertActive(){}},async code=>{assert.match(code,/^\d{6}$/);return true;});
+  backend=await VaultLinkHardwareBackend.connect(bridged,{bsvNetwork: "main", publicKeyHex,generations:{walletGeneration:1,backendGeneration:1,hostRunGeneration:1},assertActive(){}},async code=>{assert.match(code,/^\d{6}$/);return true;});
   const connection=crypto.randomUUID();
   const config={id:'app-channel',owner:'app',kind:'app',network:'main',paymentType:'p2pkh',enabled:true,singleLimit:400n,defaultSessionLimit:500n,revision:1};
   await backend.configureChannel(config);assert.equal((await backend.readChannel(config.id)).owner,'app');
@@ -151,7 +151,7 @@ test('RocKey cancels awaiting approval outside FIFO and retains App session on U
    const iterator=child.stdout[Symbol.asyncIterator]();let backend;
    try{
     backend=await VaultLinkHardwareBackend.connect({async read(){const v=await iterator.next();return v.done?null:new Uint8Array(v.value);},async write(b){if(!child.stdin.write(b))await once(child.stdin,'drain');},async close(){child.stdin.end();}},
-     {publicKeyHex:hex(key.publicKey()),generations:{walletGeneration:1,backendGeneration:1,hostRunGeneration:phase==='first'?1:2},assertActive(){}},async()=>true);
+     {bsvNetwork: "main", publicKeyHex:hex(key.publicKey()),generations:{walletGeneration:1,backendGeneration:1,hostRunGeneration:phase==='first'?1:2},assertActive(){}},async()=>true);
     if(phase==='first'){
      await backend.configureChannel(config);await backend.startAppSession(sessionId,'app');
      const payment=id=>({rawTx,prevTransactions:[previous],channelId:config.id,paymentId:id,sessionId,network:'main'});

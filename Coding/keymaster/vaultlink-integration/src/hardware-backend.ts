@@ -63,6 +63,7 @@ export interface HardwareOperationActivity {
 }
 export interface WalletContext {
   publicKeyHex: string;
+  bsvNetwork: "main" | "test";
   generations: Generations;
   /** 生命周期真值来自 Coordinator，方法捕获的 UI 状态不可作为检查依据。 */
   assertActive(): void;
@@ -74,7 +75,7 @@ export interface PaymentInput {
   paymentId: string;
   /** 插件填 null，Connect App 填该次连接的钱包会话编号。 */
   sessionId: string | null;
-  network: "main";
+  network: "main" | "test";
 }
 export interface HardwarePaymentResult {
   signatures: Uint8Array[];
@@ -108,10 +109,11 @@ export class VaultLinkHardwareBackend {
   private constructor(
     private client: ProtocolClient,
     private context: WalletContext,
+    reader?: Promise<void>,
   ) {
     this.pub = publicKey(context.publicKeyHex);
     // run 内部会关闭并拒绝所有 pending；关闭后不保留一个看似可用的代理。
-    this.disconnected = client.run().then(
+    this.disconnected = (reader ?? client.run()).then(
       () => { this.closed = true; },
       () => { this.closed = true; },
     );
@@ -136,26 +138,35 @@ export class VaultLinkHardwareBackend {
       },
       [0x22e],
     );
+    const backend = new VaultLinkHardwareBackend(client, frozen);
     try {
       frozen.assertActive();
-      return new VaultLinkHardwareBackend(client, frozen);
+      const identity=object(await client.execute("identity.network",{},await commitment("identity-network",1,{})),["bsvNetwork","publicKey"]);
+      if(identity.bsvNetwork!==frozen.bsvNetwork || !(identity.publicKey instanceof Uint8Array) || !equal(identity.publicKey,publicKey(frozen.publicKeyHex)))throw Error("network-identity-mismatch");
+      frozen.assertActive();
+      return backend;
     } catch (error) {
       await client.close(error);
       throw error;
     }
   }
   /** 首次绑定只发布经过实体配对与新鲜持有权证明的公钥。 */
-  static async enroll(transport: Transport, context: Omit<WalletContext, "publicKeyHex">,
-    confirmPairing: (code: string) => Promise<boolean>): Promise<{backend: VaultLinkHardwareBackend; publicKeyHex: string}> {
+  static async enroll(transport: Transport, context: Omit<WalletContext, "publicKeyHex" | "bsvNetwork">,
+    confirmPairing: (code: string) => Promise<boolean>): Promise<{backend: VaultLinkHardwareBackend; publicKeyHex: string; bsvNetwork: "main" | "test"}> {
     context.assertActive();
     const frozen = {...context, generations: {...context.generations}};
     const verified = await enrollHost(transport, frozen.generations, secpIdentityVerifier, async code => {
       frozen.assertActive(); const allow = await confirmPairing(code); frozen.assertActive(); return allow;
     }, [0x22e]);
+    const reader = verified.client.run();
+    void reader.catch(() => undefined);
     try {
       frozen.assertActive();
       const publicKeyHex = Array.from(verified.publicKey, byte => byte.toString(16).padStart(2, "0")).join("");
-      return {publicKeyHex, backend: new VaultLinkHardwareBackend(verified.client, {...frozen, publicKeyHex})};
+      const identity=object(await verified.client.execute("identity.network",{},await commitment("identity-network",1,{})),["bsvNetwork","publicKey"]);
+      if((identity.bsvNetwork!=="main"&&identity.bsvNetwork!=="test") || !(identity.publicKey instanceof Uint8Array) || !equal(identity.publicKey,verified.publicKey))throw Error("network-identity-mismatch");
+      const bsvNetwork=identity.bsvNetwork;frozen.assertActive();
+      return {publicKeyHex, bsvNetwork, backend: new VaultLinkHardwareBackend(verified.client, {...frozen, publicKeyHex,bsvNetwork}, reader)};
     } catch (error) { await verified.client.close(error); throw error; }
   }
   static async openSerial(
@@ -245,7 +256,7 @@ export class VaultLinkHardwareBackend {
   ): Promise<HardwarePaymentResult> {
     const frozen = structuredClone(input);
     return this.enqueuePayment(frozen.sessionId, async () => {
-      if (frozen.network !== "main") throw Error("unsupported-network");
+      if (frozen.network !== this.context.bsvNetwork) throw Error("unsupported-network");
       if(frozen.authorization&&(frozen.family!=="bitfs"||frozen.stage!=="state"||(frozen.role&&frozen.role!=="payer")))throw Error("invalid-authorization");
       if(frozen.openingRequest&&(frozen.family!=="bitfs"||frozen.stage!=="state"||frozen.role!=="cosigner"||frozen.authorization||frozen.prevTransactions.length))throw Error("invalid-opening");
       const review = frozen.openingRequest ? await inspectBitfsOpening(frozen.rawTx,frozen.openingRequest,this.pub) : frozen.authorization ? await inspectBitfsAuthorization(frozen.rawTx,frozen.prevTransactions,this.pub,frozen.authorization) : await inspectFeePool(
@@ -334,7 +345,7 @@ export class VaultLinkHardwareBackend {
   signStandard(input: PaymentInput): Promise<HardwarePaymentResult> {
     const frozen = structuredClone(input);
     return this.enqueuePayment(frozen.sessionId, async () => {
-      if (frozen.network !== "main") throw Error("unsupported-network");
+      if (frozen.network !== this.context.bsvNetwork) throw Error("unsupported-network");
       const review = await inspectStandard(frozen.rawTx, frozen.prevTransactions, this.pub);
       const body = {rawTx: frozen.rawTx, prevTransactions: frozen.prevTransactions, channelId: frozen.channelId, paymentId: frozen.paymentId, sessionId: frozen.sessionId};
       const value = await this.submitPayment("tx.standard-payment", body, await commitment("bsv-standard-payment", 1, {...body, amount: review.amount}), frozen.sessionId);
@@ -445,7 +456,7 @@ export class VaultLinkHardwareBackend {
     this.assert();
     const body: Value = kind === "identity" ? {envelope:envelope.slice()} : {envelope:envelope.slice(),content:content?.slice() ?? new Uint8Array()};
     return this.enqueuePayment(appSessionId,async()=>{
-      const review=await inspectConnectEnvelope(kind,body,this.pub);
+      const review=await inspectConnectEnvelope(kind,body,this.pub,this.context.bsvNetwork);
       this.assert();this.paymentGuard?.();
       const hash=await commitment(`connect-${kind}-envelope`,1,body);
       const result=object(await this.submitPayment(`connect.${kind}-sign`,body,hash,appSessionId),["publicKey","signature"]);
@@ -604,6 +615,7 @@ export class VaultLinkHardwareBackend {
   }
   configureChannel(config: ChannelConfig): Promise<void> {
     const frozen = structuredClone(config);
+    if(frozen.network!==this.context.bsvNetwork)throw Error("network-identity-mismatch");
     return this.enqueue(async () => {
       const result = object(
         await this.request(
@@ -653,7 +665,7 @@ export class VaultLinkHardwareBackend {
     input: PaymentInput,
   ): Promise<HardwarePaymentResult> {
     this.assert();
-    if (input.network !== "main") throw new Error("unsupported-network");
+    if (input.network !== this.context.bsvNetwork) throw new Error("unsupported-network");
     if (!input.channelId || !input.paymentId)
       throw new Error("channel-required");
     const review = await inspectP2pkh(

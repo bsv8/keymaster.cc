@@ -4,7 +4,7 @@ import { parseRequestMessage } from "./protocolValidation.js";
 
 describe("storage protocol validation", () => {
   it("accepts an explicit empty list prefix as the app root", () => {
-    const parsed = parseRequestMessage({
+    const parsed = parseRequestMessage({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
       v: PROTOCOL_VERSION,
       type: "request",
       id: "list-root",
@@ -15,7 +15,7 @@ describe("storage protocol validation", () => {
   });
 
   it("rejects a path segment longer than 255 characters", () => {
-    expect(() => parseRequestMessage({
+    expect(() => parseRequestMessage({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
       v: PROTOCOL_VERSION,
       type: "request",
       id: "list-long",
@@ -25,7 +25,7 @@ describe("storage protocol validation", () => {
   });
 
   it("rejects get ranges whose end exceeds safe integer bounds", () => {
-    expect(() => parseRequestMessage({
+    expect(() => parseRequestMessage({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
       v: PROTOCOL_VERSION,
       type: "request",
       id: "get-overflow",
@@ -39,7 +39,7 @@ describe("price protocol validation", () => {
   it.each(["price.get", "price.subscribe", "price.unsubscribe"] as const)(
     "%s accepts exactly connectSessionId",
     (method) => {
-      const parsed = parseRequestMessage({
+      const parsed = parseRequestMessage({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
         v: PROTOCOL_VERSION,
         type: "request",
         id: "price-1",
@@ -51,7 +51,7 @@ describe("price protocol validation", () => {
   );
 
   it("rejects extra caller-supplied fields", () => {
-    expect(() => parseRequestMessage({
+    expect(() => parseRequestMessage({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
       v: PROTOCOL_VERSION,
       type: "request",
       id: "price-extra",
@@ -61,7 +61,7 @@ describe("price protocol validation", () => {
   });
 
   it("rejects a missing session id", () => {
-    expect(() => parseRequestMessage({
+    expect(() => parseRequestMessage({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
       v: PROTOCOL_VERSION,
       type: "request",
       id: "price-missing-session",
@@ -73,7 +73,7 @@ describe("price protocol validation", () => {
 
 describe("connect.login local catalog trust boundary", () => {
   const proof = { version: 1 as const, publisherPublicKey: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798", app: { id: "stable-app-id", name: "Stable App", description: "Description" }, requirements: [] as ("private-key" | "storage")[], signature: "ba7206e5617360697c0199ffdb3c82a2728b2e46a5b48b39d405ec65009bc3c34a3a91e0acf1f37ff88654a7a60d3f4da8532875d3f333859a22c8eb9feb7af7" };
-  const base = {
+  const base = {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
     v: PROTOCOL_VERSION,
     type: "request",
     id: "login",
@@ -95,7 +95,7 @@ describe("connect.login local catalog trust boundary", () => {
 
 describe("connect.launch signed proof boundary", () => {
   const proof = { version: 1 as const, publisherPublicKey: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798", app: { id: "stable-app-id", name: "Stable App", description: "Description" }, requirements: [] as ("private-key" | "storage")[], signature: "ba7206e5617360697c0199ffdb3c82a2728b2e46a5b48b39d405ec65009bc3c34a3a91e0acf1f37ff88654a7a60d3f4da8532875d3f333859a22c8eb9feb7af7" };
-  const base = {
+  const base = {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
     v: PROTOCOL_VERSION,
     type: "request",
     id: "launch",
@@ -121,15 +121,15 @@ describe("msfile protocol validation", () => {
   const HASH = "ab".repeat(32);
 
   it("accepts the three canonical shapes", () => {
-    expect(parseRequestMessage({
+    expect(parseRequestMessage({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
       v: PROTOCOL_VERSION, type: "request", id: "s1", method: "msfile.stat",
       params: { connectSessionId: "session", seedHashHex: HASH }
     }).params).toMatchObject({ connectSessionId: "session" });
-    expect(parseRequestMessage({
+    expect(parseRequestMessage({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
       v: PROTOCOL_VERSION, type: "request", id: "s2", method: "msfile.seed.read",
       params: { connectSessionId: "session", sourceId: SOURCE, seedHashHex: HASH }
     }).params).toMatchObject({ sourceId: SOURCE });
-    expect(parseRequestMessage({
+    expect(parseRequestMessage({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
       v: PROTOCOL_VERSION, type: "request", id: "s3", method: "msfile.block.read",
       params: { connectSessionId: "session", sourceId: SOURCE, seedHashHex: HASH, blockHashHex: HASH }
     }).params).toMatchObject({ sourceId: SOURCE, seedHashHex: HASH });
@@ -147,7 +147,7 @@ describe("msfile protocol validation", () => {
     "ownerPublicKeyHex",
     "appIdentity"
   ])("rejects forbidden field %s on msfile.seed.read", (field) => {
-    expect(() => parseRequestMessage({
+    expect(() => parseRequestMessage({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
       v: PROTOCOL_VERSION, type: "request", id: "x", method: "msfile.seed.read",
       params: {
         connectSessionId: "session",
@@ -159,18 +159,18 @@ describe("msfile protocol validation", () => {
   });
 
   it("rejects non-canonical hashes and malformed source routes", () => {
-    expect(() => parseRequestMessage({
+    expect(() => parseRequestMessage({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
       v: PROTOCOL_VERSION, type: "request", id: "x", method: "msfile.stat",
       params: { connectSessionId: "s", seedHashHex: "AB".repeat(32) }
     })).toThrowError(/64 lower-case hex/iu);
-    expect(() => parseRequestMessage({
+    expect(() => parseRequestMessage({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
       v: PROTOCOL_VERSION, type: "request", id: "x", method: "msfile.block.read",
       params: { connectSessionId: "s", sourceId: "remote-proxy:04" + "11".repeat(32), seedHashHex: HASH, blockHashHex: HASH }
     })).toThrowError(/source route/iu);
   });
 
   it("requires connectSessionId like every other business method family", () => {
-    expect(() => parseRequestMessage({
+    expect(() => parseRequestMessage({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
       v: PROTOCOL_VERSION, type: "request", id: "x", method: "msfile.stat",
       params: { seedHashHex: HASH }
     })).toThrowError(/connectSessionId/iu);
@@ -182,6 +182,7 @@ describe("p2pkh.transfer / feepool 多资产校验（施工单 2026-09-18 001）
   const MAINNET_P2PKH = "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2";
   const TESTNET_P2PKH = "mzBc4XEFSdjm9XEV3R3c7x6Q7ZqQ2d1b8e";
   const baseP2pkh = {
+    networkIdentity: {bsvNetwork:"main" as const,publicKeyHex:"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"},
     v: PROTOCOL_VERSION,
     type: "request" as const,
     id: "p2pkh-asset",
@@ -194,6 +195,7 @@ describe("p2pkh.transfer / feepool 多资产校验（施工单 2026-09-18 001）
     }
   };
   const baseFeepool = {
+    networkIdentity: {bsvNetwork:"main" as const,publicKeyHex:"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"},
     v: PROTOCOL_VERSION,
     type: "request" as const,
     id: "feepool-asset",
@@ -206,9 +208,9 @@ describe("p2pkh.transfer / feepool 多资产校验（施工单 2026-09-18 001）
     }
   };
 
-  it("缺省 assetId 保持 undefined（service 层归一化为 bsv-mainnet）并接受 mainnet 地址", () => {
+  it("缺省 assetId 使用身份网络并接受 mainnet 地址", () => {
     const parsed = parseRequestMessage(baseP2pkh);
-    expect(parsed.params).toMatchObject({ recipientAddress: MAINNET_P2PKH, assetId: undefined });
+    expect(parsed.params).toMatchObject({ recipientAddress: MAINNET_P2PKH, assetId: "bsv-mainnet" });
     const explicit = parseRequestMessage({ ...baseP2pkh, params: { ...baseP2pkh.params, assetId: "bsv-mainnet" } });
     expect(explicit.params).toMatchObject({ assetId: "bsv-mainnet" });
   });
@@ -223,6 +225,7 @@ describe("p2pkh.transfer / feepool 多资产校验（施工单 2026-09-18 001）
   it("bsv-testnet 接受 testnet 地址", () => {
     const parsed = parseRequestMessage({
       ...baseP2pkh,
+      networkIdentity: {...baseP2pkh.networkIdentity,bsvNetwork:"test"},
       params: { ...baseP2pkh.params, recipientAddress: TESTNET_P2PKH, assetId: "bsv-testnet" }
     });
     expect(parsed.params).toMatchObject({ recipientAddress: TESTNET_P2PKH, assetId: "bsv-testnet" });
@@ -250,10 +253,10 @@ describe("p2pkh.transfer / feepool 多资产校验（施工单 2026-09-18 001）
     })).toThrowError(/assetId/iu);
   });
 
-  it("feepool.prepare 接受 bsv-testnet，缺省时 assetId 为 undefined", () => {
-    const parsed = parseRequestMessage({ ...baseFeepool, params: { ...baseFeepool.params, assetId: "bsv-testnet" } });
+  it("feepool.prepare 使用完整网络身份", () => {
+    const parsed = parseRequestMessage({ ...baseFeepool, networkIdentity:{...baseFeepool.networkIdentity,bsvNetwork:"test"}, params: { ...baseFeepool.params, assetId: "bsv-testnet" } });
     expect(parsed.params).toMatchObject({ assetId: "bsv-testnet" });
     const defaults = parseRequestMessage(baseFeepool);
-    expect(defaults.params).toMatchObject({ assetId: undefined });
+    expect(defaults.params).toMatchObject({ assetId: "bsv-mainnet" });
   });
 });

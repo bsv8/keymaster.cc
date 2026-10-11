@@ -1,3 +1,4 @@
+import { validateNetworkIdentity } from "./networkIdentity.js";
 // Coordinator 与 WebLoom Runtime 之间的 typed capability 契约。
 //
 // 这里是 Keymaster 领域 DTO 的唯一 Runtime 边界：manifest 只携带 capability
@@ -312,9 +313,8 @@ export type CoordinatorCryptoResultFor<O extends CoordinatorCryptoOperation> =
  * 永远不会成为 RPC operationResult。这个形状与 Worker 的 `toPublicKey`
  * 投影一致，而不是把 Vault 内部记录直接暴露给 wire parser。
  */
-export type CoordinatorVaultKeyView = Pick<KeyRef, "publicKeyHex" | "label" | "capabilities" | "createdAt"> & {
+export type CoordinatorVaultKeyView = Pick<KeyRef, "bsvNetwork" | "publicKeyHex" | "label" | "capabilities" | "createdAt"> & {
   address?: string;
-  network?: "main" | "test";
   format: string;
   source?: string;
 };
@@ -659,12 +659,13 @@ function parseJsonRecord(value: unknown, field: string): P2pkhProviderConfig {
 function parseWalletInitializePlan(value: unknown): WalletInitializePlan {
   const plan = expectRecord(value, "wallet initialize plan");
   const firstKey = expectRecord(plan.firstKey, "wallet initialize plan.firstKey");
+  const bsvNetwork = enumValue(firstKey.bsvNetwork, ["main", "test"] as const, "wallet initialize plan.firstKey.bsvNetwork");
   const kind = enumValue(firstKey.kind, ["generate", "import"] as const, "wallet initialize plan.firstKey.kind");
   const label = text(firstKey.label, "wallet initialize plan.firstKey.label", 256);
   const capabilities = stringList(firstKey.capabilities, "wallet initialize plan.firstKey.capabilities", 64, 128);
   const password = text(firstKey.password, "wallet initialize plan.firstKey.password", 4_096);
   if (kind === "generate") {
-    return { transactionId: text(plan.transactionId, "wallet initialize plan.transactionId", 128), firstKey: { kind, label, capabilities, password } };
+    return { transactionId: text(plan.transactionId, "wallet initialize plan.transactionId", 128), firstKey: { kind, bsvNetwork, label, capabilities, password } };
   }
   const material = expectRecord(firstKey.material, "wallet initialize plan.firstKey.material");
   const wif = optionalText(material.wif, "wallet initialize plan.firstKey.material.wif", 256);
@@ -673,6 +674,7 @@ function parseWalletInitializePlan(value: unknown): WalletInitializePlan {
     transactionId: text(plan.transactionId, "wallet initialize plan.transactionId", 128),
     firstKey: {
       kind,
+      bsvNetwork,
       label,
       material: { hex: text(material.hex, "wallet initialize plan.firstKey.material.hex", 256), ...(wif === undefined ? {} : { wif }) },
       format: text(firstKey.format, "wallet initialize plan.firstKey.format", 128),
@@ -1542,7 +1544,7 @@ function parseCoordinatorRequest(value: unknown): CoordinatorRpcRequest {
       return { kind, taskId: text(request.taskId, kind + ".taskId", 256), expectedSessionEpoch: epoch("expectedSessionEpoch") } as CoordinatorRpcRequest;
     case "background.trigger":
       return { kind, taskId: text(request.taskId, kind + ".taskId", 256), reason: text(request.reason, kind + ".reason", 256), expectedSessionEpoch: epoch("expectedSessionEpoch") };
-    case "background.cancel-by-key": return { kind, publicKeyHex: text(request.publicKeyHex, kind + ".publicKeyHex", 256), expectedSessionEpoch: epoch("expectedSessionEpoch") };
+    case "background.cancel-by-key": return { kind, networkIdentity: validateNetworkIdentity(request.networkIdentity), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "background.settings.update": return { kind, settings: parseBackgroundSettings(request.settings), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "autolock.settings.update": return { kind, settings: parseAutoLockSettings(request.settings), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "p2pkh.settings.update": {
@@ -1562,7 +1564,7 @@ function parseCoordinatorRequest(value: unknown): CoordinatorRpcRequest {
       return {
         kind,
         settings: {
-          includeTestnet: booleanValue(settings.includeTestnet, kind + ".settings.includeTestnet"),
+          bsvNetwork: enumValue(settings.bsvNetwork, ["main", "test"] as const, kind + ".settings.bsvNetwork"),
           ...(parsedFeeRates === undefined ? {} : { feeRateSatoshisPerKb: parsedFeeRates })
         },
         expectedSessionEpoch: epoch("expectedSessionEpoch")
@@ -1754,16 +1756,15 @@ function parseCoordinatorVaultKeyView(value: unknown, field: string): Coordinato
   const publicKeyHex = text(key.publicKeyHex, field + ".publicKeyHex", 66);
   if (!/^(02|03)[0-9a-f]{64}$/iu.test(publicKeyHex)) throw new TypeError(`Coordinator ${field}.publicKeyHex is invalid`);
   const address = optionalText(key.address, field + ".address", 512);
-  const network = key.network === undefined ? undefined : enumValue(key.network, ["main", "test"] as const, field + ".network");
   const source = optionalText(key.source, field + ".source", 512);
   return {
+    bsvNetwork: enumValue(key.bsvNetwork, ["main", "test"] as const, field + ".bsvNetwork"),
     publicKeyHex,
     label: text(key.label, field + ".label", 256),
     capabilities: stringList(key.capabilities, field + ".capabilities", 64, 128),
     createdAt: text(key.createdAt, field + ".createdAt", 128),
     format: text(key.format, field + ".format", 128),
     ...(address === undefined ? {} : { address }),
-    ...(network === undefined ? {} : { network }),
     ...(source === undefined ? {} : { source }),
   };
 }
@@ -1817,7 +1818,7 @@ function parseCoordinatorBootstrapSnapshot(value: unknown, field: string): Coord
     ? undefined
     : (() => {
       const settings = expectRecord(snapshot.p2pkhSettings, field + ".p2pkhSettings");
-      return { includeTestnet: booleanValue(settings.includeTestnet, field + ".p2pkhSettings.includeTestnet") };
+      return { bsvNetwork: enumValue(settings.bsvNetwork, ["main", "test"] as const, field + ".p2pkhSettings.bsvNetwork") };
     })();
   const walletGeneration = optionalText(snapshot.walletGeneration, field + ".walletGeneration", 256);
   const storageIoOwnerPeer = snapshot.storageIoOwnerPeer === undefined
@@ -1903,6 +1904,7 @@ function parseWalletKeySummary(value: unknown, field: string): Extract<WalletIni
   const key = expectRecord(value, field);
   const source = optionalText(key.source, field + ".source", 512);
   return {
+    bsvNetwork: enumValue(key.bsvNetwork, ["main", "test"] as const, field + ".bsvNetwork"),
     publicKeyHex: text(key.publicKeyHex, field + ".publicKeyHex", 66),
     label: text(key.label, field + ".label", 256),
     address: text(key.address, field + ".address", 512),
@@ -1942,7 +1944,7 @@ function parseWalletColdStartSnapshot(value: unknown, field: string): WalletCold
   if (result.key !== undefined) {
     const record = expectRecord(result.key, field + ".key");
     const backend = record.backend === undefined ? undefined : enumValue(record.backend, ["software", "hardware"] as const, field + ".key.backend");
-    key = { publicKeyHex: text(record.publicKeyHex, field + ".key.publicKeyHex", 66), label: text(record.label, field + ".key.label", 1024), ...(backend === undefined ? {} : { backend }) };
+    key = { bsvNetwork: enumValue(record.bsvNetwork, ["main", "test"] as const, field + ".key.bsvNetwork"), publicKeyHex: text(record.publicKeyHex, field + ".key.publicKeyHex", 66), label: text(record.label, field + ".key.label", 1024), ...(backend === undefined ? {} : { backend }) };
   }
   return { state, ...(meta === undefined ? {} : { meta }), ...(key === undefined ? {} : { key }), ...(reason === undefined ? {} : { reason }) };
 }
@@ -1950,6 +1952,7 @@ function parseWalletColdStartSnapshot(value: unknown, field: string): WalletCold
 function parseWalletUnlockResult(value: unknown, field: string): WalletUnlockResult {
   const result = expectRecord(value, field);
   return {
+    bsvNetwork: enumValue(result.bsvNetwork, ["main", "test"] as const, field + ".bsvNetwork"),
     sessionEpoch: text(result.sessionEpoch, field + ".sessionEpoch", 256),
     walletGeneration: text(result.walletGeneration, field + ".walletGeneration", 256),
     publicKeyHex: text(result.publicKeyHex, field + ".publicKeyHex", 66),
@@ -2080,6 +2083,7 @@ function parseStorageOwnerGrant(value: unknown, field: string): StorageBindingGr
     : text(grant.purposeId, field + ".purposeId", 63);
   const authority = enumValue(grant.authority, ["built-in-module", "third-party-app"] as const, field + ".authority");
   const common = {
+    ...validateNetworkIdentity(grant),
     storageGrantId: text(grant.storageGrantId, field + ".storageGrantId", 256),
     walletGeneration: text(grant.walletGeneration, field + ".walletGeneration", 256),
     runGeneration: text(grant.runGeneration, field + ".runGeneration", 256),
@@ -2118,6 +2122,7 @@ function parseStorageOwnerGrant(value: unknown, field: string): StorageBindingGr
 function parseStoragePlatformGrant(value: unknown, field: string): StoragePlatformGrant {
   const grant = expectRecord(value, field);
   return {
+    ...validateNetworkIdentity(grant),
     platformGrantId: text(grant.platformGrantId, field + ".platformGrantId", 256),
     walletGeneration: text(grant.walletGeneration, field + ".walletGeneration", 256),
     runGeneration: text(grant.runGeneration, field + ".runGeneration", 256),
@@ -3240,7 +3245,7 @@ function parseTaskSnapshot(value: unknown, field: string): CoordinatorTaskSnapsh
   if (snapshot.keyScope !== undefined) {
     const scope = expectRecord(snapshot.keyScope, field + ".keyScope");
     const label = optionalText(scope.label, field + ".keyScope.label", 256);
-    keyScope = { publicKeyHex: text(scope.publicKeyHex, field + ".keyScope.publicKeyHex", 256), ...(label === undefined ? {} : { label }) };
+    keyScope = { ...validateNetworkIdentity(scope), ...(label === undefined ? {} : { label }) };
   }
   return {
     id: text(snapshot.id, field + ".id", 256),
@@ -3268,7 +3273,7 @@ function parseBackgroundSnapshotEvent(value: unknown): BackgroundSnapshotEvent {
     ? undefined
     : (() => {
       const settings = expectRecord(event.p2pkhSettings, "event.p2pkhSettings");
-      return { includeTestnet: booleanValue(settings.includeTestnet, "event.p2pkhSettings.includeTestnet") };
+      return { bsvNetwork: enumValue(settings.bsvNetwork, ["main", "test"] as const, "event.p2pkhSettings.bsvNetwork") };
     })();
   return {
     topic: "background.snapshot",
@@ -3642,6 +3647,11 @@ function parseTopicSubscription(value: unknown): CoordinatorTopicSubscription {
 }
 
 function parseTopicEvent(value: unknown): CoordinatorTopicEvent {
+  const event = parseTopicEventBody(value);
+  const identity = record(value) ? value.networkIdentity : undefined;
+  return identity === undefined ? event : { ...event, networkIdentity: validateNetworkIdentity(identity) };
+}
+function parseTopicEventBody(value: unknown): CoordinatorTopicEvent {
   const topic = parseCoordinatorTopic(record(value) ? value.topic : undefined, "event.topic");
   switch (topic) {
     case "session.state": return parseSessionStateEvent(value);
@@ -3863,6 +3873,6 @@ function parsePublicKeyIdentity(value: unknown): import("./vault.js").KeyIdentit
   const identity = expectRecord(value, "activeKeyIdentity");
   if (identity.backend !== undefined && identity.backend !== "software" && identity.backend !== "hardware") throw new TypeError("Invalid public identity backend");
   if (!Array.isArray(identity.capabilities) || identity.capabilities.length > 64) throw new TypeError("Invalid public identity capabilities");
-  return { ...(identity.backend === undefined ? {} : { backend: identity.backend }), publicKeyHex: text(identity.publicKeyHex, "activeKeyIdentity.publicKeyHex", 256), label: text(identity.label, "activeKeyIdentity.label", 1024),
+  return { bsvNetwork: enumValue(identity.bsvNetwork, ["main", "test"] as const, "activeKeyIdentity.bsvNetwork"), ...(identity.backend === undefined ? {} : { backend: identity.backend }), publicKeyHex: text(identity.publicKeyHex, "activeKeyIdentity.publicKeyHex", 256), label: text(identity.label, "activeKeyIdentity.label", 1024),
     createdAt: text(identity.createdAt, "activeKeyIdentity.createdAt", 256), capabilities: identity.capabilities.map(item => text(item, "activeKeyIdentity.capabilities", 256)) };
 }

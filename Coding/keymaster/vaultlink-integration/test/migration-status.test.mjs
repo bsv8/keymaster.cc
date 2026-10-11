@@ -29,7 +29,7 @@ test('actual RocKey encrypted endpoint returns public migration progress and blo
       let log='',backend;child.stderr.setEncoding('utf8');child.stderr.on('data',s=>log+=s);
       try {
         backend=await VaultLinkHardwareBackend.connect({async read(){const v=await reader.next();return v.done?null:new Uint8Array(v.value);},async write(b){if(!child.stdin.write(b))await once(child.stdin,'drain');},async close(){child.stdin.end();}},
-          {publicKeyHex,generations:{walletGeneration:1,backendGeneration:1,hostRunGeneration:1},assertActive(){}},async()=>true);
+          {bsvNetwork: "main", publicKeyHex,generations:{walletGeneration:1,backendGeneration:1,hostRunGeneration:1},assertActive(){}},async()=>true);
         assert.deepEqual(await backend.migrationStatus(),state);
         assert.deepEqual(await backend.exportPaymentPolicy(),bank);
         if(phase==='device-committed') {

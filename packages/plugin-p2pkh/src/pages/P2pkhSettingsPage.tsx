@@ -1,7 +1,7 @@
 import { useP2pkhResources } from "../P2pkhResourceContext.js";
 // packages/plugin-p2pkh/src/pages/P2pkhSettingsPage.tsx
 // P2PKH 设置：
-//   - includeTestnet：是否把 testnet 资产纳入运行范围；
+//   - bsvNetwork：是否把 testnet 资产纳入运行范围；
 //   - BSV 矿工费率三档。
 //   - 已删除“确认同步供应商选择”：P2PKH 历史与 UTXO 只有 WoC 一个数据源。
 
@@ -13,7 +13,7 @@ import { P2PKH_COORDINATOR_CONTROL_CAPABILITY } from "@keymaster/contracts";
 import { resolveP2pkhFeeRateSatoshisPerKb, type P2pkhFeeRateTier, type P2pkhGlobalSettings, type P2pkhService } from "../p2pkhContracts.js";
 import { P2PKH_CAPABILITY } from "../p2pkhContracts.js";
 
-const DEFAULT_SETTINGS: P2pkhGlobalSettings = { includeTestnet: false };
+const DEFAULT_SETTINGS: P2pkhGlobalSettings = { bsvNetwork: "main" };
 
 export function P2pkhSettingsPage() {
   const reader = useP2pkhResources();
@@ -84,26 +84,7 @@ export function P2pkhSettingsPage() {
 
   return (
     <div className="p2pkh-settings">
-      <Select
-        label={t("p2pkh.settings.includeTestnet", { defaultValue: "包含 testnet 货币" })}
-        value={settings.includeTestnet ? "yes" : "no"}
-        onChange={(e) => void applySettings({ ...settings, includeTestnet: e.currentTarget.value === "yes" })}
-        options={[
-          {
-            label: { key: "p2pkh.settings.includeTestnet.no", fallback: "否（推荐）" },
-            value: "no"
-          },
-          {
-            label: { key: "p2pkh.settings.includeTestnet.yes", fallback: "是" },
-            value: "yes"
-          }
-        ]}
-      />
-      <p className="p2pkh-settings__hint">
-        {t("p2pkh.settings.includeTestnetHint", {
-          defaultValue: "关闭后 testnet 资产、转账入口与 testnet 钱包行会隐藏，确认同步也会跳过 testnet；再次开启会补齐 testnet 资源。"
-        })}
-      </p>
+      <p>BSV 网络：{settings.bsvNetwork === "test" ? "Testnet" : "Mainnet"}（创建身份时确定，不可修改）</p>
       <section className="p2pkh-settings__fee-rates" aria-labelledby="p2pkh-fee-rates-title">
         <h3 id="p2pkh-fee-rates-title">{t("p2pkh.settings.feeRates", { defaultValue: "BSV 矿工费率" })}</h3>
         <p>{t("p2pkh.settings.feeRatesHint", { defaultValue: "按 sats/kB 配置。转账页默认使用“中”；修改后立即应用到新建的交易预览。" })}</p>

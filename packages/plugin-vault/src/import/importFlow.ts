@@ -11,6 +11,7 @@ import type { WalletInitializePlan, WalletKeySummary } from "@keymaster/contract
 import type { KeyImportResult } from "./types.js";
 
 export interface ImportOptions {
+  bsvNetwork: import("@keymaster/contracts").BsvNetwork;
   /** 用户填写的标签。 */
   label: string;
   /** 当前 Vault 密码。 */
@@ -26,11 +27,13 @@ export async function persistImport(
   result: KeyImportResult,
   options: ImportOptions
 ): Promise<WalletKeySummary> {
+  if (result.network !== undefined && result.network !== options.bsvNetwork) throw new Error("Imported key network mismatch");
   if (!options.label) throw new Error("Label is required");
   const plan: WalletInitializePlan = {
     transactionId: `import-${crypto.randomUUID()}`,
     firstKey: {
       kind: "import",
+      bsvNetwork: options.bsvNetwork,
       label: options.label,
       material: result.material,
       format: result.detectedFormat,

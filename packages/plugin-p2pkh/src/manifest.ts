@@ -103,7 +103,7 @@ export const p2pkhResources: I18nPluginResources = {
   resources: {
     en: {
       "p2pkh.provider.name": "P2PKH",
-      "p2pkh.provider.description": "BSV P2PKH transfers: bsv / bsvtest networks (testnet is gated by the includeTestnet setting).",
+      "p2pkh.provider.description": "BSV P2PKH transfers: bsv / bsvtest networks (testnet is gated by the bsvNetwork setting).",
       "p2pkh.route.transactions": "P2PKH on-chain transactions",
       "p2pkh.route.localTransactions": "P2PKH local transactions",
       "p2pkh.route.transaction": "P2PKH transaction",
@@ -117,7 +117,7 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.crumb.localTransactions": "Local transactions",
       "p2pkh.crumb.transaction": "Transaction",
       "p2pkh.settings.label": "P2PKH",
-      "p2pkh.settings.description": "P2PKH product settings (includeTestnet, etc.). WOC settings are on the WOC page.",
+      "p2pkh.settings.description": "P2PKH product settings (bsvNetwork, etc.). WOC settings are on the WOC page.",
       "p2pkh.home.balance": "P2PKH balance",
       "p2pkh.task.transactions.label": "P2PKH confirmed transactions",
       "p2pkh.task.transactions.description": "Sync WoC history metadata and refresh the in-memory UTXO snapshot.",
@@ -211,8 +211,8 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.wallet.taskStatus": "Task status: {{status}}",
       "p2pkh.wallet.syncError": "Sync error: {{error}}",
       "p2pkh.wallet.network": "Network",
-      "p2pkh.wallet.networkDisabled": "Testnet is disabled",
-      "p2pkh.wallet.networkDisabledDescription": "Enable testnet in P2PKH settings before viewing testnet data.",
+      "p2pkh.wallet.networkDisabled": "Network identity mismatch",
+      "p2pkh.wallet.networkDisabledDescription": "This route belongs to a different network from the wallet identity.",
       "p2pkh.wallet.pagination": "Transaction pages",
       "p2pkh.wallet.page": "Page {{page}}",
       "p2pkh.wallet.mainnet": "Mainnet",
@@ -277,10 +277,10 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.state.spent": "Spent",
       "p2pkh.state.claimed": "Claimed",
       "p2pkh.state.protected": "Protected",
-      "p2pkh.settings.includeTestnet": "Include testnet assets",
-      "p2pkh.settings.includeTestnet.yes": "Yes",
-      "p2pkh.settings.includeTestnet.no": "No (recommended)",
-      "p2pkh.settings.includeTestnetHint": "When off, testnet assets, transfer offers, and the testnet wallet row are hidden; confirmed synchronization also skips testnet. Turning it back on rehydrates the testnet resource.",
+      "p2pkh.settings.bsvNetwork": "Include testnet assets",
+      "p2pkh.settings.bsvNetwork.yes": "Yes",
+      "p2pkh.settings.bsvNetwork.no": "No (recommended)",
+      "p2pkh.settings.bsvNetworkHint": "The network is fixed when the identity is created or imported.",
       "p2pkh.settings.feeRates": "BSV miner fee rates",
       "p2pkh.settings.feeRatesHint": "Configure sats/kB. New transfers use Medium by default; changes apply to new transaction previews.",
       "p2pkh.settings.feeRate.low": "Low",
@@ -365,7 +365,7 @@ export const p2pkhResources: I18nPluginResources = {
     },
     "zh-CN": {
       "p2pkh.provider.name": "P2PKH",
-      "p2pkh.provider.description": "BSV P2PKH 转移：bsv / bsvtest 两个网络（testnet 受 includeTestnet 设置控制）。",
+      "p2pkh.provider.description": "BSV P2PKH 转移：bsv / bsvtest 两个网络（testnet 受 bsvNetwork 设置控制）。",
       "p2pkh.route.transactions": "P2PKH 链上交易",
       "p2pkh.route.localTransactions": "P2PKH 本地交易",
       "p2pkh.route.transaction": "P2PKH 交易",
@@ -379,7 +379,7 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.crumb.localTransactions": "本地交易",
       "p2pkh.crumb.transaction": "交易",
       "p2pkh.settings.label": "P2PKH",
-      "p2pkh.settings.description": "P2PKH 产品设置（includeTestnet 等）。WOC 设置请到独立 WOC 设置页。",
+      "p2pkh.settings.description": "P2PKH 产品设置（bsvNetwork 等）。WOC 设置请到独立 WOC 设置页。",
       "p2pkh.home.balance": "P2PKH 余额",
       "p2pkh.task.transactions.label": "P2PKH 确认交易",
       "p2pkh.task.transactions.description": "同步 WoC 历史元数据并刷新内存 UTXO 快照。",
@@ -473,8 +473,8 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.wallet.taskStatus": "任务状态：{{status}}",
       "p2pkh.wallet.syncError": "同步错误：{{error}}",
       "p2pkh.wallet.network": "网络",
-      "p2pkh.wallet.networkDisabled": "测试网未启用",
-      "p2pkh.wallet.networkDisabledDescription": "请先在 P2PKH 设置中启用测试网，再查看测试网数据。",
+      "p2pkh.wallet.networkDisabled": "身份网络不一致",
+      "p2pkh.wallet.networkDisabledDescription": "此页面的网络与当前钱包身份不一致。",
       "p2pkh.wallet.pagination": "交易分页",
       "p2pkh.wallet.page": "第 {{page}} 页",
       "p2pkh.wallet.mainnet": "主网",
@@ -539,10 +539,10 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.state.spent": "已花费",
       "p2pkh.state.claimed": "已占用",
       "p2pkh.state.protected": "受保护",
-      "p2pkh.settings.includeTestnet": "包含 testnet 货币",
-      "p2pkh.settings.includeTestnet.yes": "是",
-      "p2pkh.settings.includeTestnet.no": "否（推荐）",
-      "p2pkh.settings.includeTestnetHint": "关闭后 testnet 资产、转账入口与 testnet 钱包行会隐藏，确认同步也会跳过 testnet；再次开启会补齐 testnet 资源。",
+      "p2pkh.settings.bsvNetwork": "包含 testnet 货币",
+      "p2pkh.settings.bsvNetwork.yes": "是",
+      "p2pkh.settings.bsvNetwork.no": "否（推荐）",
+      "p2pkh.settings.bsvNetworkHint": "网络在创建或导入身份时确定，之后不可修改。",
       "p2pkh.settings.feeRates": "BSV 矿工费率",
       "p2pkh.settings.feeRatesHint": "按 sats/kB 配置。转账页默认使用“中”；修改后立即应用到新建的交易预览。",
       "p2pkh.settings.feeRate.low": "低",
@@ -757,7 +757,7 @@ const p2pkhPluginDefinition = {
     });
     ctx.provide(P2PKH_CAPABILITY, service);
     ctx.provide(P2PKH_SETTINGS_READER_CAPABILITY, {
-      includeTestnet: () => service.getGlobalSettings().includeTestnet,
+      bsvNetwork: () => service.getGlobalSettings().bsvNetwork,
       onChange: listener => service.onGlobalSettingsChange(listener),
     });
     ctx.provide(BALANCE_BROADCAST_CAPABILITY, service.balanceBroadcaster);
@@ -939,7 +939,7 @@ const p2pkhPluginDefinition = {
     // 恢复失败时门禁保持 rejected，选币因此失败而不是放行。
     //
     // 网络按**每条记录自己保存的 network** 决定（见 `restoreProtections`），
-    // 不使用 `includeTestnet` 之类设置：那不是某笔资金的网络。
+    // 不使用 `bsvNetwork` 之类设置：那不是某笔资金的网络。
     const offRestoreFundingProtections = walletState.subscribe(() => {
       void startProtectionRestore().catch(() => undefined);
     });
@@ -1008,7 +1008,7 @@ const p2pkhPluginDefinition = {
       subscribe: (_args, _ctx, invalidate) => service.onGlobalSettingsChange(invalidate),
       equals: (prev, next) => {
         if (!prev || !next) return prev === next;
-        return prev.includeTestnet === next.includeTestnet
+        return prev.bsvNetwork === next.bsvNetwork
           && JSON.stringify(prev.feeRateSatoshisPerKb ?? {}) === JSON.stringify(next.feeRateSatoshisPerKb ?? {});
       },
       invalidation: "immediate"
@@ -1104,7 +1104,7 @@ const p2pkhPluginDefinition = {
     resources.register<P2pkhWalletResource, readonly string[]>({
       id: "p2pkh.wallet",
       scope: "active-key",
-      key: (_args, context) => ["p2pkh.wallet", context.activePublicKeyHex ?? "none", String(service.getGlobalSettings().includeTestnet)],
+      key: (_args, context) => ["p2pkh.wallet", context.activePublicKeyHex ?? "none", String(service.getGlobalSettings().bsvNetwork)],
       load: async (_args, context) => loadWalletResource(context),
       subscribe: (_args, _ctx, invalidate) => { const offs = [service.onDataChanged(invalidate), service.onGlobalSettingsChange(invalidate), walletState.subscribe(invalidate), coordinator.subscribeTopic("background.snapshot", invalidate)]; return () => offs.forEach((off) => off()); },
       invalidation: "microtask"
@@ -1170,8 +1170,8 @@ const p2pkhPluginDefinition = {
       pages,
       context: ctx,
       business,
-      includeTestnet: service.getGlobalSettings().includeTestnet,
-      onIncludeTestnetChange: (handler) => service.onGlobalSettingsChange((settings) => handler(settings.includeTestnet))
+      bsvNetwork: service.getGlobalSettings().bsvNetwork,
+      onBsvNetworkChange: (handler) => service.onGlobalSettingsChange((settings) => handler(settings.bsvNetwork))
     });
     ctx.onDispose(disposeNavigation);
 
@@ -1182,7 +1182,7 @@ const p2pkhPluginDefinition = {
     setupP2pkhUriActions(ctx);
     const identityResources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
     identityResources.register({ id: "p2pkh.identity-key", scope: "global", key: () => ["p2pkh.identity-key"], load: async () => walletState.snapshot(), subscribe: (_args, _context, invalidate) => walletState.subscribe(invalidate), invalidation: "immediate" });
-    identityResources.register({ id: "p2pkh.identity-testnet", scope: "global", key: () => ["p2pkh.identity-testnet"], load: async () => service.getGlobalSettings().includeTestnet, subscribe: (_args, _context, invalidate) => service.onGlobalSettingsChange(() => invalidate()), invalidation: "immediate" });
+    identityResources.register({ id: "p2pkh.identity-testnet", scope: "global", key: () => ["p2pkh.identity-testnet"], load: async () => service.getGlobalSettings().bsvNetwork, subscribe: (_args, _context, invalidate) => service.onGlobalSettingsChange(() => invalidate()), invalidation: "immediate" });
     const Identity = bindP2pkhUi(ctx, IdentityHomeButton);
     pages.register({ kind: "home", id: "p2pkh.identity", slot: "main", order: -990, label: "Identity", render: () => createElement(Identity) });
 

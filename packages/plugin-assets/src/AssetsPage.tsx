@@ -44,12 +44,12 @@ export function statusLabel(status: string, t: (key: string, values?: { defaultV
   }
 }
 
-function visibleNetworks(includeTestnet: boolean): Network[] {
-  return includeTestnet ? NETWORK_ORDER : ["main"];
+function visibleNetworks(bsvNetwork: "main" | "test"): Network[] {
+  return [bsvNetwork];
 }
 
-function groupByNetwork<T extends { network?: BsvNetwork }>(items: readonly T[], includeTestnet: boolean): Array<{ network: Network; items: T[] }> {
-  return visibleNetworks(includeTestnet).map((network) => ({
+function groupByNetwork<T extends { network?: BsvNetwork }>(items: readonly T[], bsvNetwork: "main" | "test"): Array<{ network: Network; items: T[] }> {
+  return visibleNetworks(bsvNetwork).map((network) => ({
     network,
     items: items.filter((item) => (item.network ?? "main") === network)
   }));
@@ -72,12 +72,12 @@ export function AssetsPage() {
     (snapshot) => snapshot.data ?? { assets: [], tokens: [] },
     { assets: [], tokens: [] }
   );
-  const settings = useOptionalResourceSelector<{ includeTestnet: boolean }, { includeTestnet: boolean }>(
+  const settings = useOptionalResourceSelector<{ bsvNetwork: "main" | "test" }, { bsvNetwork: "main" | "test" }>(
     reader,
     "assets.testnet",
     [],
-    (snapshot) => snapshot.data ?? { includeTestnet: false },
-    { includeTestnet: false }
+    (snapshot) => snapshot.data ?? { bsvNetwork: "main" },
+    { bsvNetwork: "main" }
   );
   const activeIdentity = useOptionalResourceSelector<KeyIdentity | null, KeyIdentity | null>(
     reader,
@@ -86,7 +86,7 @@ export function AssetsPage() {
     (snapshot) => snapshot.data ?? null,
     null
   );
-  const includeTestnet = settings.includeTestnet;
+  const bsvNetwork = settings.bsvNetwork;
   const providerTotal = (assets?.list().length ?? 0) + (tokens?.list().length ?? 0);
   const activeText = useMemo(() => {
     if (!activeIdentity) return t("assets.context.noKey", { defaultValue: "无 key" });
@@ -113,14 +113,14 @@ export function AssetsPage() {
           <span className="assets-page__eyebrow">{t("assets.page.eyebrow", { defaultValue: "资产总览" })}</span>
           <PageHeader title={t("assets.page.title", { defaultValue: "资产" })} description={activeText} />
           <p className="assets-page__lede">
-            {includeTestnet
+            {bsvNetwork
               ? t("assets.page.lede.testnet", { defaultValue: "按 provider 聚合展示你当前 key 下的 coin、token 与同步状态。mainnet 和 testnet 会分开展示。" })
               : t("assets.page.lede.mainnet", { defaultValue: "按 provider 聚合展示你当前 key 下的 coin、token 与同步状态。当前只显示 mainnet。" })}
           </p>
         </div>
-        <span className={`assets-page__scope is-${includeTestnet ? "dual" : "main"}`}>
+        <span className={`assets-page__scope is-${bsvNetwork === "test" ? "dual" : "main"}`}>
           <span className="assets-page__scope-dot" aria-hidden="true" />
-          {includeTestnet
+          {bsvNetwork
             ? t("assets.page.scope.dual", { defaultValue: "主网 + 测试网" })
             : t("assets.page.scope.main", { defaultValue: "仅主网" })}
         </span>
@@ -140,7 +140,7 @@ export function AssetsPage() {
           <div className="asset-overview-stack">
             {rows.assets.length === 0 ? <p className="asset-overview-empty">{t("assets.page.provider.empty", { defaultValue: "No items yet." })}</p> : null}
             {rows.assets.map((provider) => {
-              const groups = groupByNetwork(provider.assets, includeTestnet).filter((group) => group.items.length > 0);
+              const groups = groupByNetwork(provider.assets, bsvNetwork).filter((group) => group.items.length > 0);
               return (
               <article key={provider.provider.id} className="asset-overview-provider">
                 <div className="asset-overview-provider__head">
@@ -192,7 +192,7 @@ export function AssetsPage() {
           <div className="asset-overview-stack">
             {rows.tokens.length === 0 ? <p className="asset-overview-empty">{t("assets.page.provider.empty", { defaultValue: "No items yet." })}</p> : null}
             {rows.tokens.map((provider) => {
-              const groups = groupByNetwork(provider.tokens, includeTestnet).filter((group) => group.items.length > 0);
+              const groups = groupByNetwork(provider.tokens, bsvNetwork).filter((group) => group.items.length > 0);
               return (
               <article key={provider.provider.id} className="asset-overview-provider">
                 <div className="asset-overview-provider__head">

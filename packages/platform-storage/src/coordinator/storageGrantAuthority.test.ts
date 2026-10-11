@@ -3,8 +3,8 @@ import type { OwnerAppStorageGrant } from "@keymaster/contracts";
 import { createStorageGrantAuthority } from "./storageGrantAuthority.js";
 it("rejects an App grant revoked during its authoritative session lookup", async () => {
   const appIdentity = { publisherPublicKeyHex: "02" + "11".repeat(32), appId: "test.app", version: 1 as const, appName: "Test", identityDigestHex: "22".repeat(32) };
-  const context: OwnerAppStorageGrant = { connectSessionId: "connect", transportOrigin: "https://app.example", appIdentity, appStorageName: "app", moduleId: "app", purposeId: "files", sessionEpoch: "epoch", walletGeneration: "wallet", runGeneration: "run" };
-  const session = { origin: context.transportOrigin, appIdentity, ownerPublicKeyHex: "key", revokedAt: null };
+  const context: OwnerAppStorageGrant = {bsvNetwork:"main",publicKeyHex:"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",   connectSessionId: "connect", transportOrigin: "https://app.example", appIdentity, appStorageName: "app", moduleId: "app", purposeId: "files", sessionEpoch: "epoch", walletGeneration: "wallet", runGeneration: "run" };
+  const session = {networkIdentity:{bsvNetwork:context.bsvNetwork,publicKeyHex:context.publicKeyHex}, origin: context.transportOrigin, appIdentity, ownerPublicKeyHex: "key", revokedAt: null };
   let complete!: (value: typeof session) => void;
   const authority = createStorageGrantAuthority({
     session: () => ({ sessionEpoch: "epoch", walletGeneration: "wallet", runGeneration: "run", unlocked: true, rootAvailable: true }),

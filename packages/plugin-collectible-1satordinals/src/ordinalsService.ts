@@ -1,4 +1,4 @@
-import { sameWalletSession } from "@keymaster/contracts";
+import { requireUnlockedWalletIdentity, sameWalletSession } from "@keymaster/contracts";
 // packages/plugin-collectible-1satordinals/src/ordinalsService.ts
 // 1Sat Ordinals service：plugin-collectible-1satordinals 内部封装，组合
 // p2pkh.service（取当前 active key 的未花费 UTXO 集合）与
@@ -56,9 +56,9 @@ export interface P2pkhUtxoFilterFor1Sat {
 export interface P2pkhServiceFor1Sat {
   listUtxos(filter?: P2pkhUtxoFilterFor1Sat): Promise<P2pkhUtxoFor1Sat[]>;
   listUtxosRaw?(filter?: P2pkhUtxoFilterFor1Sat): Promise<P2pkhUtxoFor1Sat[]>;
-  getGlobalSettings?(): { includeTestnet: boolean };
+  getGlobalSettings?(): { bsvNetwork: "main" | "test" };
   onDataChanged?(handler: () => void): () => void;
-  onGlobalSettingsChange?(handler: (settings: { includeTestnet: boolean }) => void): () => void;
+  onGlobalSettingsChange?(handler: (settings: { bsvNetwork: "main" | "test" }) => void): () => void;
 }
 
 export interface OrdinalsOutpointHit {
@@ -115,12 +115,8 @@ export function createOrdinalsService(options: CreateOrdinalsServiceOptions): Or
   if (p2pkh.onDataChanged) unsubs.push(p2pkh.onDataChanged(() => notify()));
   if (p2pkh.onGlobalSettingsChange) unsubs.push(p2pkh.onGlobalSettingsChange(() => notify()));
 
-  function includeTestnet(): boolean {
-    try {
-      return p2pkh.getGlobalSettings?.().includeTestnet ?? false;
-    } catch {
-      return false;
-    }
+  function bsvNetwork(): "main" | "test" {
+    return requireUnlockedWalletIdentity(walletState.snapshot()).bsvNetwork;
   }
 
   async function activeKeyUtxos(assetId: "bsv" | "bsvtest", publicKeyHex: string): Promise<P2pkhUtxoFor1Sat[]> {
@@ -138,13 +134,8 @@ export function createOrdinalsService(options: CreateOrdinalsServiceOptions): Or
     const startedState = walletState.snapshot();
     const startedKeyHex = startedState.activePublicKeyHex;
     if (!startedKeyHex) return [];
-    const includeTest = includeTestnet();
-    const networks: Array<{ assetId: "bsv" | "bsvtest"; network: BsvNetwork }> = includeTest
-      ? [
-          { assetId: "bsv", network: "main" },
-          { assetId: "bsvtest", network: "test" }
-        ]
-      : [{ assetId: "bsv", network: "main" }];
+    const network = bsvNetwork();
+    const networks: Array<{ assetId: "bsv" | "bsvtest"; network: BsvNetwork }> = [{ assetId: network === "test" ? "bsvtest" : "bsv", network }];
     const out: OrdinalsOutpointHit[] = [];
     for (const { assetId, network } of networks) {
       if (signal?.aborted || !sameWalletSession(startedState, walletState.snapshot())) return [];
@@ -177,7 +168,7 @@ export function createOrdinalsService(options: CreateOrdinalsServiceOptions): Or
     const vout = Number(voutStr);
     if (!Number.isFinite(vout)) return null;
     const wocOutpoint = toWocOutpoint(txid, vout);
-    const networks = includeTestnet() ? (["main", "test"] as const) : (["main"] as const);
+    const networks = [bsvNetwork()];
     let lastError: unknown;
     for (const network of networks) {
       let inscription: Woc1SatOrdinalsInscription | null;
@@ -209,7 +200,7 @@ export function createOrdinalsService(options: CreateOrdinalsServiceOptions): Or
     const vout = Number(voutStr);
     if (!Number.isFinite(vout)) return null;
     const wocOutpoint = toWocOutpoint(txid, vout);
-    const networks = includeTestnet() ? (["main", "test"] as const) : (["main"] as const);
+    const networks = [bsvNetwork()];
     let lastError: unknown;
     for (const network of networks) {
       try {
@@ -230,7 +221,7 @@ export function createOrdinalsService(options: CreateOrdinalsServiceOptions): Or
     if (!txid || !voutStr) return Promise.reject(new Error("Ordinal collectible outpoint is invalid"));
     const vout = Number(voutStr);
     if (!Number.isFinite(vout)) return Promise.reject(new Error("Ordinal collectible outpoint is invalid"));
-    const networks = includeTestnet() ? (["main", "test"] as const) : (["main"] as const);
+    const networks = [bsvNetwork()];
     let lastError: unknown;
     for (const network of networks) {
       try {

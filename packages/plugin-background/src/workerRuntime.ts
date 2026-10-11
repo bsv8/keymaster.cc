@@ -1,3 +1,4 @@
+import { type NetworkIdentity, type BackgroundTaskKeyScope, sameNetworkIdentity } from "@keymaster/contracts";
 import type { SessionEpoch, CoordinatorVaultStatus, CoordinatorResponse, CoordinatorBackgroundSyncSettings, CoordinatorTaskSnapshot, BackgroundSnapshotEvent, WocQueueSnapshot } from "@keymaster/contracts";
 import { BACKGROUND_MANAGED_SYNC_TASK_IDS, backgroundSyncDefaultIntervalMs, isValidBackgroundSyncIntervalMs, BACKGROUND_TRIGGER_REASON } from "@keymaster/contracts";
 export interface TaskRuntime {
@@ -16,7 +17,7 @@ export interface TaskRuntime {
   error?: string;
   blockedReason?: string;
   timer?: ReturnType<typeof setTimeout>;
-  keyScope?: { publicKeyHex: string; label?: string } | (() => { publicKeyHex: string; label?: string } | undefined);
+  keyScope?: BackgroundTaskKeyScope | (() => BackgroundTaskKeyScope | undefined);
   intervalMs?: number;
   /**
    * 同步策略（2026-09-20 智能调度）：
@@ -29,6 +30,7 @@ export interface TaskRuntime {
   startedEpoch?: SessionEpoch;
   startedRunGeneration?: string;
   startedPublicKeyHex?: string;
+  startedIdentity?: BackgroundTaskKeyScope;
   completion?: Promise<void>;
 }
 export function normalizeBackgroundSyncSettings(settings: CoordinatorBackgroundSyncSettings | undefined): CoordinatorBackgroundSyncSettings {
@@ -153,14 +155,19 @@ export function createWorkerBackgroundRuntime(deps: WorkerBackgroundPorts) {
     runtime.timer = setTimeout(() => { runtime.timer = undefined; void executeTask(runtime.id, "interval"); }, runtime.intervalMs);
   }
 
+  function scopeIsFresh(runtime: TaskRuntime): boolean {
+    const current = resolveKeyScope(runtime);
+    return runtime.startedIdentity ? !!current && sameNetworkIdentity(runtime.startedIdentity, current) : current === undefined;
+  }
+
   function assertTaskFresh(taskId: string): void {
     const runtime = deps.state().taskRuntimes.get(taskId);
-    if (!runtime || runtime.startedEpoch !== deps.state().sessionEpoch || runtime.startedRunGeneration !== deps.state().runGeneration || runtime.startedPublicKeyHex !== deps.state().activePublicKeyHex) {
+    if (!runtime || runtime.startedEpoch !== deps.state().sessionEpoch || runtime.startedRunGeneration !== deps.state().runGeneration || runtime.startedPublicKeyHex !== deps.state().activePublicKeyHex || !scopeIsFresh(runtime)) {
       throw new Error("stale task session epoch");
     }
   }
 
-  function resolveKeyScope(runtime: TaskRuntime): { publicKeyHex: string; label?: string } | undefined { return typeof runtime.keyScope === "function" ? runtime.keyScope() : runtime.keyScope; }
+  function resolveKeyScope(runtime: TaskRuntime): BackgroundTaskKeyScope | undefined { return typeof runtime.keyScope === "function" ? runtime.keyScope() : runtime.keyScope; }
 
   async function handleBackgroundRunNow(
     requestId: string,
@@ -226,23 +233,21 @@ export function createWorkerBackgroundRuntime(deps: WorkerBackgroundPorts) {
     return handleBackgroundRunNow(requestId, { kind: "background.run-now", taskId: request.taskId, expectedSessionEpoch: request.expectedSessionEpoch }, request.reason);
   }
 
-  async function handleBackgroundCancelByKey(requestId: string, request: { kind: "background.cancel-by-key"; publicKeyHex: string; expectedSessionEpoch: SessionEpoch }): Promise<CoordinatorResponse> {
-    const cancelled = await cancelTaskRuntimesByKey(request.publicKeyHex);
+  async function handleBackgroundCancelByKey(requestId: string, request: { kind: "background.cancel-by-key"; networkIdentity: NetworkIdentity; expectedSessionEpoch: SessionEpoch }): Promise<CoordinatorResponse> {
+    const cancelled = await cancelTaskRuntimesByKey(request.networkIdentity);
     deps.publish( { type: "background.snapshot.changed", sessionEpoch: deps.state().sessionEpoch, snapshots: deps.snapshots() });
     return { requestId, sessionEpoch: deps.state().sessionEpoch, ack: cancelled ? { status: "accepted" } : { status: "ok" } };
   }
 
-  async function cancelTaskRuntimesByKey(publicKeyHex: string): Promise<boolean> {
+  async function cancelTaskRuntimesByKey(identity: NetworkIdentity): Promise<boolean> {
     let cancelled = false;
     const completions: Promise<void>[] = [];
     for (const runtime of deps.state().taskRuntimes.values()) {
       // keyScope 可能是随当前 active owner 动态变化的函数；owner 切换后，
       // 运行中的旧任务不能被误认为属于新 owner。以任务启动时捕获的 owner
       // 为准，确保旧 Contacts/P2PKH 任务及时 abort 并等待 completion。
-      const taskOwnerPublicKeyHex = runtime.state === "running" && runtime.startedPublicKeyHex
-        ? runtime.startedPublicKeyHex
-        : resolveKeyScope(runtime)?.publicKeyHex;
-      if (taskOwnerPublicKeyHex !== publicKeyHex) continue;
+      const taskIdentity = runtime.state === "running" ? runtime.startedIdentity : resolveKeyScope(runtime);
+      if (!taskIdentity || !sameNetworkIdentity(taskIdentity, identity)) continue;
       runtime.controller?.abort();
       if (runtime.timer) clearTimeout(runtime.timer);
       runtime.timer = undefined;
@@ -379,6 +384,7 @@ export function createWorkerBackgroundRuntime(deps: WorkerBackgroundPorts) {
     runtime.startedEpoch = deps.state().sessionEpoch;
     runtime.startedRunGeneration = deps.state().runGeneration;
     runtime.startedPublicKeyHex = deps.state().activePublicKeyHex;
+    runtime.startedIdentity = resolveKeyScope(runtime);
     runtime.blockedReason = undefined;
     runtime.error = undefined;
     runtime.state = "running";
@@ -394,7 +400,7 @@ export function createWorkerBackgroundRuntime(deps: WorkerBackgroundPorts) {
     let execution!: Promise<void>;
     execution = (async () => {
      try {
-      if (runtime.startedEpoch !== deps.state().sessionEpoch || runtime.startedRunGeneration !== deps.state().runGeneration || runtime.startedPublicKeyHex !== deps.state().activePublicKeyHex) throw new Error("stale task epoch");
+      if (runtime.startedEpoch !== deps.state().sessionEpoch || runtime.startedRunGeneration !== deps.state().runGeneration || runtime.startedPublicKeyHex !== deps.state().activePublicKeyHex || !scopeIsFresh(runtime)) throw new Error("stale task epoch");
       if (!runtime.run) throw new Error(`Task ${taskId} has no Coordinator handler`);
       const run = (signal: AbortSignal) => runtime.run!({
         signal,
@@ -403,7 +409,7 @@ export function createWorkerBackgroundRuntime(deps: WorkerBackgroundPorts) {
         assertSessionFresh: () => assertTaskFresh(taskId),
       });
       await deps.runAudited(taskId, controller.signal, run);
-      if (runtime.startedEpoch !== deps.state().sessionEpoch || runtime.startedRunGeneration !== deps.state().runGeneration || runtime.startedPublicKeyHex !== deps.state().activePublicKeyHex) throw new Error("stale task result");
+      if (runtime.startedEpoch !== deps.state().sessionEpoch || runtime.startedRunGeneration !== deps.state().runGeneration || runtime.startedPublicKeyHex !== deps.state().activePublicKeyHex || !scopeIsFresh(runtime)) throw new Error("stale task result");
       runtime.state = "idle";
       runtime.lastCompletedAt = new Date().toISOString();
       runtime.error = undefined;
@@ -445,7 +451,7 @@ export function createWorkerBackgroundRuntime(deps: WorkerBackgroundPorts) {
       } else if (deps.state().vaultStatus !== "unlocked" ||
           runtime.startedEpoch !== deps.state().sessionEpoch ||
           runtime.startedRunGeneration !== deps.state().runGeneration ||
-          runtime.startedPublicKeyHex !== deps.state().activePublicKeyHex) {
+          runtime.startedPublicKeyHex !== deps.state().activePublicKeyHex || !scopeIsFresh(runtime)) {
         runtime.state = "blocked";
         runtime.blockedReason = "Vault is locked";
       } else if (deps.isAvailabilityBlocked(runtime.blockedReason)) {
@@ -469,7 +475,7 @@ export function createWorkerBackgroundRuntime(deps: WorkerBackgroundPorts) {
         && deps.state().activePublicKeyHex
         && runtime.startedEpoch === deps.state().sessionEpoch
         && runtime.startedRunGeneration === deps.state().runGeneration
-        && runtime.startedPublicKeyHex === deps.state().activePublicKeyHex) {
+        && runtime.startedPublicKeyHex === deps.state().activePublicKeyHex && scopeIsFresh(runtime)) {
         armSmartSyncIfIdle();
       }
 

@@ -5,8 +5,8 @@
   "sourceCommit": "e15c9d061dd3d379167941590b67a4e8439d49f3",
   "files": {
     "LICENSE": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef",
-    "dist/bsv.d.ts": "b2b656aae60a9667735d195af01cabf7cd0dedd4b99578fdd62e7c7fb8eee79d",
-    "dist/bsv.js": "ac19e96144cab6598f2312e0850726dc9e317213aae0588041ec50c6cae2c24e",
+    "dist/bsv.d.ts": "d96eae3f00801faa12299afa57c4472d04179bf8109373eaca5d61a7bcece2fc",
+    "dist/bsv.js": "85e0752680adac53d0ce5a80138ddd7fd77dbb83bd01a7356673a1934526ba26",
     "dist/bytes.d.ts": "47f299c87f4779831934cb8b3e533b32b4951743de70ac37d408c7cc311ec05f",
     "dist/bytes.js": "fae47b4166b9cd1f3e1b8609ad6d796a8a3b1443ab3b57b1bb50aa8584139916",
     "dist/cbor.d.ts": "4bd5f3318de7e9bc086bf5bc6c85276f53fa29a9e9555cec2ece0c7147590c83",
@@ -25,8 +25,8 @@
     "dist/frame.js": "fdd0c8e31bb30ff0260e8d9c3eee777380e532050f0d952b5c2a23bd9766d519",
     "dist/handshake.d.ts": "39729073089d5c7878d3dc9d4f53cf82d38e96d8db89337fad1bec86d5ee5d26",
     "dist/handshake.js": "8e6f6e7d9461124c485877ad3b4f2f70baf8281b67778af4cc72076bfd1bc193",
-    "dist/index.d.ts": "24e5420f0d49ef35a454de01142ebc9a85d9802cecbeb7c81e1ee2c8cb144389",
-    "dist/index.js": "24e5420f0d49ef35a454de01142ebc9a85d9802cecbeb7c81e1ee2c8cb144389",
+    "dist/index.d.ts": "22a67a236aac95873409fea4a6ba1e18c2dee89a53b272de7d3207029a45d518",
+    "dist/index.js": "22a67a236aac95873409fea4a6ba1e18c2dee89a53b272de7d3207029a45d518",
     "dist/local-secret.d.ts": "9d2d88b3511d6c164c681737be32a86365b2212d609b572c65c62dd1d5a560eb",
     "dist/local-secret.js": "3530903b4ff4cd09799100a2eae59dd185ddaaf9d431a3b4f6c0deb9c510d361",
     "dist/payment-operation.d.ts": "9ad5c761f7c187da724668264e9836ff9990ab8327c80d88729f47df0d3600ee",
@@ -42,8 +42,8 @@
     "dist/transport.d.ts": "ca3a22832be1c30f0efe14751fe1428a1743c0b1ebc7a8b69f2ab81cad13ffeb",
     "dist/transport.js": "04b5c3eba4bc2a79e0faaaabc04f0ec59a498ee2e81a2387da437ef40020fc21",
     "package.json": "ba801aebf3bf6edaa43251756258fa1638fd9e7b2f8e24e04c492706da1e606e",
-    "dist/connect-envelope.d.ts": "15e7bbfd2fb2b59ffddf4f063b4f38bdd38c64fb7399db622ca1048534e2c28e",
-    "dist/connect-envelope.js": "13e95ab94b859d318281515f47afc22a1bcecb80f0b1145e9104860bb36c6c90",
+    "dist/connect-envelope.d.ts": "bf978311b63ce7c6c7e196a48b772c2393be9f89073aa69738bab11bc5f24ec4",
+    "dist/connect-envelope.js": "5248d87616a11d2fc7bcfaac425fd89ac0037c3597919e90e94ad2abbe279b36",
     "dist/channel.js": "eb971e5cedd9eb20d013ea40f7e195b0e6d054a041f573723789d049c2133ebf",
     "dist/jcs.js": "5a23df83f284bed5ffb1edd4713800791fa9a64b7cbf99a1e270d23d354c1ac7",
     "dist/channel.d.ts": "6d83169a0de52d537cabaf2ac9299b783f780492d6367b70a10ecbb14694bf90",
@@ -53,7 +53,7 @@
     "dist/network-identity.d.ts": "406064dc9adb0c8ae900f3ec9af98e032366d8add6a218211818f98df775e5b4",
     "dist/network-identity.js": "6e8e34baaa40d2d9d5c229b57c039d6488c078c1dafb6cdd3897e34dfb849354",
     "dist/policy-transfer.d.ts": "9f244229c5f0d5679052f4770df5208910b41bef3a08ecfd13d72af83aae2de1",
-    "dist/policy-transfer.js": "2408021f146375a056c69899221d8756426576ca3ae2953cb756f5d59f1aa5f6",
+    "dist/policy-transfer.js": "971994265b83104aa340f534e275d036488855ec9d49780a1fd3a1a74fff5936",
     "dist/migration.d.ts": "3adfc6dd4bbda58c7249519f3c4f5ed1a0a0e868ef561be75f40f790d7aa3113",
     "dist/migration.js": "f80702fc4d4bf91efaf369503fd16a3836c3a22515b9d5ea1f4e448f7d4dd789",
     "dist/secret-value.js": "b0b13f4c7a6cedaa09cf6372c810d197f29d521e0e224eae4d9f1272ced55c40",
@@ -63,6 +63,44 @@
     "reason": "配对展示请求先于浏览器人工确认；sourceCommit 之后的工作区修正",
     "files": {
       "src/session.ts": "c5f0c9acf5aa7870825fb50ac420bbd8d9228304a2f7e96efb39f0ceadfe9085"
+    }
+  },
+  "sourceOverlay": {
+    "reason": "NetworkIdentity: immutable BSV network and signed Connect v2 envelope",
+    "sourceDirectory": "/Users/david/Workspaces/BSV8_VaultLinkProtocol/Coding/BSV8_VaultLinkProtocol",
+    "files": {
+      "dist/connect-envelope.js": {
+        "baseSha256": "13e95ab94b859d318281515f47afc22a1bcecb80f0b1145e9104860bb36c6c90",
+        "sha256": "5248d87616a11d2fc7bcfaac425fd89ac0037c3597919e90e94ad2abbe279b36"
+      },
+      "dist/connect-envelope.d.ts": {
+        "baseSha256": "15e7bbfd2fb2b59ffddf4f063b4f38bdd38c64fb7399db622ca1048534e2c28e",
+        "sha256": "bf978311b63ce7c6c7e196a48b772c2393be9f89073aa69738bab11bc5f24ec4"
+      },
+      "dist/bsv.js": {
+        "baseSha256": "ac19e96144cab6598f2312e0850726dc9e317213aae0588041ec50c6cae2c24e",
+        "sha256": "85e0752680adac53d0ce5a80138ddd7fd77dbb83bd01a7356673a1934526ba26"
+      },
+      "dist/bsv.d.ts": {
+        "baseSha256": "b2b656aae60a9667735d195af01cabf7cd0dedd4b99578fdd62e7c7fb8eee79d",
+        "sha256": "d96eae3f00801faa12299afa57c4472d04179bf8109373eaca5d61a7bcece2fc"
+      },
+      "dist/index.js": {
+        "baseSha256": "24e5420f0d49ef35a454de01142ebc9a85d9802cecbeb7c81e1ee2c8cb144389",
+        "sha256": "22a67a236aac95873409fea4a6ba1e18c2dee89a53b272de7d3207029a45d518"
+      },
+      "dist/index.d.ts": {
+        "baseSha256": "24e5420f0d49ef35a454de01142ebc9a85d9802cecbeb7c81e1ee2c8cb144389",
+        "sha256": "22a67a236aac95873409fea4a6ba1e18c2dee89a53b272de7d3207029a45d518"
+      },
+      "dist/policy-transfer.js": {
+        "baseSha256": "2408021f146375a056c69899221d8756426576ca3ae2953cb756f5d59f1aa5f6",
+        "sha256": "971994265b83104aa340f534e275d036488855ec9d49780a1fd3a1a74fff5936"
+      },
+      "dist/policy-transfer.d.ts": {
+        "baseSha256": "9f244229c5f0d5679052f4770df5208910b41bef3a08ecfd13d72af83aae2de1",
+        "sha256": "9f244229c5f0d5679052f4770df5208910b41bef3a08ecfd13d72af83aae2de1"
+      }
     }
   }
 }

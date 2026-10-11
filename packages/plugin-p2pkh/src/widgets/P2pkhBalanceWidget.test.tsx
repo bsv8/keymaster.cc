@@ -30,11 +30,11 @@ function deferred<T>() {
 
 function makeFakeService(overrides?: {
   getAssetBalance?: (assetId: string) => Promise<P2pkhBalance>;
-  includeTestnet?: boolean;
+  bsvNetwork?: "main" | "test";
 }) {
   const syncListeners = new Set<(s: string) => void>();
   const dataListeners = new Set<() => void>();
-  const settingsListeners = new Set<(s: { includeTestnet: boolean }) => void>();
+  const settingsListeners = new Set<(s: { bsvNetwork: "main" | "test" }) => void>();
   let callCount = 0;
 
   return {
@@ -53,8 +53,8 @@ function makeFakeService(overrides?: {
         if (overrides?.getAssetBalance) return overrides.getAssetBalance(assetId);
         return { total: assetId === "bsv" ? 1000 : 200, available: true };
       }),
-      getGlobalSettings: () => ({ includeTestnet: overrides?.includeTestnet ?? false }),
-      onGlobalSettingsChange: (h: (s: { includeTestnet: boolean }) => void) => {
+      getGlobalSettings: () => ({ bsvNetwork: overrides?.bsvNetwork ?? "main" }),
+      onGlobalSettingsChange: (h: (s: { bsvNetwork: "main" | "test" }) => void) => {
         settingsListeners.add(h);
         return () => settingsListeners.delete(h);
       },
@@ -97,13 +97,13 @@ function registerDefinitions(resourceRegistry: ResourceRegistry, service: P2pkhS
     key: (_args: readonly string[], context: { activePublicKeyHex?: string }) =>
       ["p2pkh.balance", context.activePublicKeyHex ?? "none"],
     load: async (_args: readonly string[], context: { activePublicKeyHex?: string }) => {
-      const include = service.getGlobalSettings().includeTestnet;
+      const include = service.getGlobalSettings().bsvNetwork;
       const calls = [service.getAssetBalance("bsv")];
-      if (include) calls.push(service.getAssetBalance("bsvtest"));
+      if (include === "test") calls.push(service.getAssetBalance("bsvtest"));
       const results = await Promise.all(calls);
       return {
         publicKeyHex: context.activePublicKeyHex ?? ACTIVE_PK,
-        includeTestnet: include,
+        bsvNetwork: include,
         balances: {
           ...(results[0] ? { mainnet: results[0] } : {}),
           ...(include && results[1] ? { testnet: results[1] } : {}),
@@ -129,7 +129,7 @@ function registerDefinitions(resourceRegistry: ResourceRegistry, service: P2pkhS
     subscribe: (_args: readonly string[], _ctx: unknown, invalidate: () => void) => service.onGlobalSettingsChange(invalidate),
     equals: (prev: any, next: any) => {
       if (!prev || !next) return prev === next;
-      return prev.includeTestnet === next.includeTestnet;
+      return prev.bsvNetwork === next.bsvNetwork;
     },
     invalidation: "immediate"
   });
@@ -374,7 +374,7 @@ describe("P2pkhBalanceWidget", () => {
   });
 
   it("hides the testnet row when testnet is disabled", async () => {
-    const fake = makeFakeService({ includeTestnet: false });
+    const fake = makeFakeService({ bsvNetwork: "main" });
     const walletState = makeFakeWalletState();
     const host = createWidgetHost();
     host.provide(P2PKH_CAPABILITY, fake.service);
@@ -396,7 +396,7 @@ describe("P2pkhBalanceWidget", () => {
 
   it("shows the testnet row when testnet is enabled", async () => {
     const fake = makeFakeService({
-      includeTestnet: true,
+      bsvNetwork: "test",
       getAssetBalance: async (assetId: string) => ({
         total: assetId === "bsv" ? 1000 : 200,
         available: true,

@@ -1,3 +1,5 @@
+type BsvNetwork = "main" | "test";
+function validateBsvNetwork(value: unknown): BsvNetwork { if (value !== "main" && value !== "test") throw new TypeError("Hardware identity network is missing"); return value; }
 /**
  * key.json 的硬件公开记录。它只是持久身份绑定，不是设备持有权证明。
  * 恢复连接仍必须用 VLP 挑战验签；不得用 USB 编号或本记录代替认证。
@@ -10,6 +12,7 @@ export interface HardwareKeyDocumentV1 {
   wireVersion: 2;
   label: string;
   publicKeyHex: string;
+  bsvNetwork: BsvNetwork;
   walletGeneration: string;
   backendGeneration: number;
 }
@@ -18,7 +21,7 @@ export function validateHardwareKeyDocument(value: unknown): HardwareKeyDocument
   const fail = (): never => { throw new TypeError("Invalid hardware Key record"); };
   if (!value || typeof value !== "object" || Array.isArray(value)) return fail();
   const record = value as Record<string, unknown>;
-  const fields = ["format", "version", "backend", "wireVersion", "label", "publicKeyHex", "walletGeneration", "backendGeneration"];
+  const fields = ["format", "version", "backend", "wireVersion", "label", "bsvNetwork", "publicKeyHex", "walletGeneration", "backendGeneration"];
   if (Object.keys(record).length !== fields.length || Object.keys(record).some(key => !fields.includes(key))) return fail();
   if (record.format !== "keymaster.hardware-key" || record.version !== 1 || record.backend !== "vaultlink" || record.wireVersion !== 2) return fail();
   if (typeof record.label !== "string" || !record.label.length || new TextEncoder().encode(record.label).length > 1024) return fail();
@@ -28,7 +31,7 @@ export function validateHardwareKeyDocument(value: unknown): HardwareKeyDocument
   if (typeof record.backendGeneration !== "number" || !Number.isSafeInteger(record.backendGeneration) || record.backendGeneration < 1 || record.backendGeneration > 0xffffffff) return fail();
   return {
     format: "keymaster.hardware-key", version: 1, backend: "vaultlink", wireVersion: 2,
-    label: record.label, publicKeyHex: record.publicKeyHex,
+    bsvNetwork: validateBsvNetwork(record.bsvNetwork), label: record.label, publicKeyHex: record.publicKeyHex,
     walletGeneration: record.walletGeneration, backendGeneration: record.backendGeneration,
   };
 }

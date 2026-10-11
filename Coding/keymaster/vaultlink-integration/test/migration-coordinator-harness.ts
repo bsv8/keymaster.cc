@@ -13,7 +13,7 @@ export async function migrationCoordinatorHarness(publicKeyHex:string) {
   await __testResetWalletStore(); await __testBootstrapWalletStorage();
   const secret=new Uint8Array(32); secret[31]=1;
   const password='software-password';
-  const source=await createAndVerifyMigrationKeyHold({privateKey:secret,publicKeyHex,label:'same key'},password);
+  const source=await createAndVerifyMigrationKeyHold({bsvNetwork: "main" as const, privateKey:secret,publicKeyHex,label:'same key'},password);
   secret.fill(0);
   const walletGeneration=crypto.randomUUID();
   await __testSeedWalletLocalRecords({keyHold:new TextDecoder().decode(source),meta:JSON.stringify({

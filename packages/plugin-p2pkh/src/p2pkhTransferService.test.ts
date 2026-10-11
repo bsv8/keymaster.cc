@@ -59,7 +59,7 @@ function makeRepository(resource: P2pkhKeyResource) {
 }
 
 function makeResource(): P2pkhKeyResource {
-  return { resourceId: makeResourceId("main"), publicKeyHex: OWNER.publicKeyHex, label: "active", address: OWNER.address, network: "main", createdAt: "2024-01-01T00:00:00.000Z", generation: 0 };
+  return {  resourceId: makeResourceId("main"), publicKeyHex: OWNER.publicKeyHex, label: "active", address: OWNER.address, network: "main", createdAt: "2024-01-01T00:00:00.000Z", generation: 0 };
 }
 
 function makeService(outcome: "accepted" | "already-known" | "isolated" | "not-dispatched" = "accepted", broadcastError?: Error, options?: { utxos?: P2pkhUtxo[]; centralBroadcastService?: CentralBroadcastService }) {
@@ -86,8 +86,8 @@ function makeService(outcome: "accepted" | "already-known" | "isolated" | "not-d
     loadSpendableUtxos: loadSpendableUtxos as never,
     centralBroadcastService: options?.centralBroadcastService,
     broadcastWithCoordinator: broadcast as never,
-    getActiveKey: () => ({ publicKeyHex: OWNER.publicKeyHex, label: "active", capabilities: ["p2pkh"], createdAt: "now" }),
-    getKeyForOwner: async (publicKeyHex) => ({ publicKeyHex, label: "active", capabilities: ["p2pkh"], createdAt: "now" })
+    getActiveKey: () => ({bsvNetwork: "main" as const,  publicKeyHex: OWNER.publicKeyHex, label: "active", capabilities: ["p2pkh"], createdAt: "now" }),
+    getKeyForOwner: async (publicKeyHex) => ({bsvNetwork: "main" as const,  publicKeyHex, label: "active", capabilities: ["p2pkh"], createdAt: "now" })
   });
   return { service, stateRepository, broadcast, loadSpendableUtxos, paymentActions };
 }
@@ -224,8 +224,8 @@ describe("ordinary P2PKH Coordinator transfer", () => {
       vault: makeVault(), messageBus: { publish: vi.fn(), subscribe: vi.fn(() => () => undefined) } as never,
       getStore: async () => stateRepository as never,
       loadSpendableUtxos: async () => [makeUtxo()],
-      getActiveKey: () => ({ publicKeyHex: OWNER.publicKeyHex, label: "active", capabilities: [], createdAt: "now" }),
-      getKeyForOwner: async (publicKeyHex) => ({ publicKeyHex, label: "active", capabilities: [], createdAt: "now" })
+      getActiveKey: () => ({bsvNetwork: "main" as const,  publicKeyHex: OWNER.publicKeyHex, label: "active", capabilities: [], createdAt: "now" }),
+      getKeyForOwner: async (publicKeyHex) => ({bsvNetwork: "main" as const,  publicKeyHex, label: "active", capabilities: [], createdAt: "now" })
     });
     await expect(gated.submit(preview)).rejects.toThrow(/Coordinator broadcast/);
     expect(stateRepository.locals.size).toBe(0);

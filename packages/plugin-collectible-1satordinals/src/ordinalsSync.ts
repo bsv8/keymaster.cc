@@ -45,7 +45,7 @@ export function createOrdinalsSyncTask(options: CreateOrdinalsSyncTaskOptions): 
     },
     keyScope: () => {
       const state = walletState.snapshot();
-      return state.activePublicKeyHex ? { publicKeyHex: state.activePublicKeyHex } : undefined;
+      return state.activeKeyIdentity;
     },
     canRun: (): BackgroundRunEligibility => {
       if (vault.status() !== "unlocked") {
@@ -73,6 +73,7 @@ export function createOrdinalsSyncTask(options: CreateOrdinalsSyncTaskOptions): 
       assetDataNotifier?.emit({
         providerId: "1satordinals",
         publicKeyHex: startedKeyHex,
+        networkIdentity: state.activeKeyIdentity,
         revision: Date.now(),
         kinds: ["holding"]
       });

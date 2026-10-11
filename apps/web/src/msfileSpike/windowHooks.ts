@@ -190,7 +190,7 @@ async function initializeSpikeWallet(coordinator: ReturnType<typeof getCoordinat
     type: "initialize",
     plan: {
       transactionId: `msfile-spike-${crypto.randomUUID()}`,
-      firstKey: { kind: "generate", label, capabilities: ["p2pkh"], password: SPIKE_PASSWORD },
+      firstKey: { kind: "generate", bsvNetwork: "test", label, capabilities: ["p2pkh"], password: SPIKE_PASSWORD },
     },
   });
   if (created.status !== "ok") throw new Error(`spike wallet creation failed: ${created.status}`);

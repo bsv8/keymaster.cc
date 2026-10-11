@@ -57,7 +57,7 @@ export function decodePaymentPolicy(raw, key) {
 /** Device migration must reject unsupported channels before transferring a key. */
 export function assertHardwarePaymentPolicy(snapshot, key) {
     const s = PaymentPolicy.inspectSnapshot(snapshot, key), supported = new Set(["p2pkh", "bsv.standard", "feepool.connect", "feepool.bitfs", "feepool.connect.cosigner", "feepool.bitfs.cosigner"]);
-    if (s.channels.some(c => c.network !== "main" || !supported.has(c.paymentType)))
+    if (s.channels.some(c => (c.network !== "main" && c.network !== "test") || !supported.has(c.paymentType)))
         fail("unsupported-policy");
     decodePaymentPolicy(encodePaymentPolicy(s, key), key);
 }

@@ -87,7 +87,7 @@ describe("ImportPage - JSON importer 选中的输入方式切换", () => {
     mount();
     await selectJsonImporter(user);
     // 切到文本
-    const select = screen.getByRole("combobox");
+    const select = screen.getAllByRole("combobox").find(element => element.getAttribute("aria-label") !== "BSV 网络")!;
     await user.selectOptions(select, "text");
     // textarea 出现
     await waitFor(() => {
@@ -108,7 +108,7 @@ describe("ImportPage - 切换输入方式清空旧状态", () => {
     await selectJsonImporter(user);
 
     // 先切到文本
-    const select = screen.getByRole("combobox");
+    const select = screen.getAllByRole("combobox").find(element => element.getAttribute("aria-label") !== "BSV 网络")!;
     await user.selectOptions(select, "text");
 
     const text = JSON.stringify({ privateKey: "5Hwgr3..." });
@@ -135,7 +135,7 @@ describe("ImportPage - JSON 文本模式 bsv8 envelope 嗅探", () => {
     mount();
     await selectJsonImporter(user);
 
-    const select = screen.getByRole("combobox");
+    const select = screen.getAllByRole("combobox").find(element => element.getAttribute("aria-label") !== "BSV 网络")!;
     await user.selectOptions(select, "text");
 
     const envelope = JSON.stringify({
@@ -160,7 +160,7 @@ describe("ImportPage - JSON 文本模式 bsv8 envelope 嗅探", () => {
     mount();
     await selectJsonImporter(user);
 
-    const select = screen.getByRole("combobox");
+    const select = screen.getAllByRole("combobox").find(element => element.getAttribute("aria-label") !== "BSV 网络")!;
     await user.selectOptions(select, "text");
 
     const ta = screen.getByRole("textbox", { name: /JSON 文本|JSON text/ }) as HTMLTextAreaElement;

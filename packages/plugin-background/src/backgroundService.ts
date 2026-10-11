@@ -1,3 +1,4 @@
+import { type NetworkIdentity, sameNetworkIdentity } from "@keymaster/contracts";
 // packages/plugin-background/src/backgroundService.ts
 // 后台任务平台实现。
 // 施工单 002 硬切换：删除所有 leader 选举逻辑，由 Coordinator 统一管理。
@@ -399,11 +400,11 @@ export function createBackgroundService(_options: CreateBackgroundServiceOptions
   /**
    * 取消指定 key namespace 下所有 task。
    */
-  async function cancelByKey(publicKeyHex: string): Promise<BackgroundCommandResult> {
+  async function cancelByKey(identity: NetworkIdentity): Promise<BackgroundCommandResult> {
     const toCancel: TaskRuntime[] = [];
     for (const t of tasks.values()) {
       const ks = resolveKeyScope(t.def);
-      if (ks?.publicKeyHex === publicKeyHex) {
+      if (ks && sameNetworkIdentity(ks, identity)) {
         toCancel.push(t);
       }
     }

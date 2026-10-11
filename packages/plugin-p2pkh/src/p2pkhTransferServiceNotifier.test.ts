@@ -17,7 +17,7 @@ function hexToBytes(value: string): Uint8Array { return Uint8Array.from({ length
 function makeVault() { return { status: () => "unlocked", requestPayment: paymentRequester(PRIVATE_KEY), createActiveKeyCrypto: async () => ({ deriveP2pkhAddress: async (input: { network: "main" | "test" }) => ({ ...deriveP2pkhAddress(PRIVATE_KEY, input.network) }), signDigest: async (input: { digest: ArrayBuffer; format: "der" | "compact" }) => { const signature = secp256k1.sign(new Uint8Array(input.digest), hexToBytes(PRIVATE_KEY), { lowS: true, prehash: false, format: input.format }); return { publicKeyHex: OWNER.publicKeyHex, format: input.format, signature: signature.buffer.slice(signature.byteOffset, signature.byteOffset + signature.byteLength) }; } }) } as never; }
 
 function makeRepository() {
-  const resource: P2pkhKeyResource = { resourceId: makeResourceId("main"), publicKeyHex: OWNER.publicKeyHex, label: "active", address: OWNER.address, network: "main", createdAt: "2024-01-01T00:00:00.000Z", generation: 0 };
+  const resource: P2pkhKeyResource = {  resourceId: makeResourceId("main"), publicKeyHex: OWNER.publicKeyHex, label: "active", address: OWNER.address, network: "main", createdAt: "2024-01-01T00:00:00.000Z", generation: 0 };
   const utxo: P2pkhUtxo = { id: "coin", resourceId: resource.resourceId, publicKeyHex: OWNER.publicKeyHex, network: "main", address: OWNER.address, ...fundingCoin(OWNER.publicKeyHex, 3000, TXID), height: 1, status: "confirmed", isSpentInMempoolTx: false, syncedAt: resource.createdAt };
   const claims = new Map<string, P2pkhLocalInputClaim>(); const locals = new Map<string, P2pkhLocalTransaction>();
   return {
@@ -41,8 +41,8 @@ function createFixture(outcome: "accepted" | "isolated") {
       if (outcome === "isolated") return { status: "ok" as const, value: { status: "isolated", reason: "provider-failed" }, sessionEpoch: "test-epoch" };
       return { status: "ok" as const, value: { status: outcome }, sessionEpoch: "test-epoch" };
     },
-    getActiveKey: () => ({ publicKeyHex: OWNER.publicKeyHex, label: "active", capabilities: [], createdAt: "now" }),
-    getKeyForOwner: async (publicKeyHex) => ({ publicKeyHex, label: "active", capabilities: [], createdAt: "now" }),
+    getActiveKey: () => ({bsvNetwork: "main" as const,  publicKeyHex: OWNER.publicKeyHex, label: "active", capabilities: [], createdAt: "now" }),
+    getKeyForOwner: async (publicKeyHex) => ({bsvNetwork: "main" as const,  publicKeyHex, label: "active", capabilities: [], createdAt: "now" }),
   });
   return { service, stateRepository, emit };
 }

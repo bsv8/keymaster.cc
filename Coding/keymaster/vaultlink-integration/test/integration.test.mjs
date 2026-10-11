@@ -4,7 +4,7 @@ import { mkdtemp, readFile, writeFile, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SoftwarePaymentGate, VaultLinkHardwareBackend } from '../dist/index.js';
-import { DeviceIdentityKey, PaymentPolicy, P2pkhPaymentOperation, acceptDevice, DeviceServer,
+import { NetworkIdentityOperation, DeviceIdentityKey, PaymentPolicy, P2pkhPaymentOperation, acceptDevice, DeviceServer,
   serializeTransaction, p2pkhScript, sha256d } from '@vaultlink/sdk';
 const keyBytes = new Uint8Array(32); keyBytes[31] = 1;
 const key = new DeviceIdentityKey(keyBytes);
@@ -41,11 +41,12 @@ test('wallet hardware adapter: actual handshake/proof, P2PKH response verified, 
   let server;
   const serve=acceptDevice(device,deviceKey,1,1,async code=>{assert.match(code,/^\d{6}$/);devicePair++;return true;}).then(session=>{
     server=new DeviceServer(session,()=>{deviceKey.close();policy.lock();});
+    server.register('identity.network',new NetworkIdentityOperation(deviceKey,'main'));
     server.register('tx.p2pkh-payment',new P2pkhPaymentOperation(deviceKey,policy,null,async()=>{prompts++;return {allow:true,raiseSessionLimit:1000n};}));
     return server.run();
   });
   let active=true;
-  const backend=await VaultLinkHardwareBackend.connect(host,{publicKeyHex:pub,generations:{walletGeneration:1,backendGeneration:1,hostRunGeneration:1},assertActive(){if(!active)throw Error('stale');}},async()=>{hostPair++;return true;});
+  const backend=await VaultLinkHardwareBackend.connect(host,{bsvNetwork: "main", publicKeyHex:pub,generations:{walletGeneration:1,backendGeneration:1,hostRunGeneration:1},assertActive(){if(!active)throw Error('stale');}},async()=>{hostPair++;return true;});
   try {
     const one=await backend.signP2pkh(await payment('one')); assert.equal(one.amount,300n);assert.equal(one.fee,10n);assert.equal(prompts,0);
     const two=await backend.signP2pkh(await payment('two'));assert.equal(two.signatures.length,1);assert.equal(prompts,1);

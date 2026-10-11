@@ -45,7 +45,8 @@ function CopyButton({ value }: { value: string }) {
 
 function MyInfoModal({ open, onClose, publicKeyHex, hasP2pkh }: { open: boolean; onClose: () => void; publicKeyHex?: string; hasP2pkh: boolean }) {
   const { t } = usePluginI18n();
-  const address = useMemo(() => p2pkhAddress(publicKeyHex, "mainnet"), [publicKeyHex]);
+  const network = useResourceView<"main" | "test">(useP2pkhResources(), "p2pkh.identity-testnet", []).data ?? "main";
+  const address = useMemo(() => p2pkhAddress(publicKeyHex, network === "test" ? "testnet" : "mainnet"), [publicKeyHex, network]);
 
   return (
     <Modal open={open} onClose={onClose} title={t("p2pkh.identity.info.title", { defaultValue: "我的信息" })} closeButtonLabel={t("p2pkh.identity.info.close", { defaultValue: "关闭我的信息" })} data-testid="home-my-info-modal">
@@ -54,23 +55,16 @@ function MyInfoModal({ open, onClose, publicKeyHex, hasP2pkh }: { open: boolean;
       ) : (
         <div className="home-actions__identity">
           <div className="home-actions__qr" aria-label={t("p2pkh.identity.info.publicKeyQr", { defaultValue: "公钥二维码" })}>
-            <QRCodeSVG value={publicKeyHex} size={196} level="M" includeMargin />
+            <QRCodeSVG value={JSON.stringify({bsvNetwork: network, publicKeyHex})} size={196} level="M" includeMargin />
           </div>
           <IdentityRow label={t("p2pkh.identity.info.publicKey", { defaultValue: "公钥" })} value={publicKeyHex} shortValue={formatShortPublicKey(publicKeyHex)} />
+          <IdentityRow label="网络" value={network} />
           {address ? <IdentityRow label={t("p2pkh.identity.info.address", { defaultValue: "地址" })} value={address} /> : null}
-          {hasP2pkh ? <TestnetAddress publicKeyHex={publicKeyHex} /> : null}
+
         </div>
       )}
     </Modal>
   );
-}
-
-function TestnetAddress({ publicKeyHex }: { publicKeyHex: string }) {
-  const { t } = usePluginI18n();
-  const includeTestnet = (useResourceView<boolean>(useP2pkhResources(), "p2pkh.identity-testnet", []).data ?? false);
-  const address = useMemo(() => p2pkhAddress(publicKeyHex, "testnet"), [publicKeyHex]);
-  if (!includeTestnet || !address) return null;
-  return <IdentityRow label={t("p2pkh.identity.info.testnetAddress", { defaultValue: "Testnet 地址" })} value={address} />;
 }
 
 function IdentityRow({ label, value, shortValue }: { label: string; value: string; shortValue?: string }) {

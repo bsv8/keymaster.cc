@@ -4,7 +4,7 @@ import { createKeymasterPluginHost } from "@keymaster/runtime/assembly";
 import { createAppStorageClients } from "./appStorageClients.js";
 const hosts: ReturnType<typeof createKeymasterPluginHost>[] = [];
 afterEach(async () => { await Promise.all(hosts.splice(0).map(host => host.dispose())); });
-const binding: AppStorageBinding = { connectSessionId: "session", transportOrigin: "https://app.example", sessionEpoch: "s1", walletGeneration: "w1", runGeneration: "r1", appIdentity: { version: 1, publisherPublicKeyHex: "02" + "11".repeat(32), appId: "example", appName: "Example", identityDigestHex: "22".repeat(32) } };
+const binding: AppStorageBinding = {bsvNetwork:"main",publicKeyHex:"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798", connectSessionId: "session", transportOrigin: "https://app.example", sessionEpoch: "s1", walletGeneration: "w1", runGeneration: "r1", appIdentity: { version: 1, publisherPublicKeyHex: "02" + "11".repeat(32), appId: "example", appName: "Example", identityDigestHex: "22".repeat(32) } };
 async function fixture(list: StorageRuntimeController["list"], id = "protocol") {
   let context!: PluginContext;
   const controller = { list } as StorageRuntimeController;

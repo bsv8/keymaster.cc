@@ -113,8 +113,8 @@ function P2pkhWalletPageInner({
     resources,
     "p2pkh.settings",
     [],
-    (snapshot) => snapshot.data ?? { includeTestnet: false },
-    { includeTestnet: false }
+    (snapshot) => snapshot.data ?? { bsvNetwork: "main" },
+    { bsvNetwork: "main" }
   );
 
   useEffect(() => {
@@ -129,7 +129,7 @@ function P2pkhWalletPageInner({
     setPage(next);
     router.push(listPath(network, next, view));
   };
-  const networkEnabled = network === "main" || settings.includeTestnet;
+  const networkEnabled = network === settings.bsvNetwork;
   // 钱包余额唯一读取来源是全局广播；页面不再维护第二份余额状态。
   const resourceBalance = networkEnabled ? balanceSnapshot.balances[BALANCE_NETWORK_KEYS[network]] : undefined;
   const balance = resourceBalance;
@@ -179,7 +179,7 @@ function P2pkhWalletPageInner({
     setRefreshing(true);
     setActionError(null);
     try {
-      // service 的无 network 兼容入口默认刷新 mainnet；钱包页必须把当前
+      // service 与页面均绑定身份网络；钱包页将当前
       // 路由网络明确传下去，否则 testnet 页的按钮只会刷新另一张快照。
       await service.refreshUtxos?.({ ownerPublicKeyHex: selectedResources[0]?.publicKeyHex, resourceId: `p2pkh:${network}` });
     } catch (error) {
@@ -260,7 +260,7 @@ function P2pkhWalletPageInner({
       <PageHeader
         title={`${viewTitle} · ${networkTitle}`}
         description={viewDescription}
-        actions={<><Button variant={network === "main" ? "primary" : "ghost"} onClick={() => router.push(listPath("main", page, view))}>{t("p2pkh.wallet.mainnet", { defaultValue: "Mainnet" })}</Button>{settings.includeTestnet ? <Button variant={network === "test" ? "primary" : "ghost"} onClick={() => router.push(listPath("test", page, view))}>{t("p2pkh.wallet.testnet", { defaultValue: "Testnet" })}</Button> : null}</>}
+        actions={<span>{settings.bsvNetwork === "test" ? "Testnet" : "Mainnet"}</span>}
       />
       {wallet.error ? <EmptyState title={t("p2pkh.wallet.loadFailed", { defaultValue: "Wallet data unavailable" })} description={wallet.error} /> : null}
       {networkEnabled ? <section className="p2pkh-wallet__balances" aria-label={t("p2pkh.wallet.balances", { defaultValue: "BSV balances" })}>
@@ -270,7 +270,7 @@ function P2pkhWalletPageInner({
           <BalanceBreakdown breakdown={balanceKnown ? balance?.breakdown : undefined} />
           <Button variant="ghost" disabled={refreshing || selectedResources.length === 0} onClick={() => void refreshUtxos()}>{refreshing ? t("p2pkh.action.inProgress", { defaultValue: "处理中…" }) : t("p2pkh.action.refreshUtxos", { defaultValue: "刷新 UTXO" })}</Button>
         </article>
-      </section> : <EmptyState title={t("p2pkh.wallet.networkDisabled", { defaultValue: "Testnet is disabled" })} description={t("p2pkh.wallet.networkDisabledDescription", { defaultValue: "Enable testnet in P2PKH settings before viewing testnet data." })} />}
+      </section> : <EmptyState title={t("p2pkh.wallet.networkDisabled", { defaultValue: "Network identity mismatch" })} description={t("p2pkh.wallet.networkDisabledDescription", { defaultValue: "This route belongs to a different network from the wallet identity." })} />}
       <section className="p2pkh-wallet__sync" aria-label={t("p2pkh.wallet.syncStatus", { defaultValue: "Confirmed synchronization status" })}>
         <p>{t("p2pkh.wallet.lastCompleteSync", { defaultValue: "Last complete sync: {{time}}", time: wallet.lastSyncedAt ?? sync?.lastSuccessAt ?? "—" })}</p>
         <p>{t("p2pkh.wallet.taskStatus", { defaultValue: "Task status: {{status}}", status: t(`p2pkh.syncStatus.${wallet.syncStatus}`, { defaultValue: wallet.syncStatus }) })}</p>

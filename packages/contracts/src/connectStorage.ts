@@ -1,3 +1,4 @@
+import type { NetworkIdentity as importNetworkIdentity } from "./networkIdentity.js";
 // Connect 文件 API 契约。
 //
 // 这里保留 Connect 的文件 wire shape；它与 platform-storage 的本地引擎、
@@ -10,7 +11,7 @@ import type { BinaryField } from "./protocol.js";
 import type { AppIdentitySnapshot } from "./appIdentity.js";
 
 /** 已验证 Connect App 的 owner 访问授权。 */
-export interface OwnerAppStorageGrant {
+export interface OwnerAppStorageGrant extends importNetworkIdentity {
   /** Connect 会话 ID。 */
   connectSessionId: string;
   /** 发起请求的精确 Origin。 */

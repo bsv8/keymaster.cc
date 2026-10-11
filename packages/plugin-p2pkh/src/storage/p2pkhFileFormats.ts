@@ -54,20 +54,17 @@ export const P2PKH_KNOWN_PROVIDER_IDS: ReadonlySet<string> = new Set(["woc"]);
 export interface P2pkhSettingFileV1 {
   format: typeof P2PKH_SETTING_FORMAT;
   version: typeof P2PKH_SETTING_VERSION;
-  includeTestnet: boolean;
   feeRateSatoshisPerKb?: Partial<Record<P2pkhFeeRateTier, number>>;
   providerConfigs?: Record<string, Record<string, unknown>>;
 }
 
 /** 运行时视图：缺省已填。 */
 export interface P2pkhResolvedSetting {
-  includeTestnet: boolean;
   feeRateSatoshisPerKb: Record<P2pkhFeeRateTier, number>;
   providerConfigs: Record<string, Record<string, unknown>>;
 }
 
 export const P2PKH_SETTING_DEFAULTS = Object.freeze({
-  includeTestnet: false,
   feeRateSatoshisPerKb: Object.freeze({ low: 60, medium: 120, high: 180 } as Record<P2pkhFeeRateTier, number>),
 });
 
@@ -162,7 +159,6 @@ export function parseP2pkhSettingFile(bytes: Uint8Array): P2pkhSettingFileV1 | u
   }
   if (!isRecord(parsed)) return undefined;
   if (parsed.format !== P2PKH_SETTING_FORMAT || parsed.version !== P2PKH_SETTING_VERSION) return undefined;
-  if (typeof parsed.includeTestnet !== "boolean") return undefined;
 
   let feeRate: Partial<Record<P2pkhFeeRateTier, number>> | undefined;
   if (parsed.feeRateSatoshisPerKb !== undefined) {
@@ -191,7 +187,6 @@ export function parseP2pkhSettingFile(bytes: Uint8Array): P2pkhSettingFileV1 | u
   return {
     format: P2PKH_SETTING_FORMAT,
     version: P2PKH_SETTING_VERSION,
-    includeTestnet: parsed.includeTestnet,
     ...(feeRate === undefined ? {} : { feeRateSatoshisPerKb: feeRate }),
     ...(providerConfigs === undefined ? {} : { providerConfigs }),
   };
@@ -200,7 +195,6 @@ export function parseP2pkhSettingFile(bytes: Uint8Array): P2pkhSettingFileV1 | u
 /** 把磁盘文件解析成运行时视图（缺省填默认值）。 */
 export function resolveP2pkhSetting(file?: P2pkhSettingFileV1): P2pkhResolvedSetting {
   return {
-    includeTestnet: file?.includeTestnet ?? P2PKH_SETTING_DEFAULTS.includeTestnet,
     feeRateSatoshisPerKb: { ...P2PKH_SETTING_DEFAULTS.feeRateSatoshisPerKb, ...(file?.feeRateSatoshisPerKb ?? {}) },
     providerConfigs: file?.providerConfigs === undefined ? {} : structuredClone(file.providerConfigs),
   };
@@ -219,7 +213,6 @@ export function serializeP2pkhSettingFile(setting: P2pkhResolvedSetting): Uint8A
   const document = {
     format: P2PKH_SETTING_FORMAT,
     version: P2PKH_SETTING_VERSION,
-    includeTestnet: setting.includeTestnet,
     ...(Object.keys(feeRate).length === 0 ? {} : { feeRateSatoshisPerKb: feeRate }),
     ...(Object.keys(providerConfigs).length === 0 ? {} : { providerConfigs }),
   };

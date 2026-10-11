@@ -91,7 +91,7 @@ function makeStorageBindingAuthority(): StorageBindingAuthority {
 
 /** 一份合法的平台 K-V 授权：坐标 + 三件世代身份。 */
 function platformGrant(platformGrantId: string) {
-  return {
+  return {bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
     platformGrantId,
     walletGeneration: "wallet-1",
     runGeneration: "run-1",

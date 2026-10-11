@@ -1,3 +1,4 @@
+import { serializeDocument } from "keyhold";
 import { describe, expect, it } from "vitest";
 import { createIndexedDbWalletStore } from "@keymaster/platform-storage/coordinator";
 import { WALLET_KEYHOLD_FILE_PATH, createWalletKeyRepository } from "@keymaster/plugin-vault/coordinator";
@@ -20,7 +21,7 @@ describe("wallet key repository", () => {
     const store = setup("fixed");
     try {
       const repository = createWalletKeyRepository(store);
-      await repository.create({ label: "主 Key", privateKeyBytes: privateKey(1), password: "key-password", iterations: ITERATIONS });
+      await repository.create({bsvNetwork: "main" as const,  label: "主 Key", privateKeyBytes: privateKey(1), password: "key-password", iterations: ITERATIONS });
       expect(await store.get(WALLET_KEYHOLD_FILE_PATH)).toBeDefined();
       expect(WALLET_KEYHOLD_FILE_PATH).toBe("key.json");
       // 不再有公钥派生的文件名,根目录里也不存在第二把 Key。
@@ -35,9 +36,9 @@ describe("wallet key repository", () => {
     const store = setup("single");
     try {
       const repository = createWalletKeyRepository(store);
-      await repository.create({ label: "第一把", privateKeyBytes: privateKey(1), password: "pw", iterations: ITERATIONS });
+      await repository.create({bsvNetwork: "main" as const,  label: "第一把", privateKeyBytes: privateKey(1), password: "pw", iterations: ITERATIONS });
       await expect(
-        repository.create({ label: "第二把", privateKeyBytes: privateKey(2), password: "pw", iterations: ITERATIONS })
+        repository.create({bsvNetwork: "main" as const,  label: "第二把", privateKeyBytes: privateKey(2), password: "pw", iterations: ITERATIONS })
       ).rejects.toMatchObject({ code: "storage_conflict" });
       expect((await repository.read())?.document.label).toBe("第一把");
     } finally {
@@ -51,13 +52,13 @@ describe("wallet key repository", () => {
     const second = createIndexedDbWalletStore({ databaseName });
     try {
       const results = await Promise.allSettled([
-        createWalletKeyRepository(first).create({
+        createWalletKeyRepository(first).create({bsvNetwork: "main" as const,
           label: "甲",
           privateKeyBytes: privateKey(11),
           password: "pw",
           iterations: ITERATIONS,
         }),
-        createWalletKeyRepository(second).create({
+        createWalletKeyRepository(second).create({bsvNetwork: "main" as const,
           label: "乙",
           privateKeyBytes: privateKey(12),
           password: "pw",
@@ -78,7 +79,7 @@ describe("wallet key repository", () => {
     try {
       const repository = createWalletKeyRepository(store);
       const secret = privateKey(2);
-      await repository.create({ label: "解锁 Key", privateKeyBytes: secret, password: "right-pw", iterations: ITERATIONS });
+      await repository.create({bsvNetwork: "main" as const,  label: "解锁 Key", privateKeyBytes: secret, password: "right-pw", iterations: ITERATIONS });
       const unlocked = await repository.unlock("right-pw");
       expect(unlocked.privateKeyBytes).toEqual(secret);
       unlocked.privateKeyBytes.fill(0);
@@ -92,7 +93,7 @@ describe("wallet key repository", () => {
     const store = setup("change");
     try {
       const repository = createWalletKeyRepository(store);
-      await repository.create({ label: "改密 Key", privateKeyBytes: privateKey(3), password: "old-pw", iterations: ITERATIONS });
+      await repository.create({bsvNetwork: "main" as const,  label: "改密 Key", privateKeyBytes: privateKey(3), password: "old-pw", iterations: ITERATIONS });
       const before = await repository.read();
       await expect(repository.changePassword({ oldPassword: "wrong", newPassword: "new-pw" })).rejects.toMatchObject({
         code: "storage_identity_required",
@@ -113,7 +114,7 @@ describe("wallet key repository", () => {
     const store = setup("rename");
     try {
       const repository = createWalletKeyRepository(store);
-      await repository.create({ label: "旧名称", privateKeyBytes: privateKey(4), password: "pw", iterations: ITERATIONS });
+      await repository.create({bsvNetwork: "main" as const,  label: "旧名称", privateKeyBytes: privateKey(4), password: "pw", iterations: ITERATIONS });
       const renamed = await repository.rename("新名称");
       expect(renamed.document.label).toBe("新名称");
       const unlocked = await repository.unlock("pw");
@@ -124,11 +125,11 @@ describe("wallet key repository", () => {
     }
   });
 
-  it("imports and exports the original KeyHold bytes unchanged", async () => {
+  it("preserves imported local identity and exports standard KeyHold without network", async () => {
     const store = setup("import");
     const source = createIndexedDbWalletStore({ databaseName: "keymaster-test-key-src-" + crypto.randomUUID() });
     try {
-      const original = await createWalletKeyRepository(source).create({
+      const original = await createWalletKeyRepository(source).create({bsvNetwork: "main" as const,
         label: "导入 Key",
         privateKeyBytes: privateKey(5),
         password: "pw",
@@ -138,7 +139,10 @@ describe("wallet key repository", () => {
       const imported = await repository.import(original.bytes);
       expect(imported.document.publicKeyHex).toBe(original.document.publicKeyHex);
       // 导入不要求密码,也不重新加密。
-      expect(await repository.export()).toEqual(original.bytes);
+      if(original.backend !== "software") throw new Error("Expected software identity");
+      const { bsvNetwork, networkAuthenticationHex, ...portable } = original.document;
+      expect(bsvNetwork).toBe("main");
+      expect(await repository.export()).toEqual(new TextEncoder().encode(serializeDocument(portable)));
     } finally {
       source.close();
       store.close();

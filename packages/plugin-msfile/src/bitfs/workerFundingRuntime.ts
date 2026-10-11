@@ -16,9 +16,9 @@ export interface WorkerFundingDependencies {
   session(): { vaultStatus: string; activePublicKeyHex?: string; sessionEpoch: string };
   journalStore(): BorrowedModuleFileStore;
   executor(operation: WindowP2pExecutorOperation): Promise<unknown>;
-  ensureResources(owner: string, includeTestnet: boolean): Promise<FundingSnapshotResource[]>;
+  ensureResources(owner: string, bsvNetwork: "main" | "test"): Promise<FundingSnapshotResource[]>;
   snapshots(): FundingSnapshots | undefined;
-  readP2pkhSettings(): Promise<{ includeTestnet: boolean; feeRateSatoshisPerKb: { medium: number } }>;
+  readP2pkhSettings(): Promise<{ bsvNetwork: "main" | "test"; feeRateSatoshisPerKb: { medium: number } }>;
   maxFeeSatoshis(): number;
   deriveAddress(owner: string, network: "main" | "test"): string;
   addressScript(address: string, network: "main" | "test"): string;
@@ -148,7 +148,7 @@ async function waitForMsfileFundingSnapshot(input: {
     if (session.sessionEpoch !== epoch || session.vaultStatus !== "unlocked" || session.activePublicKeyHex?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase() || deps.snapshots() !== snapshots) throw new Error("BitFS funding snapshot session changed");
   };
   assertFresh();
-  const resources = await deps.ensureResources(input.ownerPublicKeyHex, input.network === "test");
+  const resources = await deps.ensureResources(input.ownerPublicKeyHex, input.network);
   assertFresh();
   const resource = resources.find((item) => item.network === input.network);
   if (!resource || !snapshots) throw new Error("BitFS FundingTx 的 P2PKH 余额快照尚未就绪");
@@ -205,10 +205,10 @@ function createMsfileBitfsFundingSplitDeps(input: {
     async getAvailableSnapshot() {
       assertContext({ ownerPublicKeyHex: owner, network: input.network, generation: input.generation });
       const settings = await deps.readP2pkhSettings();
-      if (input.network === "test" && !settings.includeTestnet) {
+      if (input.network === "test" && !settings.bsvNetwork) {
         throw new Error("请先在 P2PKH 设置中启用测试网余额");
       }
-      const resources = await deps.ensureResources(owner, settings.includeTestnet);
+      const resources = await deps.ensureResources(owner, settings.bsvNetwork);
       snapshotResource = resources.find((resource) => resource.network === input.network);
       if (!snapshotResource || !snapshots) {
         return { available: false, state: "unavailable", items: [] };

@@ -234,10 +234,12 @@ export function isThirdPartyAppPath(path: string): boolean {
 import type { KeyImportMaterial } from "../keyImport.js";
 
 /** 首次初始化可以选择的唯一 Key 来源。 */
+import type { BsvNetwork, NetworkIdentity } from "../networkIdentity.js";
 export type WalletFirstKeyDraft =
   | {
       /** 由受信任的 Coordinator 在提交边界内生成随机私钥。 */
       kind: "generate";
+      bsvNetwork: BsvNetwork;
       /** Key 的显示标签。 */
       label: string;
       /** 这把 Key 的公开能力，例如 p2pkh。 */
@@ -248,6 +250,7 @@ export type WalletFirstKeyDraft =
   | {
       /** 导入由页面 importer 解析并校验过的私钥材料。 */
       kind: "import";
+      bsvNetwork: BsvNetwork;
       /** Key 的显示标签。 */
       label: string;
       /** 只在本次提交调用期间存在的私钥材料。 */
@@ -277,7 +280,7 @@ export interface WalletInitializePlan {
 }
 
 /** 初始化成功后公开的 Key 摘要；不包含私钥。 */
-export interface WalletKeySummary {
+export interface WalletKeySummary extends NetworkIdentity {
   /** 压缩公钥 hex。 */
   publicKeyHex: string;
   /** 显示标签。 */
@@ -349,6 +352,7 @@ export interface WalletColdStartSnapshot {
   meta?: WalletMetaV1;
   /** ready 状态下的唯一 Key 公开信息；不解密。 */
   key?: {
+    bsvNetwork: BsvNetwork;
     publicKeyHex: string;
     label: string;
     /** 软件旧快照可缺省；硬件明确声明，密码不能用来认证该后端。 */
@@ -359,7 +363,7 @@ export interface WalletColdStartSnapshot {
 }
 
 /** 解锁结果；明文私钥只在 Worker 内存中短暂存在。 */
-export interface WalletUnlockResult {
+export interface WalletUnlockResult extends NetworkIdentity {
   /** 解锁后确立的会话世代。 */
   sessionEpoch: string;
   /** 当前钱包身份世代。 */

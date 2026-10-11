@@ -22,7 +22,7 @@ export async function startActualMigrationDevice(options={}) {
 export async function openActualMigrationDevice(Backend,options={}) {
  const device=await startActualMigrationDevice(options);let backend;
  try{backend=await Backend.connect(device.transport,
-   {...(options.journal?{journal:options.journal}:{}),publicKeyHex:device.pub,generations:{walletGeneration:1,backendGeneration:1,hostRunGeneration:1},assertActive(){}},async()=>true);
+   {bsvNetwork: "main", ...(options.journal?{journal:options.journal}:{}),publicKeyHex:device.pub,generations:{walletGeneration:1,backendGeneration:1,hostRunGeneration:1},assertActive(){}},async()=>true);
  }catch(e){await device.close();throw Error(String(e)+"\n"+device.log(),{cause:e});}
  return {...device,backend,async close(){await backend.close().catch(()=>{});await device.close();}};
 }

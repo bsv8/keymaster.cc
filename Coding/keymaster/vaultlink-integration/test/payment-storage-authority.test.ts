@@ -6,7 +6,7 @@ test("真实存储根：核心付款账本可条件写，模块不可借用核�
   const store = createIndexedDbWalletStore({ databaseName: "payment-private-storage-" + crypto.randomUUID() });
   const declaration = CENTRAL_STORAGE_DECLARATIONS.vaultPayments;
   let binding = { walletGeneration: crypto.randomUUID(), sessionEpoch: crypto.randomUUID(), runGeneration: crypto.randomUUID() };
-  const root = createPlatformRootStore({ store, generations: () => binding });
+  const root = createPlatformRootStore({identity: {bsvNetwork:"main",publicKeyHex:"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"},  store, generations: () => binding });
   const clients = createWorkerStorageClients({
     root: () => root, binding: () => binding, sameBinding: (a, b) => a === b,
     declaration(module, purpose, model) {

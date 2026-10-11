@@ -52,7 +52,7 @@ function memoryFiles(): { files: BorrowedOwnerFileStore; map: Map<string, Uint8A
 function walletState(): { walletState: VaultWalletState; state: VaultLifecycleSnapshot } {
   const state: VaultLifecycleSnapshot = walletStateFixtureSnapshot({ activePublicKeyHex: OWNER });
   const service: VaultWalletState = {
-    snapshot: () => walletStateFixtureSnapshot((() => state)(), () => ({ publicKeyHex: OWNER, label: "test", capabilities: [], createdAt: "now" })),
+    snapshot: () => walletStateFixtureSnapshot((() => state)(), () => ({bsvNetwork: "main" as const,  publicKeyHex: OWNER, label: "test", capabilities: [], createdAt: "now" })),
 
     subscribe: () => () => undefined
   };

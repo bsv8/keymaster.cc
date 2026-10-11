@@ -9,7 +9,7 @@ it("refuses cached operations after the same key enters a new session and after 
   keySession.replace(new Uint8Array(32).fill(0).map((value, index) => index === 31 ? 1 : value));
   const factory = createWorkerActiveKeyCryptoFactory({
     keySession, sessionEpoch: () => sessionEpoch,
-    summary: () => ({ publicKeyHex, capabilities: ["p2pkh"], createdAt: "today", label: "Key" }),
+    summary: () => ({bsvNetwork: "main" as const,  publicKeyHex, capabilities: ["p2pkh"], createdAt: "today", label: "Key" }),
     withIoLease: (_operation, execute) => execute(),
   });
   const old = await factory(publicKeyHex);
@@ -23,7 +23,7 @@ it("refuses cached operations after the same key enters a new session and after 
 });
 it("protects private public identity metadata arrays", () => {
   const projection = createWorkerIdentityProjection();
-  projection.setSummary({ publicKeyHex, capabilities: ["p2pkh"], createdAt: "today", label: "Key" });
+  projection.setSummary({bsvNetwork: "main" as const,  publicKeyHex, capabilities: ["p2pkh"], createdAt: "today", label: "Key" });
   projection.summary()!.capabilities.length = 0;
   expect(projection.summary()!.capabilities).toEqual(["p2pkh"]);
 });
@@ -35,7 +35,7 @@ it("revokes a cached child handle with its provider even when the wallet session
   keySession.replace(Uint8Array.from({ length: 32 }, (_, index) => index === 31 ? 1 : 0));
   let leases = 0;
   const factory = createWorkerActiveKeyCryptoFactory({ keySession, sessionEpoch: () => "same",
-    summary: () => ({ publicKeyHex, capabilities: ["p2pkh"], createdAt: "today", label: "Key" }),
+    summary: () => ({bsvNetwork: "main" as const,  publicKeyHex, capabilities: ["p2pkh"], createdAt: "today", label: "Key" }),
     withIoLease: (_operation, execute) => { leases++; return execute(); },
   });
   const cached = await factory(publicKeyHex, scope);
@@ -63,7 +63,7 @@ it.each(["sign", "derive-address"] as const)("discards late %s results after pro
   const waiting = new Promise<void>(resolve => { finish = resolve; });
   const started = new Promise<void>(resolve => { entered = resolve; });
   const factory = createWorkerActiveKeyCryptoFactory({ keySession, sessionEpoch: () => "same",
-    summary: () => ({ publicKeyHex, capabilities: ["p2pkh"], createdAt: "today", label: "Key" }),
+    summary: () => ({bsvNetwork: "main" as const,  publicKeyHex, capabilities: ["p2pkh"], createdAt: "today", label: "Key" }),
     async withIoLease(_operation, execute) { const result = await execute(); entered(); await waiting; return result; },
   });
   const cached = await factory(publicKeyHex, scope);

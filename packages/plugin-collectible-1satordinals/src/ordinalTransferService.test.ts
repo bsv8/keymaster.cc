@@ -18,7 +18,7 @@ function fakeP2pkh(): P2pkhServiceFor1Sat {
     listUtxos: async () => [
       { txid: "fund1", vout: 0, value: 5000, address: SOURCE_ADDRESS }
     ],
-    getGlobalSettings: () => ({ includeTestnet: false })
+    getGlobalSettings: () => ({ bsvNetwork: "main" })
   };
 }
 

@@ -1,3 +1,5 @@
+import { NetworkIdentitySelect } from "./NetworkIdentitySelect.js";
+import type { BsvNetwork } from "@keymaster/contracts";
 import { KeyImportWizard } from "./import/KeyImportWizard.js";
 import { useInternalVault } from "./VaultInternalContext.js";
 // apps/web/src/shell/LockedShell.tsx
@@ -33,6 +35,7 @@ type Mode = "welcome" | "new-wallet-form" | "first-time-import" | "hardware-new"
 
 export function VaultWalletEntry() {
   const vault = useInternalVault();
+  const [bsvNetwork, setBsvNetwork] = useState<BsvNetwork>("main");
 
   const { t } = usePluginI18n();
   // 触发 languageChanged 重渲染。
@@ -121,6 +124,7 @@ export function VaultWalletEntry() {
         transactionId: `create-${Date.now()}`,
         firstKey: {
           kind: "generate",
+          bsvNetwork,
           label: t("shell.locked.defaultKeyLabel", { defaultValue: "我的钱包" }),
           capabilities: ["p2pkh"],
           password
@@ -229,6 +233,7 @@ export function VaultWalletEntry() {
                 "设置一个 Key 密码。钱包 Key 会和初始化标记在同一个 IndexedDB 事务里写入；提交失败不会留下半成品。"
             })}
           />
+          <NetworkIdentitySelect value={bsvNetwork} onChange={setBsvNetwork} />
           <TextInput
             label={t("shell.locked.passwordNew", { defaultValue: "新密码" })}
             type="password"

@@ -1,3 +1,4 @@
+import type { NetworkIdentity } from "./networkIdentity.js";
 // packages/contracts/src/protocol.ts
 // Keymaster 对外协议 V1 公共契约。
 //
@@ -353,6 +354,7 @@ export type ProtocolEventMessage =
 
 /** 顶层 request 报文。 */
 export interface ProtocolRequestMessage<M extends ProtocolMethod = ProtocolMethod> {
+  networkIdentity: NetworkIdentity;
   v: typeof PROTOCOL_VERSION;
   type: "request";
   /** 请求唯一标识；同时承担 transport 关联 id 与业务操作 id 双重角色。 */
@@ -366,6 +368,7 @@ export type ProtocolResultMessage =
   | {
       v: typeof PROTOCOL_VERSION;
       type: "result";
+      networkIdentity: NetworkIdentity;
       id: string;
       ok: true;
       result: MethodResult;
@@ -373,6 +376,7 @@ export type ProtocolResultMessage =
   | {
       v: typeof PROTOCOL_VERSION;
       type: "result";
+      networkIdentity: NetworkIdentity;
       id: string;
       ok: false;
       error: ProtocolError;
@@ -578,7 +582,7 @@ export interface PaymentChannelRegisterResult { channelId: string; }
  * 设计缘由（施工单 2026-09-18 001 多资产硬切换）：
  *   - 公开命名固定 `bsv-mainnet` / `bsv-testnet`，不暴露 p2pkh 内部
  *     的 `bsv` / `bsvtest`；
- *   - `bsv-testnet` 只有在 Keymaster 设置里开启 testnet 后才可用，
+ *   - `bsv-testnet` 只属于测试网身份，
  *     否则 accept 阶段 fail-fast `asset_not_enabled`；
  *   - 缺省（不传 assetId）等同 `bsv-mainnet`，旧调用方零改动。
  */
@@ -599,7 +603,7 @@ export type P2pkhTransferAssetId = "bsv-mainnet" | "bsv-testnet";
  *   - amountSatoshis 是整数 satoshis，不接受小数；feeSatoshis 在 result 里
  *     回。
  *   - `assetId` 可选；缺省 `bsv-mainnet`。`bsv-testnet` 需要 Keymaster
- *     设置里已开启 testnet。
+ *     当前身份属于测试网。
  *   - `connectSessionId` 是**强制**输入字段（施工单 2026-06-28 002 硬切换）：
  *     资金 owner 取自 session 绑定 owner，**不**读取全局 active key。
  *     旧 session 失效时直接 fail-fast，不再静默 fallback 到 active key。
@@ -614,7 +618,7 @@ export interface P2pkhTransferParams {
   /** 可选 fee rate（sat/kB）。>= 1。 */
   feeRateSatoshisPerKb?: number;
   /**
-   * 可选资产；缺省 `bsv-mainnet`。`bsv-testnet` 需要设置里开启 testnet。
+   * 可选资产；缺省当前 NetworkIdentity 的网络资产。跨网络请求被拒绝。
    */
   assetId?: P2pkhTransferAssetId;
   /**
@@ -685,7 +689,7 @@ export interface FeepoolPrepareParams {
   /** 正整数 satoshis；本次想转给对端的金额（三种 action 语义一致）。 */
   amountSatoshis: number;
   /**
-   * 可选资产；缺省 `bsv-mainnet`。`bsv-testnet` 需要设置里开启 testnet。
+   * 可选资产；缺省当前 NetworkIdentity 的网络资产。跨网络请求被拒绝。
    * 池按 (origin + ownerPublicKeyHex + counterpartyPublicKeyHex + assetId)
    * 归档；mainnet 与 testnet 不串池。
    */
@@ -1074,6 +1078,7 @@ export type ProtocolFailureReason =
  *     `bootstrap_runtime | vault_runtime` 两条来源里挑当前可用的那条。
  */
 export interface ConnectSessionRecord {
+  networkIdentity: import("./networkIdentity.js").NetworkIdentity;
   /** sessionId：service 在 connect.login / launchAppView 时生成；UUID。 */
   sessionId: string;
   /** exact event.origin；connect.resume / 业务方法必须严格匹配。 */
@@ -1139,6 +1144,7 @@ export interface ConnectLoginParams {
  * 任何 key 域 surrogate id（硬切换 002 后连内部借用句柄也按 hex 走）。
  */
 export interface ConnectLoginResult {
+  networkIdentity: import("./networkIdentity.js").NetworkIdentity;
   /** 持久化 sessionId；caller 必须存本地。 */
   connectSessionId: string;
   /** 绑定 key 的压缩公钥 hex；与 session 记录内字段一致。 */
@@ -1175,6 +1181,7 @@ export interface ConnectResumeParams {
  * 关键（施工单 2026-06-28 002 硬切换）：**不**再返回 `ownerKeyId`。
  */
 export interface ConnectResumeResult {
+  networkIdentity: import("./networkIdentity.js").NetworkIdentity;
   connectSessionId: string;
   ownerPublicKeyHex: string;
   resolvedClaims: Record<string, ResolvedClaimValue>;
@@ -1275,6 +1282,7 @@ export interface ConnectLaunchParams {
 
 /** `connect.launch` 成功结果（与 `connect.login` 对齐）。 */
 export interface ConnectLaunchResult {
+  networkIdentity: import("./networkIdentity.js").NetworkIdentity;
   connectSessionId: string;
   ownerPublicKeyHex: string;
   resolvedClaims: Record<string, ResolvedClaimValue>;
@@ -1457,6 +1465,7 @@ export interface AppViewContext {
  *     与 Session Window 当前内存。
  */
 export interface SessionRuntimeBootstrap {
+  networkIdentity: import("./networkIdentity.js").NetworkIdentity;
   /** 绑定 key 的压缩公钥 hex；与 payload.ownerPublicKeyHex 必须一致。 */
   ownerPublicKeyHex: string;
   /** 绑定 key 的 label（仅展示用）。 */
@@ -1497,6 +1506,7 @@ export interface SessionRuntimeBootstrap {
  *     request；appView mode 不允许依赖这种回退。
  */
 export interface AppBootstrapPayload {
+  networkIdentity: import("./networkIdentity.js").NetworkIdentity;
   /** 当前 app 信息（仅 UI / 启动用）。 */
   app: {
     appId: string;

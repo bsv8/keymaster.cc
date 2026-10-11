@@ -74,7 +74,7 @@ test.each(["attach", "enroll", "attach-close"] as const)("正式 Coordinator：%
   try {
     await __testResetWalletStore(); await __testBootstrapWalletStorage();
     const walletGeneration = crypto.randomUUID();
-    const record = { format: "keymaster.hardware-key", version: 1, backend: "vaultlink", wireVersion: 2, backendGeneration: 1,
+    const record = {bsvNetwork: "main" as const,  format: "keymaster.hardware-key", version: 1, backend: "vaultlink", wireVersion: 2, backendGeneration: 1,
       label: "RocKey fixture", publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798", walletGeneration };
     if (mode !== "enroll") await __testSeedWalletLocalRecords({ keyHold: JSON.stringify(record), meta: JSON.stringify({
       format: WALLET_META_FORMAT, version: 1, schemaVersion: WALLET_CURRENT_SCHEMA_VERSION, initialized: true, walletGeneration, createdAt: new Date().toISOString(),
@@ -151,7 +151,7 @@ test.each(["attach", "enroll", "attach-close"] as const)("正式 Coordinator：%
     const appCrypto = await appVault.createAppViewSession({sessionId: "device-app", publicKeyHex: record.publicKeyHex, password: ""});
     expect(await appCrypto.deriveP2pkhAddress({publicKeyHex: record.publicKeyHex, network: "main"})).toMatchObject({address: "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH"});
     // 真实 IndexedDB 领域库、正式 Connect 分派及实际 C++ 账本，端口仅适配 Window。
-    const domainRoot = createPlatformRootStore({store: domainStore, generations: () => {
+    const domainRoot = createPlatformRootStore({identity: {bsvNetwork:"main",publicKeyHex:"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"}, store: domainStore, generations: () => {
       const state = __testGetSnapshot();
       return {walletGeneration: state.walletGeneration!, sessionEpoch: state.sessionEpoch, runGeneration: state.runGeneration};
     }});
@@ -160,7 +160,7 @@ test.each(["attach", "enroll", "attach-close"] as const)("正式 Coordinator：%
     }
     const repository = await openProtocolStorageRepository({durablePolicy: ownedKv[0]!, sessions: ownedKv[1]!, commandHistory: ownedKv[2]!});
     const origin = "https://native-app.example", connectSessionId = crypto.randomUUID();
-    await repository.putConnectSession({sessionId: connectSessionId, origin, ownerPublicKeyHex: record.publicKeyHex, ownerLabel: "Native App", claimsSnapshot: {}, createdAt: Date.now(), lastUsedAt: Date.now(), revokedAt: null});
+    await repository.putConnectSession({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: record.publicKeyHex }, sessionId: connectSessionId, origin, ownerPublicKeyHex: record.publicKeyHex, ownerLabel: "Native App", claimsSnapshot: {}, createdAt: Date.now(), lastUsedAt: Date.now(), revokedAt: null});
     protocol = new ProtocolServiceImpl({vault: appVault, walletState: {snapshot: () => appVault!.walletSnapshot(), subscribe: handler => appVault!.subscribeWalletState(handler)}, storageRepository: repository,
       resolveOpener: () => appPort.port1 as unknown as Window,
       postReady: (_target, value) => appPort.port1.postMessage(value),
@@ -171,7 +171,7 @@ test.each(["attach", "enroll", "attach-close"] as const)("正式 Coordinator：%
     protocol.startSession();
     const registerAppChannel = async (name: string) => {
       const id = crypto.randomUUID();
-      await protocol!.handleMessage({origin, source: appPort.port1, data: {v: 1, type: "request", id, method: "payment.channel.register", params: {connectSessionId, channelName: name, paymentType: "p2pkh"}}} as unknown as MessageEvent);
+      await protocol!.handleMessage({origin, source: appPort.port1, data: { networkIdentity: {bsvNetwork: "main", publicKeyHex: record.publicKeyHex},v: 1, type: "request", id, method: "payment.channel.register", params: {connectSessionId, channelName: name, paymentType: "p2pkh"}}} as unknown as MessageEvent);
       const deadline = Date.now() + 3000;
       while (!appReplies.has(id) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
       const response = appReplies.get(id);
@@ -188,7 +188,7 @@ test.each(["attach", "enroll", "attach-close"] as const)("正式 Coordinator：%
     // The real Connect dispatcher builds its existing v1 CBOR envelope; C++ parses and signs it.
     const semanticRequest = async (method: "identity.get" | "intent.sign", extra: Record<string,unknown>) => {
       const id=crypto.randomUUID(),iat=Math.floor(Date.now()/1000);
-      await protocol!.handleMessage({origin,source:appPort.port1,data:{v:1,type:"request",id,method,params:{connectSessionId,aud:origin,iat,exp:iat+600,text:"Native Connect test",...extra}}} as unknown as MessageEvent);
+      await protocol!.handleMessage({origin,source:appPort.port1,data:{ networkIdentity: {bsvNetwork: "main", publicKeyHex: record.publicKeyHex},v:1,type:"request",id,method,params:{connectSessionId,aud:origin,iat,exp:iat+600,text:"Native Connect test",...extra}}} as unknown as MessageEvent);
       expect(protocol!.snapshot().phase).toBe("confirming");
       await protocol!.confirmByUser();
       const deadline=Date.now()+3000;

@@ -22,3 +22,4 @@ export * from "./bitfs-wire.js";
 export * from "./network-identity.js";
 export * from "./policy-transfer.js";
 export * from "./migration.js";
+export { NetworkIdentityOperation } from "./connect-envelope.js";

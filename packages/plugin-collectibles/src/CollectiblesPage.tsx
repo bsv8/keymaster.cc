@@ -46,12 +46,12 @@ export function statusLabel(status: string, t: (key: string, values?: { defaultV
   }
 }
 
-function visibleNetworks(includeTestnet: boolean): Network[] {
-  return includeTestnet ? NETWORK_ORDER : ["main"];
+function visibleNetworks(bsvNetwork: "main" | "test"): Network[] {
+  return [bsvNetwork];
 }
 
-function groupByNetwork<T extends { network?: BsvNetwork }>(items: readonly T[], includeTestnet: boolean): Array<{ network: Network; items: T[] }> {
-  return visibleNetworks(includeTestnet).map((network) => ({
+function groupByNetwork<T extends { network?: BsvNetwork }>(items: readonly T[], bsvNetwork: "main" | "test"): Array<{ network: Network; items: T[] }> {
+  return visibleNetworks(bsvNetwork).map((network) => ({
     network,
     items: items.filter((item) => (item.network ?? "main") === network)
   }));
@@ -69,13 +69,13 @@ export function CollectiblesPage() {
     [],
     (snapshot) => snapshot.data ?? []
   );
-  const settings = useResourceViewSelector<{ includeTestnet: boolean }, { includeTestnet: boolean }>(
+  const settings = useResourceViewSelector<{ bsvNetwork: "main" | "test" }, { bsvNetwork: "main" | "test" }>(
     reader,
     "collectibles.testnet",
     [],
-    (snapshot) => snapshot.data ?? { includeTestnet: false }
+    (snapshot) => snapshot.data ?? { bsvNetwork: "main" }
   );
-  const includeTestnet = settings.includeTestnet;
+  const bsvNetwork = settings.bsvNetwork;
   const createPath = useMemo(() => {
     const features = business.listFeatures()
       .filter((feature) => feature.domainId === "assets")
@@ -94,15 +94,15 @@ export function CollectiblesPage() {
             <PageHeader
               title={t("collectibles.page.title", { defaultValue: "藏品" })}
               description={
-                includeTestnet
+                bsvNetwork
                   ? t("collectibles.page.lede.testnet", { defaultValue: "按 provider 浏览单件藏品。mainnet 和 testnet 会分开展示。" })
                   : t("collectibles.page.lede.mainnet", { defaultValue: "按 provider 浏览单件藏品。当前只显示 mainnet。" })
               }
             />
           </div>
           <div className="asset-overview-hero__actions">
-            <span className={`asset-overview-scope is-${includeTestnet ? "dual" : "main"}`}>
-              {includeTestnet
+            <span className={`asset-overview-scope is-${bsvNetwork === "test" ? "dual" : "main"}`}>
+              {bsvNetwork
                 ? t("collectibles.page.scope.dual", { defaultValue: "Mainnet + testnet" })
                 : t("collectibles.page.scope.main", { defaultValue: "Mainnet only" })}
             </span>
@@ -145,7 +145,7 @@ export function CollectiblesPage() {
                   <span>{provider.provider.id}</span>
                 </div>
                 {provider.error ? <p className="asset-overview-provider__error">{provider.error}</p> : null}
-                {groupByNetwork(provider.items, includeTestnet).map((group) => (
+                {groupByNetwork(provider.items, bsvNetwork).map((group) => (
                   <section key={group.network} className={`asset-overview-network is-${group.network}`}>
                     <div className="asset-overview-network__head">
                       <h5>{networkLabel(group.network, t)}</h5>

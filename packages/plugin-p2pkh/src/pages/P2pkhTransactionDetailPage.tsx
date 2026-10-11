@@ -57,8 +57,8 @@ function P2pkhTransactionDetailPageInner({ service }: { service: P2pkhService })
     resources,
     "p2pkh.settings",
     [],
-    (snapshot) => snapshot.data ?? { includeTestnet: false },
-    { includeTestnet: false }
+    (snapshot) => snapshot.data ?? { bsvNetwork: "main" },
+    { bsvNetwork: "main" }
   );
   const wallet = useOptionalResourceSelector<WalletSnapshot, WalletSnapshot & { error?: string; loaded: boolean }>(
     resources,
@@ -75,7 +75,7 @@ function P2pkhTransactionDetailPageInner({ service }: { service: P2pkhService })
       : { ...emptyWallet(), error: snapshot.error?.message, loaded: false },
     { ...emptyWallet(), loaded: false }
   );
-  const networkEnabled = network === "main" || settings.includeTestnet;
+  const networkEnabled = network === settings.bsvNetwork;
   const snapshotHistory = useMemo(() => source === "transactions" && txid ? wallet.history.find((row) => row.network === network && row.txid.toLowerCase() === txid.toLowerCase()) : undefined, [wallet.history, network, txid, source]);
   const snapshotLocal = useMemo(() => {
     if (source !== "local-transactions" || !txid) return undefined;
@@ -142,7 +142,7 @@ function P2pkhTransactionDetailPageInner({ service }: { service: P2pkhService })
 
   if (!txid || !networkEnabled || (!record && !local)) {
     const disabled = !networkEnabled;
-    return <div className="p2pkh-tx-detail"><PageHeader title={t("p2pkh.txDetail.title", { defaultValue: "Transaction details" })} actions={<Button variant="ghost" onClick={back}>{t("p2pkh.action.backToTransactions", { defaultValue: "Back to transactions" })}</Button>} /><EmptyState title={disabled ? t("p2pkh.wallet.networkDisabled", { defaultValue: "Testnet is disabled" }) : t("p2pkh.txDetail.unavailable", { defaultValue: "本地没有这笔交易" })} description={disabled ? t("p2pkh.wallet.networkDisabledDescription", { defaultValue: "Enable testnet in P2PKH settings before viewing testnet data." }) : wallet.error ?? t("p2pkh.txDetail.unavailableDescription", { defaultValue: "此页面只展示本钱包已知的历史记录。" })} /></div>;
+    return <div className="p2pkh-tx-detail"><PageHeader title={t("p2pkh.txDetail.title", { defaultValue: "Transaction details" })} actions={<Button variant="ghost" onClick={back}>{t("p2pkh.action.backToTransactions", { defaultValue: "Back to transactions" })}</Button>} /><EmptyState title={disabled ? t("p2pkh.wallet.networkDisabled", { defaultValue: "Network identity mismatch" }) : t("p2pkh.txDetail.unavailable", { defaultValue: "本地没有这笔交易" })} description={disabled ? t("p2pkh.wallet.networkDisabledDescription", { defaultValue: "This route belongs to a different network from the wallet identity." }) : wallet.error ?? t("p2pkh.txDetail.unavailableDescription", { defaultValue: "此页面只展示本钱包已知的历史记录。" })} /></div>;
   }
 
   return <div className="p2pkh-tx-detail">

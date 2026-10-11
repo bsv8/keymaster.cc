@@ -1,3 +1,4 @@
+import { type NetworkIdentity, type BackgroundTaskKeyScope, sameNetworkIdentity } from "@keymaster/contracts";
 // packages/plugin-background/src/backgroundServiceCoordinator.ts
 // BackgroundService Coordinator Facade
 //
@@ -33,7 +34,7 @@ interface CoordinatorTaskSnapshotLike {
   nextRunAt?: string;
   error?: string;
   blockedReason?: BackgroundTaskSnapshot["blockedReason"];
-  keyScope?: { publicKeyHex: string; label?: string };
+  keyScope?: BackgroundTaskKeyScope;
 }
 
 type CoordinatorResultLike = { status: string; message?: string; reason?: { key: string; fallback: string } | string; retryable?: boolean };
@@ -45,7 +46,7 @@ export interface CoordinatorClientLike {
   backgroundRunNow(taskId: string): Promise<CoordinatorResultLike>;
   backgroundTrigger(taskId: string, reason: string): Promise<CoordinatorResultLike>;
   backgroundCancel(taskId: string): Promise<CoordinatorResultLike>;
-  backgroundCancelByKey(publicKeyHex: string): Promise<CoordinatorResultLike>;
+  backgroundCancelByKey(identity: NetworkIdentity): Promise<CoordinatorResultLike>;
   backgroundSettingsUpdate(settings: BackgroundSyncSettings): Promise<CoordinatorResultLike>;
   reportRecoverableCoordinatorFailure?(kind: string, cause: unknown): void;
 }
@@ -140,8 +141,8 @@ export function createBackgroundServiceCoordinator(
       return toBackgroundResult(await coordinatorClient.backgroundCancel(taskId));
     },
 
-    async cancelByKey(publicKeyHex: string): Promise<BackgroundCommandResult> {
-      return toBackgroundResult(await coordinatorClient.backgroundCancelByKey(publicKeyHex));
+    async cancelByKey(identity: NetworkIdentity): Promise<BackgroundCommandResult> {
+      return toBackgroundResult(await coordinatorClient.backgroundCancelByKey(identity));
     },
 
     getScheduleSettings(): BackgroundSyncSettings {

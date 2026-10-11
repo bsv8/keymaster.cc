@@ -30,7 +30,7 @@ test('actual RocKey Channel interoperates bidirectionally with Channel SDK 0.6.0
  const owner=hex(key.publicKey()),peerKey=parsePrivateKey(Uint8Array.from([...new Uint8Array(31),2])),peer=publicKeyFromPrivate(peerKey);
  try{
   backend=await VaultLinkHardwareBackend.connect({async read(){const v=await iter.next();return v.done?null:new Uint8Array(v.value);},async write(b){if(!child.stdin.write(b))await once(child.stdin,'drain');},async close(){child.stdin.end();}},
-   {publicKeyHex:owner,generations:{walletGeneration:1,backendGeneration:1,hostRunGeneration:1},assertActive(){}},async()=>true);
+   {bsvNetwork: "main", publicKeyHex:owner,generations:{walletGeneration:1,backendGeneration:1,hostRunGeneration:1},assertActive(){}},async()=>true);
   // Real libp2p SDK independently verifies every byte reconstructed on device.
   const staticKey=new Uint8Array(32).fill(7);
   const noiseSignature=await backend.signNetworkIdentity('noise',{staticKey});

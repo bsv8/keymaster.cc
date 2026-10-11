@@ -1,3 +1,5 @@
+import { NetworkIdentitySelect } from "./NetworkIdentitySelect.js";
+import type { BsvNetwork } from "@keymaster/contracts";
 import { useInternalVault } from "./VaultInternalContext.js";
 // packages/plugin-vault/src/VaultCreatePage.tsx
 // 首启"新建钱包"页：与 apps/web LockedShell 的"新建钱包"卡片语义保持一致。
@@ -17,6 +19,7 @@ import { VAULT_SERVICE_CAPABILITY } from "@keymaster/contracts";
 
 export function VaultCreatePage() {
   const vault = useInternalVault();
+  const [bsvNetwork, setBsvNetwork] = useState<BsvNetwork>("main");
   const { t } = usePluginI18n();
   // 触发 languageChanged 重渲染。
   const [password, setPassword] = useState("");
@@ -40,7 +43,8 @@ export function VaultCreatePage() {
       await vault.initialize({
         // 操作 id 只用于幂等与诊断，不是身份。
         transactionId: `create-${crypto.randomUUID()}`,
-        firstKey: { kind: "generate", label: "", capabilities: ["p2pkh"], password },
+        firstKey: { kind: "generate",
+          bsvNetwork, label: "", capabilities: ["p2pkh"], password },
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : t("vault.create.err.failed", { defaultValue: "创建失败" }));
@@ -60,6 +64,7 @@ export function VaultCreatePage() {
         })}
       />
       <form onSubmit={submit} className="vault-form">
+        <NetworkIdentitySelect value={bsvNetwork} onChange={setBsvNetwork} />
         <TextInput
           label={t("vault.create.passwordNew", { defaultValue: "新密码" })}
           type="password"

@@ -303,6 +303,7 @@ interface TestWallet {
  * 事务提交后安装 Root、runtime 与任务。
  */
 async function initializeTestWallet(input?: {
+  bsvNetwork?: "main" | "test";
   label?: string;
   password?: string;
   /** 私钥 hex；缺省时导入 TEST_PRIV_2。 */
@@ -320,7 +321,7 @@ async function initializeTestWallet(input?: {
     type: "initialize",
     plan: {
       transactionId: input?.transactionId ?? `init-${label}`,
-      firstKey: {
+      firstKey: {bsvNetwork: input?.bsvNetwork ?? "main",
         kind: "import",
         label,
         material: { hex: input?.privateKeyHex ?? TEST_PRIV_2 },
@@ -609,12 +610,11 @@ describe("Session Coordinator worker", () => {
 
   it("rejects forged client ownership and revoked/changed Storage grants", async () => {
     await __testBootstrapWalletStorage();
-    await initializeTestWallet({ label: "grant-forgery" });
     const ownerPublicKeyHex = VALID_PUBLISHER_KEYS[2]!;
-    __testSetVaultStatus("unlocked", ownerPublicKeyHex);
+    await bootstrapWalletOwnedBy(ownerPublicKeyHex, 3, "grant-owner");
     const identity = { version: 1 as const, publisherPublicKeyHex: VALID_PUBLISHER_KEYS[0]!, appId: "app", appName: "App", identityDigestHex: "aa".repeat(32) };
     let revoked = false;
-    __testSetStorageSessionResolver(async (id) => revoked ? null : { sessionId: id, origin: "https://app.example", ownerPublicKeyHex, appIdentity: identity, revokedAt: null });
+    __testSetStorageSessionResolver(async (id) => revoked ? null : { networkIdentity: {bsvNetwork: "main", publicKeyHex: ownerPublicKeyHex}, sessionId: id, origin: "https://app.example", ownerPublicKeyHex, appIdentity: identity, revokedAt: null });
     const granted = await __testDispatchStorageGrant("session-a", "port-a", "forged-client");
     expect(granted.ack.status).toBe("ok");
     const grantId = granted.operationResult as string;
@@ -634,7 +634,7 @@ describe("Session Coordinator worker", () => {
     expect((await __testDispatchStorageGrant("missing", "port-a")).ack.status).toBe("error");
     const identity = { version: 1 as const, publisherPublicKeyHex: VALID_PUBLISHER_KEYS[1]!, appId: "app", appName: "App", identityDigestHex: "bb".repeat(32) };
     let origin = "https://one.example";
-    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin, ownerPublicKeyHex, appIdentity: identity, revokedAt: null }));
+    __testSetStorageSessionResolver(async (id) => ({ networkIdentity: {bsvNetwork: "main", publicKeyHex: ownerPublicKeyHex}, sessionId: id, origin, ownerPublicKeyHex, appIdentity: identity, revokedAt: null }));
     const granted = await __testDispatchStorageGrant("session-b", "port-a");
     expect(granted.ack.status).toBe("ok");
     origin = "https://two.example";
@@ -675,7 +675,7 @@ describe("Session Coordinator worker", () => {
   it("aborts a slow Storage data lane when the global lock preempts it", async () => {
     __testSetVaultStatus("unlocked", VALID_PUBLISHER_KEYS[2]!);
     const identity = { version: 1 as const, publisherPublicKeyHex: VALID_PUBLISHER_KEYS[2]!, appId: "app", appName: "App", identityDigestHex: "cc".repeat(32) };
-    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://slow.example", ownerPublicKeyHex: VALID_PUBLISHER_KEYS[2]!, appIdentity: identity, revokedAt: null }));
+    __testSetStorageSessionResolver(async (id) => ({ networkIdentity: {bsvNetwork: "main", publicKeyHex: VALID_PUBLISHER_KEYS[2]!}, sessionId: id, origin: "https://slow.example", ownerPublicKeyHex: VALID_PUBLISHER_KEYS[2]!, appIdentity: identity, revokedAt: null }));
     __testSetStorageRuntime({ list: async (_ctx, input) => await new Promise((_, reject) => { input.signal?.addEventListener("abort", () => { reject(new Error("storage_unavailable")); }); }), abortSession: async () => undefined });
     const grant = await __testDispatchStorageGrant("slow-session", "port-a");
     const pending = __testDispatchStorageData({ grantId: grant.operationResult as string, actualPortId: "port-a" });
@@ -689,7 +689,7 @@ describe("Session Coordinator worker", () => {
   it("keeps physical slots occupied until ignored-AbortSignal Providers settle", async () => {
     await bootstrapWalletOwnedBy(VALID_PUBLISHER_KEYS[3]!, 4, "physical-slots");
     const identity = { version: 1 as const, publisherPublicKeyHex: VALID_PUBLISHER_KEYS[3]!, appId: "app", appName: "App", identityDigestHex: "ff".repeat(32) };
-    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://slots.example", ownerPublicKeyHex: VALID_PUBLISHER_KEYS[3]!, appIdentity: identity, revokedAt: null }));
+    __testSetStorageSessionResolver(async (id) => ({ networkIdentity: {bsvNetwork: "main", publicKeyHex: VALID_PUBLISHER_KEYS[3]!}, sessionId: id, origin: "https://slots.example", ownerPublicKeyHex: VALID_PUBLISHER_KEYS[3]!, appIdentity: identity, revokedAt: null }));
     const releases: Array<() => void> = [];
     __testSetStorageRuntime({ list: async () => await new Promise<never>((resolve) => { releases.push(() => resolve(undefined as never)); }), abortSession: async () => undefined });
     const ports = ["port-a", "port-b", "port-c", "port-d"];
@@ -720,7 +720,7 @@ describe("Session Coordinator worker", () => {
   it("rejects a late provider success after session epoch or generation changes", async () => {
     await bootstrapWalletOwnedBy(VALID_PUBLISHER_KEYS[4]!, 5, "late-provider");
     const identity = { version: 1 as const, publisherPublicKeyHex: VALID_PUBLISHER_KEYS[4]!, appId: "app", appName: "App", identityDigestHex: "dd".repeat(32) };
-    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://late.example", ownerPublicKeyHex: VALID_PUBLISHER_KEYS[4]!, appIdentity: identity, revokedAt: null }));
+    __testSetStorageSessionResolver(async (id) => ({ networkIdentity: {bsvNetwork: "main", publicKeyHex: VALID_PUBLISHER_KEYS[4]!}, sessionId: id, origin: "https://late.example", ownerPublicKeyHex: VALID_PUBLISHER_KEYS[4]!, appIdentity: identity, revokedAt: null }));
     let release!: () => void;
     const delayed = new Promise<void>((resolve) => { release = resolve; });
     // 单 Key 本地存储没有 Provider 世代；迟到结果由「钱包身份世代 + 平台 Root
@@ -736,7 +736,7 @@ describe("Session Coordinator worker", () => {
     __testAdvanceWalletGeneration();
     release();
     expect((await pending).ack).toMatchObject({ status: "error", code: "storage_unavailable" });
-    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://late.example", ownerPublicKeyHex: VALID_PUBLISHER_KEYS[4]!, appIdentity: identity, revokedAt: null }));
+    __testSetStorageSessionResolver(async (id) => ({ networkIdentity: {bsvNetwork: "main", publicKeyHex: VALID_PUBLISHER_KEYS[4]!}, sessionId: id, origin: "https://late.example", ownerPublicKeyHex: VALID_PUBLISHER_KEYS[4]!, appIdentity: identity, revokedAt: null }));
     let releaseEpoch!: () => void;
     const delayedEpoch = new Promise<void>((resolve) => { releaseEpoch = resolve; });
     __testSetStorageRuntime({
@@ -895,11 +895,11 @@ describe("Session Coordinator worker", () => {
     let release!: () => void;
     const released = new Promise<void>((resolve) => { release = resolve; });
     let aborted = false;
-    __testRegisterTask({ id: "test-a", publicKeyHex: "a".repeat(64), run: async ({ signal }) => { await released; aborted = signal.aborted; } });
-    __testRegisterTask({ id: "test-b", publicKeyHex: "b".repeat(64), run: async () => undefined });
+    __testRegisterTask({ bsvNetwork: "main", id: "test-a", publicKeyHex: "a".repeat(64), run: async ({ signal }) => { await released; aborted = signal.aborted; } });
+    __testRegisterTask({ bsvNetwork: "main", id: "test-b", publicKeyHex: "b".repeat(64), run: async () => undefined });
     const running = __testRunTask("test-a");
     await Promise.resolve();
-    const cancelling = __testCancelByKey("a".repeat(64));
+    const cancelling = __testCancelByKey({ bsvNetwork: "main", publicKeyHex: "a".repeat(64) });
     release();
     await cancelling;
     await running;
@@ -913,10 +913,10 @@ describe("Session Coordinator worker", () => {
     let release!: () => void;
     const released = new Promise<void>((resolve) => { release = resolve; });
     let aborted = false;
-    __testRegisterTask({
+    __testRegisterTask({ bsvNetwork: "main",
       id: "dynamic-owner-task",
       publicKeyHex: activeOwner,
-      keyScope: () => ({ publicKeyHex: activeOwner }),
+      keyScope: () => ({ bsvNetwork: "main", publicKeyHex: activeOwner }),
       run: async ({ signal }) => {
         await released;
         aborted = signal.aborted;
@@ -925,7 +925,7 @@ describe("Session Coordinator worker", () => {
     const running = __testRunTask("dynamic-owner-task");
     await Promise.resolve();
     activeOwner = "b".repeat(64);
-    const cancelling = __testCancelByKey("a".repeat(64));
+    const cancelling = __testCancelByKey({ bsvNetwork: "main", publicKeyHex: "a".repeat(64) });
     release();
     await cancelling;
     await running;
@@ -935,7 +935,7 @@ describe("Session Coordinator worker", () => {
   it("rejects a late handler freshness check after session invalidation", async () => {
     __testSetVaultStatus("unlocked", "a".repeat(64));
     let committed = false;
-    __testRegisterTask({ id: "late", publicKeyHex: "a".repeat(64), run: async ({ assertSessionFresh }) => { await Promise.resolve(); assertSessionFresh(); committed = true; } });
+    __testRegisterTask({ bsvNetwork: "main", id: "late", publicKeyHex: "a".repeat(64), run: async ({ assertSessionFresh }) => { await Promise.resolve(); assertSessionFresh(); committed = true; } });
     const running = __testRunTask("late");
     __testInvalidateSession();
     await running;
@@ -966,7 +966,7 @@ describe("Session Coordinator worker", () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     let runs = 0;
-    __testRegisterTask({ id: "once", publicKeyHex: "a".repeat(64), run: async () => { runs++; await gate; } });
+    __testRegisterTask({ bsvNetwork: "main", id: "once", publicKeyHex: "a".repeat(64), run: async () => { runs++; await gate; } });
     const first = await __testBackgroundRunNow("once");
     const second = await __testBackgroundRunNow("once");
     expect(first.ack.status).toBe("accepted");
@@ -1084,14 +1084,14 @@ describe("Session Coordinator worker", () => {
 
   it("marks tasks as blocked when vault is locked", async () => {
     __testSetVaultStatus("locked");
-    __testRegisterTask({ id: "task-1", publicKeyHex: "a".repeat(64), run: async () => undefined });
+    __testRegisterTask({ bsvNetwork: "main", id: "task-1", publicKeyHex: "a".repeat(64), run: async () => undefined });
     // 模拟 performGlobalLock 的行为
     const snapshot = __testGetSnapshot();
     const task = snapshot.taskSnapshots.find((t) => t.id === "task-1");
     expect(task?.state).toBe("idle"); // 初始状态是 idle
     // 锁定时任务应该变为 blocked
     __testSetVaultStatus("unlocked", "a".repeat(64));
-    __testRegisterTask({ id: "task-2", publicKeyHex: "a".repeat(64), run: async () => undefined });
+    __testRegisterTask({ bsvNetwork: "main", id: "task-2", publicKeyHex: "a".repeat(64), run: async () => undefined });
     // 验证解锁状态下的任务是 idle
     expect(__testGetSnapshot().taskSnapshots.find((t) => t.id === "task-2")?.state).toBe("idle");
   });
@@ -1100,7 +1100,7 @@ describe("Session Coordinator worker", () => {
     __testSetVaultStatus("unlocked", "a".repeat(64));
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
-    __testRegisterTask({ id: "running-task", publicKeyHex: "a".repeat(64), run: async () => { await gate; } });
+    __testRegisterTask({ bsvNetwork: "main", id: "running-task", publicKeyHex: "a".repeat(64), run: async () => { await gate; } });
     void __testRunTask("running-task");
     await Promise.resolve();
     // 锁定
@@ -1131,7 +1131,7 @@ describe("Session Coordinator worker", () => {
 
   it("restores tasks to idle and reschedules after unlock", async () => {
     __testSetVaultStatus("unlocked", "a".repeat(64));
-    __testRegisterTask({ id: "blocked-task", publicKeyHex: "a".repeat(64), run: async () => undefined });
+    __testRegisterTask({ bsvNetwork: "main", id: "blocked-task", publicKeyHex: "a".repeat(64), run: async () => undefined });
     // 模拟锁定
     const snapshot1 = __testGetSnapshot();
     expect(snapshot1.taskSnapshots.find((t) => t.id === "blocked-task")?.state).toBe("idle");
@@ -1144,7 +1144,7 @@ describe("Session Coordinator worker", () => {
 
   it("managed 任务的 nextRunAt 来自同步管理设置，关闭后没有 nextRunAt", async () => {
     await bootstrapReadyWallet("managed-next-run");
-    __testRegisterTask({
+    __testRegisterTask({ bsvNetwork: "main",
       id: "token-bsv21.sync",
       pluginId: "token-bsv21",
       publicKeyHex: "a".repeat(64),
@@ -1167,7 +1167,7 @@ describe("Session Coordinator worker", () => {
   it("任务缺真实提供方单元时阻断，提供方就绪后恢复", async () => {
     __testSetVaultStatus("unlocked", "a".repeat(64));
     let runs = 0;
-    __testRegisterTask({ id: "p2pkh.transactions-sync", publicKeyHex: "a".repeat(64),
+    __testRegisterTask({ bsvNetwork: "main", id: "p2pkh.transactions-sync", publicKeyHex: "a".repeat(64),
       run: async () => { runs++; } });
     await __testRunTask("p2pkh.transactions-sync");
     expect(runs).toBe(0);
@@ -1187,7 +1187,7 @@ describe("Session Coordinator worker", () => {
     __testReadyWorkerUnit("woc.coordinator-worker");
     __testReadyWorkerUnit("p2pkh.coordinator-worker");
     let runs = 0;
-    __testRegisterTask({
+    __testRegisterTask({ bsvNetwork: "main",
       id: "token-stas.sync",
       pluginId: "token-stas",
       publicKeyHex: __testGetActivePublicKeyHex()!,
@@ -1214,7 +1214,7 @@ describe("Session Coordinator worker", () => {
     __testReadyWorkerUnit("p2pkh.coordinator-worker");
     __testSetSmartSyncDebounceMs(5);
     let runs = 0;
-    __testRegisterTask({
+    __testRegisterTask({ bsvNetwork: "main",
       id: "p2pkh.utxo-snapshot",
       pluginId: "p2pkh",
       publicKeyHex: __testGetActivePublicKeyHex()!,
@@ -1251,7 +1251,7 @@ describe("Session Coordinator worker", () => {
     __testReadyWorkerUnit("p2pkh.coordinator-worker");
     __testSetSmartSyncDebounceMs(60);
     let runs = 0;
-    __testRegisterTask({
+    __testRegisterTask({ bsvNetwork: "main",
       id: "p2pkh.utxo-snapshot",
       pluginId: "p2pkh",
       publicKeyHex: __testGetActivePublicKeyHex()!,
@@ -1291,7 +1291,7 @@ describe("Session Coordinator worker", () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     let runs = 0;
-    __testRegisterTask({
+    __testRegisterTask({ bsvNetwork: "main",
       id: "p2pkh.utxo-snapshot",
       pluginId: "p2pkh",
       publicKeyHex: __testGetActivePublicKeyHex()!,
@@ -1322,7 +1322,7 @@ describe("Session Coordinator worker", () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     let runs = 0;
-    __testRegisterTask({
+    __testRegisterTask({ bsvNetwork: "main",
       id: "p2pkh.utxo-snapshot",
       pluginId: "p2pkh",
       publicKeyHex: key.publicKeyHex!,
@@ -1357,7 +1357,7 @@ describe("Session Coordinator worker", () => {
     __testSetSmartSyncDebounceMs(10_000);
     const runs = new Map<string, number>();
     const register = (id: string, pluginId: string, syncPolicy: "smart" | "managed", intervalMs?: number) => {
-      __testRegisterTask({ id, pluginId, publicKeyHex: __testGetActivePublicKeyHex()!, syncPolicy, intervalMs, run: async () => { runs.set(id, (runs.get(id) ?? 0) + 1); } });
+      __testRegisterTask({ bsvNetwork: "main", id, pluginId, publicKeyHex: __testGetActivePublicKeyHex()!, syncPolicy, intervalMs, run: async () => { runs.set(id, (runs.get(id) ?? 0) + 1); } });
     };
     register("p2pkh.utxo-snapshot", "p2pkh", "smart");
     register("p2pkh.transactions-sync", "p2pkh", "managed", 60_000);
@@ -1767,13 +1767,14 @@ describe("单 Key 冷启动与初始化门禁", () => {
     expect(__testGetSnapshot().taskSnapshots).toEqual([]);
   });
 
-  it("固定 key.json 的钱包冷启动进入 locked，并在 locked 门禁下安装 runtime 与任务", async () => {
+  it.each(["main", "test"] as const)("%s 身份冷启动保留网络与公钥，并在 locked 门禁下安装 runtime 与任务", async (bsvNetwork) => {
     await coldStartFreshWorker();
-    await initializeTestWallet({ label: "locked-cold-start" });
+    const wallet = await initializeTestWallet({ label: "locked-cold-start", bsvNetwork });
 
     const coldStart = await coldStartFreshWorker();
     expect(coldStart.state).toBe("ready");
-    expect(coldStart.key?.label).toBe("locked-cold-start");
+    expect(coldStart.key).toMatchObject({ label: "locked-cold-start", bsvNetwork, publicKeyHex: wallet.publicKeyHex });
+    expect(__testGetSnapshot().p2pkhSettings).toEqual({ bsvNetwork });
     expect(__testGetVaultStatus()).toBe("locked");
     expect(__testGetActivePublicKeyHex()).toBeUndefined();
     // locked 仍然装配 runtime 与任务，但全部 blocked：解锁后才恢复。
@@ -1795,7 +1796,7 @@ describe("单 Key 冷启动与初始化门禁", () => {
     expect(paths).toContain(".keymaster/meta");
   });
 
-  it("根目录只有唯一 key.json 与模块目录，不含桶或钱包 Owner 前缀", async () => {
+  it("根目录保留 key.json，模块数据带 network 与 Owner 前缀", async () => {
     await coldStartFreshWorker();
     const wallet = await initializeTestWallet({ label: "root-shape" });
     await __testOwnerStoragePut("owner-probe.bin", new Uint8Array([1, 2, 3]));
@@ -1808,7 +1809,7 @@ describe("单 Key 冷启动与初始化门禁", () => {
     expect(paths.filter((path) => path === "key.json")).toHaveLength(1);
     // 模块业务数据归入模块目录，而不是 `.keymaster/modules/` 第二份真值。
     expect(paths.some((path) => path.startsWith(".keymaster/modules/"))).toBe(false);
-    expect(paths).toContain("p2pkh/owner-probe.bin");
+    expect(paths).toContain(`main/${wallet.publicKeyHex}/p2pkh/owner-probe.bin`);
   });
 
   it("已初始化钱包不能被创建/导入入口覆盖", async () => {
@@ -1941,7 +1942,7 @@ describe("单 Key 重置后的授权生命周期", () => {
     expect(__testGetSnapshot().walletGeneration).toBe(second.walletGeneration);
     await expect(__testOwnerStoragePut("late-writer.bin", new Uint8Array([9]))).resolves.toBeUndefined();
     // 新写入只能落在新钱包的模块目录，且必须被当前会话 epoch 约束。
-    expect(await __testListWalletObjectPaths()).toContain("p2pkh/late-writer.bin");
+    expect(await __testListWalletObjectPaths()).toContain(`main/${__testGetActivePublicKeyHex()}/p2pkh/late-writer.bin`);
   });
 
   it("重新导入同一私钥仍是新的授权生命周期", async () => {
@@ -2166,7 +2167,7 @@ describe("Window P2P executor lease 与受限 signer（施工单 001 §3.1–3.2
       type: "initialize",
       plan: {
         transactionId: "b11-second-key",
-        firstKey: {
+        firstKey: {bsvNetwork: "main" as const,
           kind: "import",
           label: "switched-owner",
           material: { hex: TEST_PRIV_2 },
@@ -2755,8 +2756,8 @@ describe("Session Coordinator MSFile RPC lane", () => {
   it("rejects grants whose session lookup spans a lock/unlock cycle（审查修复）", async () => {
     await unlockVault();
     const epochAtEnqueue = __testGetSnapshot().sessionEpoch;
-    let releaseResolver!: (value: { sessionId: string; origin: string; ownerPublicKeyHex: string; appIdentity: typeof identity; revokedAt: number | null } | null) => void;
-    const gated = new Promise<{ sessionId: string; origin: string; ownerPublicKeyHex: string; appIdentity: typeof identity; revokedAt: number | null } | null>((resolve) => { releaseResolver = resolve; });
+    let releaseResolver!: (value: { sessionId: string; origin: string; networkIdentity: import("@keymaster/contracts").NetworkIdentity; ownerPublicKeyHex: string; appIdentity: typeof identity; revokedAt: number | null } | null) => void;
+    const gated = new Promise<{ sessionId: string; origin: string; networkIdentity: import("@keymaster/contracts").NetworkIdentity; ownerPublicKeyHex: string; appIdentity: typeof identity; revokedAt: number | null } | null>((resolve) => { releaseResolver = resolve; });
     __testSetStorageSessionResolver(() => gated);
 
     const pendingGrant = __testDispatchMsfileGrant({
@@ -2771,7 +2772,7 @@ describe("Session Coordinator MSFile RPC lane", () => {
     await __testLock();
     await __testUnlock("vault-pw");
 
-    releaseResolver({ sessionId: "session-gated", origin: "https://app.example", ownerPublicKeyHex, appIdentity: identity, revokedAt: null });
+    releaseResolver({ networkIdentity: {bsvNetwork: "main", publicKeyHex: ownerPublicKeyHex}, sessionId: "session-gated", origin: "https://app.example", ownerPublicKeyHex, appIdentity: identity, revokedAt: null });
     const result = await pendingGrant;
     expect(result.ack).toMatchObject({ status: "stale-epoch" });
   });
@@ -2779,7 +2780,7 @@ describe("Session Coordinator MSFile RPC lane", () => {
   it("never reaches the service when an existing grant spans a lock/unlock during session lookup（第五轮审查修复）", async () => {
     const epoch = await unlockVault();
     __testSetStorageSessionResolver(async (id) => id === "session-msfile"
-      ? { sessionId: id, origin: "https://app.example", ownerPublicKeyHex: __testGetSnapshot().activePublicKeyHex!, appIdentity: identity, revokedAt: null }
+      ? { networkIdentity: {bsvNetwork: "main", publicKeyHex: __testGetSnapshot().activePublicKeyHex!}, sessionId: id, origin: "https://app.example", ownerPublicKeyHex: __testGetSnapshot().activePublicKeyHex!, appIdentity: identity, revokedAt: null }
       : null);
     const granted = await __testDispatchMsfileGrant({
       connectSessionId: "session-msfile",
@@ -2798,8 +2799,8 @@ describe("Session Coordinator MSFile RPC lane", () => {
     } as never);
 
     // 让 authoritative session 查询悬挂，期间 lock → unlock。
-    let releaseResolver!: (value: { sessionId: string; origin: string; ownerPublicKeyHex: string; appIdentity: typeof identity; revokedAt: number | null } | null) => void;
-    const gated = new Promise<{ sessionId: string; origin: string; ownerPublicKeyHex: string; appIdentity: typeof identity; revokedAt: number | null } | null>((resolve) => { releaseResolver = resolve; });
+    let releaseResolver!: (value: { sessionId: string; origin: string; networkIdentity: import("@keymaster/contracts").NetworkIdentity; ownerPublicKeyHex: string; appIdentity: typeof identity; revokedAt: number | null } | null) => void;
+    const gated = new Promise<{ sessionId: string; origin: string; networkIdentity: import("@keymaster/contracts").NetworkIdentity; ownerPublicKeyHex: string; appIdentity: typeof identity; revokedAt: number | null } | null>((resolve) => { releaseResolver = resolve; });
     __testSetStorageSessionResolver(() => gated);
     const pendingRead = __testDispatchMsfileData({ type: "read-seed", grantId, sourceId: `remote-proxy:${identity.publisherPublicKeyHex}`, seedHashHex: "ab".repeat(32) }, "port-a");
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -2807,7 +2808,7 @@ describe("Session Coordinator MSFile RPC lane", () => {
     await __testUnlock("vault-pw");
 
     // 释放后：grant 已随 lock 清空 → 拒绝且 service 从未被调用。
-    releaseResolver({ sessionId: "session-msfile", origin: "https://app.example", ownerPublicKeyHex, appIdentity: identity, revokedAt: null });
+    releaseResolver({ networkIdentity: {bsvNetwork: "main", publicKeyHex: ownerPublicKeyHex}, sessionId: "session-msfile", origin: "https://app.example", ownerPublicKeyHex, appIdentity: identity, revokedAt: null });
     const result = await pendingRead;
     expect(result.ack).toMatchObject({ status: "error", code: "msfile_identity_required" });
     expect(readSeedSpy).not.toHaveBeenCalled();
@@ -2817,7 +2818,7 @@ describe("Session Coordinator MSFile RPC lane", () => {
   it("refuses to bind a grant when the session owner is not the active runtime owner（审查修复）", async () => {
     await unlockVault();
     const otherOwner = validPublisherKey(31);
-    __testSetStorageSessionResolver(async () => ({
+    __testSetStorageSessionResolver(async () => ({ networkIdentity: {bsvNetwork: "main", publicKeyHex: otherOwner},
       sessionId: "session-owner-mismatch",
       origin: "https://app.example",
       ownerPublicKeyHex: otherOwner,
@@ -2838,7 +2839,7 @@ describe("Session Coordinator MSFile RPC lane", () => {
     // 审查修复后 grant 要求 session owner === active runtime owner。
     const activeOwner = __testGetSnapshot().activePublicKeyHex!;
     __testSetStorageSessionResolver(async (id) => id === "session-msfile"
-      ? { sessionId: id, origin: "https://app.example", ownerPublicKeyHex: activeOwner, appIdentity: identity, revokedAt: null }
+      ? { networkIdentity: {bsvNetwork: "main", publicKeyHex: activeOwner}, sessionId: id, origin: "https://app.example", ownerPublicKeyHex: activeOwner, appIdentity: identity, revokedAt: null }
       : null);
     const granted = await __testDispatchMsfileGrant({
       connectSessionId: "session-msfile",
@@ -3006,7 +3007,7 @@ describe("正式 Worker setup 的钱包状态绑定", () => {
       // A pending task outlives its revoked owner Scope until its Promise settles.
       // Snapshot generation must clear its identity without bypassing the view's guard.
       const taskView = view;
-      __testRegisterTask({ id: "revoked-owner-projection", publicKeyHex: "02" + "ab".repeat(32), keyScope: () => ({ publicKeyHex: taskView.snapshot().activePublicKeyHex! }), run: async () => {} });
+      __testRegisterTask({ bsvNetwork: "main", id: "revoked-owner-projection", publicKeyHex: "02" + "ab".repeat(32), keyScope: () => taskView.snapshot().activeKeyIdentity, run: async () => {} });
       await host.revoke("window-p2p", "consumer removed");
       expect(__testGetSnapshot().taskSnapshots.find(task => task.id === "revoked-owner-projection")?.keyScope).toBeUndefined();
       expect((await __testLock()).ack.status).toBe("accepted");

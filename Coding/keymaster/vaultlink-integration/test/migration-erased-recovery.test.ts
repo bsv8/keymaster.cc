@@ -15,13 +15,13 @@ for(const phase of ['erasing','erased'])test(`committed browser + actual empty-d
  // actual SDK encryption, KeyStore erase, journal and IndexedDB commit code.
  const store=createIndexedDbWalletStore({databaseName:'erased-migration-'+crypto.randomUUID()}),generation=crypto.randomUUID();
  const encode=(v:unknown)=>new TextEncoder().encode(JSON.stringify(v));
- const source=await store.put(WALLET_KEYHOLD_PATH,encode({format:'keymaster.hardware-key',version:1,backend:'vaultlink',wireVersion:2,label:'保持身份',publicKeyHex,walletGeneration:generation,backendGeneration:1}));
+ const source=await store.put(WALLET_KEYHOLD_PATH,encode({bsvNetwork: "main" as const, format:'keymaster.hardware-key',version:1,backend:'vaultlink',wireVersion:2,label:'保持身份',publicKeyHex,walletGeneration:generation,backendGeneration:1}));
  await store.put(WALLET_META_PATH,encode({format:WALLET_META_FORMAT,version:1,schemaVersion:WALLET_CURRENT_SCHEMA_VERSION,initialized:true,walletGeneration:generation,createdAt:new Date().toISOString()}));
  const service=createMigrationJournalService({store:createVaultBootstrapStorage(store).migration,inspectKey:inspectWalletKeyBytes});
  const bank=encodePaymentPolicy({version:2,key:publicKeyHex,channels:[],sessions:[],pending:[],pools:[]},publicKeyHex);
  const id=crypto.randomUUID(),journal=await service.begin({migrationId:id,expectedRevision:source.revision,policyBank:bank});
  await service.deviceCommitted(id,journal.policyHash);const privateKey=new Uint8Array(32);privateKey[31]=1;
- try{const target=await createAndVerifyMigrationKeyHold({privateKey,publicKeyHex,label:'保持身份'},'new-software-password');await service.commitLocal(id,target,bank);}finally{privateKey.fill(0);}
+ try{const target=await createAndVerifyMigrationKeyHold({bsvNetwork: "main" as const, privateKey,publicKeyHex,label:'保持身份'},'new-software-password');await service.commitLocal(id,target,bank);}finally{privateKey.fill(0);}
  const committed=(await service.current())!;
  const d=await openActualMigrationDevice(ErasedMigrationConnection,{phase,journal:committed});
  try{

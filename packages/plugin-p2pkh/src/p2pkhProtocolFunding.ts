@@ -214,7 +214,7 @@ export function createProtocolFundingService(deps: CreateProtocolFundingServiceD
         if (record.ownerPublicKeyHex.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) continue;
         // 明确被拒：交易没进网络，UTXO 不存在，可以不保护。
         if (record.broadcastState === "rejected") continue;
-        // 按记录自己的网络观察：`includeTestnet` 这类设置不是记录的网络。
+        // 按记录自己的网络观察：`bsvNetwork` 这类设置不是记录的网络。
         const state = await deps.observeChain(record.network, record.txid).catch(() => "unknown" as const);
         if (state === "spent") {
           // 已证明被花费：UTXO 不存在，解除保护。

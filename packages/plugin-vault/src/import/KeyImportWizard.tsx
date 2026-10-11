@@ -1,3 +1,6 @@
+import { useState } from "react";
+import { NetworkIdentitySelect } from "../NetworkIdentitySelect.js";
+import type { BsvNetwork } from "@keymaster/contracts";
 import { useInternalVault, useVaultImporters } from "../VaultInternalContext.js";
 // packages/plugin-vault/src/import/KeyImportWizard.tsx
 // Key 导入向导（原 apps/web/src/shell/FirstTimeImportWizard.tsx 迁移）：
@@ -85,6 +88,7 @@ export function KeyImportWizard({ onCancel, vaultPassword, draftMode, onComplete
   // draft / 初始化时 Vault 可能还没有安装；导入步骤只负责解析并把内存草稿
   // 交还给宿主页面，不能因为缺少 vault.service 让整个向导 fatal。
   const vault = useInternalVault();
+  const [bsvNetwork, setBsvNetwork] = useState<BsvNetwork>("main");
   const { t, text } = usePluginI18n();
   // draft 模式：只解析并交还草稿；首启模式才创建 Vault。
   const isDraftMode = draftMode ?? Boolean(vaultPassword);
@@ -183,8 +187,10 @@ export function KeyImportWizard({ onCancel, vaultPassword, draftMode, onComplete
     // keys/、Hold 或目录。宿主会在最终确认时调用单一事务入口。
     if (isDraftMode && onComplete) {
       const parsed = state.importState.result;
+      if (parsed.network !== undefined && parsed.network !== bsvNetwork) throw new Error("导入私钥的网络与选择不一致");
       const label = state.label.trim() || `key-${Date.now()}`;
       onComplete({
+        bsvNetwork,
         label,
         material: {
           hex: parsed.material.hex,
@@ -252,10 +258,12 @@ export function KeyImportWizard({ onCancel, vaultPassword, draftMode, onComplete
     dispatch({ type: "import", action: { type: "parse-start" } });
     try {
       const parsed = state.importState.result;
+      if (parsed.network !== undefined && parsed.network !== bsvNetwork) throw new Error("导入私钥的网络与选择不一致");
       await vault.initialize({
         transactionId: `key-import-${Date.now()}`,
         firstKey: {
           kind: "import",
+          bsvNetwork,
           label: state.label.trim() || `key-${Date.now()}`,
           material: parsed.material,
           format: parsed.detectedFormat,
@@ -355,7 +363,8 @@ export function KeyImportWizard({ onCancel, vaultPassword, draftMode, onComplete
           })}
         />
         <section className="first-time-import__picker">
-          <ImporterPicker
+          <NetworkIdentitySelect value={bsvNetwork} onChange={setBsvNetwork} />
+        <ImporterPicker
             selected={importer?.id}
             onSelect={(imp) => dispatch({ type: "pick-importer", importer: imp })}
           />

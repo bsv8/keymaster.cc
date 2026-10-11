@@ -1,3 +1,4 @@
+import { type NetworkIdentity, networkIdentityStorageRoot, sameNetworkIdentity } from "@keymaster/contracts";
 import {createHardwareChannelAdapter} from "@keymaster/plugin-vault/coordinator";
 import { createForumWorkerService, executeForumWorkerRequest, streamForumAttachment } from "@keymaster/plugin-forum/coordinator";
 import { createMsFileContentService, createMsFileRemoteContentFetcher, createMsFileSellerPublicationEvidence } from "@keymaster/plugin-msfile/coordinator";
@@ -255,7 +256,7 @@ interface CoordinatorRuntimeSettings {
   scheduleSettings: CoordinatorBackgroundSyncSettings;
   autoLockTimeoutMs: number;
   p2pkhProviderConfigs: Record<string, Record<string, unknown>>;
-  p2pkhSettings: { includeTestnet: boolean };
+  p2pkhSettings: { bsvNetwork: "main" | "test" };
 }
 /** 桶级 Coordinator snapshot 持久化同步管理 + 自动锁；P2PKH 偏好归 owner 的 setting.json。 */
 type CoordinatorSettingsSnapshot = Pick<CoordinatorRuntimeSettings, "scheduleSettings" | "autoLockTimeoutMs">;
@@ -264,7 +265,7 @@ function defaultCoordinatorRuntimeSettings(): CoordinatorRuntimeSettings {
     scheduleSettings: { taskIntervals: {} },
     autoLockTimeoutMs: AUTO_LOCK_DEFAULT_TIMEOUT_MS,
     p2pkhProviderConfigs: {},
-    p2pkhSettings: { includeTestnet: false },
+    p2pkhSettings: { bsvNetwork: "main" },
   };
 }
 const coordinatorMeta: CoordinatorRuntimeSettings = defaultCoordinatorRuntimeSettings();
@@ -457,7 +458,7 @@ export async function __testSeedCoordinatorKeyValueGarbage(): Promise<string> {
   if (!store || !platformRootStore) throw new Error("Test Coordinator garbage storage is not ready");
   const declaration = CENTRAL_STORAGE_DECLARATIONS.bsvPrice;
   const handle = await platformRootStore.openPlatformStore({ declaration });
-  const valuePrefix = `${buildWalletStorageRoot({
+  const valuePrefix = `${networkIdentityStorageRoot(platformRootStore.identity)}${buildWalletStorageRoot({
     authority: declaration.authority,
     moduleId: declaration.moduleId,
     purposeId: declaration.purposeId,
@@ -531,7 +532,10 @@ async function installPlatformStorage(): Promise<void> {
     await withCoordinatorFinalIoLease("write", undefined, () => removeRetiredPluginIntent(storage), {
       allowLocalLock: true, auditOperation: "storage.retired-plugin-intent.cleanup",
     });
+    const keyFile = await walletKeys?.read();
+    if (!keyFile) throw new StorageRuntimeError("storage_identity_required", "Wallet network identity is unavailable");
     const root = createPlatformRootStore({
+      identity: { bsvNetwork: keyFile.document.bsvNetwork, publicKeyHex: keyFile.document.publicKeyHex },
       store: walletStore,
       generations: () => ({
         walletGeneration: coordinatorState.walletGeneration,
@@ -596,7 +600,7 @@ function replaceCoordinatorMeta(next: CoordinatorRuntimeSettings): void {
   coordinatorMeta.autoLockTimeoutMs = normalizeAutoLockTimeoutMs(
     (next as Partial<CoordinatorRuntimeSettings>).autoLockTimeoutMs
   );
-  coordinatorMeta.p2pkhSettings ??= { includeTestnet: false };
+  coordinatorMeta.p2pkhSettings ??= { bsvNetwork: "main" };
   coordinatorMeta.p2pkhProviderConfigs ??= {};
 }
 
@@ -1030,7 +1034,7 @@ function closeCoordinatorUpgradeSession(reason: string): void {
   coordinatorUpgradeSession = undefined;
 }
 
-let testStorageSessionResolver: ((sessionId: string) => Promise<{ sessionId: string; origin: string; ownerPublicKeyHex?: string; appIdentity: import("@keymaster/contracts").OwnerAppStorageGrant["appIdentity"]; revokedAt: number | null } | null>) | undefined;
+let testStorageSessionResolver: ((sessionId: string) => Promise<{ sessionId: string; origin: string; networkIdentity?: import("@keymaster/contracts").NetworkIdentity; ownerPublicKeyHex?: string; appIdentity: import("@keymaster/contracts").OwnerAppStorageGrant["appIdentity"]; revokedAt: number | null } | null>) | undefined;
 
 function isValidStorageIdentity(identity: unknown): identity is import("@keymaster/contracts").OwnerAppStorageGrant["appIdentity"] {
   return isVerifiedAppIdentitySnapshot(identity);
@@ -1067,17 +1071,17 @@ const THIRD_PARTY_APP_FILES_DECLARATION = Object.freeze({
   schemaVersion: 1,
 } satisfies PluginStorageDeclaration);
 
-async function readProtocolConnectSession(sessionId: string): Promise<{ sessionId: string; origin: string; ownerPublicKeyHex: string; appIdentity: import("@keymaster/contracts").OwnerAppStorageGrant["appIdentity"]; revokedAt: number | null } | null> {
+async function readProtocolConnectSession(sessionId: string): Promise<{ sessionId: string; origin: string; networkIdentity: import("@keymaster/contracts").NetworkIdentity; ownerPublicKeyHex: string; appIdentity: import("@keymaster/contracts").OwnerAppStorageGrant["appIdentity"]; revokedAt: number | null } | null> {
   if (testStorageSessionResolver) {
     const resolved = await testStorageSessionResolver(sessionId);
     return resolved && resolved.revokedAt === null && Boolean(resolved.sessionId && resolved.origin) && isValidStorageIdentity(resolved.appIdentity)
-      ? { sessionId: resolved.sessionId, origin: resolved.origin, ownerPublicKeyHex: resolved.ownerPublicKeyHex ?? "", appIdentity: resolved.appIdentity, revokedAt: null }
+      ? { sessionId: resolved.sessionId, origin: resolved.origin, networkIdentity: resolved.networkIdentity!, ownerPublicKeyHex: resolved.ownerPublicKeyHex ?? "", appIdentity: resolved.appIdentity, revokedAt: null }
       : null;
   }
   if (!sessionId) return null;
   const record = await getAuthoritativeConnectSession(sessionId);
   return record && isValidStorageIdentity(record.appIdentity)
-    ? { sessionId: record.sessionId, origin: record.origin, ownerPublicKeyHex: record.ownerPublicKeyHex, appIdentity: record.appIdentity, revokedAt: null }
+    ? { sessionId: record.sessionId, origin: record.origin, networkIdentity: record.networkIdentity, ownerPublicKeyHex: record.ownerPublicKeyHex, appIdentity: record.appIdentity, revokedAt: null }
     : null;
 }
 
@@ -1329,7 +1333,7 @@ async function revokeStorageBindingAndDrain(reason: string): Promise<void> {
   // 任务 completion 由自己的绑定栅栏收口；这里不等待一个可能永不响应
   // AbortSignal 的业务 task，存储排空才是数据变更前的硬门禁。
   if (coordinatorState.activePublicKeyHex) {
-    void cancelTaskRuntimesByKey(coordinatorState.activePublicKeyHex).catch((error) => {
+    void cancelTaskRuntimesByKey(requireCoordinatorNetworkIdentity()).catch((error) => {
       console.warn("[coordinator] task cancellation deferred", error instanceof Error ? error.message : String(error));
     });
   }
@@ -1365,7 +1369,7 @@ const msfileFundingRuntime = createWorkerFundingRuntime({
   executor: requestWindowP2pExecutorOperation,
   ensureResources: ensureWorkerP2pkhResources,
   snapshots: () => p2pkhUtxoSnapshots,
-  readP2pkhSettings: () => p2pkhSettingRepository().readSetting(),
+  readP2pkhSettings: async () => ({ ...await p2pkhSettingRepository().readSetting(), bsvNetwork: requireCoordinatorNetworkIdentity().bsvNetwork }),
   maxFeeSatoshis: bitfsFundingMaxFeeSatoshis,
   deriveAddress: deriveP2pkhAddress,
   addressScript: p2pkhAddressToScriptHex,
@@ -1378,7 +1382,7 @@ const msfileBitfsRuntime = createBitfsWorkerRuntime({
   ensureService: () => ensureMsfileRuntime(),
   files: (purpose) => createWorkerModuleFileStore("msfile", purpose),
   woc: () => testDomainUnitReadiness ? p2pkhWocService : msfileWorkerChainAccess?.(),
-  p2pkhSettings: () => p2pkhSettingRepository().readSetting(),
+  p2pkhSettings: async () => ({ ...await p2pkhSettingRepository().readSetting(), bsvNetwork: requireCoordinatorNetworkIdentity().bsvNetwork }),
   crypto: (owner) => createWorkerActiveKeyCrypto(owner),
   blockHeight: readCoordinatorBitfsBlockHeight,
   executor: requestWindowP2pExecutorOperation,
@@ -1457,22 +1461,15 @@ export const recoverMsfileBitfsFundingSplit = msfileFundingRuntime.recoverSplit;
 /* ---------- SatSubscription runtime（唯一 owner：SharedWorker） ---------- */
 const SAT_WINDOW_LANE_ID = "sat-subscription";
 
-/**
- * 缺省 SatSubscription 供应商网络选择。
- *
- * 设计缘由：
- *   - `npm run dev` 使用 testnet 网关；
- *   - `npm run build` / `npm run build:production` 使用 mainnet 网关；
- *   - Worker 与页面由同一次 Vite 构建处理，`import.meta.env.DEV` 语义一致。
- */
+/** SS 与 BitFS 服务均从钱包身份取得网络；构建模式不决定业务网络。 */
 function satDefaultNetwork(): SatDefaultNetwork {
-  return import.meta.env.DEV === true ? "testnet" : "mainnet";
+  return requireCoordinatorNetworkIdentity().bsvNetwork === "test" ? "testnet" : "mainnet";
 }
 
 type BitfsNetwork = "main" | "test";
 
 function bitfsNetwork(): BitfsNetwork {
-  return import.meta.env.VITE_BITFS_NETWORK === "test" ? "test" : "main";
+  return requireCoordinatorNetworkIdentity().bsvNetwork;
 }
 
 async function readCoordinatorBitfsBlockHeight(network: BitfsNetwork): Promise<number> {
@@ -3008,7 +3005,7 @@ async function currentWalletPayments(): Promise<WalletPayments | HardwareWalletP
     assertActive();
     if (result.type !== "signDigest" || result.format !== "der") throw new Error("Invalid payment signature result");
     return cryptoHexToBytes(result.signatureHex);
-  });
+  },requireCoordinatorNetworkIdentity().bsvNetwork);
   walletPaymentsOpening = pending;
   try { const ready = await pending; assertActive(); walletPayments = ready; return ready; }
   finally { if (walletPaymentsOpening === pending) walletPaymentsOpening = undefined; }
@@ -3193,6 +3190,12 @@ function createCoordinatorChainHeightTask(woc: WocService) {
 
 const workerIdentityProjection = createWorkerIdentityProjection();
 const coordinatorActiveKeySummary = workerIdentityProjection.summary;
+function requireCoordinatorNetworkIdentity(): import("@keymaster/contracts").NetworkIdentity {
+  const identity = coordinatorActiveKeySummary();
+  if (!identity || coordinatorState.vaultStatus !== "unlocked") throw new Error("Network identity is unavailable");
+  return { bsvNetwork: identity.bsvNetwork, publicKeyHex: identity.publicKeyHex };
+}
+
 const setCoordinatorActiveKeySummary = workerIdentityProjection.setSummary;
 function workerWalletSnapshot(): import("@keymaster/contracts").VaultLifecycleSnapshot {
   return { status: coordinatorState.vaultStatus === "fatal" ? "locked" : coordinatorState.vaultStatus,
@@ -3361,7 +3364,7 @@ async function installP2pkhCoordinatorTasks(walletState: VaultWalletState, woc: 
   if (coordinatorState.sessionEpoch !== epoch) throw new Error("P2PKH task installation became stale");
   const definitions = createP2pkhWorkerTaskDefinitions({
     walletState, woc, storage,
-    isNetworkEnabled: network => network === "main" || coordinatorMeta.p2pkhSettings?.includeTestnet === true,
+    isNetworkEnabled: network => network === requireCoordinatorNetworkIdentity().bsvNetwork,
     loadSettings: loadP2pkhSettingForOwner,
     refreshUtxos: signal => refreshP2pkhUtxoSnapshots(signal, storage, assertActive),
     emitDataChanged: (kinds, utxoSeqs) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: coordinatorState.activePublicKeyHex ?? "", kinds, ...(utxoSeqs === undefined ? {} : { utxoSeqs }) }),
@@ -3484,15 +3487,15 @@ async function registerCoordinatorTasks(): Promise<void> {
   if (woc) initializeCoordinatorP2pkhProviders(woc, woc);
   if (testDomainUnitReadiness && woc) await installCoordinatorDomainTask(createCoordinatorChainHeightTask(woc), "woc", () => {});
   if (testDomainUnitReadiness && woc) await installP2pkhCoordinatorTasks(walletState, woc);
-  const p2pkhProvider = createP2pkhWorkerAssetReader({ walletState, storage: createWorkerModuleFileStore("p2pkh", ""), snapshots: () => p2pkhUtxoSnapshots, includeTestnet: () => coordinatorMeta.p2pkhSettings?.includeTestnet === true });
+  const p2pkhProvider = createP2pkhWorkerAssetReader({ walletState, storage: createWorkerModuleFileStore("p2pkh", ""), snapshots: () => p2pkhUtxoSnapshots, bsvNetwork: () => requireCoordinatorNetworkIdentity().bsvNetwork });
   const vault = { status: () => coordinatorState.vaultStatus, } as VaultService;
   if (testDomainUnitReadiness && woc) {
   const bsv21Task = createBsv21CoordinatorTask({ walletState, stateStore: createWorkerKeyValueStore("token-bsv21", "token-state"), p2pkh: p2pkhProvider, woc: createWocBsv21Service({ messageBus }), wocService: woc, vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
   const stasTask = createStasCoordinatorTask({ walletState, stateStore: createWorkerKeyValueStore("token-stas", "token-state"), p2pkh: p2pkhProvider, woc: createWocStasService({ messageBus }), vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
   const oneSatTask = createOrdinalsCoordinatorTask({ walletState, p2pkh: p2pkhProvider, woc: createWoc1SatOrdinalsService({ messageBus }), wocService: woc, vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
-  coordinatorState.taskRuntimes.set(bsv21Task.id, createCoordinatorTaskRuntime({ id: bsv21Task.id, pluginId: "token-bsv21", unitId: bsv21Task.unitId, syncPolicy: "managed", intervalMs: managedIntervalFor(bsv21Task.id), keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await bsv21Task.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } }));
-  coordinatorState.taskRuntimes.set(stasTask.id, createCoordinatorTaskRuntime({ id: stasTask.id, pluginId: "token-stas", unitId: stasTask.unitId, syncPolicy: "managed", intervalMs: managedIntervalFor(stasTask.id), keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await stasTask.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } }));
-  coordinatorState.taskRuntimes.set(oneSatTask.id, createCoordinatorTaskRuntime({ id: oneSatTask.id, pluginId: "collectible-1satordinals", unitId: oneSatTask.unitId, syncPolicy: "managed", intervalMs: managedIntervalFor(oneSatTask.id), keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await oneSatTask.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } }));
+  coordinatorState.taskRuntimes.set(bsv21Task.id, createCoordinatorTaskRuntime({ id: bsv21Task.id, pluginId: "token-bsv21", unitId: bsv21Task.unitId, syncPolicy: "managed", intervalMs: managedIntervalFor(bsv21Task.id), keyScope: () => coordinatorState.activePublicKeyHex ? requireCoordinatorNetworkIdentity() : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await bsv21Task.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } }));
+  coordinatorState.taskRuntimes.set(stasTask.id, createCoordinatorTaskRuntime({ id: stasTask.id, pluginId: "token-stas", unitId: stasTask.unitId, syncPolicy: "managed", intervalMs: managedIntervalFor(stasTask.id), keyScope: () => coordinatorState.activePublicKeyHex ? requireCoordinatorNetworkIdentity() : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await stasTask.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } }));
+  coordinatorState.taskRuntimes.set(oneSatTask.id, createCoordinatorTaskRuntime({ id: oneSatTask.id, pluginId: "collectible-1satordinals", unitId: oneSatTask.unitId, syncPolicy: "managed", intervalMs: managedIntervalFor(oneSatTask.id), keyScope: () => coordinatorState.activePublicKeyHex ? requireCoordinatorNetworkIdentity() : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await oneSatTask.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } }));
   }
   bindCoordinatorTaskUnitsToOwner();
   for (const runtime of coordinatorState.taskRuntimes.values()) scheduleRuntime(runtime);
@@ -3956,7 +3959,7 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
   if (request.kind === "storage.grant") {
     const session = await readProtocolConnectSession(request.connectSessionId);
     if (revokedCoordinatorPeerIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
-    if (!session) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Storage session is invalid or revoked", code: "storage_identity_required" } };
+    if (!session || !session.networkIdentity || !platformRootStore || !sameNetworkIdentity(session.networkIdentity, platformRootStore.identity)) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Storage network identity is invalid or revoked", code: "storage_identity_required" } };
     if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex || !platformRootStore) {
       return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Storage requires an unlocked wallet", code: "storage_identity_required" } };
     }
@@ -3972,6 +3975,7 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
     const grantId = `grant-${crypto.randomUUID()}`;
     storageGrants.set(grantId, {
       context: {
+        ...session.networkIdentity,
         connectSessionId: session.sessionId,
         transportOrigin: session.origin,
         appIdentity: session.appIdentity,
@@ -4014,6 +4018,7 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
     }
     if (!platformRootStore) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Platform storage requires a ready root", code: "storage_unavailable" } };
     const grant: StoragePlatformGrant & { clientId: string } = {
+      ...platformRootStore.identity,
       platformGrantId: `platform-${crypto.randomUUID()}`,
       walletGeneration: coordinatorState.walletGeneration,
       runGeneration: coordinatorState.runGeneration,
@@ -4042,6 +4047,7 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
     if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex || !platformRootStore) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Owner storage requires an unlocked wallet", code: "storage_unavailable" } };
     if (revokedCoordinatorPeerIds.has(actualClientId)) return disconnectedClientResponse(request.requestId);
     const grant: StorageOwnerGrant & { clientId: string } = {
+      ...platformRootStore.identity,
       storageGrantId: `owner-${crypto.randomUUID()}`,
       walletGeneration: coordinatorState.walletGeneration,
       runGeneration: coordinatorState.runGeneration,
@@ -4314,7 +4320,8 @@ async function ensureChannelSubscriptionMux(runtime: SatWorkerRuntimeState): Pro
         // authority。这样初始 owner inbox、请求中的 set/release 以及退避
         // 重试都不会在旧 Worker 接管后继续使用旧连接身份。
         subscribe: (channel, signal) => {
-          if (bitfsNetwork() === "test" && channel.startsWith("bsvprice.")) return Promise.resolve();
+          // 主网与测试网都必须真实订阅；runtime 已按钱包身份绑定对应网关。
+          // 提前返回会让 mux 错报 subscribed，页面却永远收不到行情。
           return withCoordinatorFinalIoLease(
           "write",
           signal,
@@ -6184,7 +6191,9 @@ async function handleHardwareConnection(
         (journal&&journal.phase!=="complete"||coordinatorState.vaultStatus!=="unlocked"||activeKeyBackend!=="software"))throw Error("migration-provisioning-unavailable");
       if(recovery){coordinatorState.walletGeneration=journal!.walletGeneration;hardwareRecoveryConnection={migrationId:journal!.migrationId,peerId};}
       const assertRecordLive=()=>{if(signal?.aborted||revokedCoordinatorPeerIds.has(peerId)||walletStore!==store||walletKeys!==keys||coordinatorState.sessionEpoch!==epoch||coordinatorState.runGeneration!==run)throw Error("migration-session-revoked");};
-      try{await hardwareConnections.attachProvision({peerId,leaseId:command.leaseId,port:command.port,signal,assertRecordLive,walletGeneration:coordinatorState.walletGeneration!});connectedByRequest=true;assertRecordLive();
+      const sourceKey=await withCoordinatorFinalIoLease("read",signal,()=>keys.read(),{auditOperation:"vault.operation"});
+      if(!sourceKey)throw Error("network-identity-required");
+      try{await hardwareConnections.attachProvision({bsvNetwork:sourceKey.document.bsvNetwork,peerId,leaseId:command.leaseId,port:command.port,signal,assertRecordLive,walletGeneration:coordinatorState.walletGeneration!});connectedByRequest=true;assertRecordLive();
         const state=await hardwareConnections.provision().migrationStatus();assertRecordLive();if(journal&&journal.phase!=="complete"&&state)verifyDeviceMigrationJournal(journal,state);
         else if(recovery&&journal!.phase!=="prepared")throw Error("migration-device-record-missing");
       }catch(error){hardwareRecoveryConnection=undefined;await hardwareConnections.closePeer(peerId);throw error;}
@@ -6205,7 +6214,7 @@ async function handleHardwareConnection(
       try {
         if(command.action==="recover-erased")await hardwareConnections.attachErased({peerId,leaseId:command.leaseId,port:command.port,signal,assertRecordLive,journal});
         else await hardwareConnections.attach({peerId,leaseId:command.leaseId,port:command.port,signal,assertRecordLive,
-          document:{format:"keymaster.hardware-key",version:1,backend:"vaultlink",wireVersion:2,label:file.document.label,
+          document:{format:"keymaster.hardware-key",version:1,backend:"vaultlink",wireVersion:2,bsvNetwork:file.document.bsvNetwork,label:file.document.label,
             publicKeyHex:journal.publicKeyHex,walletGeneration:journal.walletGeneration,backendGeneration:1}});
         connectedByRequest=true;assertRecordLive();
         const state=await (hardwareConnections.isErasedRecovery()?hardwareConnections.erased():hardwareConnections.backend()).migrationStatus();assertRecordLive();
@@ -6245,7 +6254,7 @@ async function handleHardwareConnection(
         bindingEpoch = generateEpoch(); coordinatorState.sessionEpoch = bindingEpoch;
         coordinatorState.activePublicKeyHex = document.publicKeyHex; activeKeyBackend = "hardware";
         coordinatorState.vaultStatus = "unlocked";
-        setCoordinatorActiveKeySummary({backend: "hardware", publicKeyHex: document.publicKeyHex, label: document.label,
+        setCoordinatorActiveKeySummary({bsvNetwork: document.bsvNetwork, backend: "hardware", publicKeyHex: document.publicKeyHex, label: document.label,
           capabilities: ["p2pkh", "bsv.standard", "feepool.connect", "feepool.bitfs", "local-secret.v3"], createdAt: meta.createdAt});
         await installPlatformStorage(); bindingToken = platformRootToken;
         assertRecordLive(); hardwareConnections.backend();
@@ -6301,7 +6310,7 @@ async function handleHardwareConnection(
       coordinatorState.activePublicKeyHex = file.document.publicKeyHex;
       activeKeyBackend = "hardware";
       coordinatorState.vaultStatus = "unlocked";
-      setCoordinatorActiveKeySummary({ backend: "hardware", publicKeyHex: file.document.publicKeyHex, label: file.document.label,
+      setCoordinatorActiveKeySummary({ bsvNetwork: file.document.bsvNetwork, backend: "hardware", publicKeyHex: file.document.publicKeyHex, label: file.document.label,
         capabilities: ["p2pkh", "bsv.standard", "feepool.connect", "feepool.bitfs", "local-secret.v3"], createdAt: snapshot.meta?.createdAt ?? "" });
       workerWalletState.publish();
       await completeUnlockedBinding();
@@ -6404,6 +6413,7 @@ function adoptUnlockedKey(input: {
   coordinatorState.activePublicKeyHex = input.publicKeyHex;
   replaceActivePrivateKey(input.privateKeyBytes);
   setCoordinatorActiveKeySummary(input.identity);
+  coordinatorMeta.p2pkhSettings = { bsvNetwork: input.identity.bsvNetwork };
   // The authenticated session is committed before owner-unit construction reads it.
   workerWalletState.publish();
   testHarnessActivationSecret = undefined;
@@ -6457,9 +6467,13 @@ async function executeActiveWalletCrypto(operation: CoordinatorCryptoOperation):
     assertActiveWalletIdentity();
     return {type:operation.type,signatureHex:bytesToHex(signature),format:"compact"};
   }
+  if (operation.type === "deriveP2pkhAddress" && operation.network !== requireCoordinatorNetworkIdentity().bsvNetwork) throw Error("network-identity-mismatch");
   if (activeKeyBackend !== "hardware") return vaultKeySession.execute(operation);
   // 地址派生只用已经核验的公钥；所有私钥运算必须走明确的设备语义 Profile。
-  if (operation.type === "deriveP2pkhAddress") return {type:operation.type,address:deriveP2pkhAddress(coordinatorState.activePublicKeyHex!,operation.network)};
+  if (operation.type === "deriveP2pkhAddress") {
+    if(operation.network!==requireCoordinatorNetworkIdentity().bsvNetwork)throw Error("network-identity-mismatch");
+    return {type:operation.type,address:deriveP2pkhAddress(coordinatorState.activePublicKeyHex!,operation.network)};
+  }
   throw new Error("hardware-profile-required");
 }
 
@@ -6505,7 +6519,7 @@ async function migrateHardwareToSoftware(newPassword:string):Promise<{migrationI
       const migrationId=previous&&previous.journal.phase!=="complete"?previous.journal.migrationId:crypto.randomUUID();
       if(previous?.journal.phase!=="local-committed"&&newPassword.length<8)throw Error("password-too-short");
       const migration=createHardwareToSoftwareMigration({service,device:backend,assertExclusive,
-        createAndVerifyKeyHold:async(privateKey,publicKeyHex)=>createAndVerifyMigrationKeyHold({privateKey,publicKeyHex,label:source.document.label},newPassword)});
+        createAndVerifyKeyHold:async(privateKey,publicKeyHex)=>createAndVerifyMigrationKeyHold({bsvNetwork:source.document.bsvNetwork,privateKey,publicKeyHex,label:source.document.label},newPassword)});
       return migration.run({migrationId,expectedRevision:source.revision});
     });
     coordinatorState.walletGeneration=result.walletGeneration;
@@ -6537,7 +6551,7 @@ async function migrateSoftwareToHardware(sourcePassword:string):Promise<{migrati
     const migration=createSoftwareToHardwareMigration({service,device:portal,assertExclusive:check,
       sourceBank:()=>service.sourceBank(source.document.publicKeyHex),
       unlockSource:async()=>{const unlocked=await keys.unlock(sourcePassword);try{check();if(unlocked.revision!==source.revision||unlocked.document.publicKeyHex!==source.document.publicKeyHex)throw Error("migration-source-changed");return unlocked.privateKeyBytes;}catch(e){unlocked.privateKeyBytes.fill(0);throw e;}},
-      hardwareDocument:journal=>new TextEncoder().encode(JSON.stringify({format:"keymaster.hardware-key",version:1,backend:"vaultlink",wireVersion:2,label:source.document.label,
+      hardwareDocument:journal=>new TextEncoder().encode(JSON.stringify({format:"keymaster.hardware-key",version:1,backend:"vaultlink",wireVersion:2,bsvNetwork:journal.bsvNetwork,label:source.document.label,
         publicKeyHex:journal.publicKeyHex,walletGeneration:journal.walletGeneration,backendGeneration:1})),
     });
     const completed=await migration.run({migrationId,expectedRevision:source.revision});check();
@@ -6618,7 +6632,7 @@ async function performGlobalLock(reason: string): Promise<void> {
   // 浏览句柄绑定 session epoch，随 epoch 推进整体作废；这里显式撤销，让
   // 页面上已经拿到的句柄立刻失效，而不是等到下一次请求再失败。
   storageBrowseCoordinator.revokeAll();
-  const previousActive = coordinatorState.activePublicKeyHex?.toLowerCase();
+  const previousActive = coordinatorState.activePublicKeyHex ? requireCoordinatorNetworkIdentity() : undefined;
   if (previousActive) void cancelTaskRuntimesByKey(previousActive).catch(() => undefined);
 
   const lockedEpoch = generateEpoch();
@@ -6753,6 +6767,7 @@ function p2pkhSettingRepository(): ReturnType<typeof createP2pkhFileRepository> 
 }
 
 const p2pkhWorkerSettings = createWorkerP2pkhSettings({
+  network: () => requireCoordinatorNetworkIdentity().bsvNetwork,
   storage: () => createWorkerModuleFileStore("p2pkh", ""),
   session: () => ({ sessionEpoch: coordinatorState.sessionEpoch, activePublicKeyHex: coordinatorState.activePublicKeyHex }),
   projection: coordinatorMeta,
@@ -6781,8 +6796,8 @@ function currentP2pkhDomainStorage(): BorrowedModuleFileStore {
   return p2pkhWorkerPorts.storage;
 }
 
-function ensureWorkerP2pkhResources(ownerPublicKeyHex: string, includeTestnet: boolean): Promise<P2pkhUtxoSnapshotResource[]> {
-  return ensureOwnedP2pkhResources(currentP2pkhDomainStorage(), ownerPublicKeyHex, includeTestnet);
+function ensureWorkerP2pkhResources(ownerPublicKeyHex: string, bsvNetwork: "main" | "test"): Promise<P2pkhUtxoSnapshotResource[]> {
+  return ensureOwnedP2pkhResources(currentP2pkhDomainStorage(), ownerPublicKeyHex, bsvNetwork);
 }
 
 async function refreshP2pkhUtxoSnapshots(signal?: AbortSignal, storage: BorrowedModuleFileStore = currentP2pkhDomainStorage(), assertActive: () => void = () => undefined): Promise<{ main?: number; test?: number }> {
@@ -6793,7 +6808,7 @@ async function refreshP2pkhUtxoSnapshots(signal?: AbortSignal, storage: Borrowed
   if (createWorkerWalletState().snapshot().activePublicKeyHex?.toLowerCase() !== owner.toLowerCase()) return {};
   return refreshWorkerP2pkhResources({
     storage, ownerPublicKeyHex: owner,
-    includeTestnet: coordinatorMeta.p2pkhSettings?.includeTestnet === true, snapshots,
+    bsvNetwork: coordinatorMeta.p2pkhSettings.bsvNetwork, snapshots,
     assertFresh: () => { assertActive(); if (coordinatorState.sessionEpoch !== epoch || coordinatorState.activePublicKeyHex !== owner || p2pkhUtxoSnapshots !== snapshots) throw new Error("P2PKH snapshot refresh became stale"); },
     afterRefresh: (network, result) => reconcileMsfileBitfsFundingInputs(owner, network, result),
   }, signal);
@@ -6841,7 +6856,7 @@ async function executeP2pkhSnapshot(requestId: string, request: { ownerPublicKey
   const snapshots = p2pkhUtxoSnapshots;
   // A manual refresh can precede the smart background task. Materialize the
   // deterministic address resources in this same domain store before lookup.
-  if (refresh) await ensureWorkerP2pkhResources(request.ownerPublicKeyHex, coordinatorMeta.p2pkhSettings?.includeTestnet === true);
+  if (refresh) await ensureWorkerP2pkhResources(request.ownerPublicKeyHex, coordinatorMeta.p2pkhSettings.bsvNetwork);
   return executeWorkerP2pkhSnapshot(requestId, request, refresh, {
     storage: currentP2pkhDomainStorage(), snapshots,
     epoch: () => coordinatorState.sessionEpoch,
@@ -6983,7 +6998,7 @@ function buildSnapshot(): CoordinatorBootstrapSnapshot {
 /** Display projection must not re-enter an owner capability after its Scope stops.
  * In-flight tasks remain registered until settlement to fence the next installation.
  */
-function taskSnapshotKeyScope(runtime: TaskRuntime): { publicKeyHex: string; label?: string } | undefined {
+function taskSnapshotKeyScope(runtime: TaskRuntime): NetworkIdentity & { label?: string } | undefined {
   if (coordinatorState.vaultStatus !== "unlocked") return undefined;
   try { return resolveKeyScope(runtime); }
   catch (error) {
@@ -7052,6 +7067,7 @@ function publishWorkerUtxoSeq(event: WorkerUtxoSeqEvent): void {
 function publishTopicEvent(topic: CoordinatorTopic, event: any): CoordinatorTopicEvent {
   const normalized = {
     ...event,
+    ...(coordinatorActiveKeySummary() ? { networkIdentity: { bsvNetwork: coordinatorActiveKeySummary()!.bsvNetwork, publicKeyHex: coordinatorActiveKeySummary()!.publicKeyHex } } : {}),
     topic,
     ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : topic === "chain.height" ? { chainHeightRevision: ++chainHeightRevision } : topic === "storage.state" ? { storageRevision: event.storageRevision } : topic === "msfile.state" ? { msfileRevision: event.msfileRevision } : topic === "sat.events" ? { satRevision: event.satRevision } : topic === "channel.events" ? { channelRevision: ++channelRevision } : topic === "contacts.presence" ? { presenceRevision: ++contactsPresenceRevision } : topic === "worker.units" ? { workerUnitRevision: event.workerUnitRevision ?? coordinatorRuntimeUnitRevision() } : { assetDataRevision: ++assetDataRevision }),
     sessionEpoch: coordinatorState.sessionEpoch,
@@ -7688,7 +7704,7 @@ const coordinatorRuntimePlugins = COORDINATOR_WORKER_UNIT_CATALOG.map((unit) => 
         context.provide(P2PKH_WORKER_PROTOCOL_CAPABILITY, Object.freeze({
           async getService() { context.scope.assertActive(); const service = await workerTransferRuntime.ensureProtocol(); context.scope.assertActive(); return service; },
         }));
-        context.provide(P2PKH_ASSET_READER_CAPABILITY, createP2pkhWorkerAssetReader({ walletState: context.capability(VAULT_WALLET_STATE_CAPABILITY).bind(context.consumer, context.scope), storage: context.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(context.consumer, context.scope, ""), snapshots: () => p2pkhUtxoSnapshots, includeTestnet: () => coordinatorMeta.p2pkhSettings?.includeTestnet === true }));
+        context.provide(P2PKH_ASSET_READER_CAPABILITY, createP2pkhWorkerAssetReader({ walletState: context.capability(VAULT_WALLET_STATE_CAPABILITY).bind(context.consumer, context.scope), storage: context.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(context.consumer, context.scope, ""), snapshots: () => p2pkhUtxoSnapshots, bsvNetwork: () => requireCoordinatorNetworkIdentity().bsvNetwork }));
       }
       if (unit.productId === "p2pkh" && !testDomainUnitReadiness) {
         const cleanup = await installP2pkhCoordinatorTasks(context.capability(VAULT_WALLET_STATE_CAPABILITY).bind(context.consumer, context.scope), context.capability(WOC_CAPABILITY), () => context.scope.assertActive(), context.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(context.consumer, context.scope, ""));
@@ -7887,6 +7903,7 @@ async function initializeCoordinatorInternal(skipStorageBootstrap = false, propa
         storageColdStartState = coldStart;
         switch (coldStart?.state) {
           case "ready":
+            coordinatorMeta.p2pkhSettings = { bsvNetwork: coldStart.key!.bsvNetwork };
             coordinatorState.walletGeneration = coldStart.meta?.walletGeneration ?? coordinatorState.walletGeneration;
             coordinatorState.vaultStatus = "locked";
             coordinatorState.activePublicKeyHex = undefined;
@@ -8021,6 +8038,7 @@ async function bootstrapWalletStorage(): Promise<void> {
   // 冷启动只读 meta 与固定 KeyHold；这里不恢复任何运行态授权。
   storageColdStartState = await walletLifecycle.coldStart();
   if (storageColdStartState.state === "ready") {
+    coordinatorMeta.p2pkhSettings = { bsvNetwork: storageColdStartState.key!.bsvNetwork };
     coordinatorState.walletGeneration = storageColdStartState.meta?.walletGeneration ?? coordinatorState.walletGeneration;
     await installPlatformStorage();
     return;
@@ -9290,7 +9308,8 @@ export function __testRegisterTask(input: {
   /** 测试任务所属运行单元；省略时按产品生成 coordinator-worker 单元。 */
   unitId?: string;
   publicKeyHex: string;
-  keyScope?: { publicKeyHex: string } | (() => { publicKeyHex: string } | undefined);
+  bsvNetwork: "main" | "test";
+  keyScope?: NetworkIdentity | (() => NetworkIdentity | undefined);
   /** 同步策略；省略时为 fixed（不读取同步管理设置、不参与智能调度）。 */
   syncPolicy?: "managed" | "smart" | "fixed";
   intervalMs?: number;
@@ -9304,7 +9323,7 @@ export function __testRegisterTask(input: {
     allowUncataloguedForTest: true,
     syncPolicy: input.syncPolicy,
     intervalMs: input.intervalMs,
-    keyScope: input.keyScope ?? { publicKeyHex: input.publicKeyHex },
+    keyScope: input.keyScope ?? { bsvNetwork: input.bsvNetwork, publicKeyHex: input.publicKeyHex },
     run: input.run
   }));
 }
@@ -9313,8 +9332,8 @@ export async function __testRunTask(taskId: string): Promise<void> {
   await executeTask(taskId, "test");
 }
 
-export async function __testCancelByKey(publicKeyHex: string): Promise<boolean> {
-  return cancelTaskRuntimesByKey(publicKeyHex);
+export async function __testCancelByKey(identity: NetworkIdentity): Promise<boolean> {
+  return cancelTaskRuntimesByKey(identity);
 }
 
 export function __testInvalidateSession(): void {

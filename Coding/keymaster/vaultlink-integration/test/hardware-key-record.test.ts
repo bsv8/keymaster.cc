@@ -13,7 +13,7 @@ import {
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
 const keyHex = Point.fromPrivateKey("1".padStart(64, "0")).toHex(true);
 function document(): HardwareKeyDocumentV1 {
-  return { format: "keymaster.hardware-key", version: 1, backend: "vaultlink", wireVersion: 2,
+  return {bsvNetwork: "main" as const,  format: "keymaster.hardware-key", version: 1, backend: "vaultlink", wireVersion: 2,
     label: "RocKey 硬件", publicKeyHex: keyHex, walletGeneration: crypto.randomUUID(), backendGeneration: 1 };
 }
 
@@ -61,7 +61,7 @@ describe("硬件公开 Key 记录：生产仓储与 Coordinator 冷启动", () =
     const repo=createWalletKeyRepository(store), peer=createWalletKeyRepository(other);
     const secret=new Uint8Array(32); secret[31]=1;
     try {
-      const original=await repo.create({label:"迁移 Key",privateKeyBytes:secret,password:"original-password"});
+      const original=await repo.create({bsvNetwork: "main" as const, label:"迁移 Key",privateKeyBytes:secret,password:"original-password"});
       const business=new TextEncoder().encode("existing contacts and settings");
       await store.put("contacts/state",business,{ifNoneMatch:true});
       const target={...document(),label:"迁移 Key"};
@@ -73,13 +73,13 @@ describe("硬件公开 Key 记录：生产仓储与 Coordinator 冷启动", () =
       expect(Object.keys(JSON.parse(new TextDecoder().decode(hardware!.bytes))).sort()).toEqual(Object.keys(target).sort());
       expect((await store.get("contacts/state"))?.bytes).toEqual(business);
       const wrong=new Uint8Array(32);wrong[31]=2;
-      await expect(repo.commitSoftwareMigration({expectedRevision:hardware!.revision,privateKeyBytes:wrong,password:"new-password"})).rejects.toMatchObject({code:"storage_identity_required"});wrong.fill(0);
-      const migrated=await repo.commitSoftwareMigration({expectedRevision:hardware!.revision,privateKeyBytes:secret,password:"new-password"});
+      await expect(repo.commitSoftwareMigration({bsvNetwork: "main" as const, expectedRevision:hardware!.revision,privateKeyBytes:wrong,password:"new-password"})).rejects.toMatchObject({code:"storage_identity_required"});wrong.fill(0);
+      const migrated=await repo.commitSoftwareMigration({bsvNetwork: "main" as const, expectedRevision:hardware!.revision,privateKeyBytes:secret,password:"new-password"});
       expect(migrated.backend).toBe("software");expect(migrated.document.publicKeyHex).toBe(target.publicKeyHex);
       expect((await store.get("contacts/state"))?.bytes).toEqual(business);
       await expect(repo.unlock("original-password")).rejects.toBeDefined();
       const unlocked=await repo.unlock("new-password");expect(unlocked.privateKeyBytes).toEqual(secret);unlocked.privateKeyBytes.fill(0);
-      await expect(repo.commitSoftwareMigration({expectedRevision:hardware!.revision,privateKeyBytes:secret,password:"another-password"})).rejects.toMatchObject({code:"storage_conflict"});
+      await expect(repo.commitSoftwareMigration({bsvNetwork: "main" as const, expectedRevision:hardware!.revision,privateKeyBytes:secret,password:"another-password"})).rejects.toMatchObject({code:"storage_conflict"});
     } finally { secret.fill(0); store.close(); other.close(); }
   });
 
@@ -93,7 +93,7 @@ describe("硬件公开 Key 记录：生产仓储与 Coordinator 冷启动", () =
       const a = createWalletKeyRepository(first), b = createWalletKeyRepository(second);
       const privateKeyBytes = new Uint8Array(32); privateKeyBytes[31] = 2;
       try {
-        await expect(a.create({ label: "另一把 Key", privateKeyBytes, password: "software-password" }))
+        await expect(a.create({bsvNetwork: "main" as const,  label: "另一把 Key", privateKeyBytes, password: "software-password" }))
           .rejects.toMatchObject({ code: "storage_conflict" });
       } finally { privateKeyBytes.fill(0); }
       const results = await Promise.allSettled([a.rename("甲"), b.rename("乙")]);
@@ -107,11 +107,11 @@ describe("硬件公开 Key 记录：生产仓储与 Coordinator 冷启动", () =
 
   it("Worker RPC 保留后端类型并拒绝未知类型，旧软件快照仍可读取", () => {
     const request = { kind: "storage.control", control: { type: "cold-start" } } as const;
-    const key = { publicKeyHex: keyHex, label: "硬件", backend: "hardware" };
+    const key = { bsvNetwork: "main" as const, publicKeyHex: keyHex, label: "硬件", backend: "hardware" };
     const response = { sessionEpoch: "locked", ack: { status: "ok" }, operationResult: { state: "ready", key } };
     expect(parseCoordinatorResponseFor(request, response).operationResult).toEqual({ state: "ready", key });
     expect(() => parseCoordinatorResponseFor(request, { ...response, operationResult: { state: "ready", key: { ...key, backend: "unknown" } } })).toThrow();
-    const oldKey = { publicKeyHex: keyHex, label: "软件" };
+    const oldKey = { bsvNetwork: "main" as const, publicKeyHex: keyHex, label: "软件" };
     expect(parseCoordinatorResponseFor(request, { ...response, operationResult: { state: "ready", key: oldKey } }).operationResult).toEqual({ state: "ready", key: oldKey });
   });
 
@@ -141,7 +141,7 @@ describe("硬件公开 Key 记录：生产仓储与 Coordinator 冷启动", () =
   it("正式 Worker 冷启动保留硬件身份但不授予解锁状态", async () => {
     const record = document();
     await seed(record);
-    expect(await __testColdStart()).toMatchObject({ state: "ready", key: {
+    expect(await __testColdStart()).toMatchObject({ state: "ready", key: { bsvNetwork: "main" as const,
       publicKeyHex: record.publicKeyHex, label: record.label, backend: "hardware",
     } });
     expect(__testGetVaultStatus()).toBe("locked");
@@ -160,7 +160,7 @@ describe("硬件公开 Key 记录：生产仓储与 Coordinator 冷启动", () =
     const { sha256, hex } = await import("@vaultlink/sdk");
     try {
       const source = (await store.get("key.json"))!;
-      const journal = { format: "keymaster.backend-migration", version: 1, migrationId: crypto.randomUUID(),
+      const journal = {bsvNetwork: "main" as const,  format: "keymaster.backend-migration", version: 1, migrationId: crypto.randomUUID(),
         walletGeneration: record.walletGeneration, publicKeyHex: record.publicKeyHex, source: "hardware", target: "software",
         sourceRevision: source.revision, sourceHash: hex(await sha256(source.bytes)), policyHash: hex(await sha256(new Uint8Array())),
         policyRevision: 0, phase: "device-committed", targetHash: null };

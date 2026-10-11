@@ -622,12 +622,12 @@ describe("KeymasterSessionCoordinatorClient", () => {
         backgroundSnapshotRevision: 1,
         sessionEpoch: "shared-epoch",
         snapshots: [],
-        p2pkhSettings: { includeTestnet: true }
+        p2pkhSettings: { bsvNetwork: "test" }
       });
 
       expect(backgroundEvents).toHaveLength(1);
       expect(vaultEvents).toHaveLength(0);
-      expect(client.getBootstrapSnapshot().p2pkhSettings).toEqual({ includeTestnet: true });
+      expect(client.getBootstrapSnapshot().p2pkhSettings).toEqual({ bsvNetwork: "test" });
     } finally {
       globalThis.SharedWorker = original;
     }

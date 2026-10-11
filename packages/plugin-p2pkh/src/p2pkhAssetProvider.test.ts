@@ -10,13 +10,13 @@ const owner = "02" + "11".repeat(32);
 function createDeps(history: P2pkhHistoryRecord[], locals: P2pkhLocalTransaction[]) {
   let balanceSnapshot: GlobalBalanceSnapshot = {
     publicKeyHex: owner,
-    includeTestnet: false,
+    bsvNetwork: "main",
     balances: { mainnet: { total: 1000, available: true } },
     revision: 1,
   };
   const dataListeners = new Set<() => void>();
   const service = {
-    getGlobalSettings: () => ({ includeTestnet: false }),
+    getGlobalSettings: () => ({ bsvNetwork: "main" }),
     balanceBroadcaster: {
       getSnapshot: () => balanceSnapshot,
       subscribe: () => () => undefined,

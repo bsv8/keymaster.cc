@@ -70,8 +70,8 @@ function P2pkhTransferWidgetInner({
     reader,
     "p2pkh.settings",
     [],
-    (snapshot) => snapshot.data ?? { includeTestnet: false },
-    { includeTestnet: false }
+    (snapshot) => snapshot.data ?? { bsvNetwork: "main" },
+    { bsvNetwork: "main" }
   );
   const balanceSnapshot = useOptionalResourceSelector<GlobalBalanceSnapshot, GlobalBalanceSnapshot>(
     reader,

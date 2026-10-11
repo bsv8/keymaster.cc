@@ -9,12 +9,18 @@ export class ProvisionMigrationConnection {
  private constructor(private client:ProtocolClient,private assertLive:()=>void){
   this.disconnected=client.run().then(()=>{this.closed=true;},()=>{this.closed=true;});
  }
- static async connect(transport:Transport,context:{generations:Generations;assertActive():void},confirmPairing:(code:string)=>Promise<boolean>){
+ static async connect(transport:Transport,context:{generations:Generations;bsvNetwork:"main"|"test";assertActive():void},confirmPairing:(code:string)=>Promise<boolean>){
   context.assertActive();
   // Reboot recovery can have an actual key already wrapped. Both modes remain
   // migration-only in this portal, with the same source-key proof below.
   const verified=await enrollHost(transport,context.generations,secpIdentityVerifier,async code=>{context.assertActive();const yes=await confirmPairing(code);context.assertActive();return yes;},[]);
-  try{context.assertActive();return new ProvisionMigrationConnection(verified.client,context.assertActive);}
+  try{context.assertActive();const portal=new ProvisionMigrationConnection(verified.client,context.assertActive);
+   const raw=await portal.request('identity.network','identity-network',{});
+   const wrapped=raw!==null&&typeof raw==='object'&&!Array.isArray(raw)&&!(raw instanceof Uint8Array)&&'publicKey' in raw;
+   const identity=object(raw,wrapped?['bsvNetwork','publicKey']:['bsvNetwork']);
+   if(wrapped&&(!(identity.publicKey instanceof Uint8Array)||identity.publicKey.length!==33))throw Error('invalid-network-identity');
+   if(identity.bsvNetwork!==context.bsvNetwork)throw Error('network-identity-mismatch');
+   return portal;}
   catch(error){await verified.client.close(error);throw error;}
  }
  private async request(op:string,profile:string,body:Value):Promise<Value>{

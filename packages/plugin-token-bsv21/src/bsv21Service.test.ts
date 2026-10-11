@@ -3,7 +3,7 @@ import { walletStateFixtureSnapshot } from "@keymaster/runtime/test-support";
 // bsv21Service 回归测试：覆盖 service 的核心组合逻辑——
 //   1. 按 active key 的 publicKeyHex 过滤 P2PKH 资源；
 //   2. 对每个地址先 listAddressTokens 再逐 origin getAddressTokenBalance；
-//   3. includeTestnet 决定是否纳入 "bsvtest" 资源；
+//   3. bsvNetwork 决定是否纳入 "bsvtest" 资源；
 //   4. getToken 按 origin 命中 / 落空。
 // 这些是"key -> address -> WOC token"流程最易回归的点。
 
@@ -18,8 +18,8 @@ import {
 const ACTIVE_PK = "pk-active";
 
 /** 只实现 service 实际调用的 walletState.snapshot()。 */
-function fakeWalletState(activePublicKeyHex?: string): VaultWalletState {
-  return { snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex }))()) } as unknown as VaultWalletState;
+function fakeWalletState(activePublicKeyHex?: string, bsvNetwork: "main" | "test" = "main"): VaultWalletState {
+  return { snapshot: () => { const state = walletStateFixtureSnapshot({ activePublicKeyHex }, () => ({ publicKeyHex: activePublicKeyHex!, bsvNetwork, label: "Identity", capabilities: ["p2pkh"], createdAt: "2026-10-11" })); return { ...state, activeKeyIdentity: state.activeKeyIdentity ? { ...state.activeKeyIdentity, bsvNetwork } : undefined }; } } as unknown as VaultWalletState;
 }
 
 function res(assetId: "bsv" | "bsvtest", publicKeyHex: string, address: string): P2pkhKeyResourceForBsv21 {
@@ -29,7 +29,7 @@ function res(assetId: "bsv" | "bsvtest", publicKeyHex: string, address: string):
 /** 记录被查询的 assetId，便于断言 testnet 行为。 */
 function fakeP2pkh(
   resources: Partial<Record<"bsv" | "bsvtest", P2pkhKeyResourceForBsv21[]>>,
-  includeTestnet: boolean,
+  bsvNetwork: boolean,
   calls?: string[]
 ): P2pkhServiceForBsv21 {
   return {
@@ -37,7 +37,7 @@ function fakeP2pkh(
       calls?.push(assetId);
       return Promise.resolve(resources[assetId] ?? []);
     },
-    getGlobalSettings: () => ({ includeTestnet })
+    getGlobalSettings: () => ({ bsvNetwork: bsvNetwork ? "test" as const : "main" as const })
   };
 }
 
@@ -96,7 +96,7 @@ describe("createBsv21Service", () => {
     expect(out[0]!.unspent).toHaveLength(1);
   });
 
-  it("includeTestnet=false 时不查询 bsvtest", async () => {
+  it("bsvNetwork=false 时不查询 bsvtest", async () => {
     const calls: string[] = [];
     const svc = createBsv21Service({
       walletState: fakeWalletState(ACTIVE_PK),
@@ -107,10 +107,10 @@ describe("createBsv21Service", () => {
     expect(calls).toEqual(["bsv"]);
   });
 
-  it("includeTestnet=true 时纳入 bsvtest 资源", async () => {
+  it("test 身份只扫描 bsvtest 资源", async () => {
     const calls: string[] = [];
     const svc = createBsv21Service({
-      walletState: fakeWalletState(ACTIVE_PK),
+      walletState: fakeWalletState(ACTIVE_PK, "test"),
       p2pkh: fakeP2pkh(
         { bsv: [res("bsv", ACTIVE_PK, "addr-A")], bsvtest: [res("bsvtest", ACTIVE_PK, "addr-T")] },
         true,
@@ -119,17 +119,17 @@ describe("createBsv21Service", () => {
       wocBsv21: fakeWoc({ "addr-A": ["tok1"], "addr-T": ["tokt"] })
     });
     const out = await svc.listActiveKeyTokens();
-    expect(calls).toEqual(["bsv", "bsvtest"]);
-    expect(out.map((t) => t.meta.origin).sort()).toEqual(["tok1", "tokt"]);
+    expect(calls).toEqual(["bsvtest"]);
+    expect(out.map((t) => t.meta.origin).sort()).toEqual(["tokt"]);
   });
 
-  it("includeTestnet 选项覆盖 p2pkh 全局设置", async () => {
+  it("钱包身份决定网络，不跟随旧 P2PKH 显示设置", async () => {
     const calls: string[] = [];
     const svc = createBsv21Service({
       walletState: fakeWalletState(ACTIVE_PK),
       p2pkh: fakeP2pkh({ bsv: [res("bsv", ACTIVE_PK, "addr-A")] }, true, calls),
       wocBsv21: fakeWoc({ "addr-A": ["tok1"] }),
-      includeTestnet: () => false
+      bsvNetwork: () => "main"
     });
     await svc.listActiveKeyTokens();
     expect(calls).toEqual(["bsv"]);

@@ -405,6 +405,11 @@ function SatSubscriptionSettingsInner({
           <div key={supplier.supplierId} className="sat-subscription-settings__supplier" data-supplier-id={supplier.supplierId}>
             <strong>{supplier.name}</strong> <code>{supplier.supplierId}</code>
             <div>{tr("sat.settings.identity", "认证公钥")}: <code>{supplier.supplierPublicKeyHex}</code></div>
+            {/* 使用运行时快照的拨号地址，确保显示的网关跟随当前身份网络。 */}
+            <div className="sat-subscription-settings__server-uris">
+              <span>{tr("sat.settings.serverUri", "服务器 URI")}</span>
+              {supplier.multiaddrs.map((uri, index) => <code key={`${index}-${uri}`}>{uri}</code>)}
+            </div>
             <div data-testid={`ss-connection-status-${supplier.supplierId}`} data-connection-status={connectionState}>
               <span
                 data-testid={`ss-connection-light-${supplier.supplierId}`}
@@ -418,18 +423,18 @@ function SatSubscriptionSettingsInner({
               {" "}{tr("sat.settings.connection", "连接状态")}: {connectionState}（{connectionStateLabel(connectionState, tr)}）；{supplier.enabled ? tr("sat.settings.enabled", "已启用") : tr("sat.settings.disabled", "已停用")}
             </div>
             <div>{tr("sat.settings.desired", "期望订阅")}: {view?.desiredChannels.length ? view.desiredChannels.join(", ") : tr("sat.settings.none", "无")}；{tr("sat.settings.observed", "远端观察")}: {view?.observedChannels.length ? view.observedChannels.join(", ") : tr("sat.settings.none", "无")}</div>
-            <div>
+            <div className="sat-subscription-settings__service-actions">
               <Button size="sm" variant="secondary" disabled={busy} onClick={() => void refreshSpi(supplier.supplierId)}>{tr("sat.settings.spi.refresh", "刷新 SPI 余额")}</Button>
               <Button size="sm" variant="secondary" disabled={busy || !supplier.enabled} onClick={() => void refreshSubscriptions(supplier.supplierId)}>{tr("sat.settings.subscriptions.refresh", "刷新远端订阅")}</Button>
               <Button size="sm" variant="secondary" disabled={busy || !supplier.enabled} onClick={() => void refreshBilling(supplier.supplierId)}>{tr("sat.settings.billing.refresh", "查询服务器账单")}</Button>
               {spiInfo[supplier.supplierId]?.currencies.map((currency) => <span key={`${currency.currency}-${currency.network}`} className="sat-subscription-settings__spi-account" data-testid={`ss-spi-account-${supplier.supplierId}-${currency.currency}-${currency.network}`}> {currency.currency}/{currency.network}: <code>{currency.balance.toString(10)}</code>（充值地址 <code>{currency.paymentAddress}</code>）{currency.currency === "BSV" ? <> <Button size="sm" variant="secondary" disabled={busy} onClick={() => void prepareTopUp(supplier.supplierId, currency)}>{tr("sat.settings.spi.prepare", "生成充值预览")}</Button> <Button size="sm" variant="secondary" disabled={busy} onClick={() => void collect(supplier.supplierId, currency)}>{tr("sat.settings.spi.collect", "回收余额")}</Button></> : null}</span>)}
             </div>
-            <div>
+            <div className="sat-subscription-settings__amounts">
               <input aria-label={tr("sat.settings.spi.topupAmount", "充值金额（satoshis，正整数）")} value={topUpAmount} onChange={(event) => setTopUpAmount(event.target.value)} inputMode="numeric" />
               <input aria-label={tr("sat.settings.spi.collectAmount", "回收金额（satoshis，正整数）")} value={collectAmount} onChange={(event) => setCollectAmount(event.target.value)} inputMode="numeric" />
               <span>请先刷新 SPI 并在对应 BSV 账户行操作</span>
             </div>
-            <div data-testid={`ss-billing-panel-${supplier.supplierId}`} data-billing-panel={supplier.supplierId}>
+            <div className="sat-subscription-settings__billing" data-testid={`ss-billing-panel-${supplier.supplierId}`} data-billing-panel={supplier.supplierId}>
               <div>
                 <span>{tr("sat.settings.billing.panel", "服务器账单（SS server 直查，不写入本地）")}</span>{" "}
                 <label>

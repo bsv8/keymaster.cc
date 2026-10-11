@@ -26,7 +26,7 @@ test('software core accounts Kind 5 before signing: under-limit automatic, over-
  const files={async get(){try{const bytes=new Uint8Array(await readFile(file));return {bytes,revision:revision(bytes)};}catch(e){if(e.code==='ENOENT')return;throw e;}},
   async put(_path,bytes,condition){const old=await this.get();if(condition.ifNoneMatch&&old||condition.ifRevision&&condition.ifRevision!==old?.revision)throw Error('revision-conflict');await writeFile(file+'.tmp',bytes);await rename(file+'.tmp',file);return {revision:revision(bytes)};}};
  let signs=0;const signer=async digest=>{signs++;return secp256k1.sign(digest,secret,{prehash:false,lowS:true,format:'der'});};
- const wallet=await WalletPayments.open(files,hex(key.publicKey()),()=>{},signer),arbiter=new DeviceIdentityKey(unhex('00'.repeat(31)+'03'));
+ const wallet=await WalletPayments.open(files,hex(key.publicKey()),()=>{},signer, "main"),arbiter=new DeviceIdentityKey(unhex('00'.repeat(31)+'03'));
  try{
   const registered=await wallet.handle({action:'register',id:'msfile.bitfs.main',owner:'msfile',kind:'plugin',network:'main',paymentType:'feepool.bitfs'});
   await wallet.handle({action:'configure',channel:{...registered,singleLimit:'100',revision:2}});
@@ -54,7 +54,7 @@ test('product core: actual transaction, cumulative approval, raise, denial, lock
   };
   let signs=0;
   const signer=async digest=>{signs++;return secp256k1.sign(digest,secret,{prehash:false,lowS:true,format:'der'});};
-  let wallet=await WalletPayments.open(files,hex(key.publicKey()),()=>{},signer);
+  let wallet=await WalletPayments.open(files,hex(key.publicKey()),()=>{},signer, "main");
   try {
     const channel=await wallet.handle({action:'register',id:'app.pay',owner:'app',kind:'app',network:'main',paymentType:'p2pkh'});
     assert.equal(channel.singleLimit,'0');
@@ -98,7 +98,7 @@ test('product core: actual transaction, cumulative approval, raise, denial, lock
     assert.equal(resumedReview.used,'1200');await wallet.handle({action:'answer',id:resumedReview.id,allow:false});await assert.rejects(resumed,/denied/);
     const locked=wallet.handle(command('locked'));const cancelled=assert.rejects(locked,/denied|policy-unavailable/);
     await pending(wallet);wallet.close();await cancelled;assert.equal(signs,4);
-    wallet=await WalletPayments.open(files,hex(key.publicKey()),()=>{},signer);
+    wallet=await WalletPayments.open(files,hex(key.publicKey()),()=>{},signer, "main");
     await wallet.handle({action:'session-open',id:'connection',owner:'app'});
     const afterRestart=wallet.handle(command('after-restart'));const afterRestartReview=await pending(wallet);
     assert.equal(afterRestartReview.used,'1200');await wallet.handle({action:'answer',id:afterRestartReview.id,allow:false});await assert.rejects(afterRestart,/denied/);
@@ -106,4 +106,22 @@ test('product core: actual transaction, cumulative approval, raise, denial, lock
     await assert.rejects(wallet.handle({action:'session-open',id:'connection',owner:'app'}),/invalid-session/);
     await assert.rejects(wallet.handle(command('one')),/request-reuse|invalid-session/);
   } finally {wallet.close();await rm(dir,{recursive:true,force:true});}
+});
+
+// Real durable ledger: a shared private key still cannot authorize another network.
+test('test identity retains only test payment channels and refuses a main ledger for the same key',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'km-network-policy-')),file=join(dir,'policy');
+ const files={
+  async get(){try{const bytes=new Uint8Array(await readFile(file));return {bytes,revision:revision(bytes)};}catch(e){if(e.code==='ENOENT')return;throw e;}},
+  async put(_path,bytes,condition){const old=await this.get();if(condition.ifNoneMatch&&old||condition.ifRevision&&condition.ifRevision!==old?.revision)throw Error('revision-conflict');await writeFile(file+'.tmp',bytes);await rename(file+'.tmp',file);return {revision:revision(bytes)};},
+ };
+ const signer=async digest=>secp256k1.sign(digest,secret,{prehash:false,lowS:true,format:'der'});
+ const wallet=await WalletPayments.open(files,hex(key.publicKey()),()=>{},signer,'test');
+ try{
+  await assert.rejects(wallet.handle({action:'register',id:'wrong',owner:'plugin',kind:'plugin',network:'main',paymentType:'p2pkh'}),/network-identity-mismatch/);
+  const channel=await wallet.handle({action:'register',id:'test.pay',owner:'plugin',kind:'plugin',network:'test',paymentType:'p2pkh'});
+  assert.equal(channel.network,'test');wallet.close();
+  await assert.rejects(WalletPayments.open(files,hex(key.publicKey()),()=>{},signer,'main'),/network-identity-mismatch/);
+  const reopened=await WalletPayments.open(files,hex(key.publicKey()),()=>{},signer,'test');reopened.close();
+ }finally{wallet.close();await rm(dir,{recursive:true,force:true});}
 });

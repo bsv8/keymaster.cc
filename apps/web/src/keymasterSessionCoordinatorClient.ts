@@ -1,3 +1,4 @@
+import { type NetworkIdentity, type BackgroundTaskKeyScope, sameNetworkIdentity } from "@keymaster/contracts";
 // apps/web/src/keymasterSessionCoordinatorClient.ts
 // Keymaster Session Coordinator Client Transport
 //
@@ -800,8 +801,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     return this.requestCommand(request);
   }
 
-  async backgroundCancelByKey(publicKeyHex: string): Promise<CoordinatorCommandResult> {
-    return this.requestCommand({ kind: "background.cancel-by-key", clientId: this.clientId, requestId: this.generateRequestId(), publicKeyHex, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
+  async backgroundCancelByKey(identity: NetworkIdentity): Promise<CoordinatorCommandResult> {
+    return this.requestCommand({ kind: "background.cancel-by-key", clientId: this.clientId, requestId: this.generateRequestId(), networkIdentity: identity, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
   }
 
   async storageControl(control: CoordinatorStorageControl): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
@@ -1092,7 +1093,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
   }
 
-  async p2pkhSettingsUpdate(settings: { includeTestnet: boolean; feeRateSatoshisPerKb?: Partial<Record<"low" | "medium" | "high", number>> }): Promise<CoordinatorCommandResult> {
+  async p2pkhSettingsUpdate(settings: { bsvNetwork: "main" | "test"; feeRateSatoshisPerKb?: Partial<Record<"low" | "medium" | "high", number>> }): Promise<CoordinatorCommandResult> {
     return this.requestCommand({ kind: "p2pkh.settings.update", clientId: this.clientId, requestId: this.generateRequestId(), settings, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
   }
 

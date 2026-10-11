@@ -11,7 +11,7 @@ const OWNER_B = deriveP2pkhAddress("00000000000000000000000000000000000000000000
 const RECIPIENT = deriveP2pkhAddress("0000000000000000000000000000000000000000000000000000000000000002", "main");
 
 function makeRepository(owner: typeof OWNER_A) {
-  const resource: P2pkhKeyResource = { resourceId: makeResourceId("main"), publicKeyHex: owner.publicKeyHex, label: "owner", address: owner.address, network: "main", createdAt: "2024-01-01T00:00:00.000Z", generation: 0 };
+  const resource: P2pkhKeyResource = {  resourceId: makeResourceId("main"), publicKeyHex: owner.publicKeyHex, label: "owner", address: owner.address, network: "main", createdAt: "2024-01-01T00:00:00.000Z", generation: 0 };
   const utxo: P2pkhUtxo = { id: "funding", resourceId: resource.resourceId, publicKeyHex: owner.publicKeyHex, network: "main", address: owner.address, ...fundingCoin(owner.publicKeyHex, 3000), status: "confirmed", isSpentInMempoolTx: false, syncedAt: resource.createdAt };
   return {
     resource, utxo,
@@ -41,8 +41,8 @@ describe("ordinary P2PKH transfer owner binding", () => {
         return store ? [store.utxo] : [{ id: "x", resourceId: resource.resourceId, publicKeyHex: ownerPublicKeyHex, network: "main" as const, address: resource.address, txid: "09".repeat(32), vout: 0, value: 3_000, status: "confirmed" as const, isSpentInMempoolTx: false, syncedAt: resource.createdAt }];
       },
       broadcastWithCoordinator: async () => ({ status: "ok" as const, value: { status: "accepted" }, sessionEpoch: "test-epoch" }),
-      getActiveKey: () => ({ publicKeyHex: OWNER_A.publicKeyHex, label: "a", capabilities: [], createdAt: "now" }),
-      getKeyForOwner: async (publicKeyHex) => ({ publicKeyHex, label: "b", capabilities: [], createdAt: "now" }),
+      getActiveKey: () => ({bsvNetwork: "main" as const,  publicKeyHex: OWNER_A.publicKeyHex, label: "a", capabilities: [], createdAt: "now" }),
+      getKeyForOwner: async (publicKeyHex) => ({bsvNetwork: "main" as const,  publicKeyHex, label: "b", capabilities: [], createdAt: "now" }),
     });
     await service.prepare({ ownerPublicKeyHex: OWNER_B.publicKeyHex, assetId: "bsv", recipientAddress: RECIPIENT.address, amountSatoshis: 1_000, feeRateSatoshisPerKb: 1 });
     expect(openedOwners).toContain(OWNER_B.publicKeyHex);

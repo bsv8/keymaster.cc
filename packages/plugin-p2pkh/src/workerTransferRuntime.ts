@@ -11,7 +11,7 @@ export interface WorkerTransferDependencies {
   assertActive(): void;
   session(): { owner?: string; epoch: string; unlocked: boolean };
   loadSettings(owner: string): Promise<void>;
-  settings(): { includeTestnet: boolean };
+  settings(): { bsvNetwork: "main" | "test" };
   walletState(): VaultWalletState;
   storage(): BorrowedModuleFileStore;
   crypto(owner: string): Promise<ActiveKeyCrypto>;

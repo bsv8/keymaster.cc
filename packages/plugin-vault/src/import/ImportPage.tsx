@@ -1,3 +1,6 @@
+import { useState } from "react";
+import { NetworkIdentitySelect } from "../NetworkIdentitySelect.js";
+import type { BsvNetwork } from "@keymaster/contracts";
 import { useInternalVault, useVaultImporters } from "../VaultInternalContext.js";
 // packages/plugin-vault/src/import/ImportPage.tsx
 // 导入页面：选择 importer -> 输入 -> 解析 -> 通过 vault 保存 -> 触发 key.imported。
@@ -33,7 +36,7 @@ import { usePluginI18n } from "@keymaster/runtime";
 import type { VaultService } from "@keymaster/contracts";
 import type { KeyImporter, KeyImportResult } from "./types.js";
 import {
-  
+
   VAULT_WALLET_STATE_CAPABILITY,
   RUNTIME_MESSAGE_BUS,
   VAULT_SERVICE_CAPABILITY,
@@ -58,6 +61,7 @@ export function ImportPage({ embedded = false }: { embedded?: boolean }) {
   const vault = useInternalVault();
   const messageBus = usePluginCapability(RUNTIME_MESSAGE_BUS);
   const { t, text } = usePluginI18n();
+  const [bsvNetwork, setBsvNetwork] = useState<BsvNetwork>("main");
 
   // 硬切换 010：本页面只服务已解锁态导入更多 key。
   // - uninitialized：本应走 LockedShell 里的首启导入向导；如果意外
@@ -156,6 +160,7 @@ export function ImportPage({ embedded = false }: { embedded?: boolean }) {
     dispatch({ type: "parse-start" });
     try {
       await persistImport(vault, state.result, {
+        bsvNetwork,
         label: state.label || `key-${Date.now()}`,
         password: state.password,
         capabilities: ["p2pkh"],
@@ -214,7 +219,8 @@ export function ImportPage({ embedded = false }: { embedded?: boolean }) {
       /> : null}
       <section className="import-page__pickers">
         <h3>{t("vault.import.page.step.picker", { defaultValue: "1. 选择导入方式" })}</h3>
-        <ImporterPicker
+        <NetworkIdentitySelect value={bsvNetwork} onChange={setBsvNetwork} />
+          <ImporterPicker
           selected={importer?.id}
           onSelect={(imp) => dispatch({ type: "pick-importer", importer: imp })}
         />

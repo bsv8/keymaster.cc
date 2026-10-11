@@ -2113,10 +2113,10 @@ async function createMsfileBitfsBuyerTask(input: {
       await ensureDedicatedFunding(fundingInput.openingOutput.valueSatoshis);
       assertCurrentContext();
       const settings = await deps.p2pkhSettings();
-      if (input.network === "test" && !settings.includeTestnet) {
+      if (input.network === "test" && !settings.bsvNetwork) {
         throw new Error("请先在 P2PKH 设置中启用测试网余额");
       }
-      const resources = await deps.ensureResources(owner, settings.includeTestnet);
+      const resources = await deps.ensureResources(owner, settings.bsvNetwork);
       fundingSnapshotResource = resources.find((resource) => resource.network === input.network);
       if (!fundingSnapshotResource || !snapshots) throw new Error("BitFS FundingTx 的 P2PKH 余额快照尚未就绪");
       for (let attempt = 0; ; attempt += 1) {

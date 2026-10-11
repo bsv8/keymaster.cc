@@ -17,7 +17,7 @@ function fixture() {
     assertActive: () => undefined,
     session: () => ({ owner: "owner", epoch, unlocked: true }),
     loadSettings: async () => undefined,
-    settings: () => ({ includeTestnet: false }),
+    settings: () => ({ bsvNetwork: "main" }),
     walletState: () => { throw new Error("unused"); },
     storage: () => { throw new Error("unused"); },
     crypto: async () => { throw new Error("unused"); },

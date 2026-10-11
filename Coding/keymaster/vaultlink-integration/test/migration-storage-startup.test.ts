@@ -38,7 +38,7 @@ for (const phase of ['prepared','local-committed'] as const) {
       const journal=await service.begin({migrationId:crypto.randomUUID(),expectedRevision:source.revision,policyBank:bank});
       if(phase==='local-committed') {
         await service.deviceCommitted(journal.migrationId,journal.policyHash);
-        await service.commitLocal(journal.migrationId,new TextEncoder().encode(JSON.stringify({format:'keymaster.hardware-key',version:1,backend:'vaultlink',wireVersion:2,label:'same key',publicKeyHex:pub,walletGeneration:harness.walletGeneration,backendGeneration:1})),bank);
+        await service.commitLocal(journal.migrationId,new TextEncoder().encode(JSON.stringify({bsvNetwork: "main" as const, format:'keymaster.hardware-key',version:1,backend:'vaultlink',wireVersion:2,label:'same key',publicKeyHex:pub,walletGeneration:harness.walletGeneration,backendGeneration:1})),bank);
       }
       device=await startActualMigrationDevice({importing:true,...(phase==='local-committed'?{phase:'device-committed',journal}:{})});
       const actual=device;

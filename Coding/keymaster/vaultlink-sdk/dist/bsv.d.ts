@@ -51,7 +51,7 @@ export declare class DeviceIdentityKey {
     /** 费用池签名仍从完整交易证据计算，绝不开放任意摘要签名接口。 */
     signAllFeePool(raw: Uint8Array, previous: Uint8Array[], family: import("./feepool.js").FeePoolFamily, stage: import("./feepool.js").FeePoolStage, signal: AbortSignal, beforeSign: () => Promise<void>): Promise<Uint8Array[]>;
     provePossession(transcript: Uint8Array, sessionId: number, challenge: Uint8Array): Promise<Uint8Array>;
-    signConnectEnvelope(kind: import("./connect-envelope.js").ConnectEnvelopeKind, body: import("./cbor.js").Value, signal: AbortSignal, authorize: (review: import("./connect-envelope.js").ConnectEnvelopeReview) => Promise<boolean>): Promise<Uint8Array>;
+    signConnectEnvelope(kind: import("./connect-envelope.js").ConnectEnvelopeKind, body: import("./cbor.js").Value, signal: AbortSignal, authorize: (review: import("./connect-envelope.js").ConnectEnvelopeReview) => Promise<boolean>, network?: "main" | "test"): Promise<Uint8Array>;
     reviewChannel(kind: import('./channel.js').ChannelOperationKind, raw: Uint8Array): Promise<import('./channel.js').ChannelReview>;
     signChannel(kind: import('./channel.js').ChannelKind, raw: Uint8Array, signal: AbortSignal, authorize: (review: import('./channel.js').ChannelReview) => Promise<boolean>): Promise<Uint8Array>;
     sealChannel(raw: Uint8Array, signal: AbortSignal, authorize: (review: import('./channel.js').ChannelReview) => Promise<boolean>): Promise<Uint8Array>;

@@ -19,7 +19,7 @@ const TEST_PUB_HEX_PRIV1 =
   "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 function makeFakeOwnerCrypto(publicKeyHex: string) {
   return {
-    getIdentity: () => ({
+    getIdentity: () => ({bsvNetwork: "main" as const,
       publicKeyHex,
       label: "Key A",
       sessionId: "session-a",
@@ -116,7 +116,7 @@ describe("sessionWindowBootstrap", () => {
 describe("protocolMultipartUploadRepository stores (smoke)", () => {
   // 验证 ConnectSessionRecord / OriginSettingsRecord 等结构仍兼容旧逻辑
   it("ConnectSessionRecord 不含 ownerKeyId / runtimeBinding 字段（施工单 2026-06-30 002）", () => {
-    const rec: ConnectSessionRecord = {
+    const rec: ConnectSessionRecord = {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "a".repeat(66) },
       sessionId: "s",
       origin: "https://x",
       ownerPublicKeyHex: "a".repeat(66),
@@ -226,7 +226,7 @@ function makeFakeVaultService(): VaultService {
     verifyPassword: async () => undefined,
     changePassword: async () => undefined,
     createAppViewSession: async () => ({
-      getIdentity: () => ({
+      getIdentity: () => ({bsvNetwork: "main" as const,
         sessionId: "fake",
         publicKeyHex: "02".padEnd(66, "a"),
         label: "fake",
@@ -264,7 +264,7 @@ function makeFakeVaultService(): VaultService {
     },
     exportKeyBackup: async () => "not used",
     createActiveKeyCrypto: async () => ({
-      getIdentity: () => ({
+      getIdentity: () => ({bsvNetwork: "main" as const,
         sessionId: "fake",
         publicKeyHex: "02".padEnd(66, "a"),
         label: "fake",
@@ -309,14 +309,14 @@ describe("ProtocolService bootstrap fail-closed (修复 issue #3)", () => {
     // 用真实 priv=0x...01 配对派生出真实公钥，但 payload 声明的
     // ownerPublicKeyHex 是 "a".repeat(66)——故意错配，触发
     // `bootstrap_runtime_pubkey_mismatch` 失败路径。
-    await priv.applyLauncherBootstrap({
+    await priv.applyLauncherBootstrap({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "a".repeat(66) },
       app: { appId: "a", appOrigin: "https://x", appUrl: "https://x" },
       connectSessionId: "s",
       ownerPublicKeyHex: "a".repeat(66),
       resolvedClaims: {},
       resolvedAt: 0,
       launchToken: "tok",
-      sessionRuntimeBootstrap: {
+      sessionRuntimeBootstrap: {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX_PRIV1 },
         ownerPublicKeyHex: TEST_PUB_HEX_PRIV1,
         ownerLabel: "Key A",
         capabilities: ["p2pkh"],
@@ -342,7 +342,7 @@ describe("ProtocolService bootstrap fail-closed (修复 issue #3)", () => {
       bootstrapFailureReason: () => string | null;
     };
     const priv = svc as unknown as PrivProto;
-    await priv.applyLauncherBootstrap({
+    await priv.applyLauncherBootstrap({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "a".repeat(66) },
       app: { appId: "a", appOrigin: "https://x", appUrl: "https://x" },
       connectSessionId: "s",
       ownerPublicKeyHex: "a".repeat(66),
@@ -384,7 +384,7 @@ describe("ProtocolService bootstrap fail-closed (修复 issue #3)", () => {
       };
       const priv = svc as unknown as PrivProto;
       // sessionRuntimeBootstrap 缺字段 → 走失败路径。
-      await priv.applyLauncherBootstrap({
+      await priv.applyLauncherBootstrap({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "a".repeat(66) },
         app: { appId: "a", appOrigin: "https://x", appUrl: "https://x" },
         connectSessionId: "s",
         ownerPublicKeyHex: "a".repeat(66),
@@ -431,14 +431,14 @@ describe("consumeLauncherBootstrap direct-consume 模型 (修复 issue #1)", () 
   function makeFakeBootstrap(): import("@keymaster/contracts").AppBootstrapPayload {
     // priv=0x...01 对应压缩公钥 0279be...f81798（来自 noble secp256k1）；
     // 这里用真实配对以让 applyLauncherBootstrap 的私钥 → 公钥派生校验通过。
-    return {
+    return {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX_PRIV1 },
       app: { appId: "a", appOrigin: "https://x", appUrl: "https://x" },
       connectSessionId: "s",
       ownerPublicKeyHex: TEST_PUB_HEX_PRIV1,
       resolvedClaims: {},
       resolvedAt: 0,
       launchToken: "tok",
-      sessionRuntimeBootstrap: {
+      sessionRuntimeBootstrap: {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX_PRIV1 },
         ownerPublicKeyHex: TEST_PUB_HEX_PRIV1,
         ownerLabel: "Key A",
         capabilities: ["p2pkh"],
@@ -664,7 +664,7 @@ describe("ProtocolService.awaitLauncherBootstrap 端到端 (direct consume)", ()
   function makeFakeBootstrap(
     overrides: Partial<import("@keymaster/contracts").AppBootstrapPayload> = {}
   ): import("@keymaster/contracts").AppBootstrapPayload {
-    return {
+    return {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX_PRIV1 },
       app: {
         appId: "app-x",
         appOrigin: "https://app.example",
@@ -675,7 +675,7 @@ describe("ProtocolService.awaitLauncherBootstrap 端到端 (direct consume)", ()
       resolvedClaims: {},
       resolvedAt: 0,
       launchToken: "tok",
-      sessionRuntimeBootstrap: {
+      sessionRuntimeBootstrap: {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: TEST_PUB_HEX_PRIV1 },
         ownerPublicKeyHex: TEST_PUB_HEX_PRIV1,
         ownerLabel: "Key A",
         capabilities: ["p2pkh"],
@@ -710,7 +710,7 @@ describe("ProtocolService.awaitLauncherBootstrap 端到端 (direct consume)", ()
       verifyPassword: async () => undefined,
       changePassword: async () => undefined,
       createAppViewSession: async () => ({
-        getIdentity: () => ({
+        getIdentity: () => ({bsvNetwork: "main" as const,
           sessionId: "fake",
           publicKeyHex: "02".padEnd(66, "a"),
           label: "fake",
@@ -748,7 +748,7 @@ describe("ProtocolService.awaitLauncherBootstrap 端到端 (direct consume)", ()
       },
       exportKeyBackup: async () => "not used",
       createActiveKeyCrypto: async () => ({
-        getIdentity: () => ({
+        getIdentity: () => ({bsvNetwork: "main" as const,
           sessionId: "fake",
           publicKeyHex: "02".padEnd(66, "a"),
           label: "fake",

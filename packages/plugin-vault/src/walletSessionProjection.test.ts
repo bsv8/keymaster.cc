@@ -5,10 +5,10 @@ import { createVaultServiceCoordinator } from "./vaultServiceCoordinator.js";
 const KEY = "02" + "ab".repeat(32);
 function fixture(crypto: () => Promise<unknown> = async () => ({ ack: { status: "ok" }, result: { address: "address" } })) {
   let push!: (event: SessionStateEvent) => void; let closed = false;
-  const bootstrap: CoordinatorBootstrapSnapshot = { authorityInstanceId: "authority", vaultStatus: "unlocked", activePublicKeyHex: KEY, sessionEpoch: "epoch-1", runGeneration: "run-1", walletGeneration: "wallet-1", taskSnapshots: [], scheduleSettings: { taskIntervals: {} } };
+  const bootstrap: CoordinatorBootstrapSnapshot = { authorityInstanceId: "authority", vaultStatus: "unlocked", activePublicKeyHex: KEY, activeKeyIdentity: {bsvNetwork:"main",publicKeyHex:KEY,label:"Key",capabilities:[],createdAt:"now"}, sessionEpoch: "epoch-1", runGeneration: "run-1", walletGeneration: "wallet-1", taskSnapshots: [], scheduleSettings: { taskIntervals: {} } };
   const client = { getBootstrapSnapshot: () => bootstrap, subscribeTopic: (_topic: string, handler: typeof push) => { push = handler; return () => { closed = true; }; }, getIsConnected: () => true, crypto } as unknown as VaultCoordinatorControl;
   const mirror = new SessionStateMirror(client);
-  const emit = (changes: Partial<SessionStateEvent>) => push({ topic: "session.state", type: "session.state.changed", cause: "unlock", vaultStatus: "unlocked", activePublicKeyHex: KEY, sessionEpoch: "epoch-1", runGeneration: "run-1", walletGeneration: "wallet-1", sessionRevision: 1, ...changes });
+  const emit = (changes: Partial<SessionStateEvent>) => push({ topic: "session.state", type: "session.state.changed", cause: "unlock", vaultStatus: "unlocked", activePublicKeyHex: KEY, activeKeyIdentity: {bsvNetwork:"main",publicKeyHex:KEY,label:"Key",capabilities:[],createdAt:"now"}, sessionEpoch: "epoch-1", runGeneration: "run-1", walletGeneration: "wallet-1", sessionRevision: 1, ...changes });
   return { mirror, client, emit, closed: () => closed };
 }
 describe("committed Vault session projection", () => {

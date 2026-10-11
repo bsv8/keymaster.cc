@@ -113,7 +113,7 @@ async function ensureUnlocked(
         plan: {
           transactionId: `msfile-e2e-${crypto.randomUUID()}`,
           firstKey: {
-            kind: "generate",
+            kind: "generate", bsvNetwork: "test",
             label: "MSFile production E2E",
             capabilities: ["p2pkh"],
             password: E2E_VAULT_PASSWORD,
@@ -280,6 +280,7 @@ export function installMsFileProductionE2EHooks(host: PluginHost): void {
       await protocolRepository.putConnectSession({
         sessionId: input.sessionId,
         origin: input.origin,
+        networkIdentity: { bsvNetwork: coordinator.getBootstrapSnapshot().activeKeyIdentity!.bsvNetwork, publicKeyHex: ownerPublicKeyHex },
         ownerPublicKeyHex,
         ownerLabel: "MSFile production E2E",
         claimsSnapshot: {},
@@ -313,7 +314,7 @@ export function installMsFileProductionE2EHooks(host: PluginHost): void {
         type: "initialize",
         plan: {
           transactionId: `msfile-e2e-${crypto.randomUUID()}`,
-          firstKey: { kind: "generate", label, capabilities: ["p2pkh"], password: E2E_VAULT_PASSWORD },
+          firstKey: { kind: "generate", bsvNetwork: "test", label, capabilities: ["p2pkh"], password: E2E_VAULT_PASSWORD },
         },
       });
       if (created.status !== "ok") throw new Error(`MSFile E2E wallet creation failed: ${created.status}`);

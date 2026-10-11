@@ -16,7 +16,7 @@ export const P2PKH_MSG = {
   BALANCE_CHANGED: "p2pkh.balance.changed",
   /**
    * 全局产品设置变更（硬切换 001）。
-   * 设计缘由：跨标签页或非 settings 页面需要知道 includeTestnet 切换，
+   * 设计缘由：跨标签页或非 settings 页面需要知道 bsvNetwork 切换，
    * 跨 tab 链路交给 messageBus；settings 页同 tab 链路交给
    * `service.onGlobalSettingsChange` 订阅句柄。
    * payload: P2pkhGlobalSettings。

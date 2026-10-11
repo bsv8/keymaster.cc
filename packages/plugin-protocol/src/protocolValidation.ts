@@ -1,3 +1,4 @@
+import { validateNetworkIdentity, type NetworkIdentity } from "@keymaster/contracts";
 // packages/plugin-protocol/src/protocolValidation.ts
 // 协议层校验：顶层 message 结构 / BinaryField 形状 / aud / iat / exp /
 // p2pkh 地址 / feepool 公钥 hex / 金额正整数。
@@ -78,7 +79,7 @@ export class ProtocolValidationError extends Error {
  */
 export function parseRequestMessage(
   raw: unknown
-): { id: string; method: ProtocolMethod; params: MethodParams<ProtocolMethod> } {
+): { id: string; networkIdentity: NetworkIdentity; method: ProtocolMethod; params: MethodParams<ProtocolMethod> } {
   if (!isPlainObject(raw)) {
     throw new ProtocolValidationError("invalid_request", "Request must be a plain object");
   }
@@ -95,8 +96,14 @@ export function parseRequestMessage(
     throw new ProtocolValidationError("invalid_request", "Unknown method");
   }
   const method = raw.method as ProtocolMethod;
-  const params = validateParams(method, raw.params, raw.id);
-  return { id: raw.id, method, params };
+  let networkIdentity: NetworkIdentity;
+  try { networkIdentity = validateNetworkIdentity(raw.networkIdentity); } catch { throw new ProtocolValidationError("invalid_request", "Complete network identity is required"); }
+  const payment = method === "p2pkh.transfer" || method.startsWith("feepool.") || method === "payment.channel.register";
+  const parameters = payment && isPlainObject(raw.params) && raw.params.assetId === undefined
+    ? { ...raw.params, assetId: networkIdentity.bsvNetwork === "test" ? "bsv-testnet" : "bsv-mainnet" } : raw.params;
+  const params = validateParams(method, parameters, raw.id);
+  if (payment && isPlainObject(params) && "assetId" in params && params.assetId !== (networkIdentity.bsvNetwork === "test" ? "bsv-testnet" : "bsv-mainnet")) throw new ProtocolValidationError("asset_not_enabled", "Payment network differs from identity");
+  return { id: raw.id, networkIdentity, method, params };
 }
 
 /** 校验单个 method 的 params。抛 ProtocolValidationError。 */

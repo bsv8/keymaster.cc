@@ -102,6 +102,7 @@ function openDatabase(
   databaseName: string,
   storeName: string,
   indexStoreName: string,
+  invalidate: (error: StorageRuntimeError) => void,
 ): Promise<IDBDatabase> {
   return new Promise<IDBDatabase>((resolve, reject) => {
     let request: IDBOpenDBRequest;
@@ -122,7 +123,14 @@ function openDatabase(
       const database = request.result;
       // 版本变化(升级或另一个标签页删除数据库)时立即让出连接,
       // 不把旧连接当成仍然可写。
-      database.onversionchange = () => database.close();
+      database.onversionchange = (event) => {
+        // 不能自动重开：删除/升级可能已更换钱包真值，旧会话不得继续写入。
+        invalidate(event.newVersion === null
+          ? fail("storage_unavailable", "钱包数据库已被删除，请刷新页面重新加载钱包。")
+          : fail("storage_wallet_unsupported", "钱包数据库版本已变更，请刷新页面加载对应版本。"));
+        database.close();
+      };
+      database.onclose = () => invalidate(fail("storage_unavailable", "钱包数据库连接已关闭，请刷新页面重新加载钱包。"));
       resolve(database);
     };
     request.onerror = () => reject(mapIndexedDbError(request.error ?? new Error("IndexedDB open failed")));
@@ -251,10 +259,12 @@ export function createIndexedDbWalletStore(options: IndexedDbWalletStoreOptions 
   const now = options.now ?? (() => Date.now());
   const generateWalletGeneration = options.generateWalletGeneration ?? (() => crypto.randomUUID());
   let closed = false;
+  let connectionError: StorageRuntimeError | undefined;
   let databasePromise: Promise<IDBDatabase> | undefined;
 
   function assertOpen(): void {
     if (closed) throw fail("storage_unavailable", "IndexedDB wallet store is closed");
+    if (connectionError) throw connectionError;
   }
 
   /** 校验路径并确认引擎仍然打开;所有按路径的入口都先过这一关。 */
@@ -265,7 +275,10 @@ export function createIndexedDbWalletStore(options: IndexedDbWalletStoreOptions 
 
   function database(): Promise<IDBDatabase> {
     assertOpen();
-    databasePromise ??= openDatabase(factory!, databaseName, storeName, indexStoreName).catch((caught) => {
+    databasePromise ??= openDatabase(factory!, databaseName, storeName, indexStoreName, (error) => {
+      connectionError = error;
+      databasePromise = undefined;
+    }).catch((caught) => {
       // 打开失败不能缓存成永远失败的 Promise:下一次操作重新尝试,不因一次失败
       // 把数据库标记为不可恢复,也不自动清空数据。
       databasePromise = undefined;
@@ -274,13 +287,23 @@ export function createIndexedDbWalletStore(options: IndexedDbWalletStoreOptions 
     return databasePromise;
   }
 
+  /** 等待连接后再次过生命周期栅栏；事务创建失败也必须转换成存储领域错误。 */
+  async function beginTransaction(stores: string | string[], mode: IDBTransactionMode): Promise<IDBTransaction> {
+    const opened = await database();
+    assertOpen();
+    try {
+      return opened.transaction(stores, mode);
+    } catch (caught) {
+      throw mapIndexedDbError(caught);
+    }
+  }
+
   /** 打开覆盖两个仓库的事务;两仓库总是同事务写入,不会互相读脏。 */
   async function withStores(
     mode: IDBTransactionMode,
     body: (stores: { objects: IDBObjectStore; index: IDBObjectStore }) => Promise<void>,
   ): Promise<void> {
-    const opened = await database();
-    const transaction = opened.transaction([storeName, indexStoreName], mode);
+    const transaction = await beginTransaction([storeName, indexStoreName], mode);
     try {
       await body({ objects: transaction.objectStore(storeName), index: transaction.objectStore(indexStoreName) });
       await transactionDone(transaction);
@@ -311,8 +334,7 @@ export function createIndexedDbWalletStore(options: IndexedDbWalletStoreOptions 
 
   async function readMeta(): Promise<WalletObject | undefined> {
     assertOpen();
-    const opened = await database();
-    const transaction = opened.transaction(storeName, "readonly");
+    const transaction = await beginTransaction(storeName, "readonly");
     const record = await readObject(transaction.objectStore(storeName), WALLET_META_PATH);
     await transactionDone(transaction);
     return record;
@@ -320,8 +342,7 @@ export function createIndexedDbWalletStore(options: IndexedDbWalletStoreOptions 
 
   async function readKeyHold(): Promise<Uint8Array | undefined> {
     assertOpen();
-    const opened = await database();
-    const transaction = opened.transaction(storeName, "readonly");
+    const transaction = await beginTransaction(storeName, "readonly");
     const stored = await readBytes(transaction.objectStore(storeName), WALLET_KEYHOLD_PATH);
     await transactionDone(transaction);
     return stored ? new Uint8Array(stored.bytes) : undefined;
@@ -330,8 +351,7 @@ export function createIndexedDbWalletStore(options: IndexedDbWalletStoreOptions 
   async function get(path: string, input: { ifRevision?: number; signal?: AbortSignal } = {}): Promise<WalletObject | undefined> {
     const normalized = openPath(path);
     if (input.signal?.aborted) throw fail("storage_unavailable", "Storage operation was cancelled");
-    const opened = await database();
-    const transaction = opened.transaction(storeName, "readonly");
+    const transaction = await beginTransaction(storeName, "readonly");
     const record = await readObject(transaction.objectStore(storeName), normalized);
     await transactionDone(transaction);
     if (record && input.ifRevision !== undefined && record.revision !== input.ifRevision) {
@@ -350,8 +370,7 @@ export function createIndexedDbWalletStore(options: IndexedDbWalletStoreOptions 
       || !Number.isSafeInteger(range.length) || range.length < 0) {
       throw fail("storage_invalid_path", "Storage range is invalid");
     }
-    const opened = await database();
-    const transaction = opened.transaction(storeName, "readonly");
+    const transaction = await beginTransaction(storeName, "readonly");
     const record = await readObject(transaction.objectStore(storeName), normalized);
     await transactionDone(transaction);
     if (!record) return undefined;
@@ -372,8 +391,7 @@ export function createIndexedDbWalletStore(options: IndexedDbWalletStoreOptions 
     const prefix = normalizePrefix(input.prefix);
     const limit = normalizeLimit(input.limit);
     const after = decodeCursor(input.cursor);
-    const opened = await database();
-    const transaction = opened.transaction(indexStoreName, "readonly");
+    const transaction = await beginTransaction(indexStoreName, "readonly");
     // 只读元数据仓库:分页列举不接触任何对象字节。
     // 多取一条判断是否还有下一页,避免为 hasMore 再开一次事务。
     const records = await requestToPromise<WalletObjectMeta[]>(

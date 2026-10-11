@@ -75,7 +75,7 @@ async function ensureUnlocked(
         plan: {
           transactionId: `lifecycle-e2e-${crypto.randomUUID()}`,
           firstKey: {
-            kind: "generate",
+            kind: "generate", bsvNetwork: "test",
             label: "Lifecycle production E2E",
             capabilities: ["p2pkh"],
             password: E2E_VAULT_PASSWORD,
@@ -355,7 +355,7 @@ export function installLifecycleProductionE2EHooks(host: PluginHost): void {
     const privateKeyBytes = new Uint8Array(32);
     privateKeyBytes[31] = 1;
     const publicKeyHex = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
-    const engine = await createSessionCryptoEngine({
+    const engine = await createSessionCryptoEngine({ bsvNetwork: "test",
       sessionId: `lifecycle-dedicated-worker-${Date.now().toString(36)}`,
       publicKeyHex,
       privateKeyBytes,

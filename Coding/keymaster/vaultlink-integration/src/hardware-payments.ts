@@ -14,7 +14,7 @@ function bytes(value: string): Uint8Array {
 function channel(value: Value): PaymentChannelDTO {
   const c = object(value,['id','owner','kind','network','paymentType','enabled','singleLimit','defaultSessionLimit','revision']);
   for (const field of ['id','owner','network','paymentType']) if (typeof c[field] !== 'string') throw Error('invalid-channel-response');
-  if ((c.kind !== 'plugin' && c.kind !== 'app') || c.network !== 'main' || typeof c.enabled !== 'boolean'
+  if ((c.kind !== 'plugin' && c.kind !== 'app') || (c.network !== 'main' && c.network !== 'test') || typeof c.enabled !== 'boolean'
     || typeof c.revision !== 'number' || !Number.isSafeInteger(c.revision) || c.revision < 1 || c.revision >= 0xffffffff) throw Error('invalid-channel-response');
   const amount = (v: Value | undefined) => {
     if (typeof v !== 'bigint' && (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0)) throw Error('invalid-channel-response');
@@ -87,7 +87,7 @@ export class HardwareWalletPayments {
     const config = channel(await this.backend.readChannel(command.channelId)); guard();
     if (config.paymentType !== (command.action === 'sign-feepool' ? `feepool.${command.family}${command.role === 'cosigner' ? '.cosigner' : ''}` : command.action === 'sign-standard' ? 'bsv.standard' : 'p2pkh')) throw Error('unsupported');
     const input = {rawTx:bytes(command.rawTxHex),prevTransactions:command.prevTransactionHexes.map(bytes),channelId:command.channelId,
-      paymentId:command.paymentId,sessionId:command.sessionId,network:'main' as const};
+      paymentId:command.paymentId,sessionId:command.sessionId,network:config.network as "main" | "test"};
     let result: HardwarePaymentResult;
     if (command.action === 'sign-feepool') result = await this.backend.signFeePool({...input,family:command.family,stage:command.stage,...(command.role ? {role:command.role} : {}),...(command.openingRequestHex ? {openingRequest:bytes(command.openingRequestHex)} : {}),...(command.authorization ? {authorization:{document:bytes(command.authorization.documentHex),refundTemplate:bytes(command.authorization.refundTemplateHex)}} : {})});
     else if (command.action === 'sign-standard') result = await this.backend.signStandard(input);

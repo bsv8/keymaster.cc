@@ -12,11 +12,12 @@
 import { validateHardwareKeyDocument, type HardwareKeyDocumentV1 } from "@keymaster/vaultlink-integration";
 import { Point } from "@noble/secp256k1";
 
-import type { KeyHoldDocumentV1, StorageErrorCode } from "@keymaster/contracts";
+import type { NetworkKeyHoldDocument, StorageErrorCode } from "@keymaster/contracts";
 import { KEYHOLD_LIMITS, WALLET_KEYHOLD_PATH } from "@keymaster/contracts";
 import { StorageRuntimeError, storageErrorCode } from "@keymaster/contracts/storage-internal";
 import type { WalletVaultKeyStore } from "@keymaster/contracts/storage-internal";
 import {
+  exportPortableKeyHoldDocument,
   createKeyHoldDocument,
   decryptKeyHoldDocument,
   parseKeyHoldDocument,
@@ -29,8 +30,8 @@ export const WALLET_KEYHOLD_FILE_PATH = WALLET_KEYHOLD_PATH;
 export interface SoftwareWalletKeyFile {
   backend: "software";
   /** 已严格校验的 KeyHold 文档。 */
-  document: KeyHoldDocumentV1;
-  /** 文件原始 bytes;导出时必须原样返回。 */
+  document: NetworkKeyHoldDocument;
+  /** 钱包网络封装的原始 bytes；可移植导出另行剥离网络。 */
   bytes: Uint8Array;
   /** 该文件的 revision;改密等条件写依赖它。 */
   revision: number;
@@ -45,7 +46,7 @@ export type WalletKeyFile = SoftwareWalletKeyFile | {
 };
 
 export interface UnlockedWalletKey {
-  document: KeyHoldDocumentV1;
+  document: NetworkKeyHoldDocument;
   /** 32 字节私钥;调用方使用后必须清零。 */
   privateKeyBytes: Uint8Array;
   /** 解锁时读取到的 revision。 */
@@ -62,10 +63,10 @@ export interface WalletKeyRepository {
    *
    * 目标已存在时拒绝覆盖:已有 Key 的钱包只能走重置流程。
    */
-  create(input: { label: string; privateKeyBytes: Uint8Array; password: string; iterations?: number }): Promise<WalletKeyFile>;
+  create(input: { bsvNetwork: import("@keymaster/contracts").BsvNetwork; label: string; privateKeyBytes: Uint8Array; password: string; iterations?: number }): Promise<WalletKeyFile>;
   /** 导入一份已存在的 KeyHold 原始文件;不要求密码,也不重新加密。 */
   import(bytes: Uint8Array): Promise<WalletKeyFile>;
-  /** 原样导出唯一 KeyHold;不需要密码。 */
+  /** 导出标准 KeyHold 私钥文件，剥离本地网络属性；不需要密码。 */
   export(): Promise<Uint8Array>;
   /** 校验旧密码后改密;仍只覆盖固定路径这一条记录。 */
   changePassword(input: { oldPassword: string; newPassword: string; iterations?: number }): Promise<WalletKeyFile>;
@@ -99,15 +100,17 @@ function parseFile(bytes: Uint8Array, revision: number): WalletKeyFile {
     }
     const document = parseKeyHoldDocument(bytes);
     return { backend: "software", document, bytes: cloneBytes(bytes), revision };
-  } catch {
+  } catch (error) {
+    if(error instanceof TypeError && error.message === "Wallet network is missing; explicit identity upgrade is required")
+      throw fail("storage_wallet_corrupt", error.message);
     throw fail("storage_wallet_corrupt", "Wallet Key file is invalid or incompatible");
   }
 }
 
 /** Trusted Worker migration validation uses the same parser as normal cold start. */
-export function inspectWalletKeyBytes(bytes: Uint8Array): { publicKeyHex: string; backend: "software" | "hardware"; walletGeneration?: string } {
+export function inspectWalletKeyBytes(bytes: Uint8Array): { bsvNetwork: "main" | "test"; publicKeyHex: string; backend: "software" | "hardware"; walletGeneration?: string } {
   const file = parseFile(bytes, 1);
-  return { publicKeyHex: file.document.publicKeyHex, backend: file.backend,
+  return { bsvNetwork: file.document.bsvNetwork, publicKeyHex: file.document.publicKeyHex, backend: file.backend,
     ...(file.backend === "hardware" ? { walletGeneration: file.document.walletGeneration } : {}) };
 }
 
@@ -130,7 +133,7 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
     return parseFile(record.bytes, record.revision);
   }
 
-  async function writeFresh(bytes: Uint8Array, document: KeyHoldDocumentV1): Promise<WalletKeyFile> {
+  async function writeFresh(bytes: Uint8Array, document: NetworkKeyHoldDocument): Promise<WalletKeyFile> {
     try {
       // 条件创建与写入在同一事务:并发创建只能有一个成功。
       const written = await store.put(WALLET_KEYHOLD_FILE_PATH, bytes, {
@@ -157,15 +160,16 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
   }
 
   async function create(input: {
+    bsvNetwork: import("@keymaster/contracts").BsvNetwork;
     label: string;
     privateKeyBytes: Uint8Array;
     password: string;
     iterations?: number;
   }): Promise<WalletKeyFile> {
-    let document: KeyHoldDocumentV1;
+    let document: NetworkKeyHoldDocument;
     try {
       document = await createKeyHoldDocument(
-        { label: input.label, privateKey: input.privateKeyBytes },
+        { bsvNetwork: input.bsvNetwork, label: input.label, privateKey: input.privateKeyBytes },
         input.password,
         input.iterations === undefined ? undefined : { iterations: input.iterations }
       );
@@ -181,7 +185,7 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
     if (bytes.byteLength > KEYHOLD_LIMITS.maxSerializedBytes) {
       throw fail("storage_limit_exceeded", "KeyHold import exceeds its size limit");
     }
-    let document: KeyHoldDocumentV1;
+    let document: NetworkKeyHoldDocument;
     try {
       document = parseKeyHoldDocument(bytes);
     } catch {
@@ -194,7 +198,7 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
     const file = await read();
     if (!file) throw fail("storage_not_found", "KeyHold file does not exist");
     if (file.backend === "hardware") throw fail("storage_wallet_unsupported", "Hardware public record is not a KeyHold backup; export requires the device migration flow");
-    return cloneBytes(file.bytes);
+    return new TextEncoder().encode(exportPortableKeyHoldDocument(file.document));
   }
 
   /**
@@ -207,7 +211,7 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
     const unlocked = await unlock(input.oldPassword);
     try {
       const nextDocument = await createKeyHoldDocument(
-        { label: unlocked.document.label, privateKey: unlocked.privateKeyBytes },
+        { bsvNetwork: unlocked.document.bsvNetwork, label: unlocked.document.label, privateKey: unlocked.privateKeyBytes },
         input.newPassword,
         input.iterations === undefined ? undefined : { iterations: input.iterations }
       );
@@ -233,13 +237,13 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
     const file = await read();
     if (!file) throw fail("storage_not_found", "KeyHold file does not exist");
     // 改名也重跑对应格式校验；不能写入下一次启动无法读取的标签。
-    let nextDocument: KeyHoldDocumentV1 | HardwareKeyDocumentV1;
+    let nextDocument: NetworkKeyHoldDocument | HardwareKeyDocumentV1;
     try {
       nextDocument = file.backend === "hardware"
         ? validateHardwareKeyDocument({ ...file.document, label })
         : parseKeyHoldDocument(new TextEncoder().encode(serializeKeyHoldDocument({ ...file.document, label })));
     } catch { throw fail("storage_wallet_corrupt", "Wallet Key label is invalid"); }
-    const nextBytes = new TextEncoder().encode(JSON.stringify(nextDocument));
+    const nextBytes = new TextEncoder().encode(file.backend === "hardware" ? JSON.stringify(nextDocument) : serializeKeyHoldDocument(nextDocument as NetworkKeyHoldDocument));
     try {
       // 改名不要求密码,但也不能覆盖别人的并发更新。
       const written = await store.put(WALLET_KEYHOLD_FILE_PATH, nextBytes, {
@@ -262,7 +266,7 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
     const document = validateHardwareKeyDocument(input.document);
     Point.fromHex(document.publicKeyHex).assertValidity();
     const source = await migrationSource(input.expectedRevision,"software");
-    if (document.publicKeyHex !== source.document.publicKeyHex) throw fail("storage_identity_required", "Backend migration cannot replace the wallet identity");
+    if (document.publicKeyHex !== source.document.publicKeyHex || document.bsvNetwork !== source.document.bsvNetwork) throw fail("storage_identity_required", "Backend migration cannot replace the wallet identity");
     const next = new TextEncoder().encode(JSON.stringify(document));
     try {
       // 替换固定路径，不保留源 KeyHold 副本。设备缺席不能自动回退软件。
@@ -279,7 +283,7 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
       try { publicKeyHex = Point.fromPrivateKey(privateKey).toHex(true); }
       catch { throw fail("storage_identity_required","Exported migration Key is invalid"); }
       if (publicKeyHex !== source.document.publicKeyHex) throw fail("storage_identity_required","Exported migration Key does not match the current identity");
-      const document = await createKeyHoldDocument({label:source.document.label,privateKey},input.password,
+      const document = await createKeyHoldDocument({bsvNetwork:source.document.bsvNetwork,label:source.document.label,privateKey},input.password,
         input.iterations===undefined?undefined:{iterations:input.iterations});
       const next = new TextEncoder().encode(serializeKeyHoldDocument(document));
       try {

@@ -26,7 +26,7 @@ describe("Coordinator runtime contract parsers", () => {
       declaration: CENTRAL_STORAGE_DECLARATIONS.protocolSessions,
       expectedSessionEpoch: "epoch-1",
     } as const satisfies CoordinatorRpcRequest;
-    const grant = {
+    const grant = {bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
       platformGrantId: "platform-1",
       walletGeneration: "11111111-1111-4111-8111-111111111111",
       runGeneration: "run-1",
@@ -383,7 +383,7 @@ describe("Coordinator runtime contract parsers", () => {
     const grant = parseCoordinatorResponseFor(rpcRequest("storage.owner.bind"), {
       sessionEpoch: "epoch-1",
       ack: { status: "ok" },
-      operationResult: {
+      operationResult: {bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
         storageGrantId: "grant-1",
         walletGeneration: "11111111-1111-4111-8111-111111111111",
         runGeneration: "run-1",
@@ -396,7 +396,7 @@ describe("Coordinator runtime contract parsers", () => {
         private: "discard",
       },
     });
-    expect(grant.operationResult).toEqual({
+    expect(grant.operationResult).toEqual({bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
       storageGrantId: "grant-1",
       walletGeneration: "11111111-1111-4111-8111-111111111111",
       runGeneration: "run-1",
@@ -413,7 +413,7 @@ describe("Coordinator runtime contract parsers", () => {
     const grant = parseCoordinatorResponseFor(rpcRequest("storage.owner.bind"), {
       sessionEpoch: "epoch-1",
       ack: { status: "ok" },
-      operationResult: {
+      operationResult: {bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
         storageGrantId: "grant-1",
         walletGeneration: "11111111-1111-4111-8111-111111111111",
         runGeneration: "run-1",
@@ -505,7 +505,7 @@ describe("Coordinator runtime contract parsers", () => {
   });
 
   it("dispatches nested Vault and crypto results by the complete request", () => {
-    const key = {
+    const key = {bsvNetwork: "main" as const,
       publicKeyHex: "02" + "11".repeat(32),
       label: "Primary",
       capabilities: ["p2pkh"],
@@ -673,7 +673,7 @@ describe("Coordinator runtime contract parsers", () => {
     expect(response(rpcRequest("sat.operation", { operation: { type: "ensure" } }), null).operationResult).toBeNull();
     expect(response(rpcRequest("channel.operation", { operation: { type: "release" } }), null).operationResult).toBeNull();
 
-    const key = {
+    const key = {bsvNetwork: "main" as const,
       publicKeyHex: "02" + "11".repeat(32),
       label: "Primary",
       capabilities: ["p2pkh"],

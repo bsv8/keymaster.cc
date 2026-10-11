@@ -22,8 +22,8 @@ it("owns the asset home contribution and its resources, refreshes from provider 
   hosts.push(host);
   host.provide(CONTACTS_SERVICE_CAPABILITY, {} as ContactsService);
   host.provide(VAULT_WALLET_STATE_CAPABILITY, walletStateFixtureAccess({
-    snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: "02" + "11".repeat(32) }))(), () => ({ publicKeyHex: "02" + "11".repeat(32), label: "Assets key", capabilities: [], createdAt: "2026-10-03" })),
-    
+    snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: "02" + "11".repeat(32) }))(), () => ({bsvNetwork: "main" as const,  publicKeyHex: "02" + "11".repeat(32), label: "Assets key", capabilities: [], createdAt: "2026-10-03" })),
+
     subscribe: () => () => {},
   }));
   const list = vi.fn(async () => []);

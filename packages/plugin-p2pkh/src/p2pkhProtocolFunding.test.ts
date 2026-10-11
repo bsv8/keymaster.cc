@@ -543,7 +543,7 @@ describe("重启后的保护恢复", () => {
     const seed = harness({});
     await seed.service.prepareDedicatedFunding({ ...request(), network: "main" });
     const record = (await seed.store.list(OWNER)).records[0] as ProtocolFundingStoredRecord;
-    // 记录自己带上网络：恢复时不必也不该拿 `includeTestnet` 之类设置去猜。
+    // 记录自己带上网络：恢复时不必也不该拿 `bsvNetwork` 之类设置去猜。
     expect(record.network).toBe("main");
 
     const rebooted = harness({ chain: "confirmed" });

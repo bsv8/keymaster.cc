@@ -137,3 +137,6 @@ export type {
   MsFileStatResult,
   MsFileSupplierStat
 } from "./msfile.js";
+
+export { validateNetworkIdentity, sameNetworkIdentity } from "./networkIdentity.js";
+export type { NetworkIdentity, BsvNetwork } from "./networkIdentity.js";

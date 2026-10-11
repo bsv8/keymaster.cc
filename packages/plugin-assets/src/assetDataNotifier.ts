@@ -15,7 +15,7 @@ export function createAssetDataNotifier(): AssetDataNotifier {
   };
   return {
     emit(event) {
-      const key = `${event.providerId}:${event.publicKeyHex ?? "none"}`;
+      const key = `${event.providerId}:${event.networkIdentity?.bsvNetwork ?? "none"}:${event.networkIdentity?.publicKeyHex ?? event.publicKeyHex ?? "none"}`;
       const previous = pending.get(key);
       pending.set(key, previous ? {
         ...previous,
