@@ -1,3 +1,4 @@
+import { type SigningChannel, type SigningMode } from "./signing-channel.js";
 export type OwnerKind = "app" | "plugin";
 export interface ChannelConfig {
     id: string;
@@ -70,7 +71,9 @@ export interface Approval {
     raiseSessionLimit?: bigint;
 }
 export interface PolicySnapshot {
-    version: 2 | 3;
+    version: 2 | 3 | 4;
+    network?: "main" | "test";
+    signing?: SigningChannel[];
     archive?: {
         payments: ArchiveEntry[];
         sessions: ArchiveSessionEntry[];
@@ -126,6 +129,11 @@ export declare class PaymentPolicy {
     private setState;
     /** 只允许执行权威在确定未执行时释放；App/普通插件不得调用此内部方法。 */
     releaseUnexecuted(requestId: string): Promise<void>;
+    /** 与支付账本原子存储、一起迁移；重复注册只校验来源，绝不覆盖用户决定。 */
+    registerSigning(channels: SigningChannel[], network: "main" | "test", confirmed: boolean): Promise<SigningChannel[]>;
+    /** 调用者只能是钱包设置入口；主机协议不能转发这个能力给硬件。 */
+    configureSigning(id: string, mode: SigningMode, expectedRevision: number): Promise<void>;
+    signingChannel(channelId: string, operation: string, network: "main" | "test"): Promise<SigningChannel>;
     snapshot(): Promise<PolicySnapshot>;
     lock(): void;
     private session;

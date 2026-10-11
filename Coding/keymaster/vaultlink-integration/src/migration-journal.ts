@@ -295,6 +295,7 @@ export function createSoftwareToHardwareMigration(deps:{
     try{check();state=await deps.device.prove(current,secret);check();}finally{secret.fill(0);}
    }else{state=await deps.device.prove(current);check();}
    verifyDeviceMigrationJournal(current,state);
+   if(state.phase!=="device-committed"&&state.phase!=="host-committed"&&state.phase!=="complete")throw Error("migration-device-save-required");
    if(current.phase==='prepared'){await deps.service.deviceCommitted(current.migrationId,current.policyHash);check();current=(await deps.service.current())!;check();}
    bank??=await deps.sourceBank();check();
    const target=deps.hardwareDocument(current);

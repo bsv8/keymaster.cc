@@ -6,7 +6,7 @@ import type {MigrationJournal} from './migration-journal.js';
  * after actual device wrapping proves successful import. */
 export class ProvisionMigrationConnection {
  readonly disconnected:Promise<void>;private closed=false;
- private constructor(private client:ProtocolClient,private assertLive:()=>void){
+ private constructor(private client:ProtocolClient,private assertLive:()=>void,private readonly network:"main"|"test"){
   this.disconnected=client.run().then(()=>{this.closed=true;},()=>{this.closed=true;});
  }
  static async connect(transport:Transport,context:{generations:Generations;bsvNetwork:"main"|"test";assertActive():void},confirmPairing:(code:string)=>Promise<boolean>){
@@ -14,18 +14,18 @@ export class ProvisionMigrationConnection {
   // Reboot recovery can have an actual key already wrapped. Both modes remain
   // migration-only in this portal, with the same source-key proof below.
   const verified=await enrollHost(transport,context.generations,secpIdentityVerifier,async code=>{context.assertActive();const yes=await confirmPairing(code);context.assertActive();return yes;},[]);
-  try{context.assertActive();const portal=new ProvisionMigrationConnection(verified.client,context.assertActive);
+  try{context.assertActive();const portal=new ProvisionMigrationConnection(verified.client,context.assertActive,context.bsvNetwork);
    const raw=await portal.request('identity.network','identity-network',{});
    const wrapped=raw!==null&&typeof raw==='object'&&!Array.isArray(raw)&&!(raw instanceof Uint8Array)&&'publicKey' in raw;
    const identity=object(raw,wrapped?['bsvNetwork','publicKey']:['bsvNetwork']);
    if(wrapped&&(!(identity.publicKey instanceof Uint8Array)||identity.publicKey.length!==33))throw Error('invalid-network-identity');
-   if(identity.bsvNetwork!==context.bsvNetwork)throw Error('network-identity-mismatch');
+   if(identity.bsvNetwork!==null&&identity.bsvNetwork!==context.bsvNetwork)throw Error('network-identity-mismatch');
    return portal;}
   catch(error){await verified.client.close(error);throw error;}
  }
  private async request(op:string,profile:string,body:Value):Promise<Value>{
   this.assertLive();if(this.closed)throw Error('disconnected');
-  const raw=await this.client.execute(op,body,await commitment(profile,1,body));this.assertLive();
+  const raw=await this.client.execute(op,body,await commitment(profile,1,body),op==='migration.import-key'?300000:120000);this.assertLive();
   if(raw&&typeof raw==='object'&&!Array.isArray(raw)&&!(raw instanceof Uint8Array)&&'error' in raw)throw Error(String(raw.error));return raw;
  }
  private binding(j:MigrationJournal){
@@ -43,7 +43,7 @@ export class ProvisionMigrationConnection {
  async stage(j:MigrationJournal,bank:Uint8Array):Promise<void>{
   if(bank.length<1||bank.length>65536||hex(await sha256(bank))!==j.policyHash)throw Error('migration-policy-changed');
   const {direction,...body}=this.binding(j);
-  const begun=this.check(j,await this.request('migration.import-begin','key-import-begin',{...body,size:bank.length}));
+  const begun=this.check(j,await this.request('migration.import-begin','key-import-begin',{...body,size:bank.length,bsvNetwork:this.network}));
   if(begun.phase!=='staged')throw Error('migration-conflict');
   const read=async()=>object(await this.request('migration.import-stage-status','key-import-stage-status',{id:j.migrationId}),['size','total','sha256']);
   const valid=async(v:Record<string,Value>)=>{
@@ -64,6 +64,10 @@ export class ProvisionMigrationConnection {
   const result=object(raw,['migration','signature']),state=inspectDeviceMigration(result.migration);assertDeviceMigrationBinding(state,this.binding(j));
   if(!(result.signature instanceof Uint8Array))throw Error("migration-key-proof-invalid");
   await verifyMigrationImportProof(state,challenge,result.signature);
+  // Empty transport identity has no network. Before deleting the source
+  // envelope, verify the now-persisted actual (network, public key) identity.
+  const identity=object(await this.request('identity.network','identity-network',{}),['bsvNetwork','publicKey']);
+  if(identity.bsvNetwork!==this.network||!(identity.publicKey instanceof Uint8Array)||!equal(identity.publicKey,unhex(j.publicKeyHex)))throw Error('network-identity-mismatch');
   this.assertLive();return state;
  }
  async commit(j:MigrationJournal):Promise<DeviceMigrationRecord>{

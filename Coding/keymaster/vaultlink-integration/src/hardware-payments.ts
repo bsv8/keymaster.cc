@@ -63,6 +63,9 @@ export class HardwareWalletPayments {
   }
   private async execute(command: WalletPaymentCommand, guard: () => void = () => this.assert()): Promise<unknown> {
     this.assert();
+    if(command.action==='backend')return 'hardware';
+    if(command.action==='signing-list'){const value=await this.backend.listSigningChannels();this.assert();return (value as {channels:unknown}).channels;}
+    if(command.action==='signing-configure')throw Error('hardware-settings-local');
     if (command.action === 'list') return this.channels();
     if (command.action === 'pending') return []; // 硬件上确认；网页不产生可以绕过按键的批准入口。
     if (command.action === 'answer') throw Error('hardware-approval-required');
@@ -73,15 +76,11 @@ export class HardwareWalletPayments {
         return existing;
       }
       const config: PaymentChannelDTO = {id:command.id,owner:command.owner,kind:command.kind,network:command.network,paymentType:command.paymentType,
-        enabled:true,singleLimit:'0',defaultSessionLimit:command.kind === 'app' ? channels.find(c => c.kind === 'app' && c.owner === command.owner)?.defaultSessionLimit ?? '0' : '0',revision:1};
+        enabled:false,singleLimit:'0',defaultSessionLimit:command.kind === 'app' ? channels.find(c => c.kind === 'app' && c.owner === command.owner)?.defaultSessionLimit ?? '0' : '0',revision:1};
       await this.backend.configureChannel({...config,singleLimit:money(config.singleLimit),defaultSessionLimit:money(config.defaultSessionLimit)});
       this.assert(); return channel(await this.backend.readChannel(config.id));
     }
-    if (command.action === 'configure') {
-      const config = command.channel;
-      await this.backend.configureChannel({...config,singleLimit:money(config.singleLimit),defaultSessionLimit:money(config.defaultSessionLimit)});
-      this.assert(); return true;
-    }
+    if (command.action === 'configure')throw Error('hardware-settings-local');
     if (command.action === 'session-open') { await this.backend.startAppSession(command.id,command.owner); this.assert(); return true; }
     if (command.action !== 'sign-p2pkh' && command.action !== 'sign-standard' && command.action !== 'sign-feepool') throw Error('unsupported');
     const config = channel(await this.backend.readChannel(command.channelId)); guard();

@@ -97,3 +97,23 @@ test('actual import endpoint rejects changed staged bytes, wrong private key and
   expect(device.log()).not.toMatch(/host-review:migration.import-key/);
  }finally{store.close();await device.close();}
 },30_000);
+
+
+test('空设备从源钱包接收 test 网络，保存证明后保留 test 身份而不改为 main',async()=>{
+ const device=await openActualMigrationDevice(ProvisionMigrationConnection,{importing:true,bsvNetwork:'test'});
+ const store=createIndexedDbWalletStore({databaseName:'migration-test-network-'+crypto.randomUUID()});
+ const encode=(v:unknown)=>new TextEncoder().encode(JSON.stringify(v));
+ const generation=crypto.randomUUID(),id=crypto.randomUUID(),secret=new Uint8Array(32);secret[31]=1;
+ const source=await createAndVerifyMigrationKeyHold({bsvNetwork:'test',privateKey:secret,publicKeyHex:device.pub,label:'test identity'},'software-password');secret.fill(0);
+ const key=await store.put(WALLET_KEYHOLD_PATH,source);
+ await store.put(WALLET_META_PATH,encode({format:WALLET_META_FORMAT,version:1,schemaVersion:WALLET_CURRENT_SCHEMA_VERSION,initialized:true,walletGeneration:generation,createdAt:new Date().toISOString()}));
+ const bootstrap=createVaultBootstrapStorage(store),repo=createWalletKeyRepository(bootstrap.keys);
+ const service=createMigrationJournalService({store:bootstrap.migration,inspectKey:inspectWalletKeyBytes});
+ try{
+  const migration=createSoftwareToHardwareMigration({service,device:device.backend,assertExclusive(){},sourceBank:()=>service.sourceBank(device.pub),
+   unlockSource:async()=> (await repo.unlock('software-password')).privateKeyBytes,
+   hardwareDocument:j=>encode({bsvNetwork:j.bsvNetwork,format:'keymaster.hardware-key',version:1,backend:'vaultlink',wireVersion:2,label:'test identity',publicKeyHex:j.publicKeyHex,walletGeneration:j.walletGeneration,backendGeneration:1})});
+  expect(await migration.run({migrationId:id,expectedRevision:key.revision})).toMatchObject({phase:'complete',bsvNetwork:'test',publicKeyHex:device.pub});
+  expect(await repo.read()).toMatchObject({backend:'hardware',document:{bsvNetwork:'test',publicKeyHex:device.pub}});
+ }finally{store.close();await device.close();}
+},30_000);

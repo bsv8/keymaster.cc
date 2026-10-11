@@ -1,4 +1,5 @@
 import {
+  signingOperations, type SigningChannel,
   commitment, DeviceIdentityKey, assertDeviceMigrationBinding,
   inspectConnectEnvelope, connectCompactSignature, type ConnectEnvelopeKind,
   inspectChannel, inspectSignedChannel, inspectInboxEnvelope, verifyChannelSignature,
@@ -38,6 +39,7 @@ export const vaultLinkSupport = Object.freeze({
     "connect.intent-sign",
     "bitfs.wire-sign", "tx.feepool-bitfs-authorize", "tx.feepool-bitfs-opening",
     "identity.noise-proof", "identity.peer-record",
+    "signing.register", "signing.list", "signing.execute",
     "channel.public-message", "channel.hash-request", "channel.private-message", "channel.seal", "channel.open",
     "tx.p2pkh-payment",
     "tx.standard-payment",
@@ -201,7 +203,8 @@ export class VaultLinkHardwareBackend {
     requestCommitment: Uint8Array,
   ): Promise<Value> {
     this.assert();
-    const body = { requestId, commitment: requestCommitment.slice() };
+    const effective=this.activeOperation?.requestId===requestId?this.activeOperation.commitment:requestCommitment;
+    const body = { requestId, commitment: effective.slice() };
     const result = await this.client.execute(
       op,
       body,
@@ -222,11 +225,32 @@ export class VaultLinkHardwareBackend {
     if (state !== "awaiting-user" && state !== "executing" && state !== "completed" && state !== "denied" && state !== "cancelled" && state !== "unknown") throw Error("invalid-request-state");
     return {operation: active.operation, state};
   }
+  private signingRegistered = false;
+  /** 钱包确认一批初始建议；重连重复注册由设备按来源校验，保留本机设置。 */
+  private async ensureSigningRegistration(): Promise<void> {
+    if(this.signingRegistered)return;
+    const channels:SigningChannel[]=signingOperations.filter(op=>op!=="software.digest-sign").map(operation=>({
+      id:operation,owner:operation.startsWith("identity.")?"window-p2p":operation.startsWith("connect.")?"connect":operation.startsWith("channel.")?"channel":"bitfs",
+      kind:"plugin",operation,mode:operation.startsWith("identity.")?"automatic":"manual",revision:1,
+    }));
+    const body:Value={network:this.context.bsvNetwork,channels:channels as unknown as Value};
+    const value=await this.submitOperation("signing.register",body,await commitment("signing-register",1,body));
+    if(value&&typeof value==="object"&&!Array.isArray(value)&&!(value instanceof Uint8Array)&&"error" in value)throw Error(String(value.error));
+    const result=object(value,["channels"]);
+    if(!Array.isArray(result.channels))throw Error("invalid-registration-response");
+    this.assert();this.signingRegistered=true;
+  }
+  listSigningChannels():Promise<Value>{return this.enqueue(()=>this.request("signing.list","signing-list",{}));}
   private async submitOperation(op: string, body: Value, hash: Uint8Array,
     allocated?: (requestId: number) => void): Promise<Value> {
     this.assert();
-    const request = this.client.submit(op, body, hash);
-    const active = {operation: op, requestId: request.requestId, commitment: hash.slice()};
+    let wireOp=op,wireBody=body,wireHash=hash;
+    if(signingOperations.includes(op)){
+      await this.ensureSigningRegistration();this.assert();
+      wireOp="signing.execute";wireBody={channelId:op,operation:op,body,commitment:hash};wireHash=await commitment("signing-request",1,wireBody);
+    }
+    const request = this.client.submit(wireOp, wireBody, wireHash);
+    const active = {operation: op, requestId: request.requestId, commitment: wireHash.slice()};
     this.activeOperation = active;
     try {
       allocated?.(request.requestId);
@@ -625,7 +649,7 @@ export class VaultLinkHardwareBackend {
         ),
         ["configured", "revision"],
       );
-      if (result.configured !== true || result.revision !== frozen.revision)
+      if (result.configured !== true || (typeof result.revision!=="number"&&typeof result.revision!=="bigint"))
         throw new Error("invalid-config-response");
     });
   }

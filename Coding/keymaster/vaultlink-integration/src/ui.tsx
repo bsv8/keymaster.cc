@@ -1,3 +1,4 @@
+import type { SigningChannel } from "@vaultlink/sdk";
 import { useEffect, useState } from "react";
 export { HardwareConnectionPanel } from "./hardware-connection-ui.js";
 import { Button, Modal, TextInput } from "@keymaster/ui";
@@ -10,12 +11,30 @@ export interface PaymentUIProps {
   text(key: string, fallback: string): string;
 }
 export function PaymentChannelSettings({ execute, text }: PaymentUIProps) {
+  const [signing, setSigning] = useState<SigningChannel[]>([]);
+  const [hardware, setHardware] = useState(false);
   const [channels, setChannels] = useState<PaymentChannelDTO[]>([]);
   const [editing, setEditing] = useState<PaymentChannelDTO>();
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     let live = true;
+    void execute({ action: "backend" }).then(
+      (v) => {
+        if (live) setHardware(v === "hardware");
+      },
+      (e) => {
+        if (live) setError(String(e));
+      },
+    );
+    void execute({ action: "signing-list" }).then(
+      (v) => {
+        if (live) setSigning(v as SigningChannel[]);
+      },
+      (e) => {
+        if (live) setError(String(e));
+      },
+    );
     void execute({ action: "list" }).then(
       (v) => {
         if (live) setChannels(v as PaymentChannelDTO[]);
@@ -45,7 +64,50 @@ export function PaymentChannelSettings({ execute, text }: PaymentUIProps) {
   }
   return (
     <section>
-      <h2>{text("payment.channels", "支付渠道")}</h2>
+      <h2>{text("payment.channels", "钱包授权渠道")}</h2>
+      {hardware ? (
+        <p>
+          {text(
+            "signing.hardwareLocal",
+            "请在 RocKey 的渠道设置菜单修改授权和额度；此处仅展示。",
+          )}
+        </p>
+      ) : null}
+      {signing.map((c) => (
+        <div key={c.id}>
+          <p>
+            {c.id} · {c.owner}
+          </p>
+          <p>
+            {c.mode === "automatic"
+              ? text("signing.auto", "自动授权")
+              : text("signing.manual", "人工授权")}
+          </p>
+          {!hardware ? (
+            <Button
+              disabled={busy}
+              onClick={() => {
+                setBusy(true);
+                setError("");
+                void execute({
+                  action: "signing-configure",
+                  id: c.id,
+                  revision: c.revision,
+                  mode: c.mode === "automatic" ? "manual" : "automatic",
+                })
+                  .then(() => execute({ action: "signing-list" }))
+                  .then((v) => setSigning(v as SigningChannel[]))
+                  .catch((e) => setError(String(e)))
+                  .finally(() => setBusy(false));
+              }}
+            >
+              {c.mode === "automatic"
+                ? text("signing.setManual", "改为人工授权")
+                : text("signing.setAuto", "改为自动授权")}
+            </Button>
+          ) : null}
+        </div>
+      ))}
       {error ? <p role="alert">{error}</p> : null}
       {channels.length === 0 ? (
         <p>{text("payment.empty", "尚无已注册的支付渠道")}</p>
@@ -64,7 +126,7 @@ export function PaymentChannelSettings({ execute, text }: PaymentUIProps) {
               {c.defaultSessionLimit}
             </p>
           ) : null}
-          <Button onClick={() => setEditing({ ...c })}>
+          <Button disabled={hardware} onClick={() => setEditing({ ...c })}>
             {text("payment.edit", "修改额度")}
           </Button>
         </div>
@@ -139,6 +201,10 @@ interface Pending {
   recipients: string[];
   fee: string;
   change: string;
+  purpose?: "registration" | "signature";
+  operation?: string;
+  mode?: string;
+  facts?: Record<string, string>;
   pool?: { family: string; stage: string; paid: string; locked: string };
 }
 export function PaymentApprovalDialog({ execute, text }: PaymentUIProps) {
@@ -198,7 +264,18 @@ export function PaymentApprovalDialog({ execute, text }: PaymentUIProps) {
   return (
     <Modal
       open
-      title={text("payment.approval", "付款超过免确认额度")}
+      title={
+        request.purpose
+          ? text(
+              request.purpose === "registration"
+                ? "signing.register"
+                : "signing.approve",
+              request.purpose === "registration"
+                ? "注册签名渠道"
+                : "请求签名授权",
+            )
+          : text("payment.approval", "付款超过免确认额度")
+      }
       onClose={() => {
         if (!busy) void answer(false);
       }}
@@ -210,7 +287,7 @@ export function PaymentApprovalDialog({ execute, text }: PaymentUIProps) {
           <Button disabled={busy} onClick={() => void answer(true)}>
             {text("payment.once", "仅批准本次")}
           </Button>
-          {request.reasons.includes("session-limit") ? (
+          {(request.reasons ?? []).includes("session-limit") ? (
             <Button
               disabled={busy || !raised}
               onClick={() => void answer(true, true)}
@@ -224,72 +301,92 @@ export function PaymentApprovalDialog({ execute, text }: PaymentUIProps) {
       <p>
         {request.owner} · {request.channelId}
       </p>
-      <p>
-        {text("payment.amount", "支付金额（聪）")}：{request.amount}
-      </p>
-      <p>
-        {text("payment.change", "本 Key 找零（聪）")}：{request.change}
-      </p>
-      <p>
-        {text("payment.fee", "矿工费（聪，不计入渠道额度）")}：{request.fee}
-      </p>
-      {request.pool ? (
+      {request.purpose ? (
         <div>
           <p>
-            {text("payment.pool", "费用池")}：
-            {request.pool.family === "connect" ? "Connect" : "BitFS"} ·{" "}
-            {request.pool.stage === "fund"
-              ? text("payment.poolFund", "资金存入")
-              : text("payment.poolState", "累计状态交易")}
+            {request.operation} · {request.mode}
           </p>
-          <p>
-            {text("payment.poolPaid", "池内累计对外付款（聪）")}：
-            {request.pool.paid}
-          </p>
-          <p>
-            {text("payment.poolLocked", "本次存入池内金额（聪）")}：
-            {request.pool.locked}
-          </p>
+          {Object.entries(request.facts ?? {}).map(([k, v]) => (
+            <p key={k} style={{ overflowWrap: "anywhere" }}>
+              {k}: {v}
+            </p>
+          ))}
         </div>
-      ) : null}
-      <p>
-        {text("payment.single", "单笔免确认额度（聪）")}：{request.singleLimit}
-      </p>
-      {request.kind === "app" ? (
-        <p>
-          {text("payment.cumulative", "会话已用／本次后累计／额度")}：
-          {request.used} /{" "}
-          {String(BigInt(request.used) + BigInt(request.amount))} /{" "}
-          {request.sessionLimit}
-        </p>
-      ) : null}
-      <p>
-        {request.reasons
-          .map((r) =>
-            r === "single-limit"
-              ? text("payment.singleExceeded", "超过单笔额度")
-              : r === "session-limit"
-                ? text("payment.sessionExceeded", "超过会话累计额度")
-                : text("payment.disabled", "免确认已关闭"),
-          )
-          .join("；")}
-      </p>
-      <p>{text("payment.outputs", "实际交易输出（含找零）")}</p>
-      <div
-        style={{ maxHeight: 180, overflowY: "auto", overflowWrap: "anywhere" }}
-      >
-        {request.recipients.map((r, i) => (
-          <p key={i}>{r}</p>
-        ))}
-      </div>
-      {request.reasons.includes("session-limit") ? (
-        <TextInput
-          label={text("payment.raise", "提高当前会话累计额度（聪）")}
-          inputMode="numeric"
-          value={raised}
-          onChange={(e) => setRaised(e.currentTarget.value)}
-        />
-      ) : null}
+      ) : (
+        <>
+          <p>
+            {text("payment.amount", "支付金额（聪）")}：{request.amount}
+          </p>
+          <p>
+            {text("payment.change", "本 Key 找零（聪）")}：{request.change}
+          </p>
+          <p>
+            {text("payment.fee", "矿工费（聪，不计入渠道额度）")}：{request.fee}
+          </p>
+          {request.pool ? (
+            <div>
+              <p>
+                {text("payment.pool", "费用池")}：
+                {request.pool.family === "connect" ? "Connect" : "BitFS"} ·{" "}
+                {request.pool.stage === "fund"
+                  ? text("payment.poolFund", "资金存入")
+                  : text("payment.poolState", "累计状态交易")}
+              </p>
+              <p>
+                {text("payment.poolPaid", "池内累计对外付款（聪）")}：
+                {request.pool.paid}
+              </p>
+              <p>
+                {text("payment.poolLocked", "本次存入池内金额（聪）")}：
+                {request.pool.locked}
+              </p>
+            </div>
+          ) : null}
+          <p>
+            {text("payment.single", "单笔免确认额度（聪）")}：
+            {request.singleLimit}
+          </p>
+          {request.kind === "app" ? (
+            <p>
+              {text("payment.cumulative", "会话已用／本次后累计／额度")}：
+              {request.used} /{" "}
+              {String(BigInt(request.used) + BigInt(request.amount))} /{" "}
+              {request.sessionLimit}
+            </p>
+          ) : null}
+          <p>
+            {request.reasons
+              .map((r) =>
+                r === "single-limit"
+                  ? text("payment.singleExceeded", "超过单笔额度")
+                  : r === "session-limit"
+                    ? text("payment.sessionExceeded", "超过会话累计额度")
+                    : text("payment.disabled", "免确认已关闭"),
+              )
+              .join("；")}
+          </p>
+          <p>{text("payment.outputs", "实际交易输出（含找零）")}</p>
+          <div
+            style={{
+              maxHeight: 180,
+              overflowY: "auto",
+              overflowWrap: "anywhere",
+            }}
+          >
+            {request.recipients.map((r, i) => (
+              <p key={i}>{r}</p>
+            ))}
+          </div>
+          {(request.reasons ?? []).includes("session-limit") ? (
+            <TextInput
+              label={text("payment.raise", "提高当前会话累计额度（聪）")}
+              inputMode="numeric"
+              value={raised}
+              onChange={(e) => setRaised(e.currentTarget.value)}
+            />
+          ) : null}
+        </>
+      )}
       {error ? <p role="alert">{error}</p> : null}
     </Modal>
   );

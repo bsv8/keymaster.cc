@@ -108,6 +108,18 @@ export class SoftwarePaymentGate {
     this.assertActive();
     return this.policy.inspectPool(id, binding, paid);
   }
+  registerSigning(...args: Parameters<PaymentPolicy["registerSigning"]>) {
+    this.assertActive();
+    return this.policy.registerSigning(...args);
+  }
+  configureSigning(...args: Parameters<PaymentPolicy["configureSigning"]>) {
+    this.assertActive();
+    return this.policy.configureSigning(...args);
+  }
+  signingChannel(...args: Parameters<PaymentPolicy["signingChannel"]>) {
+    this.assertActive();
+    return this.policy.signingChannel(...args);
+  }
   snapshot() {
     this.assertActive();
     return this.policy.snapshot();

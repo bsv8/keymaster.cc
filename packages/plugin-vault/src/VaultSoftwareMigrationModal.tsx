@@ -16,8 +16,8 @@ export function VaultSoftwareMigrationModal({vault,onClose,recovery=false,passwo
   try{await vault.migrateToHardware(submitted);onClose();}catch(e){const message=e instanceof Error?e.message:String(e);setError(message==='hardware-provision-required'?text('connectionRequired','请先连接 RocKey，核对两端配对码并在 RocKey 上确认。'):message);}finally{setBusy(false);}}
  return <Modal open title={text('title','迁入 RocKey')} onClose={()=>{if(!busy){setPassword('');onClose();}}}
   footer={<><Button variant="ghost" disabled={busy} onClick={onClose}>{text('cancel','取消')}</Button><Button loading={busy} disabled={busy||!connected||(passwordRequired&&!password)} onClick={()=>void submit()}>{text('start','继续迁移')}</Button></>}>
-  <p>{text('instructions','在空 RocKey 上重复设置 PIN，再选择导入。若设备已有本次导入的私钥，请用原 PIN 解锁。核对配对码，随后在设备上重新输入 PIN 并确认同一身份与账本。')}</p>
-  <p>{text('preserve','迁移保留身份、业务数据和额度账本；硬件不保存软件密码封装。完成后钱包锁定，请重新连接并在设备上解锁。')}</p>
+  <p>{text('instructions','空 RocKey 停留在首页即可连接。核对配对码并在设备上确认，随后继续迁移；设备收到原私钥后提示设置并重复确认 PIN，保存成功后才切换为硬件私钥。若设备已保存本次导入的私钥，请用原 PIN 解锁恢复迁移。')}</p>
+  <p>{text('preserve','迁移保留身份、网络、业务数据和渠道账本。只有核验硬件保存成功证明后，才移除软件私钥封装并将当前私钥改为硬件私钥，无需再次添加硬件钱包。')}</p>
   {!recovery?<HardwareConnectionPanel provisioning execute={hardware} onStateChange={connectionChanged} text={(key,fallback)=>t(`vault.hardware.${key}`,{defaultValue:fallback})}/>:null}
   {!connected&&!busy?<p role="status">{text('connectionRequired','请先连接 RocKey，核对两端配对码并在 RocKey 上确认。')}</p>:null}
   {!busy&&passwordRequired?<TextInput type="password" label={text('password','当前软件钱包密码')} value={password} onChange={e=>setPassword(e.currentTarget.value)} autoComplete="current-password"/>:null}

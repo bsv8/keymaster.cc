@@ -17,7 +17,7 @@ export function HardwareConnectionPanel({ execute, text, enrollmentLabel, preser
   /** User reports the old hardware key is already erased. The Worker still
    * requires a validated local-committed journal and a separate receipt-only connection. */
   erasedRecovery?:boolean;
-  /** 仅正常钱包激活后的欢迎页卸载保留连接；用户返回/关闭仍释放租约。 */
+  /** 欢迎页把 USB 租约交给 Worker 后卸载仍保留连接，不依赖状态广播顺序；调用方主动返回须 disconnect。 */
   preserveConnectionOnUnmount?(): boolean;
 }) {
   const [state, setState] = useState<HardwareConnectionState>({ status: "disconnected" });
@@ -38,11 +38,17 @@ export function HardwareConnectionPanel({ execute, text, enrollmentLabel, preser
       finally { reading = false; }
     };
     void refresh(); const timer = setInterval(() => void refresh(), 750);
-    const close = () => { const current = bridge.current; bridge.current = undefined; if (current && (!transferred.current || !preserve.current?.())) void current.close(); };
+    const close = () => {
+      const current = bridge.current; bridge.current = undefined;
+      // 首次绑定会切换欢迎页，可能早于页面的 unlocked 投影更新。
+      // 已转交的 enrollment 租约归 Window/Worker；主动返回须显式 disconnect。
+      const retained = enrollmentLabel !== undefined || preserve.current?.();
+      if (current && (!transferred.current || !retained)) void current.close();
+    };
     // attach 后由 Window bridge 的 pagehide 与 Worker close 管理租约。
     // 正常解锁会卸载登录页，不能因此又关闭设备、把钱包锁回去。
     return () => { generation.current++; clearInterval(timer); close(); };
-  }, [execute]);
+  }, [execute, enrollmentLabel]);
 
   async function connect() {
     const captured = generation.current;

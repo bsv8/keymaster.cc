@@ -17,12 +17,12 @@ export async function startActualMigrationDevice(options={}) {
  child.stderr.setEncoding('utf8');child.stderr.on('data',s=>log+=s);
  const pub='0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798';
  const transport={async read(){const v=await reader.next();return v.done?null:new Uint8Array(v.value);},async write(b){if(!child.stdin.write(b))await once(child.stdin,'drain');},async close(){child.stdin.end();}};
- return {transport,pub,approvePair(){child.kill('SIGUSR2');},armExport(){child.kill('SIGUSR1');},log:()=>log,async close(){child.stdin.end();const timer=setTimeout(()=>child.kill('SIGKILL'),3000);try{const [code]=await exited;if(code!==0)throw Error(log);}finally{clearTimeout(timer);await rm(dir,{recursive:true,force:true});}}};
+ return {transport,pub,approvePair(){child.kill('SIGUSR2');},scrollReview(){child.kill('SIGUSR1');},armExport(){child.kill('SIGUSR1');},log:()=>log,async close(){child.stdin.end();const timer=setTimeout(()=>child.kill('SIGKILL'),3000);try{const [code]=await exited;if(code!==0)throw Error(log);}finally{clearTimeout(timer);await rm(dir,{recursive:true,force:true});}}};
 }
 export async function openActualMigrationDevice(Backend,options={}) {
  const device=await startActualMigrationDevice(options);let backend;
  try{backend=await Backend.connect(device.transport,
-   {bsvNetwork: "main", ...(options.journal?{journal:options.journal}:{}),publicKeyHex:device.pub,generations:{walletGeneration:1,backendGeneration:1,hostRunGeneration:1},assertActive(){}},async()=>true);
+   {bsvNetwork: options.bsvNetwork??"main", ...(options.journal?{journal:options.journal}:{}),publicKeyHex:device.pub,generations:{walletGeneration:1,backendGeneration:1,hostRunGeneration:1},assertActive(){}},async()=>true);
  }catch(e){await device.close();throw Error(String(e)+"\n"+device.log(),{cause:e});}
  return {...device,backend,async close(){await backend.close().catch(()=>{});await device.close();}};
 }

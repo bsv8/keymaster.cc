@@ -125,3 +125,52 @@ test('test identity retains only test payment channels and refuses a main ledger
   const reopened=await WalletPayments.open(files,hex(key.publicKey()),()=>{},signer,'test');reopened.close();
  }finally{wallet.close();await rm(dir,{recursive:true,force:true});}
 });
+
+test('签名渠道使用真实磁盘与签名：人工否决、设置修订撤权、重启保留和网络隔离',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'km-signing-policy-')),file=join(dir,'policy');
+ const files={async get(){try{const bytes=new Uint8Array(await readFile(file));return {bytes,revision:revision(bytes)};}catch(e){if(e.code==='ENOENT')return;throw e;}},async put(_p,bytes,c){const old=await this.get();if(c.ifNoneMatch&&old||c.ifRevision&&c.ifRevision!==old?.revision)throw Error('revision-conflict');await writeFile(file+'.tmp',bytes);await rename(file+'.tmp',file);return {revision:revision(bytes)};}};
+ const digest=new Uint8Array(32).fill(17);let signs=0;
+ const signer=async()=>{signs++;return secp256k1.sign(digest,secret,{prehash:false,lowS:true,format:'der'});};
+ let wallet=await WalletPayments.open(files,hex(key.publicKey()),()=>{},signer,'test');
+ try{
+  const first=wallet.authorizeSignature('identity.noise-proof',signer);
+  const register=await pending(wallet);assert.equal(register.purpose,'registration');assert.equal(signs,0);
+  await wallet.handle({action:'answer',id:register.id,allow:true});const signature=await first;
+  assert.equal(secp256k1.verify(signature,digest,key.publicKey(),{prehash:false,format:'der'}),true);assert.equal(signs,1);
+  let [channel]=await wallet.handle({action:'signing-list'});
+  await wallet.handle({action:'signing-configure',id:channel.id,mode:'manual',revision:channel.revision});
+  wallet.close();wallet=await WalletPayments.open(files,hex(key.publicKey()),()=>{},signer,'test');
+  [channel]=await wallet.handle({action:'signing-list'});assert.equal(channel.mode,'manual');assert.equal(channel.revision,2);
+  const denied=wallet.authorizeSignature(channel.id,signer);const denial=assert.rejects(denied,/denied/);const request=await pending(wallet);
+  await wallet.handle({action:'answer',id:request.id,allow:false});await denial;assert.equal(signs,1);
+  const stale=wallet.authorizeSignature(channel.id,signer);const revoked=assert.rejects(stale,/permission-revoked/);const waiting=await pending(wallet);
+  await wallet.handle({action:'signing-configure',id:channel.id,mode:'automatic',revision:2});await wallet.handle({action:'answer',id:waiting.id,allow:true});await revoked;assert.equal(signs,1);
+  await wallet.authorizeSignature(channel.id,signer);assert.equal(signs,2);
+  wallet.close();await assert.rejects(WalletPayments.open(files,hex(key.publicKey()),()=>{},signer,'main'),/network-identity-mismatch/);
+ }finally{wallet.close();await rm(dir,{recursive:true,force:true});}
+});
+
+
+test('软件 Connect/BitFS 使用各自语义渠道，验证完整文档、网络与真实签名，不降为摘要渠道',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'km-typed-signing-')),file=join(dir,'policy');
+ const files={async get(){try{const bytes=new Uint8Array(await readFile(file));return {bytes,revision:revision(bytes)};}catch(e){if(e.code==='ENOENT')return;throw e;}},async put(_p,bytes,c){const old=await this.get();if(c.ifNoneMatch&&old||c.ifRevision&&c.ifRevision!==old?.revision)throw Error('revision-conflict');await writeFile(file+'.tmp',bytes);await rename(file+'.tmp',file);return {revision:revision(bytes)};}};
+ let count=0;const signer=async digest=>{count++;return secp256k1.sign(digest,secret,{prehash:false,lowS:true,format:'der'});};
+ const wallet=await WalletPayments.open(files,hex(key.publicKey()),()=>{},signer,'test');
+ async function allowManual(promise,operation){for(const purpose of ['registration','signature']){const p=await pending(wallet);assert.equal(p.operation,operation);assert.equal(p.purpose,purpose);await wallet.handle({action:'answer',id:p.id,allow:true});}return promise;}
+ try{
+  const env=encode([2,'actual-request','https://app.example',100,200,'',key.publicKey(),[],'test']);
+  const compact=await allowManual(wallet.signConnectEnvelope('identity',env,undefined,'app-connection'),'connect.identity-sign');
+  assert.equal(secp256k1.verify(compact,await sha256(env),key.publicKey(),{prehash:false,format:'compact'}),true);
+  const content=new TextEncoder().encode('actual intent'),intent=encode([2,'actual-intent','https://app.example',100,200,'','text/plain',await sha256(content),key.publicKey(),'test']);
+  await assert.rejects(wallet.signConnectEnvelope('intent',intent,new Uint8Array(),'app-connection'),/invalid-content/);
+  const intentSignature=await allowManual(wallet.signConnectEnvelope('intent',intent,content,'app-connection'),'connect.intent-sign');
+  assert.equal(secp256k1.verify(intentSignature,await sha256(intent),key.publicKey(),{prehash:false,format:'compact'}),true);
+  const document=encode([new Uint8Array(32).fill(3),new Uint8Array(32).fill(4)]);
+  const signature=await allowManual(wallet.signBitfsWire(10,document),'bitfs.wire-sign');
+  assert.equal(secp256k1.verify(signature,await bitfsWireDigest(10,document),key.publicKey(),{prehash:false,format:'der'}),true);
+  await assert.rejects(wallet.signBitfsWire(5,document),/payment-context-required/);
+  await assert.rejects(wallet.signConnectEnvelope('identity',encode([2,'actual-request','https://app.example',100,200,'',key.publicKey(),[],'main']),undefined,'app-connection'),/network-identity-mismatch/);
+  const channels=await wallet.handle({action:'signing-list'});assert.deepEqual(channels.map(c=>[c.id,c.owner]),[['connect.identity-sign','connect'],['connect.intent-sign','connect'],['bitfs.wire-sign','bitfs']]);
+  assert.equal(count,3);const cancelled=wallet.signConnectEnvelope('identity',env,undefined,'app-connection');const rejected=assert.rejects(cancelled,/denied|payment-cancelled/);const waiting=await pending(wallet);assert.equal(waiting.sessionId,'app-connection');await wallet.handle({action:'session-cancel',id:'app-connection'});await rejected;assert.deepEqual(await wallet.handle({action:'pending'}),[]);await assert.rejects(wallet.signConnectEnvelope('identity',env,undefined,'app-connection'),/payment-cancelled/);assert.equal(count,3);
+ }finally{wallet.close();await rm(dir,{recursive:true,force:true});}
+});

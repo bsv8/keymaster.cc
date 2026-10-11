@@ -210,12 +210,11 @@ test.each(["attach", "enroll", "attach-close"] as const)("正式 Coordinator：%
     const config = appChannels.find(channel => channel.id === first.channelId)!;
     const secondConfig = appChannels.find(channel => channel.id === second.channelId)!;
     expect(secondConfig.owner).toBe(config.owner);
-    for (const channel of [config, secondConfig]) {
-      // 修改同 owner 的默认会话额度会推进其所有渠道的 revision；下一项重新读真值。
-      const currentChannels = await vault({type:"payment",command:{action:"list"}}) as import("@keymaster/contracts").WalletPaymentChannel[];
-      const current = currentChannels.find(value => value.id === channel.id)!;
-      await vault({type:"payment",command:{action:"configure",channel:{...current,singleLimit:"400",defaultSessionLimit:"500",revision:current.revision + 1}}});
-    }
+    const rejectedId=crypto.randomUUID();
+    await __testDispatchStorageMessage("hardware-page",{kind:"vault.operation",requestId:rejectedId,clientId:"hardware-page",expectedSessionEpoch:__testGetSnapshot().sessionEpoch,operation:{type:"payment",command:{action:"configure",channel:{...config,singleLimit:"400",defaultSessionLimit:"500",revision:config.revision+1}}}});
+    expect(responses.get(rejectedId)?.ack).toMatchObject({status:"error",message:"hardware-settings-local"});
+    // 宿主测试流程注入本机设置 API，真实 Policy 落盘；不经主机配置命令。
+    child.kill("SIGUSR1");await expect.poll(()=>stderr).toContain("host-settings:saved");
     const sessionId = connectSessionId;
     await vault({type:"payment",command:{action:"session-open",id:sessionId,owner:config.owner}});
     const key = new DeviceIdentityKey(Uint8Array.from([...new Uint8Array(31),1]));

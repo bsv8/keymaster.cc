@@ -743,7 +743,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   async vaultOperation<O extends CoordinatorVaultOperation>(operation: O): Promise<CoordinatorValueResult<CoordinatorVaultOperationResultFor<O>>> {
     const request = { kind: "vault.operation" as const, clientId: this.clientId, requestId: this.generateRequestId(), operation, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
     try {
-      const response = await this.sendRequest(request);
+      const awaitingWallet = operation.type === "hardware" || operation.type === "migrateToHardware" || operation.type === "migrateToSoftware" || operation.type === "sealLocalSecret" || operation.type === "openLocalSecret" || operation.type === "payment" && ["register","session-open","sign-p2pkh","sign-standard","sign-feepool"].includes(operation.command.action);
+      const response = await this.sendRequest(request, awaitingWallet ? 300_000 : undefined);
       if (response.ack.status !== "ok") return response.ack;
       return {
         status: "ok",
@@ -767,7 +768,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch,
     } as const;
     try {
-      const response = await this.sendRequest(request);
+      const response = await this.sendRequest(request, operation.type === "signDigest" || operation.type === "signConnectEnvelope" ? 300_000 : undefined);
       if (response.ack.status !== "ok" || !response.cryptoResult) return { ack: response.ack };
       return { ack: response.ack, result: response.cryptoResult };
     } catch (cause) {
@@ -1051,7 +1052,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       if (signal?.aborted) return { status: "transport-error", message: "Noise signer request cancelled", retryable: false };
       onAbort = () => { void this.msfileCancel(request.requestId); };
       signal?.addEventListener("abort", onAbort, { once: true });
-      const response = await this.sendRequest(request);
+      const response = await this.sendRequest(request, 300_000);
       if (signal?.aborted) return { status: "transport-error", message: "Noise signer request cancelled", retryable: false };
       if (response.ack.status !== "ok") return response.ack;
       return { status: "ok", value: requiredCoordinatorOperationResult(response, request.kind), sessionEpoch: response.sessionEpoch };
@@ -1067,7 +1068,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       if (signal?.aborted) return { status: "transport-error", message: "Peer Record signer request cancelled", retryable: false };
       onAbort = () => { void this.msfileCancel(request.requestId); };
       signal?.addEventListener("abort", onAbort, { once: true });
-      const response = await this.sendRequest(request);
+      const response = await this.sendRequest(request, 300_000);
       if (signal?.aborted) return { status: "transport-error", message: "Peer Record signer request cancelled", retryable: false };
       if (response.ack.status !== "ok") return response.ack;
       return { status: "ok", value: requiredCoordinatorOperationResult(response, request.kind), sessionEpoch: response.sessionEpoch };

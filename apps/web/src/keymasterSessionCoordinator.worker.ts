@@ -2988,9 +2988,9 @@ function dropActivePrivateKey(): void { vaultKeySession.clear(); }
 let walletPayments: WalletPayments | HardwareWalletPayments | undefined;
 let walletPaymentsOpening: Promise<WalletPayments | HardwareWalletPayments> | undefined;
 async function currentWalletPayments(): Promise<WalletPayments | HardwareWalletPayments> {
-  const owner = coordinatorState.activePublicKeyHex, epoch = coordinatorState.sessionEpoch;
+  const owner = coordinatorState.activePublicKeyHex, epoch = coordinatorState.sessionEpoch, network=requireCoordinatorNetworkIdentity().bsvNetwork;
   const assertActive = () => {
-    if (!owner || coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex !== owner || coordinatorState.sessionEpoch !== epoch) throw new Error("Payment wallet session became stale");
+    if (!owner || coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex !== owner || coordinatorState.sessionEpoch !== epoch || requireCoordinatorNetworkIdentity().bsvNetwork!==network) throw new Error("Payment wallet session became stale");
   };
   assertActive();
   if (walletPayments) return walletPayments;
@@ -3009,6 +3009,12 @@ async function currentWalletPayments(): Promise<WalletPayments | HardwareWalletP
   walletPaymentsOpening = pending;
   try { const ready = await pending; assertActive(); walletPayments = ready; return ready; }
   finally { if (walletPaymentsOpening === pending) walletPaymentsOpening = undefined; }
+}
+
+/** 软件签名策略只在钱包核心执行，业务侧不能传入“已授权”布尔值。 */
+async function authorizeSoftwareSignature<T>(operation:string,sign:()=>Promise<T>|T,signal?:AbortSignal,facts:Record<string,string>={}):Promise<T>{
+  const wallet=await currentWalletPayments();if(!(wallet instanceof WalletPayments))throw Error("software-source-required");
+  return wallet.authorizeSignature(operation,sign,signal,facts);
 }
 
 /**
@@ -3272,14 +3278,15 @@ let vaultCryptoProviderScope: import("webloom-framework").LifecycleScope | undef
 const workerSessionCryptoFactory = createWorkerActiveKeyCryptoFactory({
   summary: coordinatorActiveKeySummary,
   async signBitfsWire(input,signal) {
-    assertActiveWalletIdentity(input.publicKeyHex);if(activeKeyBackend!=="hardware")throw Error("hardware-profile-required");
-    const signature=await hardwareConnections.backend().signBitfsWire(input.kind,new Uint8Array(input.document),signal);
+    assertActiveWalletIdentity(input.publicKeyHex);
+    const wallet=await currentWalletPayments();
+    const signature=await (wallet instanceof WalletPayments ? wallet.signBitfsWire(input.kind,new Uint8Array(input.document),signal) : hardwareConnections.backend().signBitfsWire(input.kind,new Uint8Array(input.document),signal));
     assertActiveWalletIdentity(input.publicKeyHex);return {publicKeyHex:input.publicKeyHex,format:"der",signature:new Uint8Array(signature).buffer};
   },
   async signConnectEnvelope(input) {
     assertActiveWalletIdentity(input.publicKeyHex);
-    if(activeKeyBackend!=="hardware")throw new Error("hardware-profile-required");
-    const signature=await hardwareConnections.backend().signConnectEnvelope(input.kind,new Uint8Array(input.envelope),input.content ? new Uint8Array(input.content) : undefined,input.appSessionId);
+    const wallet=await currentWalletPayments();
+    const signature=await (wallet instanceof WalletPayments ? wallet.signConnectEnvelope(input.kind,new Uint8Array(input.envelope),input.content ? new Uint8Array(input.content) : undefined,input.appSessionId) : hardwareConnections.backend().signConnectEnvelope(input.kind,new Uint8Array(input.envelope),input.content ? new Uint8Array(input.content) : undefined,input.appSessionId));
     assertActiveWalletIdentity(input.publicKeyHex);
     return {publicKeyHex:input.publicKeyHex,format:"compact",signature:signature.slice().buffer as ArrayBuffer};
   },
@@ -3289,7 +3296,7 @@ const workerSessionCryptoFactory = createWorkerActiveKeyCryptoFactory({
     signDigest: (digest, format, publicKeyHex) => {
       assertActiveWalletIdentity(publicKeyHex);
       if (activeKeyBackend === "hardware") throw new Error("hardware-profile-required");
-      return vaultKeySession.signDigest(digest, format, publicKeyHex);
+      return authorizeSoftwareSignature("software.digest-sign",()=>vaultKeySession.signDigest(digest, format, publicKeyHex),undefined,{digest:bytesToHex(digest)});
     },
   },
   withIoLease(operation, execute) {
@@ -4260,9 +4267,9 @@ const hardwareChannel = createHardwareChannelAdapter(() => hardwareConnections.b
   return coordinatorState.activePublicKeyHex;
 });
 const channelSigner = {
-  signHash: (...args: Parameters<typeof hardwareChannel.signHash>) => activeKeyBackend === "hardware" ? hardwareChannel.signHash(...args) : vaultKeySession.signHash(args[0]),
-  signPublic: (...args: Parameters<typeof hardwareChannel.signPublic>) => activeKeyBackend === "hardware" ? hardwareChannel.signPublic(...args) : vaultKeySession.signPublic(args[0]),
-  signPrivate: (...args: Parameters<typeof hardwareChannel.signPrivate>) => activeKeyBackend === "hardware" ? hardwareChannel.signPrivate(...args) : vaultKeySession.signPrivate(args[0]),
+  signHash: (...args: Parameters<typeof hardwareChannel.signHash>) => activeKeyBackend === "hardware" ? hardwareChannel.signHash(...args) : authorizeSoftwareSignature("channel.hash-request",()=>vaultKeySession.signHash(args[0]),args[1]),
+  signPublic: (...args: Parameters<typeof hardwareChannel.signPublic>) => activeKeyBackend === "hardware" ? hardwareChannel.signPublic(...args) : authorizeSoftwareSignature("channel.public-message",()=>vaultKeySession.signPublic(args[0]),args[1]),
+  signPrivate: (...args: Parameters<typeof hardwareChannel.signPrivate>) => activeKeyBackend === "hardware" ? hardwareChannel.signPrivate(...args) : authorizeSoftwareSignature("channel.private-message",()=>vaultKeySession.signPrivate(args[0]),args[1]),
   seal: (...args: Parameters<typeof hardwareChannel.seal>) => activeKeyBackend === "hardware" ? hardwareChannel.seal(...args) : vaultKeySession.seal(args[0]),
 };
 const openChannelPrivate = (channel: string, envelope: string | Uint8Array, signal?: AbortSignal) =>
@@ -5503,7 +5510,7 @@ async function executeWindowP2pExecutorIdentitySign(
     () => activeKeyBackend === "hardware"
       ? hardwareConnections.backend().signNetworkIdentity(request.kind === "window-p2p.executor.identity.sign-noise" ? "noise" : "peer-record",
           request.kind === "window-p2p.executor.identity.sign-noise" ? {staticKey:new Uint8Array(request.noiseStaticPublicKey)} : {sequence:request.sequence}, signal)
-      : vaultKeySession.signDigest(digest, "der", publicKeyHex),
+      : authorizeSoftwareSignature(request.kind === "window-p2p.executor.identity.sign-noise"?"identity.noise-proof":"identity.peer-record",()=>vaultKeySession.signDigest(digest, "der", publicKeyHex),signal,{digest:bytesToHex(digest)}),
     {
       auditOperation: "window-p2p.identity.sign",
       // Window P2P 身份签名只用于建立当前 executor 的本地握手，不会把
@@ -6462,13 +6469,15 @@ function hasActiveWalletCrypto(): boolean {
 async function executeActiveWalletCrypto(operation: CoordinatorCryptoOperation): Promise<CoordinatorCryptoResult> {
   assertActiveWalletIdentity();
   if(operation.type==="signConnectEnvelope") {
-    if(activeKeyBackend!=="hardware")throw new Error("hardware-profile-required");
-    const signature=await hardwareConnections.backend().signConnectEnvelope(operation.kind,operation.envelope,operation.content,operation.appSessionId);
+    const wallet=await currentWalletPayments();
+    const signature=await (wallet instanceof WalletPayments ? wallet.signConnectEnvelope(operation.kind,operation.envelope,operation.content,operation.appSessionId) : hardwareConnections.backend().signConnectEnvelope(operation.kind,operation.envelope,operation.content,operation.appSessionId));
     assertActiveWalletIdentity();
     return {type:operation.type,signatureHex:bytesToHex(signature),format:"compact"};
   }
   if (operation.type === "deriveP2pkhAddress" && operation.network !== requireCoordinatorNetworkIdentity().bsvNetwork) throw Error("network-identity-mismatch");
-  if (activeKeyBackend !== "hardware") return vaultKeySession.execute(operation);
+  if (activeKeyBackend !== "hardware") return operation.type==="signDigest"
+    ? authorizeSoftwareSignature("software.digest-sign",()=>vaultKeySession.execute(operation),undefined,{digest:operation.digestHex})
+    : vaultKeySession.execute(operation);
   // 地址派生只用已经核验的公钥；所有私钥运算必须走明确的设备语义 Profile。
   if (operation.type === "deriveP2pkhAddress") {
     if(operation.network!==requireCoordinatorNetworkIdentity().bsvNetwork)throw Error("network-identity-mismatch");

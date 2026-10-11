@@ -93,8 +93,8 @@ const vaultResources: I18nPluginResources = {
       "vault.import.connectionRequired": "Connect RocKey, compare the pairing codes on both screens, then confirm on RocKey.",
       "vault.import.password": "Current software wallet password",
       "vault.import.pending": "Migrating. Keep USB connected and follow the device prompts.",
-      "vault.import.instructions": "Set and repeat a PIN locally on an empty RocKey, then choose import. If this migration already wrapped the key, unlock it using its PIN. Match pairing codes and confirm the identity and ledger on the device.",
-      "vault.import.preserve": "Identity, business data and spending ledger are preserved. The software password envelope is not kept on hardware. After completion, reconnect and unlock the device.",
+      "vault.import.instructions": "Connect an empty RocKey from its home screen and verify the pairing code on the device. Continue migration; after receiving the key, RocKey asks you to set and repeat a PIN before saving. Unlock an already saved import with its original PIN to resume.",
+      "vault.import.preserve": "Identity, network, business data and channel ledger are preserved. Only after verifying the hardware save proof does Keymaster replace the software envelope with the hardware backend. No second hardware-wallet enrollment is needed.",
 
       "vault.migration.erasedInstructions":"The old device key is absent. Match the pairing code and migration record. Confirm any remaining cleanup on the device.",
       "vault.migration.action": "Move back to software wallet",
@@ -264,8 +264,8 @@ const vaultResources: I18nPluginResources = {
       "vault.import.connectionRequired": "请先连接 RocKey，核对两端配对码并在 RocKey 上确认。",
       "vault.import.password": "当前软件钱包密码",
       "vault.import.pending": "正在迁移，请保持 USB 连接并按设备提示确认。",
-      "vault.import.instructions": "在空 RocKey 上重复设置 PIN，再选择导入。若设备已有本次导入的私钥，请用原 PIN 解锁。核对配对码，随后在设备上重新输入 PIN 并确认同一身份与账本。",
-      "vault.import.preserve": "迁移保留身份、业务数据和额度账本；硬件不保存软件密码封装。完成后钱包锁定，请重新连接并在设备上解锁。",
+      "vault.import.instructions": "空 RocKey 停留在首页即可连接。核对配对码并在设备上确认，随后继续迁移；设备收到原私钥后提示设置并重复确认 PIN，保存成功后才切换为硬件私钥。若设备已保存本次导入的私钥，请用原 PIN 解锁恢复迁移。",
+      "vault.import.preserve": "迁移保留身份、网络、业务数据和渠道账本。只有核验硬件保存成功证明后，才移除软件私钥封装并将当前私钥改为硬件私钥，无需再次添加硬件钱包。",
 
       "vault.migration.erasedInstructions":"原设备已无旧私钥。请核对配对码和迁移记录；如仍需清理，请在设备上确认。",
       "vault.migration.action": "迁回软件钱包",

@@ -99,6 +99,14 @@ export function VaultWalletEntry() {
     setMode("first-time-import");
   }
 
+  async function leaveHardwareEnrollment() {
+    try {
+      const connection = await hardware({ action: "state" });
+      if (connection.leaseId) await hardware({ action: "disconnect", leaseId: connection.leaseId });
+      setMode("welcome");
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+  }
+
   function backToWelcome() {
     setPassword("");
     setConfirm("");
@@ -218,7 +226,8 @@ export function VaultWalletEntry() {
   if (mode === "hardware-new") return <OnboardingShell width="narrow">
     <PageHeader title={t("vault.hardware.title", {defaultValue: "连接硬件钱包"})} />
     <HardwareConnectionPanel preserveConnectionOnUnmount={preserveHardwareConnection} execute={hardware} enrollmentLabel="RocKey" text={(key, fallback) => t(`vault.hardware.${key}`, {defaultValue: fallback})} />
-    <Button variant="ghost" onClick={() => setMode("welcome")}>{t("common.back", {defaultValue: "返回"})}</Button>
+    <Button variant="ghost" onClick={() => void leaveHardwareEnrollment()}>{t("common.back", {defaultValue: "返回"})}</Button>
+    {error ? <p role="alert">{error}</p> : null}
   </OnboardingShell>;
 
   // ---------- 新建钱包：设置 Key 密码 ----------

@@ -719,8 +719,9 @@ const p2pkhPluginDefinition = {
     let protectionRestore: Promise<void> = Promise.resolve();
     let protectionRestoreOwner: string | undefined;
     const startProtectionRestore = (): Promise<void> => {
-      const owner = walletState.snapshot().activePublicKeyHex;
-      if (typeof owner !== "string" || owner.length === 0) {
+      const snapshot = walletState.snapshot();
+      const owner = snapshot.activePublicKeyHex;
+      if (snapshot.status !== "unlocked" || typeof owner !== "string" || owner.length === 0) {
         protectionRestoreOwner = undefined;
         return Promise.resolve();
       }
@@ -731,14 +732,11 @@ const p2pkhPluginDefinition = {
       protectionRestore = (fundingService.restoreProtections?.({ ownerPublicKeyHex: normalized, network: "main" }) ?? Promise.resolve({ restored: 0, unreadable: [] }))
         .then((outcome) => {
           if (outcome.unreadable.length > 0) throw new Error(`专用资金保护恢复失败：${outcome.unreadable.join("、")}`);
-        })
-        .catch((error: unknown) => {
-          // 门禁保持 rejected：选币会失败，而不是在没有保护的情况下放行。
-          protectionRestore = Promise.reject(error instanceof Error ? error : new Error(String(error)));
-          throw error;
         });
-      // 避免未处理的 rejection：真正 await 它的是选币门禁。
-      protectionRestore.catch(() => undefined);
+      // 只观察这同一个 Promise：它保持 rejected，选币仍会被阻断。
+      // 不在 catch 内新建 Promise.reject；那会产生无人观察的第二次拒绝，
+      // 并可能把上一会话迟到的失败写回新会话的恢复门禁。
+      void protectionRestore.catch(() => undefined);
       return protectionRestore;
     };
 

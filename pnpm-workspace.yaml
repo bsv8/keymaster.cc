@@ -3,6 +3,7 @@ packages:
   - "packages/*"
   - "Coding/keymaster/vaultlink-integration"
   - "Coding/keymaster/vaultlink-sdk"
+  - "Coding/keymaster/p2p-host"
 
 linkWorkspacePackages: true
 

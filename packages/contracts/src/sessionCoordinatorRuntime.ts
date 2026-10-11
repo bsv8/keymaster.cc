@@ -1285,14 +1285,18 @@ function parseVaultOperation(value: unknown): CoordinatorVaultOperation {
     }
     case "payment": {
       const command = expectRecord(operation.command, "payment.command");
-      const action = enumValue(command.action, ["list", "pending", "register", "configure", "session-open", "session-close", "session-cancel", "answer", "sign-p2pkh", "sign-standard", "sign-feepool"] as const, "payment.action");
+      const action = enumValue(command.action, ["backend", "signing-list", "signing-configure", "list", "pending", "register", "configure", "session-open", "session-close", "session-cancel", "answer", "sign-p2pkh", "sign-standard", "sign-feepool"] as const, "payment.action");
       const id = (key: string) => text(command[key], `payment.${key}`, 96);
       const amount = (v: unknown): string => {
         const s = text(v, "payment.amount", 20);
         if (!/^(0|[1-9][0-9]*)$/.test(s) || BigInt(s) > 0xffffffffffffffffn) throw new TypeError("payment amount is invalid");
         return s;
       };
-      if (action === "list" || action === "pending") return {type, command: {action}};
+      if (action === "list" || action === "pending" || action === "backend" || action === "signing-list") return {type, command: {action}};
+      if(action==="signing-configure"){
+        const n=command.revision;if(typeof n!=="number"||!Number.isSafeInteger(n)||n<1||n>=0xffffffff)throw new TypeError("invalid signing revision");
+        return {type,command:{action,id:id("id"),mode:enumValue(command.mode,["automatic","manual"] as const,"signing.mode"),revision:n}};
+      }
       if (action === "register") return {type, command: {action, id: id("id"), owner: id("owner"), kind: enumValue(command.kind, ["app", "plugin"] as const, "payment.kind"), network: id("network"), paymentType: id("paymentType")}};
       if (action === "configure") {
         const c = expectRecord(command.channel, "payment.channel");

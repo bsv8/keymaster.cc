@@ -7,7 +7,7 @@ import type { WalletPaymentCommand } from "./wallet-payments.js";
 export async function signProtocolPayment(input: {
   rawTxHex: string; prevTransactionHexes: string[]; publicKeyHex: string;
   network: "main" | "test"; pluginId: string;
-  requestPayment(command: Exclude<WalletPaymentCommand, {action: "list" | "pending"} | {action: "configure"} | {action: "answer"}>): Promise<unknown>;
+  requestPayment(command: Exclude<WalletPaymentCommand, {action: "list" | "pending" | "backend" | "signing-list"} | {action:"signing-configure"} | {action: "configure"} | {action: "answer"}>): Promise<unknown>;
 }): Promise<string> {
   if (!/^[a-z][a-z0-9.-]{0,63}$/.test(input.pluginId)) throw Error("invalid-payment-owner");
   const raw = unhex(input.rawTxHex), previous = input.prevTransactionHexes.map(unhex), pub = unhex(input.publicKeyHex), tx = parseTransaction(raw);

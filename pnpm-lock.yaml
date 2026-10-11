@@ -100,6 +100,24 @@ importers:
         specifier: 0.6.0
         version: 0.6.0(react@18.3.1)
 
+  Coding/keymaster/p2p-host:
+    dependencies:
+      '@chainsafe/libp2p-noise':
+        specifier: 17.0.0
+        version: 17.0.0
+      '@chainsafe/libp2p-yamux':
+        specifier: 8.0.1
+        version: 8.0.1
+      '@libp2p/identify':
+        specifier: 4.1.13
+        version: 4.1.13
+      bitcoin-libp2p:
+        specifier: 0.3.1
+        version: 0.3.1(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+      libp2p:
+        specifier: 3.3.9
+        version: 3.3.9
+
   Coding/keymaster/vaultlink-integration:
     dependencies:
       '@keymaster/contracts':
@@ -118,6 +136,15 @@ importers:
         specifier: ^18.3.1
         version: 18.3.1
     devDependencies:
+      '@keymaster/p2p-host':
+        specifier: workspace:*
+        version: link:../p2p-host
+      '@libp2p/websockets':
+        specifier: 10.1.20
+        version: 10.1.20
+      '@multiformats/multiaddr':
+        specifier: 13.0.3
+        version: 13.0.3
       go-bitfs:
         specifier: 0.3.2
         version: 0.3.2(patch_hash=139242f5c4336bb73687e66f534bbb5804bd7e4bf0f416fecc5ea8cda9a3158f)(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
@@ -795,6 +822,9 @@ importers:
       '@keymaster/contracts':
         specifier: '*'
         version: link:../contracts
+      '@keymaster/p2p-host':
+        specifier: workspace:*
+        version: link:../../Coding/keymaster/p2p-host
       '@keymaster/runtime':
         specifier: '*'
         version: link:../runtime
@@ -5045,7 +5075,7 @@ snapshots:
   '@libp2p/websockets@10.1.20':
     dependencies:
       '@libp2p/interface': 3.3.0
-      '@libp2p/utils': 7.4.0
+      '@libp2p/utils': 7.4.1
       '@multiformats/multiaddr': 13.0.3
       '@multiformats/multiaddr-matcher': 3.0.2
       '@multiformats/multiaddr-to-uri': 12.0.0

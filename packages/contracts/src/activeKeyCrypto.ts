@@ -72,9 +72,9 @@ export interface ActiveKeyCryptoDeriveP2pkhAddressResult {
 
 export interface ActiveKeyCrypto {
   getIdentity(): ActiveKeyCryptoIdentity;
-  /** Hardware signs a parsed Connect envelope; software providers retain their existing digest capability. */
+  /** 软件和硬件都按完整 Connect 正文使用专属签名渠道；网络身份随信封认证。 */
   signConnectEnvelope?(input: {publicKeyHex: string; kind: "identity" | "intent"; envelope: ArrayBuffer; content?: ArrayBuffer; appSessionId: string}): Promise<ActiveKeyCryptoSignDigestResult>;
-  /** Worker hardware provider: parses the exact existing BitFS authentication document. */
+  /** Worker 钱包解析完整 BitFS 认证文档；涉金额授权仍走支付账本。 */
   signBitfsWire?(input:{publicKeyHex:string;kind:number;document:ArrayBuffer},signal?:AbortSignal):Promise<ActiveKeyCryptoSignDigestResult>;
   signDigest(input: ActiveKeyCryptoSignDigestInput): Promise<ActiveKeyCryptoSignDigestResult>;
   deriveP2pkhAddress(

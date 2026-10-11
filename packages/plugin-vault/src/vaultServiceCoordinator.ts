@@ -337,14 +337,14 @@ export class VaultServiceCoordinator implements InternalVaultService {
     };
     return {
       getIdentity: () => { guard(); return { ...requireUnlockedWalletIdentity(issuedSession), sessionId }; },
-      ...(issuedSession.activeKeyIdentity?.backend === "hardware" ? {async signConnectEnvelope(input: Parameters<NonNullable<ActiveKeyCrypto["signConnectEnvelope"]>>[0]) {
+      async signConnectEnvelope(input: Parameters<NonNullable<ActiveKeyCrypto["signConnectEnvelope"]>>[0]) {
         guard();
         if(input.publicKeyHex!==publicKeyHex)throw new Error("session_key_mismatch");
         const r=await client.crypto!({type:"signConnectEnvelope",kind:input.kind,envelope:new Uint8Array(input.envelope).slice(),...(input.content ? {content:new Uint8Array(input.content).slice()} : {}),appSessionId:input.appSessionId});
         guard();
         if(r.ack.status!=="ok"||r.result?.type!=="signConnectEnvelope")throw new Error(commandResultMessage(r.ack,"Connect signature failed"));
         return {publicKeyHex,format:"compact" as const,signature:hexToArrayBuffer(r.result.signatureHex)};
-      }} : {}),
+      },
       async signDigest(input) {
         guard();
         const r = await client.crypto!({ type: "signDigest", digestHex: bytesToHex(input.digest), format: input.format });
