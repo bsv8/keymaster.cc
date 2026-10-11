@@ -1,3 +1,4 @@
+import type {SignatureRecorder} from "./signature-history.js";
 import {ProvisionMigrationConnection} from "./provision-migration-connection.js";
 import {ErasedMigrationConnection} from "./erased-migration-connection.js";
 import type {MigrationJournal} from "./migration-journal.js";
@@ -24,7 +25,7 @@ export class HardwareConnectionOwner {
     assertActive(): void;
   };
   private readonly hostRunGeneration = crypto.getRandomValues(new Uint32Array(1))[0]! || 1;
-  constructor(private readonly assertAuthority: () => void, private readonly disconnected: () => void = () => {}) {}
+  constructor(private readonly assertAuthority: () => void, private readonly disconnected: () => void = () => {},private readonly signatureRecorder?:SignatureRecorder) {}
 
   /** 仅钱包 Coordinator 装配付款/秘密能力；页面 RPC 永远只得到 state DTO。 */
   backend(): VaultLinkHardwareBackend {
@@ -98,7 +99,7 @@ export class HardwareConnectionOwner {
             bsvNetwork:verified.bsvNetwork,label: input.label, walletGeneration: input.walletGeneration, backendGeneration: 1, publicKeyHex: verified.publicKeyHex}); }
           catch (error) { await backend.close(); throw error; }
         }
-        slot.assertActive(); slot.backend = backend;
+        slot.assertActive(); if(this.signatureRecorder)backend?.setSignatureRecorder(this.signatureRecorder);slot.backend = backend;
         slot.state = { status: "connected", leaseId: slot.leaseId };
         void (backend??slot.erased??slot.provision!).disconnected.then(() => { if (this.current === slot) void this.close(); });
         return this.state();

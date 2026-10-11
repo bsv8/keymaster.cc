@@ -1,3 +1,4 @@
+import {signatureFailure,signatureOwner,type SignatureRecorder,type SignatureTicket} from "./signature-history.js";
 import {
   inspectConnectEnvelope,
   connectCompactSignature,
@@ -49,6 +50,7 @@ export interface PaymentChannelDTO {
   revision: number;
 }
 export type WalletPaymentCommand =
+  | {action:"signature-history"}
   | { action: "signing-list" }
   | {
       action: "signing-configure";
@@ -122,6 +124,8 @@ export class WalletPayments {
       timer: ReturnType<typeof setTimeout>;
     }
   >();
+  private signatureRecorder?:SignatureRecorder;
+  setSignatureRecorder(recorder:SignatureRecorder){this.signatureRecorder=recorder;}
   private constructor(
     private gate: SoftwarePaymentGate,
     private publicKeyHex: string,
@@ -297,6 +301,11 @@ export class WalletPayments {
     signal?: AbortSignal,
     facts: Record<string, string> = {},
   ): Promise<T> {
+    const ticket=await this.signatureRecorder?.({operation,channelId:operation,owner:signatureOwner(operation),backend:'software'});
+    try {const result=await this.authorizeSignatureInner(operation,sign,signal,facts,ticket);await ticket?.update('completed');return result;}
+    catch(error){await ticket?.update(signatureFailure(error));throw error;}
+  }
+  private async authorizeSignatureInner<T>(operation:string,sign:()=>Promise<T>|T,signal:AbortSignal|undefined,facts:Record<string,string>,ticket?:SignatureTicket):Promise<T>{
     const snapshot = await this.gate.snapshot();
     this.assertActive();
     let channel = snapshot.signing?.find((c) => c.id === operation);
@@ -317,6 +326,7 @@ export class WalletPayments {
         mode: operation.startsWith("identity.") ? "automatic" : "manual",
         revision: 1,
       };
+      await ticket?.update('pending','manual');
       if (
         !(await this.signatureConsent(channel, "registration", facts, signal))
       )
@@ -333,6 +343,7 @@ export class WalletPayments {
       operation,
       this.network,
     );
+    await ticket?.update('pending',captured.mode);
     if (
       captured.mode === "manual" &&
       !(await this.signatureConsent(captured, "signature", facts, signal))
@@ -702,10 +713,13 @@ export class WalletPayments {
     );
 
     assertRequest();
-    return this.gate.execute(
+    const ticket=await this.signatureRecorder?.({operation:command.action,channelId:command.channelId,owner:c.owner,backend:'software',amount:String(amount)});
+    await ticket?.update('pending','automatic');
+    try {const result=await this.gate.execute(
       inspection,
-      (request, quote) =>
-        this.confirm(request, quote, recipients, {
+      async (request, quote) => {
+        await ticket?.update('pending','manual');
+        return this.confirm(request, quote, recipients, {
           fee: String(review.fee),
           change: String(review.change),
           ...(poolReview
@@ -718,7 +732,7 @@ export class WalletPayments {
                 },
               }
             : {}),
-        }),
+        });},
       async () => {
         const signatures: string[] = [];
         for (let i = 0; i < tx.inputs.length; i++) {
@@ -733,6 +747,7 @@ export class WalletPayments {
         return { signatures, amount: String(amount), fee: String(review.fee) };
       },
       assertRequest,
-    );
+    );await ticket?.update('completed');return result;}
+    catch(error){await ticket?.update(signatureFailure(error));throw error;}
   }
 }

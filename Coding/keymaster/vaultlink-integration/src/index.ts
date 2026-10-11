@@ -12,3 +12,5 @@ export { HardwareWalletPayments } from "./hardware-payments.js";
 export { authenticateAppWallet } from "./app-wallet-auth.js";
 export { appPaymentChannelId } from "./app-payment-channel.js";
 export { createHardwareChannelAdapter } from "./channel-adapter.js";
+
+export * from "./signature-history.js";

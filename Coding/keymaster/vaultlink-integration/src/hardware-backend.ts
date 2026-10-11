@@ -1,3 +1,4 @@
+import {signatureFailure,signatureOwner,type SignatureRecorder} from "./signature-history.js";
 import {
   signingOperations, type SigningChannel,
   commitment, DeviceIdentityKey, assertDeviceMigrationBinding,
@@ -106,6 +107,8 @@ export class VaultLinkHardwareBackend {
   private sessions = new Map<string, {revoked: boolean}>();
   private paymentGuard?: () => void;
   private activeOperation?: {operation: string; requestId: number; commitment: Uint8Array};
+  private signatureRecorder?:SignatureRecorder;
+  setSignatureRecorder(recorder:SignatureRecorder){this.signatureRecorder=recorder;}
   private lastOperation?: HardwareOperationActivity;
   private activePayment?: {sessionId: string | null; requestId: number; commitment: Uint8Array};
   private constructor(
@@ -243,6 +246,25 @@ export class VaultLinkHardwareBackend {
   listSigningChannels():Promise<Value>{return this.enqueue(()=>this.request("signing.list","signing-list",{}));}
   private async submitOperation(op: string, body: Value, hash: Uint8Array,
     allocated?: (requestId: number) => void): Promise<Value> {
+    const logging=signingOperations.includes(op)||op.startsWith('tx.');
+    const fields=body&&typeof body==='object'&&!Array.isArray(body)&&!(body instanceof Uint8Array)?body:{};
+    let sourceOwner=signatureOwner(op);
+    if(logging&&this.signatureRecorder&&typeof fields.channelId==='string'){
+      sourceOwner=fields.channelId;
+      // Read authoritative registered source from the device, never store the raw request.
+      try{const channelBody={channelId:fields.channelId};const value=await this.client.execute('payment.channel-read',channelBody,await commitment('payment-channel-read',1,channelBody));
+        if(value&&typeof value==='object'&&!Array.isArray(value)&&!(value instanceof Uint8Array)&&typeof value.owner==='string')sourceOwner=value.owner;
+      }catch{/* Keep the actual channel identifier when its source cannot be read. */}
+    }
+    const ticket=logging?await this.signatureRecorder?.({operation:op,channelId:typeof fields.channelId==='string'?fields.channelId:op,owner:sourceOwner,backend:'hardware'}):undefined;
+    let querying=false;
+    const timer=ticket?setInterval(()=>{if(querying)return;querying=true;void this.activity().then(async activity=>{if(activity?.operation===op&&activity.state==='awaiting-user')await ticket.update('pending','manual');}).catch(()=>{}).finally(()=>{querying=false;});},1000):undefined;
+    try {const value=await this.submitOperationInner(op,body,hash,allocated);
+      const result=value&&typeof value==='object'&&!Array.isArray(value)&&!(value instanceof Uint8Array)?value:{};
+      await ticket?.update(typeof result.error==='string'?signatureFailure(Error(result.error)):'completed',undefined,typeof result.amount==='number'||typeof result.amount==='bigint'?String(result.amount):undefined);return value;
+    }catch(error){await ticket?.update(signatureFailure(error));throw error;}finally{if(timer)clearInterval(timer);}
+  }
+  private async submitOperationInner(op:string,body:Value,hash:Uint8Array,allocated?:(requestId:number)=>void):Promise<Value>{
     this.assert();
     let wireOp=op,wireBody=body,wireHash=hash;
     if(signingOperations.includes(op)){

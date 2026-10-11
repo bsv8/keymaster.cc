@@ -1,3 +1,4 @@
+import {SignatureHistory} from "@keymaster/plugin-vault/coordinator";
 import { type NetworkIdentity, networkIdentityStorageRoot, sameNetworkIdentity } from "@keymaster/contracts";
 import {createHardwareChannelAdapter} from "@keymaster/plugin-vault/coordinator";
 import { createForumWorkerService, executeForumWorkerRequest, streamForumAttachment } from "@keymaster/plugin-forum/coordinator";
@@ -399,7 +400,7 @@ const hardwareConnections = new HardwareConnectionOwner(() => {
 }, () => {
   hardwareRecoveryConnection=undefined;
   if (activeKeyBackend === "hardware") void performGlobalLock("hardware-disconnected").catch(error => console.warn("Hardware disconnect lock failed", error));
-});
+},meta=>currentSignatureHistory().start(meta));
 /** 单钱包生命周期：冷启动、创建/导入、解锁、锁定、改密、改名、导出与重置。 */
 let walletLifecycle: ReturnType<typeof createWalletLifecycleService> | undefined;
 /** 当前已装配的平台存储根；重置或 Worker 重启后重建。 */
@@ -2985,6 +2986,15 @@ const vaultKeySession = createWorkerKeySession(() => ({
 }));
 function replaceActivePrivateKey(next: Uint8Array | undefined): void { vaultKeySession.replace(next); }
 function dropActivePrivateKey(): void { vaultKeySession.clear(); }
+let historyBinding: {token:object;session:string;history:SignatureHistory}|undefined;
+function currentSignatureHistory(){
+ const identity=requireCoordinatorNetworkIdentity();
+ if(coordinatorState.vaultStatus!=="unlocked"||!platformRootToken)throw Error("signature-history-locked");
+ const session=coordinatorState.runGeneration+":"+coordinatorState.sessionEpoch;
+ if(!historyBinding||historyBinding.token!==platformRootToken||historyBinding.session!==session)
+  historyBinding={token:platformRootToken,session,history:new SignatureHistory(workerStorageClients.platformFiles("vault","payments"),identity.bsvNetwork,identity.publicKeyHex,session)};
+ return historyBinding.history;
+}
 let walletPayments: WalletPayments | HardwareWalletPayments | undefined;
 let walletPaymentsOpening: Promise<WalletPayments | HardwareWalletPayments> | undefined;
 async function currentWalletPayments(): Promise<WalletPayments | HardwareWalletPayments> {
@@ -3007,7 +3017,7 @@ async function currentWalletPayments(): Promise<WalletPayments | HardwareWalletP
     return cryptoHexToBytes(result.signatureHex);
   },requireCoordinatorNetworkIdentity().bsvNetwork);
   walletPaymentsOpening = pending;
-  try { const ready = await pending; assertActive(); walletPayments = ready; return ready; }
+  try { const ready = await pending; assertActive(); ready.setSignatureRecorder(meta=>currentSignatureHistory().start(meta));walletPayments = ready; return ready; }
   finally { if (walletPaymentsOpening === pending) walletPaymentsOpening = undefined; }
 }
 
@@ -6589,7 +6599,10 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
     if (operation.type === "openLocalSecret") return backend.openLocalSecret(operation.scope, operation.sealed);
     if (operation.type === "getCurrentKey") { const key = currentKeySummary(); return key ? {...key, format: "keymaster.hardware-key"} : undefined; }
   }
-  if (operation.type === "payment") return (await currentWalletPayments()).handle(operation.command);
+  if (operation.type === "payment") {
+    if(operation.command.action==="signature-history")return currentSignatureHistory().list();
+    return (await currentWalletPayments()).handle(operation.command);
+  }
   const epoch = coordinatorState.sessionEpoch;
   const owner = coordinatorState.activePublicKeyHex;
   return executeOwnedVaultOperation(operation, {

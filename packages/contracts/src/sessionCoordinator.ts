@@ -458,6 +458,7 @@ export interface WalletPaymentChannel {
 }
 /** 金额 wire 为十进制整数字符串，避免浮点与 BigInt JSON 精度问题。 */
 export type CoordinatorWalletPaymentCommand =
+  | {action:"signature-history"}
   | {action:"backend"|"signing-list"}
   | {action:"signing-configure";id:string;mode:"automatic"|"manual";revision:number}
   | { action: "list" | "pending" }

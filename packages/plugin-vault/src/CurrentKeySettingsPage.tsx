@@ -12,7 +12,7 @@ import { useInternalVault } from "./VaultInternalContext.js";
 // 钱包数据，所以必须由一个明确的破坏性确认框把关，不能混在普通操作里。
 
 import { useCallback, useEffect, useState } from "react";
-import { PaymentChannelSettings } from "@keymaster/vaultlink-integration/ui";
+import { PaymentChannelSettings, SignatureHistoryPanel } from "@keymaster/vaultlink-integration/ui";
 import { Button, Modal, PageHeader, TextInput } from "@keymaster/ui";
 import { usePluginI18n } from "@keymaster/runtime";
 import { usePluginCapability } from "webloom-framework/react";
@@ -45,6 +45,7 @@ export function CurrentKeySettingsPage() {
   useEffect(() => vault.subscribeWalletState(setSnapshot), [vault]);
 
   const publicKeyHex = snapshot.activePublicKeyHex;
+  const history=useCallback(()=>vault.payment({action:"signature-history"}),[vault,snapshot.walletGeneration,snapshot.sessionEpoch]);
   // 显示名由 vault 单独读取：lifecycle 事件只带公钥，避免每个会话事件都
   // 附带一份 Key 元数据。
   const [currentLabel, setCurrentLabel] = useState<string | null>(null);
@@ -113,7 +114,6 @@ export function CurrentKeySettingsPage() {
           defaultValue: "本 Origin 只保存一把钱包 Key。替换身份需要先重置钱包，那会删除全部本地钱包数据。"
         })}
       />
-      <PaymentChannelSettings execute={payment} text={(key, fallback) => t(`vault.${key}`, {defaultValue: fallback})} />
 
       {hardware === true ? <p role="note">{t("vault.currentKey.hardwareSecurity", {defaultValue:"PIN 和设备备份请在 RocKey 上管理。"})}</p> : null}
       {hardware === false ? <section className="current-key-export-card" aria-labelledby="current-key-export-title">
@@ -166,6 +166,10 @@ export function CurrentKeySettingsPage() {
           </Button>
         </div>
       </section>
+
+      <PaymentChannelSettings execute={payment} text={(key, fallback) => t(`vault.${key}`, {defaultValue: fallback})} />
+
+      <SignatureHistoryPanel load={history} text={(key,fallback)=>t(`vault.signatureHistory.${key}`,{defaultValue:fallback})}/>
 
       {importing ? <VaultSoftwareMigrationModal vault={vault} onClose={()=>setImporting(false)}/> : null}
       {migrating ? <VaultHardwareMigrationModal vault={vault} onClose={()=>setMigrating(false)}/> : null}

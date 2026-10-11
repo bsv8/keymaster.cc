@@ -35,3 +35,5 @@ export {WalletMigrationFence} from '@keymaster/vaultlink-integration/migration';
 export {verifyDeviceMigrationJournal} from '@keymaster/vaultlink-integration/migration';
 
 export {createSoftwareToHardwareMigration} from "@keymaster/vaultlink-integration/migration";
+
+export {SignatureHistory} from "@keymaster/vaultlink-integration";
