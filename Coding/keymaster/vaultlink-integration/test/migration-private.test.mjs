@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {VaultLinkHardwareBackend} from '../dist/index.js';
 import {sha256,unhex} from '@vaultlink/sdk';
 import {openActualMigrationDevice} from './native-migration-device.mjs';
-test('actual KeyStore + encrypted product Runtime: fresh PIN export, host acknowledgement, independently PIN-approved erase',async()=>{
+test('actual KeyStore + encrypted product Runtime: physical export, host completion, independent optional erase',async()=>{
  const d=await openActualMigrationDevice(VaultLinkHardwareBackend);
  try{
   assert.equal(await d.backend.migrationStatus(),null);
@@ -18,9 +18,9 @@ test('actual KeyStore + encrypted product Runtime: fresh PIN export, host acknow
   const target=await sha256(new TextEncoder().encode('public target-record fixture'));
   await assert.rejects(d.backend.eraseMigrationSource(exported.migration,target),/migration-conflict/);
   const committed=await d.backend.acknowledgeMigration(exported.migration,target);
-  assert.equal(committed.phase,'host-committed');
+  assert.equal(committed.phase,'complete');
   const erased=await d.backend.eraseMigrationSource(committed,target);
   assert.equal(erased.phase,'erased');assert.deepEqual(erased.targetHash,target);
-  assert.match(d.log(),/host-review:migration.export:pin=1/);assert.match(d.log(),/host-review:migration.erase:pin=1/);
+  assert.match(d.log(),/host-review:migration.export:pin=0/);assert.match(d.log(),/host-review:migration.erase:pin=0/);
  }finally{await d.close();}
 });

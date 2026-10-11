@@ -485,7 +485,7 @@ export interface CoordinatorHardwareState {
 export type CoordinatorVaultOperation =
   | { type: "hardware"; command: CoordinatorHardwareCommand }
   /** Private Vault UI only; no private-key bytes in request or response. */
-  | { type: "migrateToHardware"; sourcePassword: string }
+  | { type: "migrateToHardware" }
   | { type: "migrateToSoftware"; newPassword: string }
   | { type: "migrationState" }
   | { type: "payment"; command: CoordinatorWalletPaymentCommand }

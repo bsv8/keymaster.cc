@@ -11,14 +11,15 @@ export class ProvisionMigrationConnection {
  }
  static async connect(transport:Transport,context:{generations:Generations;bsvNetwork:"main"|"test";assertActive():void},confirmPairing:(code:string)=>Promise<boolean>){
   context.assertActive();
-  // Reboot recovery can have an actual key already wrapped. Both modes remain
-  // migration-only in this portal, with the same source-key proof below.
+  // Admission is for an empty device only. Transport identity is provisional;
+  // after import the same connection may prove the newly saved actual key.
   const verified=await enrollHost(transport,context.generations,secpIdentityVerifier,async code=>{context.assertActive();const yes=await confirmPairing(code);context.assertActive();return yes;},[]);
   try{context.assertActive();const portal=new ProvisionMigrationConnection(verified.client,context.assertActive,context.bsvNetwork);
    const raw=await portal.request('identity.network','identity-network',{});
    const wrapped=raw!==null&&typeof raw==='object'&&!Array.isArray(raw)&&!(raw instanceof Uint8Array)&&'publicKey' in raw;
    const identity=object(raw,wrapped?['bsvNetwork','publicKey']:['bsvNetwork']);
-   if(wrapped&&(!(identity.publicKey instanceof Uint8Array)||identity.publicKey.length!==33))throw Error('invalid-network-identity');
+   // Any existing business key forbids import, even the same public key.
+   if(wrapped)throw Error('device-already-has-key');
    if(identity.bsvNetwork!==null&&identity.bsvNetwork!==context.bsvNetwork)throw Error('network-identity-mismatch');
    return portal;}
   catch(error){await verified.client.close(error);throw error;}

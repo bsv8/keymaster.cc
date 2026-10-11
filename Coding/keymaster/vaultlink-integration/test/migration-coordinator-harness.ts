@@ -9,20 +9,22 @@ import {__testResetWalletStore, __testBootstrapWalletStorage, __testSeedWalletLo
 
 /** Explicit peer/IndexedDB host adapter; dispatch, password decryption,
  * lifecycle, migration fence and KeyHold commit are the production Coordinator. */
-export async function migrationCoordinatorHarness(publicKeyHex:string) {
+export async function migrationCoordinatorHarness(publicKeyHex:string,backend:'software'|'hardware'='software') {
   await __testResetWalletStore(); await __testBootstrapWalletStorage();
   const secret=new Uint8Array(32); secret[31]=1;
   const password='software-password';
   const source=await createAndVerifyMigrationKeyHold({bsvNetwork: "main" as const, privateKey:secret,publicKeyHex,label:'same key'},password);
   secret.fill(0);
   const walletGeneration=crypto.randomUUID();
-  await __testSeedWalletLocalRecords({keyHold:new TextDecoder().decode(source),meta:JSON.stringify({
+  await __testSeedWalletLocalRecords({keyHold:backend==='software'?new TextDecoder().decode(source):JSON.stringify({format:'keymaster.hardware-key',version:1,backend:'vaultlink',wireVersion:2,bsvNetwork:'main',label:'same key',publicKeyHex,walletGeneration,backendGeneration:1}),meta:JSON.stringify({
     format:WALLET_META_FORMAT,version:1,schemaVersion:WALLET_CURRENT_SCHEMA_VERSION,initialized:true,
     walletGeneration,createdAt:new Date().toISOString(),
   })});
   __testResetState(); await __testBootstrapWalletStorage();
-  const unlocked=await __testUnlock(password);
-  if(__testGetVaultStatus()!=='unlocked') throw Error(JSON.stringify(unlocked));
+  if(backend==='software'){
+    const unlocked=await __testUnlock(password);
+    if(__testGetVaultStatus()!=='unlocked') throw Error(JSON.stringify(unlocked));
+  }
   const peer='migration-page',responses=new Map<string,CoordinatorResponse>(),listeners=new Set<(event:SessionStateEvent)=>void>();
   const reconnect=()=>__testAttachPort(peer,value=>{
     if(value&&typeof value==='object'&&'requestId' in value)responses.set((value as CoordinatorResponse).requestId,value as CoordinatorResponse);
@@ -38,9 +40,12 @@ export async function migrationCoordinatorHarness(publicKeyHex:string) {
     const response=responses.get(requestId); responses.delete(requestId);
     if(!response)throw Error('Missing Coordinator response');return response;
   };
-  const subscribeId=crypto.randomUUID();
-  await __testDispatchStorageMessage(peer,{kind:'subscribe',clientId:peer,requestId:subscribeId,topics:['session.state']});
-  responses.delete(subscribeId);
+  const subscribe=async()=>{
+    const subscribeId=crypto.randomUUID();
+    await __testDispatchStorageMessage(peer,{kind:'subscribe',clientId:peer,requestId:subscribeId,topics:['session.state']});
+    responses.delete(subscribeId);
+  };
+  await subscribe();
   const mirror=new SessionStateMirror({getBootstrapSnapshot:__testGetSnapshot,subscribeTopic:(_topic,listener)=>{
     listeners.add(listener);return()=>{listeners.delete(listener);};
   }});
@@ -49,6 +54,6 @@ export async function migrationCoordinatorHarness(publicKeyHex:string) {
     return response.ack.status==='ok'?{...response.ack,value:response.operationResult,sessionEpoch:response.sessionEpoch}:response.ack;
   }} as unknown as CoordinatorClientLike;
   const vault=new VaultServiceCoordinator({coordinatorClient:client,sessionStateMirror:mirror});
-  return {vault,invoke,password,walletGeneration,reconnect,coldStart:__testColdStart,status:__testGetVaultStatus,
+  return {vault,invoke,password,walletGeneration,reconnect:async()=>{reconnect();await subscribe();},coldStart:__testColdStart,status:__testGetVaultStatus,
     async close(){vault.dispose();mirror.dispose();await __testResetWalletStore();}};
 }

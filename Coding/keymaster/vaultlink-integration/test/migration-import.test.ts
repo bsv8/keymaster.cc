@@ -5,7 +5,7 @@ import {createVaultBootstrapStorage} from '../../../../packages/platform-storage
 import {createWalletKeyRepository,inspectWalletKeyBytes} from '../../../../packages/plugin-vault/src/walletKeyRepository.js';
 import {createAndVerifyMigrationKeyHold} from '../../../../packages/plugin-vault/src/migrationKeyHold.js';
 import {WALLET_KEYHOLD_PATH,WALLET_META_PATH,WALLET_META_FORMAT,WALLET_CURRENT_SCHEMA_VERSION} from '@keymaster/contracts';
-import {WALLET_PAYMENT_POLICY_PATH} from '@keymaster/contracts/storage-internal';
+import {WALLET_PAYMENT_POLICY_PATH,WALLET_MIGRATION_PATH} from '@keymaster/contracts/storage-internal';
 import {serializeStoredPaymentPolicy,parseStoredPaymentPolicy} from '../src/policy-storage.js';
 import {createSoftwareToHardwareMigration,createMigrationJournalService} from '../src/migration-journal.js';
 import {ProvisionMigrationConnection} from '../src/provision-migration-connection.js';
@@ -46,30 +46,9 @@ test('soft-to-hard imports actual source key and bank, proves wrapped possession
  }finally{store.close();await device.close();}
 },30_000);
 
-for(const phase of ['import-staged','key-wrapped','device-committed','local-committed'] as const){
- test(`forward recovery from declared ${phase} commit point preserves same journal and source ledger`,async()=>{
-  const store=createIndexedDbWalletStore({databaseName:'migration-import-recovery-'+crypto.randomUUID()}),bootstrap=createVaultBootstrapStorage(store);
-  const pub='0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798',secret=new Uint8Array(32);secret[31]=1;
-  const source=await createAndVerifyMigrationKeyHold({bsvNetwork: "main" as const, privateKey:secret,publicKeyHex:pub,label:'same key'},'software-password');secret.fill(0);
-  const key=await store.put(WALLET_KEYHOLD_PATH,source),generation=crypto.randomUUID(),id=crypto.randomUUID();
-  const encode=(v:unknown)=>new TextEncoder().encode(JSON.stringify(v));
-  await store.put(WALLET_META_PATH,encode({format:WALLET_META_FORMAT,version:1,schemaVersion:WALLET_CURRENT_SCHEMA_VERSION,initialized:true,walletGeneration:generation,createdAt:new Date().toISOString()}));
-  const service=createMigrationJournalService({store:bootstrap.migration,inspectKey:inspectWalletKeyBytes});
-  const journal=await service.begin({migrationId:id,expectedRevision:key.revision,policyBank:await service.sourceBank(pub)});
-  if(phase==='local-committed'){await service.deviceCommitted(id,journal.policyHash);await service.commitLocal(id,encode({bsvNetwork: "main" as const, format:'keymaster.hardware-key',version:1,backend:'vaultlink',wireVersion:2,label:'same key',publicKeyHex:pub,walletGeneration:generation,backendGeneration:1}),await service.sourceBank(pub));}
-  const device=await openActualMigrationDevice(ProvisionMigrationConnection,{importing:true,phase:phase==='local-committed'?'device-committed':phase,journal}),repo=createWalletKeyRepository(bootstrap.keys);
-  let decrypts=0;
-  try{
-   const migration=createSoftwareToHardwareMigration({service,device:device.backend,assertExclusive(){},sourceBank:()=>service.sourceBank(pub),
-    async unlockSource(){decrypts++;return (await repo.unlock('software-password')).privateKeyBytes;},
-    hardwareDocument:j=>encode({bsvNetwork: "main" as const, format:'keymaster.hardware-key',version:1,backend:'vaultlink',wireVersion:2,label:'same key',publicKeyHex:j.publicKeyHex,walletGeneration:j.walletGeneration,backendGeneration:1})});
-   expect(await migration.run({migrationId:id,expectedRevision:key.revision})).toMatchObject({migrationId:id,phase:'complete',target:'hardware'});
-   expect(decrypts).toBe(phase==='import-staged'?1:0);
-   expect((await repo.read())?.document.publicKeyHex).toBe(pub);
-   expect((await device.backend.migrationStatus())?.phase).toBe('complete');
-  }finally{store.close();await device.close();}
- },30_000);
-}
+test('迁入连接拒绝已有同一私钥的真实设备',async()=>{
+ await expect(openActualMigrationDevice(ProvisionMigrationConnection)).rejects.toThrow('device-already-has-key');
+},30_000);
 
 test('actual import endpoint rejects changed staged bytes, wrong private key and ordinary signature requests before physical import',async()=>{
  const device=await openActualMigrationDevice(ProvisionMigrationConnection,{importing:true});
@@ -116,4 +95,34 @@ test('空设备从源钱包接收 test 网络，保存证明后保留 test 身�
   expect(await migration.run({migrationId:id,expectedRevision:key.revision})).toMatchObject({phase:'complete',bsvNetwork:'test',publicKeyHex:device.pub});
   expect(await repo.read()).toMatchObject({backend:'hardware',document:{bsvNetwork:'test',publicKeyHex:device.pub}});
  }finally{store.close();await device.close();}
+},30_000);
+
+// Refresh after the device has saved is a real one-sided commit, not a
+// device-response stub: the browser source and its ledger must stay usable.
+test('设备已保存但网页尚未提交时刷新：保留正常软件钱包，没有持久迁移中记录',async()=>{
+ const device=await openActualMigrationDevice(ProvisionMigrationConnection,{importing:true});
+ const databaseName='migration-interrupted-'+crypto.randomUUID();
+ const store=createIndexedDbWalletStore({databaseName}),bootstrap=createVaultBootstrapStorage(store);
+ const secret=new Uint8Array(32);secret[31]=1;
+ const source=await createAndVerifyMigrationKeyHold({bsvNetwork:'main',privateKey:secret,publicKeyHex:device.pub,label:'original'},'source-password');
+ const key=await store.put(WALLET_KEYHOLD_PATH,source),generation=crypto.randomUUID();
+ const encode=(value:unknown)=>new TextEncoder().encode(JSON.stringify(value));
+ await store.put(WALLET_META_PATH,encode({format:WALLET_META_FORMAT,version:1,schemaVersion:WALLET_CURRENT_SCHEMA_VERSION,initialized:true,walletGeneration:generation,createdAt:new Date().toISOString()}));
+ const service=createMigrationJournalService({store:bootstrap.migration,inspectKey:inspectWalletKeyBytes});
+ let reopened:ReturnType<typeof createIndexedDbWalletStore>|undefined;
+ try{
+  const bank=await service.sourceBank(device.pub);
+  const journal=await service.begin({migrationId:crypto.randomUUID(),expectedRevision:key.revision,policyBank:bank});
+  await device.backend.stage(journal,bank);
+  expect(await device.backend.prove(journal,secret)).toMatchObject({phase:'device-committed'});
+  expect(await store.get(WALLET_MIGRATION_PATH)).toBeUndefined();
+  store.close();reopened=createIndexedDbWalletStore({databaseName});
+  const repo=createWalletKeyRepository(createVaultBootstrapStorage(reopened).keys);
+  expect((await repo.read())?.backend).toBe('software');
+  const unlocked=await repo.unlock('source-password');
+  expect(unlocked.privateKeyBytes).toEqual(secret);unlocked.privateKeyBytes.fill(0);
+  expect((await reopened.get(WALLET_KEYHOLD_PATH))?.bytes).toEqual(source);
+  expect(await reopened.get(WALLET_MIGRATION_PATH)).toBeUndefined();
+  expect(await device.backend.migrationStatus()).toMatchObject({phase:'device-committed'});
+ }finally{secret.fill(0);store.close();reopened?.close();await device.close();}
 },30_000);

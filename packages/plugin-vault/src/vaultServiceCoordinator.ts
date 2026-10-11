@@ -213,7 +213,7 @@ export class VaultServiceCoordinator implements InternalVaultService {
     await this.vaultOperation({ type: "renameKey", label });
   }
   async migrationState(){return this.vaultOperation({type:"migrationState"});}
-  async migrateToHardware(sourcePassword:string):Promise<void>{await this.vaultOperation({type:"migrateToHardware",sourcePassword});}
+  async migrateToHardware():Promise<void>{await this.vaultOperation({type:"migrateToHardware"});}
   async migrateToSoftware(newPassword:string):Promise<void>{await this.vaultOperation({type:"migrateToSoftware",newPassword});}
   async hardware(command: import("@keymaster/contracts").CoordinatorHardwareCommand): Promise<import("@keymaster/contracts").CoordinatorHardwareState> {
     return this.vaultOperation({ type: "hardware", command });

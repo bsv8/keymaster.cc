@@ -5,7 +5,7 @@ import {createWalletKeyRepository,inspectWalletKeyBytes} from '../../../../packa
 import {createAndVerifyMigrationKeyHold} from '../../../../packages/plugin-vault/src/migrationKeyHold.js';
 import {WALLET_KEYHOLD_PATH,WALLET_META_PATH,WALLET_META_FORMAT,WALLET_CURRENT_SCHEMA_VERSION} from '@keymaster/contracts';
 import {WALLET_PAYMENT_POLICY_PATH} from '@keymaster/contracts/storage-internal';
-import {createHardwareToSoftwareMigration,createMigrationJournalService} from '../src/migration-journal.js';
+import {createHardwareToSoftwareMigration,createMigrationJournalService,requestMigratedDeviceErase} from '../src/migration-journal.js';
 import {VaultLinkHardwareBackend} from '../src/hardware-backend.js';
 import {openActualMigrationDevice} from './native-migration-device.mjs';
 import {parseStoredPaymentPolicy} from '../src/policy-storage.js';
@@ -13,7 +13,7 @@ import {parseStoredPaymentPolicy} from '../src/policy-storage.js';
 // The IndexedDB API uses the repository's explicit Node storage adapter. USB
 // physical events use the named HOST adapter; all protocol, KeyStore, KeyHold
 // cryptography, ledger validation and transaction code are actual product code.
-test('hard-to-soft: encrypted real device export → verified KeyHold → atomic browser commit → independent physical-PIN-model erase',async()=>{
+test('hard-to-soft: encrypted real device export → verified KeyHold → atomic browser commit → optional independent physical erase',async()=>{
  const device=await openActualMigrationDevice(VaultLinkHardwareBackend);
  const store=createIndexedDbWalletStore({databaseName:'migration-wire-'+crypto.randomUUID()});
  const generation=crypto.randomUUID(),id=crypto.randomUUID(),encode=(v:unknown)=>new TextEncoder().encode(JSON.stringify(v));
@@ -36,7 +36,10 @@ test('hard-to-soft: encrypted real device export → verified KeyHold → atomic
   const ledger=await store.get(`main/${device.pub}/${WALLET_PAYMENT_POLICY_PATH}`);expect(ledger).toBeDefined();
   expect(parseStoredPaymentPolicy(ledger!.bytes,device.pub)).toMatchObject({key:device.pub,version:2,pending:[],sessions:[]});
   expect((await service.read())?.journal.targetHash).toBe(result.targetHash);
-  expect(device.log()).toMatch(/host-review:migration.export:pin=1/);expect(device.log()).toMatch(/host-review:migration.erase:pin=1/);
+  expect(device.log()).toMatch(/host-review:migration.export:pin=0/);
+  expect(device.log()).not.toMatch(/host-review:migration.erase/);
+  await requestMigratedDeviceErase(result,device.backend);
+  expect(device.log()).toMatch(/host-review:migration.erase:pin=0/);
   await repo.rename('after migration');
   await repo.changePassword({oldPassword:'new-software-password',newPassword:'changed-software-password'});
   expect((await service.current())?.phase).toBe('complete');

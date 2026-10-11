@@ -29,7 +29,7 @@ export type { WalletContext as VaultLinkWalletContext, PaymentInput as VaultLink
 export { verifyMigratedHardwareLedger } from "@keymaster/vaultlink-integration/migration";
 export { inspectWalletKeyBytes } from "./walletKeyRepository.js";
 export { createAndVerifyMigrationKeyHold } from "./migrationKeyHold.js";
-export { createMigrationJournalService, createHardwareToSoftwareMigration } from "@keymaster/vaultlink-integration/migration";
+export { createMigrationJournalService, createHardwareToSoftwareMigration, requestMigratedDeviceErase } from "@keymaster/vaultlink-integration/migration";
 export {WalletMigrationFence} from '@keymaster/vaultlink-integration/migration';
 
 export {verifyDeviceMigrationJournal} from '@keymaster/vaultlink-integration/migration';

@@ -55,7 +55,7 @@ export function verifyDeviceMigrationJournal(journal: MigrationJournal, device: 
   const expected=host.phase==="prepared"?["staged","device-committed"]
     :host.phase==="device-committed"?["device-committed"]
     :host.phase==="local-committed"?["device-committed","host-committed","erasing","erased","complete"]
-    :host.target==="hardware"?["complete"]:["erased","complete"];
+    :host.target==="hardware"?["complete"]:["device-committed","host-committed","erasing","erased","complete"];
   if(!expected.includes(state.phase))throw new StorageRuntimeError("storage_conflict","Device migration phase does not match the browser commit");
   return state;
 }
@@ -71,8 +71,12 @@ export function createMigrationJournalService(deps: {
   inspectKey: (bytes: Uint8Array) => { bsvNetwork: "main" | "test"; publicKeyHex: string; backend: "software" | "hardware"; walletGeneration?: string };
 }) {
   const { store, inspectKey } = deps;
+  // Preparation lives only in this operation. A terminated Worker leaves the
+  // original wallet intact; only the final atomic batch persists a receipt.
+  let pending: {journal: MigrationJournal; revision: number} | undefined;
   const policyPath = (identity: {bsvNetwork:"main"|"test";publicKeyHex:string}) => networkIdentityStorageRoot(identity) + WALLET_PAYMENT_POLICY_PATH;
   async function read() {
+    if (pending) return pending;
     const record = await store.get(WALLET_MIGRATION_PATH);
     return record ? { journal: parseMigrationJournal(record.bytes), revision: record.revision } : undefined;
   }
@@ -140,15 +144,14 @@ export function createMigrationJournalService(deps: {
         target: identity.backend === "software" ? "hardware" : "software", sourceRevision: key.revision,
         sourceHash: hex(await sha256(key.bytes)), policyHash, policyRevision: policy?.revision ?? 0, phase: "prepared", targetHash: null };
       parseMigrationJournal(encode(journal));
-      await store.batch({ operations: [{ type: "put", path: WALLET_MIGRATION_PATH, bytes: encode(journal), contentType: "application/json" }],
-        conditions: [{ path: WALLET_MIGRATION_PATH, ...(previous ? { ifRevision: previous.revision } : { ifNoneMatch: true as const }) }, { path: WALLET_KEYHOLD_PATH, ifRevision: key.revision }, { path: WALLET_META_PATH, ifRevision: meta.revision }, { path: policyPath(identity), ifRevision: policy?.revision ?? 0 }] });
+      pending = {journal, revision: previous?.revision ?? 0};
       return journal;
     },
     async deviceCommitted(id: string, policyHash: string) {
       const record = await bound(id);
       if (record.journal.phase !== "prepared" || record.journal.policyHash !== policyHash) throw new StorageRuntimeError("storage_conflict", "Device migration acknowledgement does not match");
       const journal = { ...record.journal, phase: "device-committed" as const };
-      await store.batch({ operations: [{ type: "put", path: WALLET_MIGRATION_PATH, bytes: encode(journal) }], conditions: conditions(record) });
+      pending = {journal, revision: record.revision};
     },
     async commitLocal(id: string, targetBytes: Uint8Array, policyBank: Uint8Array) {
       const record = await bound(id);
@@ -160,15 +163,30 @@ export function createMigrationJournalService(deps: {
         || (identity.walletGeneration !== undefined && identity.walletGeneration !== record.journal.walletGeneration)) throw new StorageRuntimeError("storage_identity_required", "Migration cannot replace the wallet identity");
       const bank = new Uint8Array(policyBank), snapshot = decodePaymentPolicy(bank, identity.publicKeyHex);
       if (hex(await sha256(bank)) !== record.journal.policyHash || hex(await sha256(encodePaymentPolicy(snapshot, identity.publicKeyHex))) !== record.journal.policyHash) throw new StorageRuntimeError("storage_conflict", "Migration policy bank changed");
-      const journal = { ...record.journal, phase: "local-committed" as const, targetHash: hex(await sha256(target)) };
+      // Software activation is complete once its verified ciphertext and ledger
+      // are durable. Optional device disposal must never gate this transaction.
+      const journal = { ...record.journal, phase: "complete" as const, targetHash: hex(await sha256(target)) };
       await store.batch({ operations: [{ type: "put", path: WALLET_KEYHOLD_PATH, bytes: target, contentType: "application/json" },
         { type: "put", path: WALLET_MIGRATION_PATH, bytes: encode(journal), contentType: "application/json" },
         { type: "put", path: policyPath(identity), bytes: serializeStoredPaymentPolicy(snapshot, identity.publicKeyHex), contentType: "application/json" }], conditions: conditions(record) });
+      pending = undefined;
     },
     async finish(id: string) {
       const record = await bound(id);
       if (record.journal.phase !== "local-committed") throw new StorageRuntimeError("storage_conflict", "Local migration commit is missing");
       await store.batch({ operations: [{ type: "put", path: WALLET_MIGRATION_PATH, bytes: encode({ ...record.journal, phase: "complete" }) }], conditions: conditions(record) });
+    },
+    /** Upgrade old records without guessing which key survived. Exact source
+     * binding permits dropping an uncommitted marker; a committed target is
+     * finalized in place and never rolled back to a spendable source. */
+    async normalizePreviousAttempt() {
+      const saved = await read();
+      if (!saved || saved.journal.phase === "complete") return;
+      const record = await bound(saved.journal.migrationId);
+      await store.batch({operations: record.journal.phase === "local-committed"
+        ? [{type:"put",path:WALLET_MIGRATION_PATH,bytes:encode({...record.journal,phase:"complete"})}]
+        : [{type:"delete",path:WALLET_MIGRATION_PATH}],conditions:conditions(record)});
+      pending = undefined;
     },
 
   };
@@ -189,23 +207,21 @@ export async function verifyMigratedHardwareLedger(document: import("./hardware-
   assertPaymentPolicyContinuation(source, current, document.publicKeyHex);
 }
 
-/** Private Worker orchestration. Device and browser commits cannot be atomic,
- * so every await follows the durable journal; no exception rolls back to a
- * spendable old backend. The caller holds an exclusive wallet migration lease
- * throughout, and key creation uses the real KeyHold SDK in the Vault module.
- */
+/** Private Worker orchestration. Preparation is volatile, the source remains
+ * intact, and only a verified target and ledger enter the final atomic batch.
+ * The caller holds an exclusive wallet lease during this operation. */
 export function createHardwareToSoftwareMigration(deps: {
   service: ReturnType<typeof createMigrationJournalService>;
   device: Pick<import("./hardware-backend.js").VaultLinkHardwareBackend,
-    "exportPaymentPolicy"|"migrationStatus"|"exportMigrationKey"|"acknowledgeMigration"|"eraseMigrationSource">;
+    "exportPaymentPolicy"|"migrationStatus"|"exportMigrationKey">;
   assertExclusive(): void;
   createAndVerifyKeyHold(privateKey:Uint8Array,publicKeyHex:string):Promise<Uint8Array>;
 }) {
   const {service,device}=deps;
   const check=()=>deps.assertExclusive();
   return {
-    /** Resume may omit a new password only after local-committed. Before that,
-     * export is armed and PIN-confirmed anew on the device. */
+    /** Before a durable software commit, every retry requests a fresh device
+     * hold. Completed software activation never depends on optional erase. */
     async run(input:{migrationId:string;expectedRevision:number}):Promise<MigrationJournal> {
       check();let saved=await service.read();check();
       if(saved&&saved.journal.phase!=="complete"&&saved.journal.migrationId!==input.migrationId)
@@ -219,7 +235,8 @@ export function createHardwareToSoftwareMigration(deps: {
       if(journal.source!=="hardware"||journal.target!=="software")throw new StorageRuntimeError("storage_identity_required","This operation requires a hardware source");
       if(journal.phase==="complete")return journal;
       let state=await device.migrationStatus();check();
-      if(state && !(journal.phase==="prepared"&&state.phase==="complete"&&state.id!==journal.migrationId))verifyDeviceMigrationJournal(journal,state);
+      if(state && !(journal.phase==="prepared"&&state.id!==journal.migrationId
+        &&(state.phase==="complete"||(state.direction==="to-software"&&state.targetHash===null))))verifyDeviceMigrationJournal(journal,state);
       if(journal.phase==="prepared"||journal.phase==="device-committed") {
         if(!bank)bank=await device.exportPaymentPolicy();check();
         if(hex(await sha256(bank))!==journal.policyHash)throw new StorageRuntimeError("storage_conflict","Device payment ledger changed during migration");
@@ -238,34 +255,22 @@ export function createHardwareToSoftwareMigration(deps: {
           journal=(await service.read())!.journal;check();
         } finally {exported.privateKey.fill(0);target?.fill(0);}
       }
-      if(journal.phase!=="local-committed"||journal.targetHash===null)
+      if(journal.phase==="local-committed") {
+        await service.finish(journal.migrationId);check();
+        journal=(await service.read())!.journal;check();
+      }
+      if(journal.phase!=="complete"||journal.targetHash===null)
         throw new StorageRuntimeError("storage_conflict","Browser migration commit is missing");
-      // A lost export response is never recovered from generic query. A lost
-      // PUBLIC acknowledgement/erase response is reconciled by exact journal.
-      state=await device.migrationStatus();check();
-      if(!state)throw new StorageRuntimeError("storage_conflict","Device migration record disappeared");
-      verifyDeviceMigrationJournal(journal,state);
-      if(state.phase==="device-committed") {
-        state=await device.acknowledgeMigration(state,unhex(journal.targetHash));check();
-        verifyDeviceMigrationJournal(journal,state);
-      }
-      if(state.phase==="host-committed"||state.phase==="erasing") {
-        state=await device.eraseMigrationSource(state,unhex(journal.targetHash));check();
-        verifyDeviceMigrationJournal(journal,state);
-      }
-      if(state.phase!=="erased"||state.targetHash===null||hex(state.targetHash)!==journal.targetHash)
-        throw new StorageRuntimeError("storage_conflict","Verified hardware erase receipt is required");
-      await service.finish(journal.migrationId);check();
-      return (await service.read())!.journal;
+      return journal;
     },
   };
 }
 export {WalletMigrationFence} from './migration-fence.js';
+export {requestMigratedDeviceErase} from './software-migration-cleanup.js';
 export {ErasedMigrationConnection} from './erased-migration-connection.js';
 
 /** Forward migration keeps the source KeyHold until actual PIN-wrapped device
- * possession is proved. After browser commit recovery only reconciles public
- * records; it never decrypts or resends a software key. */
+ * possession and completion are proved. Preparation never survives refresh. */
 export function createSoftwareToHardwareMigration(deps:{
  service:ReturnType<typeof createMigrationJournalService>;
  device:import('./provision-migration-connection.js').ProvisionMigrationConnection;
@@ -275,36 +280,29 @@ export function createSoftwareToHardwareMigration(deps:{
  hardwareDocument(journal:MigrationJournal):Uint8Array;
 }){
  return {async run(input:{migrationId:string;expectedRevision:number}):Promise<MigrationJournal>{
-  const check=()=>deps.assertExclusive();check();let current=await deps.service.current();check();let bank:Uint8Array|undefined;
-  if(current?.phase==='complete'){if(current.migrationId===input.migrationId&&current.source==='software'&&current.target==='hardware')return current;current=undefined;}
-  if(current&&current.migrationId!==input.migrationId)throw Error('migration-conflict');
-  if(!current){bank=await deps.sourceBank();check();current=await deps.service.begin({...input,policyBank:bank});check();}
-  if(current.source!=='software'||current.target!=='hardware')throw Error('migration-conflict');
-  let state=await deps.device.migrationStatus();check();if(state)verifyDeviceMigrationJournal(current,state);
-  if(current.phase!=='local-committed'){
-   // A power loss can occur after wrapping the key but before advancing the
-   // public phase. Ask the scoped actual-key proof first; only absence of an
-   // unlocked wrapped key permits returning to staging/physical import.
-   if(state?.phase==='staged'){
-    try{state=await deps.device.prove(current);check();}catch(error){check();if(!(error instanceof Error)||error.message!=='locked')throw error;}
-   }
-   if(!state||state.phase==='staged'){
-    bank??=await deps.sourceBank();check();if(hex(await sha256(bank))!==current.policyHash)throw Error('migration-policy-changed');
-    await deps.device.stage(current,bank);check();
-    const secret=await deps.unlockSource();
-    try{check();state=await deps.device.prove(current,secret);check();}finally{secret.fill(0);}
-   }else{state=await deps.device.prove(current);check();}
-   verifyDeviceMigrationJournal(current,state);
-   if(state.phase!=="device-committed"&&state.phase!=="host-committed"&&state.phase!=="complete")throw Error("migration-device-save-required");
-   if(current.phase==='prepared'){await deps.service.deviceCommitted(current.migrationId,current.policyHash);check();current=(await deps.service.current())!;check();}
-   bank??=await deps.sourceBank();check();
-   const target=deps.hardwareDocument(current);
-   await deps.service.commitLocal(current.migrationId,target,bank);check();current=(await deps.service.current())!;check();
-  }
-  // A temporary handshake public key is never used for this final proof.
-  state=await deps.device.prove(current);check();verifyDeviceMigrationJournal(current,state);
-  state=await deps.device.commit(current);check();verifyDeviceMigrationJournal(current,state);
-  await deps.service.finish(current.migrationId);check();return (await deps.service.current())!;
+  const check=()=>deps.assertExclusive();check();
+  // Capture the unlocked session key before changing the device. Preparation is
+  // volatile; the only browser write is the final complete transaction.
+  const secret=await deps.unlockSource();
+  try {
+   check();const bank=await deps.sourceBank();check();
+   let journal=await deps.service.begin({...input,policyBank:bank});check();
+   if(journal.source!=='software'||journal.target!=='hardware')throw Error('migration-conflict');
+   await deps.device.stage(journal,bank);check();
+   const state=await deps.device.prove(journal,secret);check();
+   verifyDeviceMigrationJournal(journal,state);
+   if(state.phase!=='device-committed')throw Error('migration-device-save-required');
+   await deps.service.deviceCommitted(journal.migrationId,journal.policyHash);check();
+   journal=(await deps.service.current())!;check();
+   const target=new Uint8Array(deps.hardwareDocument(journal));
+   // Finish the device while the browser still owns its source. A disconnect
+   // here leaves a normal software wallet plus a device backup, never a
+   // half-written browser wallet. Further import to that device is forbidden.
+   const committed=await deps.device.commit({...journal,phase:'local-committed',targetHash:hex(await sha256(target))});check();
+   if(committed.phase!=='complete')throw Error('migration-device-save-required');
+   await deps.service.commitLocal(journal.migrationId,target,bank);check();
+   return (await deps.service.current())!;
+  } finally {secret.fill(0);}
  }};
 }
 export {ProvisionMigrationConnection} from './provision-migration-connection.js';

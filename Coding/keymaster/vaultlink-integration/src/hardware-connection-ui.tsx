@@ -77,12 +77,12 @@ export function HardwareConnectionPanel({ execute, text, enrollmentLabel, preser
     finally { await current?.close(); setState({ status: "disconnected" }); }
   }
   return <div>
-    <p>{text("instructions", "先在设备上输入 PIN 解锁 RocKey，再连接 USB 并核对两端配对码。")}</p>
+    <p>{provisioning?text('provisionInstructions','请连接没有私钥的 RocKey，并核对两端配对码。已有私钥的设备不能迁入。'):text("instructions", "先在设备上输入 PIN 解锁 RocKey，再连接 USB 并核对两端配对码。")}</p>
     {state.status === "pairing" ? <div>
       <p>{text("pairing", "核对两端配对码，在 RocKey 上长按确认：")} <strong>{state.pairingCode}</strong></p>
     </div> : state.status === "connected" ? <p role="status">{text("connected", "RocKey 已验证连接。")}</p>
       : <Button onClick={() => void connect()} loading={busy} disabled={busy || state.status !== "disconnected"}>{text("connect", "连接 RocKey")}</Button>}
     {state.leaseId ? <Button variant="ghost" onClick={() => void disconnect()}>{text("disconnect", "断开连接")}</Button> : null}
-    {error ? <p role="alert">{error}</p> : null}
+    {error ? <p role="alert">{error==='device-already-has-key'?text('deviceHasKey','RocKey 已有私钥，不能迁入；相同私钥也不允许迁入。'):error}</p> : null}
   </div>;
 }

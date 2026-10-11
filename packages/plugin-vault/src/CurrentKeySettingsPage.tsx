@@ -58,7 +58,7 @@ export function CurrentKeySettingsPage() {
       .then((key) => { if (!cancelled) {setCurrentLabel(key?.label ?? null);setHardware(key ? key.format === "keymaster.hardware-key" : undefined);} })
       .catch(() => { if (!cancelled) {setCurrentLabel(null);setHardware(undefined);} });
     return () => { cancelled = true; };
-  }, [vault, publicKeyHex, snapshot.runGeneration, snapshot.walletGeneration]);
+  }, [vault, publicKeyHex, snapshot.runGeneration, snapshot.walletGeneration, snapshot.sessionEpoch]);
 
   async function submitRename() {
     const next = (label ?? currentLabel ?? "").trim();

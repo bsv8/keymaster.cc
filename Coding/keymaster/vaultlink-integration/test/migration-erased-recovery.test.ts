@@ -32,7 +32,7 @@ for(const phase of ['erasing','erased'])test(`committed browser + actual empty-d
   const client=(portal as unknown as {client:ProtocolClient}).client,body={staticKey:new Uint8Array(32).fill(7)};
   expect(await client.execute('identity.noise-proof',body,await commitment('network-noise-proof',1,body))).toMatchObject({error:'unsupported'});
   const receipt=await portal.finishErase();expect(verifyDeviceMigrationJournal(committed,receipt).phase).toBe('erased');
-  await service.finish(id);const complete=(await service.current())!;await portal.completeDevice(complete);
+  const complete=(await service.current())!;await portal.completeDevice(complete);
   expect((await portal.migrationStatus()).phase).toBe('complete');
   const unlocked=await createWalletKeyRepository(createVaultBootstrapStorage(store).keys).unlock('new-software-password');
   try{expect(unlocked.document.publicKeyHex).toBe(publicKeyHex);}finally{unlocked.privateKeyBytes.fill(0);}

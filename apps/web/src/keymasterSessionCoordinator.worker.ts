@@ -94,7 +94,7 @@ import {
   COORDINATOR_CRYPTO_RPC_CAPABILITY,
 } from "@keymaster/contracts";
 import { MSFILE_MAX_BLOCK_BYTES, MSFILE_MAX_SEED_BYTES, MSFILE_READ_CONCURRENCY_RECOMMENDED, MSFILE_SELLER_SETTINGS_DEFAULT, normalizeMsFileReadConcurrencySettings, SAT_SUBSCRIPTION_RESOURCE_LIMITS } from "@keymaster/contracts";
-import { WalletMigrationFence, createMigrationJournalService, createHardwareToSoftwareMigration, createSoftwareToHardwareMigration, inspectWalletKeyBytes, verifyDeviceMigrationJournal, createAndVerifyMigrationKeyHold, bytesToHex, installInsecureContextCryptoFallback, hexToBytes as cryptoHexToBytes, executeVaultOperation as executeOwnedVaultOperation, deriveP2pkhAddress } from "@keymaster/plugin-vault/coordinator";
+import { WalletMigrationFence, createMigrationJournalService, createHardwareToSoftwareMigration, requestMigratedDeviceErase, createSoftwareToHardwareMigration, inspectWalletKeyBytes, verifyDeviceMigrationJournal, createAndVerifyMigrationKeyHold, bytesToHex, installInsecureContextCryptoFallback, hexToBytes as cryptoHexToBytes, executeVaultOperation as executeOwnedVaultOperation, deriveP2pkhAddress } from "@keymaster/plugin-vault/coordinator";
 // 不能通过 runtime barrel 导入：它 re-export React hooks，Vite 会把
 // React Refresh 注入 SharedWorker，后者没有 window。
 import { WebLoomError, createMessageBus, definePlugin, startSharedWorkerApp, type UpgradeGate, type UpgradeIoLease, type UpgradeSession, type HandlerCallContext, type PeerController } from "webloom-framework";
@@ -394,6 +394,8 @@ let walletStore: WalletStore | undefined;
 let walletKeys: WalletKeyRepository | undefined;
 let activeKeyBackend: "software" | "hardware" | undefined;
 let hardwareEnrollmentInProgress = false;
+/** Public failure survives the original modal being unmounted by the lock gate. */
+let softwareMigrationFailure:{migrationId:string;message:string}|undefined;
 let hardwareRecoveryConnection:{migrationId:string;peerId:string}|undefined;
 const hardwareConnections = new HardwareConnectionOwner(() => {
   if ((!platformStorageReady || !platformRootStore) && !hardwareEnrollmentInProgress && !hardwareRecoveryConnection) throw storageUnavailableError("Hardware connection has no current wallet root");
@@ -3755,7 +3757,7 @@ function clearStorageRequestSecrets(request: CoordinatorClientRequest): void {
 function clearVaultOperationSecrets(operation: CoordinatorVaultOperation): void {
   switch (operation.type) {
     case "migrateToHardware":
-      operation.sourcePassword="";return;
+      return;
     case "migrateToSoftware":
       operation.newPassword="";return;
     case "verifyPassword":
@@ -6196,7 +6198,6 @@ async function handleHardwareConnection(
       return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: {...state, ...(activity ? {activity} : {})} };
     }
     if (command.action === "disconnect") {
-      if (hardwareConnections.state().leaseId !== command.leaseId) throw new Error("stale-usb-lease");
       await hardwareConnections.disconnect(peerId, command.leaseId);
     } else if(command.action==="provision"||command.action==="recover-import") {
       if(!walletStore||!walletKeys||hardwareConnections.state().status!=="disconnected")throw Error("migration-provisioning-unavailable");
@@ -6370,6 +6371,10 @@ async function handleVaultOperation(requestId: string, request: { kind: "vault.o
     if((request.operation.type==="migrateToSoftware"||request.operation.type==="migrateToHardware")&&!platformRootStore){
       await installPlatformStorage();await loadCoordinatorMeta();await ensureStorageRuntime();await ensureCoordinatorTasksRegistered();emitStorageState();
     }
+    // Session runtime recovery performs ordinary wallet I/O. Run it only after
+    // releasing migration admission; nesting it inside the fence would reject
+    // its own reads and leave the newly activated wallet's business gates shut.
+    if(request.operation.type==="migrateToSoftware"&&coordinatorState.vaultStatus==="unlocked")await completeUnlockedBinding();
     return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
   } catch (err) {
     markStorageIoFailure(err);
@@ -6528,7 +6533,7 @@ async function migrateHardwareToSoftware(newPassword:string):Promise<{migrationI
   };
   try {
     const result=await backend.withMigration(async()=>{
-      assertExclusive();stopCoordinatorOwnerWorkerUnits();revokeStorageSessionGrants();
+      assertExclusive();
       const source=await keys.read();assertExclusive();
       if(!source)throw Error("hardware-source-required");
       const service=createMigrationJournalService({store:createVaultBootstrapStorage(store).migration,inspectKey:inspectWalletKeyBytes});
@@ -6536,24 +6541,46 @@ async function migrateHardwareToSoftware(newPassword:string):Promise<{migrationI
       if(source.backend!=="hardware"&&!(recovery&&current?.phase==="local-committed"))throw Error("hardware-source-required");
       const previous=await service.read();assertExclusive();
       const migrationId=previous&&previous.journal.phase!=="complete"?previous.journal.migrationId:crypto.randomUUID();
+      softwareMigrationFailure=undefined;
       if(previous?.journal.phase!=="local-committed"&&newPassword.length<8)throw Error("password-too-short");
       const migration=createHardwareToSoftwareMigration({service,device:backend,assertExclusive,
         createAndVerifyKeyHold:async(privateKey,publicKeyHex)=>createAndVerifyMigrationKeyHold({bsvNetwork:source.document.bsvNetwork,privateKey,publicKeyHex,label:source.document.label},newPassword)});
       return migration.run({migrationId,expectedRevision:source.revision});
     });
     coordinatorState.walletGeneration=result.walletGeneration;
-    await performGlobalLock("backend-migrated");
+    // The ciphertext/ledger/completed receipt are already durable. Keep only a
+    // migration-frozen USB handle for optional disposal; it must not authorize
+    // ordinary hardware operations or inherit the new software session.
+    const disposal=hardwareConnections.retainForMigrationCleanup(()=>{
+      if(walletStore!==store||walletKeys!==keys||coordinatorState.runGeneration!==run
+        ||coordinatorState.walletGeneration!==result.walletGeneration
+        ||(coordinatorState.sessionEpoch!==epoch&&(activeKeyBackend!=="software"||coordinatorState.activePublicKeyHex!==result.publicKeyHex)))
+        throw Error("migration-session-revoked");
+    });
+    hardwareRecoveryConnection=undefined;
+    // No wallet storage writes or admission lease in this independent task.
+    // Denial, silence and disconnect preserve the backup, never undo software.
+    void requestMigratedDeviceErase(result,disposal.backend).catch(()=>undefined).finally(()=>disposal.close());
+    walletPayments?.close();walletPayments=undefined;walletPaymentsOpening=undefined;
+    closeCoordinatorUpgradeSession("Hardware wallet migrated to software");
     storageColdStartState=await requireWalletLifecycle().coldStart();
     if(storageColdStartState.state!=="ready"||storageColdStartState.key?.backend!=="software")throw Error("migration-activation-failed");
+    await requireWalletLifecycle().unlock(newPassword);
+    const softwareIdentity=coordinatorActiveKeySummary();
+    if(softwareIdentity)setCoordinatorActiveKeySummary({...softwareIdentity,backend:"software"});
     emitStorageState();workerWalletState.publish();
     return {migrationId:result.migrationId,phase:"complete",target:"software"};
   }catch(error){
-    await performGlobalLock("backend-migration-recovery-required").catch(()=>undefined);
-    storageColdStartState=await requireWalletLifecycle().coldStart();emitStorageState();throw error;
+    storageColdStartState=await requireWalletLifecycle().coldStart();
+    // A failed volatile preparation keeps the hardware source and its session.
+    // Only an already committed software target needs normal login on failure.
+    if(storageColdStartState.state!=="ready"||storageColdStartState.key?.backend!=="hardware")
+      await performGlobalLock("backend-migrated").catch(()=>undefined);
+    emitStorageState();throw error;
   }
 }
 
-async function migrateSoftwareToHardware(sourcePassword:string):Promise<{migrationId:string;phase:"complete";target:"hardware"}> {
+async function migrateSoftwareToHardware():Promise<{migrationId:string;phase:"complete";target:"hardware"}> {
   const recovery=hardwareRecoveryConnection;if(!recovery)assertActiveWalletIdentity();
   if(!walletStore||!walletKeys||(!recovery&&activeKeyBackend!=="software"))throw Error("software-source-required");
   // 连接未验证与源钱包错误分开报告，不能把配对中的设备当作导入通道。
@@ -6562,22 +6589,28 @@ async function migrateSoftwareToHardware(sourcePassword:string):Promise<{migrati
   const check=()=>{if(walletStore!==store||walletKeys!==keys||coordinatorState.sessionEpoch!==epoch||coordinatorState.runGeneration!==run||hardwareConnections.provision()!==portal
     ||(recovery?hardwareRecoveryConnection!==recovery:coordinatorState.vaultStatus!=="unlocked"))throw Error("migration-session-revoked");};
   try{
-    check();stopCoordinatorOwnerWorkerUnits();revokeStorageSessionGrants();
+    check();
     const source=await keys.read();check();if(!source)throw Error("migration-source-missing");
     const service=createMigrationJournalService({store:createVaultBootstrapStorage(store).migration,inspectKey:inspectWalletKeyBytes});
     const previous=await service.current();check();
     const migrationId=previous&&previous.phase!=="complete"?previous.migrationId:crypto.randomUUID();
+    const completed=await vaultKeySession.useForMigration(async privateKey=>{
     const migration=createSoftwareToHardwareMigration({service,device:portal,assertExclusive:check,
       sourceBank:()=>service.sourceBank(source.document.publicKeyHex),
-      unlockSource:async()=>{const unlocked=await keys.unlock(sourcePassword);try{check();if(unlocked.revision!==source.revision||unlocked.document.publicKeyHex!==source.document.publicKeyHex)throw Error("migration-source-changed");return unlocked.privateKeyBytes;}catch(e){unlocked.privateKeyBytes.fill(0);throw e;}},
+      unlockSource:async()=>{check();return new Uint8Array(privateKey);},
       hardwareDocument:journal=>new TextEncoder().encode(JSON.stringify({format:"keymaster.hardware-key",version:1,backend:"vaultlink",wireVersion:2,bsvNetwork:journal.bsvNetwork,label:source.document.label,
         publicKeyHex:journal.publicKeyHex,walletGeneration:journal.walletGeneration,backendGeneration:1})),
     });
-    const completed=await migration.run({migrationId,expectedRevision:source.revision});check();
+    return migration.run({migrationId,expectedRevision:source.revision});
+    });check();
     coordinatorState.walletGeneration=completed.walletGeneration;await performGlobalLock("backend-migrated");
     storageColdStartState=await requireWalletLifecycle().coldStart();if(storageColdStartState.state!=="ready"||storageColdStartState.key?.backend!=="hardware")throw Error("migration-activation-failed");
     emitStorageState();workerWalletState.publish();return {migrationId,phase:"complete",target:"hardware"};
-  }catch(error){await performGlobalLock("backend-migration-recovery-required").catch(()=>undefined);storageColdStartState=await requireWalletLifecycle().coldStart();emitStorageState();throw error;}
+  }catch(error){
+    // Before atomic replacement the source session remains usable. Never turn
+    // a device rejection or bad password into a corrupt-wallet recovery gate.
+    storageColdStartState=await requireWalletLifecycle().coldStart();emitStorageState();throw error;
+  }
 }
 
 async function executeVaultOperation(operation: CoordinatorVaultOperation): Promise<unknown> {
@@ -6585,9 +6618,9 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
     if(!walletStore)return null;
     const service=createMigrationJournalService({store:createVaultBootstrapStorage(walletStore).migration,inspectKey:inspectWalletKeyBytes});
     const journal=await service.current();
-    return !journal||journal.phase==="complete"?null:{migrationId:journal.migrationId,phase:journal.phase,publicKeyHex:journal.publicKeyHex,passwordRequired:journal.phase!=="local-committed",target:journal.target};
+    return !journal||journal.phase==="complete"?null:{migrationId:journal.migrationId,phase:journal.phase,publicKeyHex:journal.publicKeyHex,passwordRequired:journal.phase!=="local-committed",target:journal.target,...(softwareMigrationFailure?.migrationId===journal.migrationId?{failure:softwareMigrationFailure.message}:{})};
   }
-  if(operation.type==="migrateToHardware"){try{return await migrateSoftwareToHardware(operation.sourcePassword);}finally{operation.sourcePassword="";}}
+  if(operation.type==="migrateToHardware")return migrateSoftwareToHardware();
   if(operation.type==="migrateToSoftware"){try{return await migrateHardwareToSoftware(operation.newPassword);}finally{operation.newPassword="";}}
   if (activeKeyBackend === "hardware") {
     assertActiveWalletIdentity();
@@ -8042,7 +8075,11 @@ async function bootstrapWalletStorage(): Promise<void> {
   }
   walletLifecycle = createWalletLifecycleService({
     store: vaultStorage.lifecycle,
-    readMigration: async () => (await vaultStorage.migration.get(WALLET_MIGRATION_PATH))?.bytes,
+    readMigration: async () => {
+      const service=createMigrationJournalService({store:vaultStorage.migration,inspectKey:inspectWalletKeyBytes});
+      await service.normalizePreviousAttempt();
+      return (await vaultStorage.migration.get(WALLET_MIGRATION_PATH))?.bytes;
+    },
     keys: walletKeys,
     generateWalletGeneration: () => crypto.randomUUID(),
     generateSessionEpoch: () => generateEpoch(),

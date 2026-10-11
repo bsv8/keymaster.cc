@@ -208,7 +208,7 @@ export type CoordinatorClientCommandRequest = Exclude<CoordinatorClientRequest, 
 
 /** 依据 Vault 内层操作 discriminant 收窄 operationResult。 */
 export type CoordinatorVaultOperationResultFor<O extends CoordinatorVaultOperation> =
-  O extends {type:"migrationState"} ? {migrationId:string;phase:"prepared"|"device-committed"|"local-committed";publicKeyHex:string;passwordRequired:boolean;target:"software"|"hardware"}|null :
+  O extends {type:"migrationState"} ? {migrationId:string;phase:"prepared"|"device-committed"|"local-committed";publicKeyHex:string;passwordRequired:boolean;target:"software"|"hardware";failure?:string}|null :
   O extends {type:"migrateToHardware"} ? {migrationId:string;phase:"complete";target:"hardware"} :
   O extends {type:"migrateToSoftware"} ? {migrationId:string;phase:"complete";target:"software"} :
   O extends { type: "hardware" } ? import("./sessionCoordinator.js").CoordinatorHardwareState :
@@ -1263,11 +1263,8 @@ function parseVaultOperation(value: unknown): CoordinatorVaultOperation {
     case "migrationState":
       if(Object.keys(operation).length!==1)throw new TypeError("Invalid migration state request");return {type};
     case "migrateToHardware":
-      if(Object.keys(operation).length!==2)throw new TypeError("Invalid migration request fields");
-      // 本地已经提交硬件 KeyHold 后，恢复只核实原设备与迁移回执，没有
-      // 软件密文可以再解密。允许空密码通过 DTO；是否需要解密由日志阶段决定。
-      if(typeof operation.sourcePassword!=="string"||operation.sourcePassword.length>4_096)throw new TypeError("Coordinator Vault operation.sourcePassword is invalid");
-      return {type,sourcePassword:operation.sourcePassword};
+      if(Object.keys(operation).length!==1)throw new TypeError("Invalid migration request fields");
+      return {type};
     case "migrateToSoftware":
       if(Object.keys(operation).length!==2)throw new TypeError("Invalid migration request fields");
       return {type,newPassword:password("newPassword")};
@@ -2569,12 +2566,13 @@ function parseCoordinatorVaultOperationResultFor(
     case "migrationState": {
       if(value===null)return null;
       const result=expectRecord(value,field);
-      if(Object.keys(result).length!==5||Object.keys(result).some(k=>!["migrationId","phase","publicKeyHex","passwordRequired","target"].includes(k)))throw new TypeError("Invalid migration state");
+      if(Object.keys(result).length!==(result.failure===undefined?5:6)||Object.keys(result).some(k=>!["migrationId","phase","publicKeyHex","passwordRequired","target","failure"].includes(k)))throw new TypeError("Invalid migration state");
       const migrationId=text(result.migrationId,field+".migrationId",36),publicKeyHex=text(result.publicKeyHex,field+".publicKeyHex",66);
       const phase=enumValue(result.phase,["prepared","device-committed","local-committed"] as const,field+".phase");
       if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(migrationId)||!/^(02|03)[0-9a-f]{64}$/u.test(publicKeyHex)||result.passwordRequired!==(phase!=="local-committed"))throw new TypeError("Invalid migration binding");
       const target=enumValue(result.target,["software","hardware"] as const,field+".target");
-      return {migrationId,phase,publicKeyHex,passwordRequired:result.passwordRequired,target};
+      const failure=result.failure===undefined?undefined:text(result.failure,field+".failure",512);
+      return {migrationId,phase,publicKeyHex,passwordRequired:result.passwordRequired,target,...(failure===undefined?{}:{failure})};
     }
     case "migrateToHardware":
     case "migrateToSoftware": {

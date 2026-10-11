@@ -24,7 +24,7 @@ function signPrivate(input: PrivateMessageSigningInput, privateKey: Uint8Array):
   } as UnsignedPrivateMessage, privateKey);
 }
 
-/** Worker-only key owner. Operations never return key bytes or a key object. */
+/** Worker-only key owner. Public operations never return key bytes or a key object. */
 export function createWorkerKeySession(identity: () => WorkerKeyIdentity) {
   let privateKeyBytes: Uint8Array | undefined;
   let generation = 0;
@@ -46,6 +46,14 @@ export function createWorkerKeySession(identity: () => WorkerKeyIdentity) {
     clear() { session.replace(undefined); },
     hasKey: () => privateKeyBytes !== undefined,
     assert(publicKeyHex?: string, sessionEpoch?: string) { assert({ publicKeyHex, sessionEpoch }); },
+    /** Private Worker callback for physical migration. Bind the copy to the
+     * unlocked session, revoke stale results and wipe it on every exit. This
+     * method has no Window/RPC operation and does not request the password. */
+    async useForMigration<T>(run: (key: Uint8Array) => Promise<T>): Promise<T> {
+      const captured = assert(), copy = new Uint8Array(privateKeyBytes!);
+      try { const result = await run(copy); assert(captured); return result; }
+      finally { copy.fill(0); }
+    },
     async signDigest(digest: Uint8Array, format: EcdsaSignatureFormat, publicKeyHex?: string) {
       const captured = assert({ publicKeyHex });
       const signature = await signEcdsaDigest({ privateKeyBytes: privateKeyBytes!, digest, format });

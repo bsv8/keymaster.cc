@@ -2,7 +2,7 @@ import type { VaultService, WalletInitializePlan, WalletKeySummary } from "@keym
 /** 仅由 Vault 装配和内部 UI 持有，禁止发布为 capability。 */
 export interface InternalVaultService extends VaultService {
   migrationState():Promise<import("@keymaster/contracts").CoordinatorVaultOperationResultFor<{type:"migrationState"}>>;
-  migrateToHardware(sourcePassword:string):Promise<void>;
+  migrateToHardware():Promise<void>;
   migrateToSoftware(newPassword:string):Promise<void>;
   coldStart(): Promise<import("@keymaster/contracts").WalletColdStartSnapshot>;
   hardware(command: import("@keymaster/contracts").CoordinatorHardwareCommand): Promise<import("@keymaster/contracts").CoordinatorHardwareState>;

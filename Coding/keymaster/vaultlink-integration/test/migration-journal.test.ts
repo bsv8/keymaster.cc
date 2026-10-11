@@ -41,7 +41,7 @@ async function prepare(databaseName: string) {
   return { store, repo, source, meta, business, policyHash, bank, storedPolicy, migrationId, service, target };
 }
 
-test("真实 IndexedDB：迁移记录跨重启保留，设备确认之前不能提交，Key 与提交阶段原子替换", async () => {
+test("真实 IndexedDB：刷新丢弃准备数据，设备确认之前不能提交，Key 与完成记录原子替换", async () => {
   const databaseName = "migration-journal-" + crypto.randomUUID();
   const p = await prepare(databaseName);
   await p.service.begin({ migrationId: p.migrationId, expectedRevision: p.source.revision, policyBank: p.bank });
@@ -51,21 +51,25 @@ test("真实 IndexedDB：迁移记录跨重启保留，设备确认之前不能�
   const reopened = createIndexedDbWalletStore({ databaseName });
   const service = createMigrationJournalService({ store: createVaultBootstrapStorage(reopened).migration, inspectKey: inspectWalletKeyBytes });
   try {
-    expect((await service.read())?.journal).toMatchObject({ phase: "prepared", source: "software", target: "hardware" });
+    expect(await service.read()).toBeUndefined();
+    expect(await reopened.get(WALLET_MIGRATION_PATH)).toBeUndefined();
+    await service.begin({migrationId:p.migrationId,expectedRevision:p.source.revision,policyBank:p.bank});
     await expect(service.deviceCommitted(p.migrationId, "00".repeat(32))).rejects.toMatchObject({ code: "storage_conflict" });
     await service.deviceCommitted(p.migrationId, p.policyHash);
     const foreign = JSON.parse(new TextDecoder().decode(p.target)); foreign.walletGeneration = crypto.randomUUID();
     await expect(service.commitLocal(p.migrationId, encode(foreign), p.bank)).rejects.toMatchObject({ code: "storage_identity_required" });
     const peer = createMigrationJournalService({ store: createVaultBootstrapStorage(reopened).migration, inspectKey: inspectWalletKeyBytes });
+    await peer.begin({migrationId:p.migrationId,expectedRevision:p.source.revision,policyBank:p.bank});
+    await peer.deviceCommitted(p.migrationId,p.policyHash);
     const results = await Promise.allSettled([service.commitLocal(p.migrationId, p.target, p.bank), peer.commitLocal(p.migrationId, p.target, p.bank)]);
     expect(results.filter(x => x.status === "fulfilled")).toHaveLength(1);
     expect(results.filter(x => x.status === "rejected")).toHaveLength(1);
-    expect((await service.read())?.journal).toMatchObject({ phase: "local-committed", targetHash: hex(await sha256(p.target)) });
+    expect((await service.read())?.journal).toMatchObject({ phase: "complete", targetHash: hex(await sha256(p.target)) });
     expect((await createWalletKeyRepository(reopened).read())?.backend).toBe("hardware");
     expect((await reopened.get("contacts/existing"))?.bytes).toEqual(p.business);
     expect((await reopened.get(POLICY_PATH))?.bytes).toEqual(p.storedPolicy.bytes);
     expect((await reopened.get(WALLET_META_PATH))?.bytes).toEqual(encode(p.meta));
-    await service.finish(p.migrationId);
+
     expect((await service.read())?.journal.phase).toBe("complete");
     const hardwareDocument = validateHardwareKeyDocument(JSON.parse(new TextDecoder().decode(p.target)));
     const completedJournal = (await reopened.get(WALLET_MIGRATION_PATH))!.bytes;
@@ -85,7 +89,7 @@ test("真实 IndexedDB：迁移记录跨重启保留，设备确认之前不能�
     try {
       const keyHold = await createKeyHoldDocument({bsvNetwork: "main" as const,  label: "保持身份", privateKey }, "new-software-password");
       await service.commitLocal(next.migrationId, new TextEncoder().encode(serializeKeyHoldDocument(keyHold)), p.bank);
-      await service.finish(next.migrationId);
+      expect((await service.current())?.phase).toBe("complete");
       const repository = createWalletKeyRepository(reopened);
       await expect(repository.unlock("original-password")).rejects.toBeDefined();
       const unlocked = await repository.unlock("new-software-password");
@@ -107,7 +111,7 @@ test("迁移端口仅允许固定记录、显式 CAS，源记录改变或重置�
     await p.repo.rename("并发改名");
     await expect(p.service.deviceCommitted(p.migrationId, p.policyHash)).rejects.toMatchObject({ code: "storage_conflict" });
     await p.store.resetWallet();
-    await expect(p.service.commitLocal(p.migrationId, p.target, p.bank)).rejects.toMatchObject({ code: "storage_conflict" });
+    await expect(p.service.commitLocal(p.migrationId, p.target, p.bank)).rejects.toMatchObject({ code: "storage_wallet_corrupt" });
     expect(await p.repo.read()).toBeUndefined();
   } finally { p.store.close(); }
 });
@@ -124,7 +128,7 @@ test("公开迁移记录严格拒绝私钥字段、无效阶段及前后提交�
 });
 
 
-test("公开设备进度必须绑定实际浏览器迁移 journal，阶段和目标提交不能串钱包或跳过擦除",async()=>{
+test("公开设备进度必须绑定实际浏览器迁移 journal，阶段和目标提交不能串钱包；迁回完成独立于擦除",async()=>{
   const p=await prepare(`migration-device-binding-${crypto.randomUUID()}`);
   try {
     const host=await p.service.begin({migrationId:p.migrationId,expectedRevision:p.source.revision,policyBank:p.bank});
@@ -139,14 +143,14 @@ test("公开设备进度必须绑定实际浏览器迁移 journal，阶段和目
     await p.service.deviceCommitted(p.migrationId,p.policyHash);
     await p.service.commitLocal(p.migrationId,p.target,p.bank);
     const local=(await p.service.read())!.journal,targetHash=unhex(local.targetHash!);
-    expect(verifyDeviceMigrationJournal(local,device).phase).toBe("device-committed");
-    expect(verifyDeviceMigrationJournal(local,{...device,phase:"host-committed",targetHash}).phase).toBe("host-committed");
+    expect(()=>verifyDeviceMigrationJournal(local,device)).toThrow();
+    expect(()=>verifyDeviceMigrationJournal(local,{...device,phase:"host-committed",targetHash})).toThrow();
     expect(()=>verifyDeviceMigrationJournal(local,{...device,phase:"host-committed",targetHash:new Uint8Array(32)})).toThrow();
-    await p.service.finish(p.migrationId);const complete=(await p.service.read())!.journal;
+    const complete=(await p.service.read())!.journal;
     expect(()=>verifyDeviceMigrationJournal(complete,device)).toThrow();
     expect(verifyDeviceMigrationJournal(complete,{...device,phase:"complete",targetHash}).phase).toBe("complete");
     const returning={...complete,source:"hardware" as const,target:"software" as const};
-    expect(()=>verifyDeviceMigrationJournal(returning,{...device,direction:"to-software",phase:"host-committed",targetHash})).toThrow();
+    expect(verifyDeviceMigrationJournal(returning,{...device,direction:"to-software",phase:"host-committed",targetHash}).phase).toBe("host-committed");
     expect(verifyDeviceMigrationJournal(returning,{...device,direction:"to-software",phase:"erased",targetHash}).phase).toBe("erased");
   }finally{p.store.close();}
 });

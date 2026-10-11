@@ -99,7 +99,9 @@ export class VaultLinkHardwareBackend {
   isMigrating():boolean{return this.migrationOwned;}
   async withMigration<T>(run:()=>Promise<T>):Promise<T>{
     this.assert();if(this.migrationOwned)throw Error("migration-pending");
-    this.migrationOwned=true;await this.tail;this.assert();return run();
+    this.migrationOwned=true;
+    try{await this.tail;this.assert();return await run();}
+    catch(error){this.migrationOwned=false;throw error;}
   }
   private tail: Promise<unknown> = Promise.resolve();
   private queued = 0;
@@ -456,7 +458,7 @@ export class VaultLinkHardwareBackend {
   }
   /** Coordinator Worker only. The caller owns the returned secret and MUST wipe
    * it after creating/verifying the new password-encrypted KeyHold. Never expose
-   * this result on Window/plugin RPC. Device export must be armed locally first. */
+   * this result on Window/plugin RPC. Device authorizes this request physically. */
   exportMigrationKey(binding: Omit<DeviceMigrationRecord,"version"|"phase"|"targetHash">):Promise<{privateKey:Uint8Array;migration:DeviceMigrationRecord}> {
     const expected=inspectDeviceMigration({...binding,version:1,phase:"staged",targetHash:null});
     if(expected.direction!=="to-software"||!equal(expected.publicKey,this.pub))throw Error("migration-conflict");
@@ -480,9 +482,9 @@ export class VaultLinkHardwareBackend {
   /** Send only after the real IndexedDB transaction has committed key, policy
    * and journal. A public acknowledgement never authorizes device erasure. */
   acknowledgeMigration(binding:DeviceMigrationRecord,targetHash:Uint8Array):Promise<DeviceMigrationRecord> {
-    return this.migrationTransition("migration.host-commit","key-migration-host-commit",binding,targetHash,"host-committed");
+    return this.migrationTransition("migration.host-commit","key-migration-host-commit",binding,targetHash,"complete");
   }
-  /** Separate device PIN + once-only physical approval; no browser confirmation
+  /** Separate once-only physical approval; no browser confirmation
    * or previous export approval can substitute for this step. */
   eraseMigrationSource(binding:DeviceMigrationRecord,targetHash:Uint8Array):Promise<DeviceMigrationRecord> {
     return this.migrationTransition("migration.erase","key-migration-erase",binding,targetHash,"erased");
