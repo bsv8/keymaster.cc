@@ -722,7 +722,7 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
                   <strong>{task.recommendedFilename ?? t("msfile.bucket.bitfs.unknownFile", { defaultValue: "未知文件名" })}</strong>
                   <code title={task.seedHashHex}>{shortHex(task.seedHashHex)}</code>
                 </div>
-                <span className="msfile-bucket__badge">{t(`msfile.bucket.bitfs.phase.${task.phase}`, { defaultValue: task.phase })}</span>
+                <span className={`msfile-bucket__badge msfile-bucket__badge--${task.phase}`}>{t(`msfile.bucket.bitfs.phase.${task.phase}`, { defaultValue: task.phase })}</span>
               </header>
               <p className="msfile-bucket__hint">{progress}</p>
               {task.message ? <p className="msfile-bucket__task-message">{task.message}</p> : null}
@@ -918,93 +918,101 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
       ) : null}
       {busyLabel ? <p className="msfile-bucket__progress" role="status">{busyLabel}</p> : null}
 
-      {listPhase === "loading" ? (
-        <p className="msfile-bucket__hint" role="status">{t("msfile.bucket.list.loading", { defaultValue: "正在读取桶内种子…" })}</p>
-      ) : null}
-      {listPhase === "failed" ? (
-        <div className="msfile-bucket__error" role="alert">
-          <span>{listError?.message ?? t("msfile.bucket.error.default", { defaultValue: "桶存储操作失败，请重试。" })}</span>
-          <Button variant="ghost" size="sm" onClick={() => { void reload(); }}>{t("msfile.bucket.list.retry", { defaultValue: "重试" })}</Button>
-        </div>
-      ) : null}
-      {listPhase === "ready" && entries.length === 0 ? (
-        <EmptyState
-          title={t("msfile.bucket.list.empty", { defaultValue: "还没有已存储的种子" })}
-          description={t("msfile.bucket.list.emptyHint", { defaultValue: "选择上面的文件上传；上传完成后会按 MasterSeed 制作种子文件并写入文件块。" })}
-        />
-      ) : null}
-      {entries.length > 0 ? (
-        <DataTable<MsFileSeedEntry>
-          rowKey={(entry) => entry.seedHashHex}
-          rows={entries}
-          columns={[
-            {
-              key: "seed",
-              header: t("msfile.bucket.column.seed", { defaultValue: "Seed Hash" }),
-              render: (entry) => (
-                <span className="msfile-bucket__seed">
-                  <code title={entry.seedHashHex}>{shortHex(entry.seedHashHex)}</code>
-                  <SeedHashCopyButton seedHashHex={entry.seedHashHex} />
-                </span>
-              ),
-            },
-            {
-              key: "name",
-              header: t("msfile.bucket.column.name", { defaultValue: "文件名" }),
-              render: (entry) => (
-                <span className="msfile-bucket__name">
-                  {entry.meta
-                    ? entry.meta.fileName
-                    : <em>{t("msfile.bucket.metaMissing", { defaultValue: "元数据缺失" })}</em>}
-                  {entry.seedPresent === false
-                    ? <span className="msfile-bucket__badge">{t("msfile.bucket.seedMissing", { defaultValue: "种子丢失" })}</span>
-                    : null}
-                </span>
-              ),
-            },
-            {
-              key: "type",
-              header: t("msfile.bucket.column.type", { defaultValue: "类型" }),
-              render: (entry) => entry.meta ? <code>{entry.meta.mediaType}</code> : "—",
-            },
-            {
-              key: "size",
-              header: t("msfile.bucket.column.size", { defaultValue: "大小" }),
-              render: (entry) => entry.meta ? formatBytes(entry.meta.fileSizeBytes) : "—",
-            },
-            {
-              key: "blocks",
-              header: t("msfile.bucket.column.blocks", { defaultValue: "块数" }),
-              render: (entry) => entry.meta ? String(entry.meta.blockCount) : "—",
-            },
-            {
-              key: "storedAt",
-              header: t("msfile.bucket.column.storedAt", { defaultValue: "存入时间" }),
-              render: (entry) => entry.meta ? new Date(entry.meta.storedAt).toLocaleString() : "—",
-            },
-            {
-              key: "actions",
-              header: t("msfile.bucket.column.actions", { defaultValue: "操作" }),
-              render: (entry) => (
-                <div className="msfile-bucket__row-actions">
-                  <Button variant="ghost" size="sm" disabled={!canOperate || busy !== null || entry.seedPresent === false} onClick={() => { void handlePreview(entry); }}>
-                    {t("msfile.bucket.action.preview", { defaultValue: "预览" })}
-                  </Button>
-                  <Button variant="ghost" size="sm" disabled={!canOperate || busy !== null || entry.seedPresent === false} onClick={() => { void handleDownload(entry); }}>
-                    {t("msfile.bucket.action.download", { defaultValue: "下载" })}
-                  </Button>
-                  <Button variant="ghost" size="sm" disabled={!canOperate || busy !== null || entry.seedPresent === false} onClick={() => { void handleVerify(entry); }}>
-                    {t("msfile.bucket.action.verify", { defaultValue: "校验" })}
-                  </Button>
-                  <Button variant="danger" size="sm" disabled={!canOperate || busy !== null} onClick={() => setDeleteTarget(entry)}>
-                    {t("msfile.bucket.action.delete", { defaultValue: "删除" })}
-                  </Button>
-                </div>
-              ),
-            },
-          ]}
-        />
-      ) : null}
+      <section className="msfile-bucket__stored" aria-labelledby="msfile-bucket-stored-title">
+        <header className="msfile-bucket__stored-head">
+          <h4 id="msfile-bucket-stored-title">{t("msfile.bucket.stored.title", { defaultValue: "已存储内容" })}</h4>
+          {listPhase === "ready" ? <span className="msfile-bucket__count">{entries.length}</span> : null}
+        </header>
+        {listPhase === "loading" ? (
+          <p className="msfile-bucket__hint" role="status">{t("msfile.bucket.list.loading", { defaultValue: "正在读取桶内种子…" })}</p>
+        ) : null}
+        {listPhase === "failed" ? (
+          <div className="msfile-bucket__error" role="alert">
+            <span>{listError?.message ?? t("msfile.bucket.error.default", { defaultValue: "桶存储操作失败，请重试。" })}</span>
+            <Button variant="ghost" size="sm" onClick={() => { void reload(); }}>{t("msfile.bucket.list.retry", { defaultValue: "重试" })}</Button>
+          </div>
+        ) : null}
+        {listPhase === "ready" && entries.length === 0 ? (
+          <EmptyState
+            title={t("msfile.bucket.list.empty", { defaultValue: "还没有已存储的种子" })}
+            description={t("msfile.bucket.list.emptyHint", { defaultValue: "选择上面的文件上传；上传完成后会按 MasterSeed 制作种子文件并写入文件块。" })}
+          />
+        ) : null}
+        {entries.length > 0 ? (
+          <div className="msfile-bucket__table">
+            <DataTable<MsFileSeedEntry>
+              rowKey={(entry) => entry.seedHashHex}
+              rows={entries}
+              columns={[
+                {
+                  key: "seed",
+                  header: t("msfile.bucket.column.seed", { defaultValue: "Seed Hash" }),
+                  render: (entry) => (
+                    <span className="msfile-bucket__seed">
+                      <code title={entry.seedHashHex}>{shortHex(entry.seedHashHex)}</code>
+                      <SeedHashCopyButton seedHashHex={entry.seedHashHex} />
+                    </span>
+                  ),
+                },
+                {
+                  key: "name",
+                  header: t("msfile.bucket.column.name", { defaultValue: "文件名" }),
+                  render: (entry) => (
+                    <span className="msfile-bucket__name">
+                      {entry.meta
+                        ? entry.meta.fileName
+                        : <em>{t("msfile.bucket.metaMissing", { defaultValue: "元数据缺失" })}</em>}
+                      {entry.seedPresent === false
+                        ? <span className="msfile-bucket__badge msfile-bucket__badge--warning">{t("msfile.bucket.seedMissing", { defaultValue: "种子丢失" })}</span>
+                        : null}
+                    </span>
+                  ),
+                },
+                {
+                  key: "type",
+                  header: t("msfile.bucket.column.type", { defaultValue: "类型" }),
+                  render: (entry) => entry.meta ? <code>{entry.meta.mediaType}</code> : "—",
+                },
+                {
+                  key: "size",
+                  header: t("msfile.bucket.column.size", { defaultValue: "大小" }),
+                  render: (entry) => entry.meta ? formatBytes(entry.meta.fileSizeBytes) : "—",
+                },
+                {
+                  key: "blocks",
+                  header: t("msfile.bucket.column.blocks", { defaultValue: "块数" }),
+                  render: (entry) => entry.meta ? String(entry.meta.blockCount) : "—",
+                },
+                {
+                  key: "storedAt",
+                  header: t("msfile.bucket.column.storedAt", { defaultValue: "存入时间" }),
+                  render: (entry) => entry.meta ? new Date(entry.meta.storedAt).toLocaleString() : "—",
+                },
+                {
+                  key: "actions",
+                  header: t("msfile.bucket.column.actions", { defaultValue: "操作" }),
+                  render: (entry) => (
+                    <div className="msfile-bucket__row-actions">
+                      <Button variant="ghost" size="sm" disabled={!canOperate || busy !== null || entry.seedPresent === false} onClick={() => { void handlePreview(entry); }}>
+                        {t("msfile.bucket.action.preview", { defaultValue: "预览" })}
+                      </Button>
+                      <Button variant="ghost" size="sm" disabled={!canOperate || busy !== null || entry.seedPresent === false} onClick={() => { void handleDownload(entry); }}>
+                        {t("msfile.bucket.action.download", { defaultValue: "下载" })}
+                      </Button>
+                      <Button variant="ghost" size="sm" disabled={!canOperate || busy !== null || entry.seedPresent === false} onClick={() => { void handleVerify(entry); }}>
+                        {t("msfile.bucket.action.verify", { defaultValue: "校验" })}
+                      </Button>
+                      <Button variant="danger" size="sm" disabled={!canOperate || busy !== null} onClick={() => setDeleteTarget(entry)}>
+                        {t("msfile.bucket.action.delete", { defaultValue: "删除" })}
+                      </Button>
+                    </div>
+                  ),
+                },
+              ]}
+            />
+          </div>
+        ) : null}
+      </section>
 
       {preview ? (
         <section className="msfile-bucket__preview" aria-labelledby="msfile-bucket-preview-title">
