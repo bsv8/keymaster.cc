@@ -1,3 +1,7 @@
+import { PrivateKey } from "@bsv/sdk";
+import { hexImporter } from "./hexImporter.js";
+import { wifImporter } from "./wifImporter.js";
+import { jsonFileImporter } from "./jsonFileImporter.js";
 import { createImporterRegistry } from "./registries/importerRegistry.js";
 import type { InternalVaultService } from "../internalVaultService.js";
 import { createFixtureHost as createPluginHost } from "@keymaster/runtime/test-support";
@@ -32,7 +36,7 @@ import { KeyImportWizard } from "./KeyImportWizard.js";
 import { keyImportResources } from "./resources.js";
 
 /** 构造一个最小 host，包含一个用于测试的 JSON importer 与可断言的 vault。 */
-function createWizardHost() {
+function createWizardHost(importer = makeTestJsonImporter()) {
   const host = createPluginHost({
 
     initialI18nResources: [keyImportResources]
@@ -43,7 +47,7 @@ function createWizardHost() {
   if (!messageBus) throw new Error("missing messageBus");
   const registry = createImporterRegistry();
   if (!registry) throw new Error("missing registry");
-  registry.register(makeTestJsonImporter());
+  registry.register(importer);
   registerImportTestContext(host, vault as InternalVaultService, registry);
   return { host, vault };
 }
@@ -296,4 +300,39 @@ vi.mock("webloom-framework/react", async importOriginal => {
 vi.mock("@keymaster/runtime", async importOriginal => {
   const runtime = await importOriginal<typeof import("@keymaster/runtime")>();
   return { ...runtime, usePluginI18n: runtime.useI18n, usePluginLocale: runtime.useLocale, usePluginBsvPrice: runtime.useBsvPrice };
+});
+
+
+describe("按导入格式确定网络", () => {
+  const hex = "0".repeat(63) + "1";
+  it.each([
+    {importer: hexImporter, input: hex, network: "test"},
+    {importer: hexImporter, input: hex, network: "main"},
+    {importer: jsonFileImporter, input: JSON.stringify({privateKey: hex}), network: "test"},
+    {importer: wifImporter, input: "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn", network: "main"},
+    {importer: wifImporter, input: PrivateKey.fromHex(hex).toWif([0xef]), network: "test"},
+  ] as const)("$importer.id 私钥可在第四步导入 $network 钱包", async ({importer, input, network}) => {
+    const user = userEvent.setup();
+    const {host, vault} = createWizardHost(importer);
+    const initialize = vi.fn(async () => ({}));
+    Object.assign(vault, {initialize});
+    render(<PluginHostProvider host={host}><KeyImportWizard onCancel={() => {}}/></PluginHostProvider>);
+    expect(screen.queryByRole("radio")).toBeNull();
+    await user.click(document.querySelector(".importer-picker__item")!);
+    if (importer.id === "wif") expect(screen.queryByRole("radio")).toBeNull();
+    else await user.click(screen.getByRole("radio", {name: network === "test" ? /测试网/ : /主网/}));
+    await user.click(screen.getByRole("button", {name: /下一步|Next/}));
+    if (importer.id === "json-file") await user.selectOptions(screen.getByRole("combobox"), "text");
+    fireEvent.change(screen.getByRole("textbox"), {target: {value: input}});
+    await user.click(screen.getByRole("button", {name: /解析|Parse/}));
+    await screen.findByText(/确认解析结果|Confirm the parsed key/);
+    expect(screen.getByText(new RegExp(`钱包网络：${network === "test" ? "测试网" : "主网"}|Wallet network: ${network === "test" ? "Testnet" : "Mainnet"}`))).toBeTruthy();
+    await user.click(screen.getByRole("button", {name: /下一步|Next/}));
+    await user.type(screen.getByLabelText(/新密码|New password/), "test-password");
+    await user.type(screen.getByLabelText(/确认密码|Confirm password/), "test-password");
+    await user.click(screen.getByRole("button", {name: /创建并导入|Create and import/}));
+    await waitFor(() => expect(initialize).toHaveBeenCalledOnce());
+    expect(initialize).toHaveBeenCalledWith(expect.objectContaining({firstKey: expect.objectContaining({bsvNetwork: network, material: expect.objectContaining({hex})})}));
+    expect(screen.queryByText("导入私钥的网络与选择不一致")).toBeNull();
+  });
 });

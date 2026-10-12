@@ -98,6 +98,7 @@ export function KeyImportWizard({ onCancel, vaultPassword, draftMode, onComplete
   const [state, dispatch] = useReducer(reduceWizard, initialWizardState);
   const step = state.step;
   const importer = state.importState.importer;
+  const walletNetwork = importer?.id === "wif" ? state.importState.result?.network : bsvNetwork;
   const jsonInputMode = state.importState.jsonInputMode;
   const importPasswordDraft = state.importState.password;
 
@@ -152,6 +153,7 @@ export function KeyImportWizard({ onCancel, vaultPassword, draftMode, onComplete
         return;
       }
       const result = r[0]!;
+      if (importer.id === "wif" && result.network === undefined) throw new Error("WIF network is required");
       // reducer 内一并处理：转存 resolvedImportPassword + 跳到 confirm-key。
       dispatch({
         type: "parse-resolved",
@@ -181,16 +183,15 @@ export function KeyImportWizard({ onCancel, vaultPassword, draftMode, onComplete
   }
 
   async function finish() {
-    if (!state.importState.result) return;
+    if (!state.importState.result || !walletNetwork) return;
 
     // draft 模式只把解析结果交还宿主；这里绝不创建空 Vault，也不写入
     // keys/、Hold 或目录。宿主会在最终确认时调用单一事务入口。
     if (isDraftMode && onComplete) {
       const parsed = state.importState.result;
-      if (parsed.network !== undefined && parsed.network !== bsvNetwork) throw new Error("导入私钥的网络与选择不一致");
       const label = state.label.trim() || `key-${Date.now()}`;
       onComplete({
-        bsvNetwork,
+        bsvNetwork: walletNetwork,
         label,
         material: {
           hex: parsed.material.hex,
@@ -258,12 +259,11 @@ export function KeyImportWizard({ onCancel, vaultPassword, draftMode, onComplete
     dispatch({ type: "import", action: { type: "parse-start" } });
     try {
       const parsed = state.importState.result;
-      if (parsed.network !== undefined && parsed.network !== bsvNetwork) throw new Error("导入私钥的网络与选择不一致");
       await vault.initialize({
         transactionId: `key-import-${Date.now()}`,
         firstKey: {
           kind: "import",
-          bsvNetwork,
+          bsvNetwork: walletNetwork,
           label: state.label.trim() || `key-${Date.now()}`,
           material: parsed.material,
           format: parsed.detectedFormat,
@@ -363,11 +363,11 @@ export function KeyImportWizard({ onCancel, vaultPassword, draftMode, onComplete
           })}
         />
         <section className="first-time-import__picker">
-          <NetworkIdentitySelect value={bsvNetwork} onChange={setBsvNetwork} />
         <ImporterPicker
             selected={importer?.id}
             onSelect={(imp) => dispatch({ type: "pick-importer", importer: imp })}
           />
+          {importer?.id === "wif" ? <p>{t("vault.import.page.wifNetwork", {defaultValue: "WIF 自带网络标记，解析后自动识别主网或测试网。"})}</p> : importer ? <NetworkIdentitySelect value={bsvNetwork} onChange={setBsvNetwork} /> : null}
         </section>
         {state.importState.error ? <p className="first-time-import__error">{state.importState.error}</p> : null}
         <div className="first-time-import__actions">
@@ -572,6 +572,7 @@ export function KeyImportWizard({ onCancel, vaultPassword, draftMode, onComplete
           })}
         />
         <section className="first-time-import__confirm">
+          <p>{t("vault.import.page.network", {defaultValue: "钱包网络："})}{walletNetwork === "test" ? t("vault.import.page.testnet", {defaultValue: "测试网"}) : t("vault.import.page.mainnet", {defaultValue: "主网"})}</p>
           <p>
             {t("vault.import.page.detected", { defaultValue: "检测到：" })}
             {parsed.detectedFormat}

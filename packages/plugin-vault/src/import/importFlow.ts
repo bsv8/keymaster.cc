@@ -27,13 +27,15 @@ export async function persistImport(
   result: KeyImportResult,
   options: ImportOptions
 ): Promise<WalletKeySummary> {
-  if (result.network !== undefined && result.network !== options.bsvNetwork) throw new Error("Imported key network mismatch");
+  // WIF 使用编码中的网络；无网络的私钥材料使用用户选择。
+  const bsvNetwork = options.source === "wif" ? result.network : options.bsvNetwork;
+  if (!bsvNetwork) throw new Error("WIF network is required");
   if (!options.label) throw new Error("Label is required");
   const plan: WalletInitializePlan = {
     transactionId: `import-${crypto.randomUUID()}`,
     firstKey: {
       kind: "import",
-      bsvNetwork: options.bsvNetwork,
+      bsvNetwork,
       label: options.label,
       material: result.material,
       format: result.detectedFormat,

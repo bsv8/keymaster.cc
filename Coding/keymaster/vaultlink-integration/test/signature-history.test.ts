@@ -113,6 +113,7 @@ test("软件签名注册、真实签名与人工拒绝均入历史；拒绝不�
       )
       .toBe(1);
     const [p] = (await wallet.handle({ action: "pending" })) as any[];
+    expect((await history.list()).some(r => r.id === p.historyId)).toBe(true);
     await wallet.handle({ action: "answer", id: p.id, allow });
   };
   try {
@@ -120,7 +121,8 @@ test("软件签名注册、真实签名与人工拒绝均入历史；拒绝不�
     await answer(true);
     expect(await first).toBeInstanceOf(Uint8Array);
     expect(await history.list()).toEqual([
-      expect.objectContaining({ state: "completed", mode: "automatic" }),
+      expect.objectContaining({ operation: "signing.register", state: "completed", mode: "manual" }),
+      expect.objectContaining({ operation: "identity.noise-proof", state: "completed", mode: "automatic" }),
     ]);
     await wallet.handle({
       action: "signing-configure",

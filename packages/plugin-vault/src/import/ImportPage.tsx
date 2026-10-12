@@ -145,6 +145,7 @@ export function ImportPage({ embedded = false }: { embedded?: boolean }) {
         });
         return;
       }
+      if (importer.id === "wif" && r[0]?.network === undefined) throw new Error("WIF network is required");
       dispatch({ type: "parse-success", result: r[0] ?? null });
     } catch (err) {
       const msg =
@@ -219,11 +220,11 @@ export function ImportPage({ embedded = false }: { embedded?: boolean }) {
       /> : null}
       <section className="import-page__pickers">
         <h3>{t("vault.import.page.step.picker", { defaultValue: "1. 选择导入方式" })}</h3>
-        <NetworkIdentitySelect value={bsvNetwork} onChange={setBsvNetwork} />
           <ImporterPicker
           selected={importer?.id}
           onSelect={(imp) => dispatch({ type: "pick-importer", importer: imp })}
         />
+        {importer?.id === "wif" ? <p>{t("vault.import.page.wifNetwork", {defaultValue: "WIF 自带网络标记，解析后自动识别主网或测试网。"})}</p> : importer ? <NetworkIdentitySelect value={bsvNetwork} onChange={setBsvNetwork} /> : null}
       </section>
       <section className="import-page__input">
         <h3>{t("vault.import.page.step.input", { defaultValue: "2. 输入" })}</h3>
@@ -273,6 +274,7 @@ export function ImportPage({ embedded = false }: { embedded?: boolean }) {
       </section>
       {state.result ? (
         <section className="import-page__confirm">
+          <p>{t("vault.import.page.network", {defaultValue: "钱包网络："})}{(importer?.id === "wif" ? state.result.network : bsvNetwork) === "test" ? t("vault.import.page.testnet", {defaultValue: "测试网"}) : t("vault.import.page.mainnet", {defaultValue: "主网"})}</p>
           <h3>{t("vault.import.page.step.confirm", { defaultValue: "3. 确认导入" })}</h3>
           <p>
             {t("vault.import.page.detected", { defaultValue: "检测到：" })}

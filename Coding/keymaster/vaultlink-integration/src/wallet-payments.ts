@@ -256,6 +256,7 @@ export class WalletPayments {
     purpose: "registration" | "signature",
     facts: Record<string, string>,
     signal?: AbortSignal,
+    historyId?: string,
   ): Promise<boolean> {
     this.assertActive();
     if (signal?.aborted) throw Error("signature-cancelled");
@@ -282,6 +283,7 @@ export class WalletPayments {
             owner: channel.owner,
             kind: channel.kind,
             purpose,
+            historyId,
             ...(facts.appSessionId ? { sessionId: facts.appSessionId } : {}),
             operation: channel.operation,
             mode: channel.mode,
@@ -326,16 +328,16 @@ export class WalletPayments {
         mode: operation.startsWith("identity.") ? "automatic" : "manual",
         revision: 1,
       };
-      await ticket?.update('pending','manual');
-      if (
-        !(await this.signatureConsent(channel, "registration", facts, signal))
-      )
-        throw Error("denied");
-      [channel] = await this.gate.registerSigning(
-        [channel],
-        this.network,
-        true,
-      );
+      const registration = await this.signatureRecorder?.({operation: "signing.register", channelId: channel.id, owner: channel.owner, backend: "software"});
+      await registration?.update("pending", "manual");
+      try {
+        if (!(await this.signatureConsent(channel, "registration", facts, signal, registration?.id))) throw Error("denied");
+        [channel] = await this.gate.registerSigning([channel], this.network, true);
+        await registration?.update("completed");
+      } catch (error) {
+        await registration?.update(signatureFailure(error));
+        throw error;
+      }
     }
     if (!channel) throw Error("channel-required");
     const captured = await this.gate.signingChannel(
@@ -346,7 +348,7 @@ export class WalletPayments {
     await ticket?.update('pending',captured.mode);
     if (
       captured.mode === "manual" &&
-      !(await this.signatureConsent(captured, "signature", facts, signal))
+      !(await this.signatureConsent(captured, "signature", facts, signal, ticket?.id))
     )
       throw Error("denied");
     this.assertActive();
@@ -368,6 +370,7 @@ export class WalletPayments {
     quote: Quote,
     recipients: string[],
     facts: {
+      historyId?: string;
       fee: string;
       change: string;
       pool?: { family: string; stage: string; paid: string; locked: string };
@@ -524,8 +527,15 @@ export class WalletPayments {
       };
       // 注册只建立零额度渠道，不替调用方授予免确认额度。
       const { action: _action, ...config } = c;
-      await this.gate.configure(config, async () => true);
-      return dto(config);
+      const registration = await this.signatureRecorder?.({operation: "payment.register", channelId: config.id, owner: config.owner, backend: "software"});
+      try {
+        await this.gate.configure(config, async () => true);
+        await registration?.update("completed", "automatic");
+        return dto(config);
+      } catch (error) {
+        await registration?.update(signatureFailure(error));
+        throw error;
+      }
     }
     if (command.action === "configure") {
       if (command.channel.network !== this.network)
@@ -720,6 +730,7 @@ export class WalletPayments {
       async (request, quote) => {
         await ticket?.update('pending','manual');
         return this.confirm(request, quote, recipients, {
+          historyId: ticket?.id,
           fee: String(review.fee),
           change: String(review.change),
           ...(poolReview

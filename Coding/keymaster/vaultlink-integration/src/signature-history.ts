@@ -25,6 +25,7 @@ export interface SignatureRecord extends SignatureMeta {
   state: SignatureState;
 }
 export interface SignatureTicket {
+  id?: string;
   update(
     state: SignatureState,
     mode?: SignatureMode,
@@ -139,6 +140,7 @@ export class SignatureHistory {
     };
     await this.change((rows) => rows.push(row));
     return {
+      id: row.id,
       update: async (state, mode, amount) => {
         try {
           await this.change((rows) => {

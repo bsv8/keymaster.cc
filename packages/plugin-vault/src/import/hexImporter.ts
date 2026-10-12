@@ -22,7 +22,6 @@ export const hexImporter: KeyImporter = {
       {
         material: { hex: text.toLowerCase() },
         address: "",
-        network: "main",
         detectedFormat: "hex",
         summary: { key: "vault.importerHex.summary", fallback: "32-byte hex private key" }
       }

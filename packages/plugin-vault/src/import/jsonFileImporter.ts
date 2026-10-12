@@ -115,7 +115,7 @@ export const jsonFileImporter: KeyImporter = {
       const unlocked = await unlockKeyHold(document, input.password);
       try {
         const hex = Array.from(unlocked.privateKey, (b) => b.toString(16).padStart(2, "0")).join("");
-        return [{ material: { hex }, address: "", network: "main", detectedFormat: "keyhold-v2", summary: { key: "vault.importerJsonFile.summary.keyhold", fallback: "KeyHold v2 document" } }];
+        return [{ material: { hex }, address: "", detectedFormat: "keyhold-v2", summary: { key: "vault.importerJsonFile.summary.keyhold", fallback: "KeyHold v2 document" } }];
       } finally {
         unlocked.privateKey.fill(0);
       }
@@ -134,7 +134,6 @@ export const jsonFileImporter: KeyImporter = {
         {
           material: { hex },
           address: "",
-          network: "main",
           detectedFormat: "bsv8-key-envelope",
           summary: { key: "vault.importerJsonFile.summary.envelope", fallback: "bsv8 encrypted key envelope" }
         }
@@ -147,7 +146,6 @@ export const jsonFileImporter: KeyImporter = {
     return candidates.map((c) => ({
       material: { hex: c.hex, wif: c.wif },
       address: "",
-      network: "main",
       detectedFormat: "json-file",
       summary: {
         key: "vault.importerJsonFile.summary.field",

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { useInternalVault } from "./VaultInternalContext.js";
-import { PaymentChannelSettings } from "@keymaster/vaultlink-integration/ui";
+import { PaymentNotificationList } from "@keymaster/vaultlink-integration/ui";
 import { usePluginI18n, useResourceView } from "@keymaster/runtime";
 import { type CoordinatorHardwareState, type KeyRef } from "@keymaster/contracts";
 import { Button } from "@keymaster/ui";
@@ -14,7 +14,13 @@ export function VaultLockButton() {
   const snapshot = useResourceView<VaultKeyResourceState>(resources, "vault.key-state", []).data;
   const status = snapshot?.status;
   const [expanded, setExpanded] = useState(false);
-  const [settings, setSettings] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
+  const pendingIds = useRef(new Set<string>());
+  const onPending = useCallback((ids: string[]) => {
+    if (ids.some(id => !pendingIds.current.has(id))) setExpanded(true);
+    pendingIds.current = new Set(ids);
+    setPendingCount(ids.length);
+  }, []);
   const [key, setKey] = useState<KeyRef>();
   const [hardware, setHardware] = useState<CoordinatorHardwareState>();
   const [error, setError] = useState("");
@@ -23,7 +29,7 @@ export function VaultLockButton() {
   const payment = useCallback((command: import("@keymaster/contracts").CoordinatorWalletPaymentCommand) => vault.payment(command), [vault]);
   useEffect(() => {
     let current = true; setKey(undefined); setHardware(undefined); setError("");
-    if (status !== "unlocked") { setExpanded(false); setSettings(false); return; }
+    if (status !== "unlocked") { setExpanded(false); pendingIds.current.clear(); setPendingCount(0); return; }
     void vault.getCurrentKey().then(value => {if (current) setKey(value);}).catch(e => {if (current) setError(e instanceof Error ? e.message : String(e));});
     return () => {current = false;};
   }, [vault, status, snapshot?.activePublicKeyHex, snapshot?.runGeneration, snapshot?.walletGeneration, snapshot?.revision]);
@@ -71,22 +77,15 @@ export function VaultLockButton() {
   return <div className="vault-topbar-wallet" ref={root}>
     <button type="button" ref={toggle} className="vault-topbar-wallet__toggle" aria-expanded={expanded}
       aria-controls="vault-topbar-panel" onClick={() => setExpanded(value => !value)}>
-      <Wallet size={16}/><span>{t("vault.panel.wallet", {defaultValue: "钱包"})}</span><ChevronDown size={14}/>
+      <Wallet size={16}/><span>{t("vault.panel.wallet", {defaultValue: "我的钱包"})}</span>{pendingCount ? <span className="vault-topbar-wallet__count">{pendingCount}</span> : null}<ChevronDown size={14}/>
     </button>
     <Button variant="ghost" className="app-topbar__lock" iconLeft={<Lock size={16} />} onClick={lock}
       title={t("common.action.lock", { defaultValue: "锁定" })} aria-label={t("common.action.lock", { defaultValue: "锁定" })}>{t("common.action.lock", { defaultValue: "锁定" })}</Button>
-    {expanded ? <div id="vault-topbar-panel" className="vault-topbar-wallet__panel" style={{"--vault-wallet-top": `${panelTop}px`} as CSSProperties} ref={panel} tabIndex={-1}
-      role="region" aria-label={t("vault.panel.wallet", {defaultValue: "钱包"})}>
-      {key ? <>
-        <strong>{key.label}</strong>
-        <p>{key.format === "keymaster.hardware-key" ? t("vault.panel.hardware", {defaultValue: "RocKey 硬件钱包"}) : t("vault.panel.software", {defaultValue: "软件钱包"})}</p>
-        <p className="vault-topbar-wallet__public-key">{key.publicKeyHex}</p>
-      </> : <p>{t("common.status.loading", {defaultValue: "正在读取…"})}</p>}
+    <div hidden={!expanded} id="vault-topbar-panel" className="vault-topbar-wallet__panel" style={{"--vault-wallet-top": `${panelTop}px`} as CSSProperties} ref={panel} tabIndex={-1}
+      role="region" aria-label={t("vault.panel.wallet", {defaultValue: "我的钱包"})}>
       {stateText ? <p role="status" aria-live="polite">{stateText}</p> : null}
-      {key?.format === "keymaster.hardware-key" ? <p>{t("vault.panel.deviceOnly", {defaultValue: "PIN、批准和否决在设备上操作。"})}</p> : null}
-      <Button variant="ghost" onClick={() => setSettings(value => !value)} aria-expanded={settings}>{t("vault.panel.channels", {defaultValue: "消费渠道与额度"})}</Button>
-      {settings ? <PaymentChannelSettings execute={payment} text={(name,fallback) => t(`vault.${name}`, {defaultValue: fallback})}/> : null}
+      <PaymentNotificationList execute={payment} visible={expanded} onPending={onPending} text={(name, fallback) => t(`vault.${name}`, {defaultValue: fallback})}/>
       {error ? <p role="alert">{error}</p> : null}
-    </div> : null}
+    </div>
   </div>;
 }

@@ -248,7 +248,7 @@ export class VaultLinkHardwareBackend {
   listSigningChannels():Promise<Value>{return this.enqueue(()=>this.request("signing.list","signing-list",{}));}
   private async submitOperation(op: string, body: Value, hash: Uint8Array,
     allocated?: (requestId: number) => void): Promise<Value> {
-    const logging=signingOperations.includes(op)||op.startsWith('tx.');
+    const logging=signingOperations.includes(op)||op.startsWith('tx.')||op === 'signing.register';
     const fields=body&&typeof body==='object'&&!Array.isArray(body)&&!(body instanceof Uint8Array)?body:{};
     let sourceOwner=signatureOwner(op);
     if(logging&&this.signatureRecorder&&typeof fields.channelId==='string'){
@@ -665,16 +665,23 @@ export class VaultLinkHardwareBackend {
     const frozen = structuredClone(config);
     if(frozen.network!==this.context.bsvNetwork)throw Error("network-identity-mismatch");
     return this.enqueue(async () => {
-      const result = object(
-        await this.request(
-          "payment.configure",
-          "payment-config",
-          frozen as unknown as Value,
-        ),
-        ["configured", "revision"],
-      );
-      if (result.configured !== true || (typeof result.revision!=="number"&&typeof result.revision!=="bigint"))
-        throw new Error("invalid-config-response");
+      const ticket = frozen.revision === 1 ? await this.signatureRecorder?.({operation: "payment.register", channelId: frozen.id, owner: frozen.owner, backend: "hardware"}) : undefined;
+      try {
+        const result = object(
+          await this.request(
+            "payment.configure",
+            "payment-config",
+            frozen as unknown as Value,
+          ),
+          ["configured", "revision"],
+        );
+        if (result.configured !== true || (typeof result.revision!=="number"&&typeof result.revision!=="bigint"))
+          throw new Error("invalid-config-response");
+        await ticket?.update("completed");
+      } catch (error) {
+        await ticket?.update(signatureFailure(error));
+        throw error;
+      }
     });
   }
   startAppSession(sessionId: string, owner: string): Promise<Value> {
