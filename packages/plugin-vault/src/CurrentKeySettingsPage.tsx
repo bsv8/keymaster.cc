@@ -5,7 +5,7 @@ import { useInternalVault } from "./VaultInternalContext.js";
 //
 // 单 Key 本地存储（docs/存储.md）之后，这一页就是"Key 管理"的全部：
 //   - 展示当前 Key 的公开信息与钱包身份世代；
-//   - 改名、改密、导出加密 KeyHold、锁定、重置钱包。
+//   - 改名、改密、导出加密 KeyHold、重置钱包。
 //
 // 它刻意**没有**：Key 列表、新建第二把 Key、切换 Key、删除 Key、导入备份。
 // 替换身份的唯一路径是"重置钱包后重新创建或导入"，而重置会删掉全部本地
@@ -80,14 +80,6 @@ export function CurrentKeySettingsPage() {
     }
   }
 
-  async function lockNow() {
-    setError(null);
-    const result = await vault.lock();
-    if (result.status !== "accepted" && result.status !== "ok" && result.status !== "stale-epoch") {
-      setError("message" in result ? result.message : `${t("vault.settings.err.lock", { defaultValue: "锁定失败" })}: ${result.status}`);
-    }
-  }
-
   if (!publicKeyHex) {
     return (
       <div className="vault-page current-key-page">
@@ -158,9 +150,6 @@ export function CurrentKeySettingsPage() {
           {hardware === false ? <Button variant="ghost" onClick={() => setChangingPassword(true)}>
             {t("vault.settings.action.changePassword", { defaultValue: "修改密码" })}
           </Button> : null}
-          <Button variant="ghost" onClick={() => void lockNow()}>
-            {t("vault.settings.action.lock", { defaultValue: "锁定钱包" })}
-          </Button>
           <Button variant="danger" onClick={() => setResetting(true)}>
             {t("vault.settings.action.resetWallet", { defaultValue: "重置钱包" })}
           </Button>
