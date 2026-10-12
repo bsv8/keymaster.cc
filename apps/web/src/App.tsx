@@ -16,7 +16,7 @@ import { useRuntimeStatus } from "@keymaster/runtime/assembly";
 //   - 其它路径保持单 Key 本地钱包的壳层逻辑（LockedShell /
 //     UnlockedShell）：uninitialized 走创建/导入，locked 走解锁。
 
-import { useEffect, useRef } from "react";
+import { useRef } from "react";
 import type { ApplicationBootstrapSnapshot, ApplicationBootstrapStatus, VaultService, VaultStatus } from "@keymaster/contracts";
 import {
   APPLICATION_BOOTSTRAP_READY_CAPABILITY,
@@ -104,6 +104,9 @@ function ApplicationBootstrapResourceApp({ path, host, hostVersion, bootstrap }:
   // 记住它曾经成功注册过，避免把生命周期重绑的 pending 窗口发布成
   // 终态错误；首次启动若从未注册过仍保持 fail-closed recovery page。
   const hadStorageStatusResource = useRef(false);
+  // Keep the existing unlock form mounted until this Window's business scopes
+  // are ready. Worker unlock success alone must not insert a startup screen.
+  const hasUnlockEntry = useRef(false);
   const resourceArgs = [String(hostVersion)] as const;
   const snapshot = useResource<ApplicationBootstrapSnapshot>(
     host.resourceStore,
@@ -142,7 +145,18 @@ function ApplicationBootstrapResourceApp({ path, host, hostVersion, bootstrap }:
   // 后续 pending/stale 若保留旧 data，则继续使用旧决定，避免刷新闪回首次设置。
   const bootstrapSnapshot = snapshot.data;
   if (!bootstrapSnapshot) {
-    if (snapshot.status === "pending" || snapshot.status === "stale") return <StartupPlaceholder />;
+    if (snapshot.status === "pending" || snapshot.status === "stale") {
+      // hostVersion changes the resource arguments as plugins register. Its new
+      // record has no data yet; preserve only the already mounted unlock entry,
+      // never infer that business pages are ready from an older record.
+      const currentVault = readVaultStatus(vaultService);
+      if (hasUnlockEntry.current && hasStorageStatusResource && hasStorageController
+        && hasVaultWalletState && (currentVault === "locked" || currentVault === "unlocked")
+        && !isProtocolPopupPath(path)) {
+        return <RuntimeApp vaultStatus="locked" walletEntry />;
+      }
+      return <StartupPlaceholder />;
+    }
     return (
       <StartupError
         title="应用启动状态为空"
@@ -226,23 +240,31 @@ function ApplicationBootstrapResourceApp({ path, host, hostVersion, bootstrap }:
   // locked 不需要等 vault-selection 之后的业务插件装配：解锁页与创建/导入
   // 入口都只依赖第一阶段就已经注册的 Vault 能力。
   if (vaultStatus === "locked") {
-    return <RuntimeApp initialVaultStatus="locked" />;
+    hasUnlockEntry.current = true;
+    return <RuntimeApp vaultStatus="locked" walletEntry />;
   }
-  if (vaultStatus === "uninitialized") return <ApplicationFrame slot="wallet-entry" />;
-
-  if (!bootstrapSnapshot.vaultSelectionReady) return <StartupPlaceholder />;
+  if (vaultStatus === "uninitialized") {
+    hasUnlockEntry.current = false;
+    return <ApplicationFrame slot="wallet-entry" />;
+  }
 
   const applicationReady = bootstrapSnapshot.phase === "connect-apps-ready"
     && bootstrapSnapshot.storageReady
     && bootstrapSnapshot.vaultCapabilityReady
+    && bootstrapSnapshot.vaultSelectionReady
     && bootstrapSnapshot.hasUnlockedActiveKey
     && bootstrapSnapshot.ownerAppsReady
     && bootstrapSnapshot.connectAppsReady
     && bootstrapSnapshot.assetCatalogsReady
     && hasVaultService
     && hasVaultWalletState;
+  if (!applicationReady && hasUnlockEntry.current && !isProtocolPopupPath(path)) {
+    return <RuntimeApp vaultStatus="locked" walletEntry />;
+  }
+  if (!bootstrapSnapshot.vaultSelectionReady) return <StartupPlaceholder />;
   if (!applicationReady) return <StartupPlaceholder message="正在准备应用…" />;
-  return <RuntimeApp initialVaultStatus="unlocked" />;
+  hasUnlockEntry.current = false;
+  return <RuntimeApp vaultStatus="unlocked" />;
 }
 
 function readVaultStatus(vaultService: VaultService | undefined): VaultStatus | undefined {
@@ -255,25 +277,22 @@ function readVaultStatus(vaultService: VaultService | undefined): VaultStatus | 
 }
 
 interface RuntimeAppProps {
-  /** Application bootstrap 已确认的同步 Vault 状态，用于首个业务 render。 */
-  initialVaultStatus?: "locked" | "unlocked";
+  /** Root revalidates this decision on every render. Resource context rebinding
+   * may temporarily leave vault.key-state pending, but must not undo it. */
+  vaultStatus?: "locked" | "unlocked";
+  walletEntry?: boolean;
 }
 
-function RuntimeApp({ initialVaultStatus }: RuntimeAppProps = {}) {
+function RuntimeApp({ vaultStatus, walletEntry }: RuntimeAppProps = {}) {
   const { vault, ready } = useRuntimeStatus();
   const { t } = useI18n();
-  const initialVaultStatusRef = useRef<RuntimeAppProps["initialVaultStatus"]>(initialVaultStatus);
-  useEffect(() => {
-    // 只用于跨过 useRuntimeStatus effect 的首个 render；后续 booting 必须
-    // 重新显示启动占位，不能永久沿用旧状态。
-    initialVaultStatusRef.current = undefined;
-  }, []);
   const path = typeof window === "undefined" ? "/" : window.location.pathname;
-  const effectiveVault = vault === "booting" && initialVaultStatusRef.current
-    ? initialVaultStatusRef.current
-    : vault;
-  const effectiveReady = ready || initialVaultStatusRef.current !== undefined;
+  const effectiveVault = vaultStatus ?? vault;
+  const effectiveReady = ready || vaultStatus !== undefined;
 
+  if (walletEntry && !isProtocolPopupPath(path)) {
+    return <ApplicationFrame slot="storage-guard"><ApplicationFrame slot="wallet-entry" /></ApplicationFrame>;
+  }
   if (!effectiveReady || effectiveVault === "booting") return <StartupPlaceholder message={t("common.status.loading", { defaultValue: "正在准备存储…" })} />;
 
   // 协议 popup 顶层特例：这是协议页的**唯一**入口点。

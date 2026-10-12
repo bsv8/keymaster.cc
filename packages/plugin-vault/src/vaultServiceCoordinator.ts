@@ -110,7 +110,18 @@ export class VaultServiceCoordinator implements InternalVaultService {
     vaultLifecycleRevision: 0,
   });
 
-  private readonly walletState = createWalletStateSource(() => this.lifecycleSnapshot);
+  private requestDiagnostics?: string;
+  private lockRequest?: { cleanup: import("@keymaster/contracts").WalletLockCleanup };
+  private readonly walletState = createWalletStateSource(() => {
+    if (!this.lockRequest) return this.requestDiagnostics && this.lifecycleSnapshot.lockCleanup
+      ? { ...this.lifecycleSnapshot, lockCleanup: { ...this.lifecycleSnapshot.lockCleanup,
+        diagnostics: [this.requestDiagnostics, this.lifecycleSnapshot.lockCleanup.diagnostics].filter(Boolean).join("\n\n").slice(0, 32768) } }
+      : this.lifecycleSnapshot;
+    // Local fail-closed presentation starts in the click handler. The Worker
+    // remains the authority for epoch changes, key revocation and cleanup.
+    return { ...this.lifecycleSnapshot, status: "locked" as const, activePublicKeyHex: undefined,
+      activeKeyIdentity: undefined, lockCleanup: this.lockRequest.cleanup };
+  });
 
   constructor(deps: VaultServiceCoordinatorDeps) {
     this.coordinatorClient = deps.coordinatorClient;
@@ -123,6 +134,9 @@ export class VaultServiceCoordinator implements InternalVaultService {
   /** 同步 Coordinator 的 Vault 真值；返回是否有观察者应获知的变化。 */
   private applyCoordinatorState(snapshot: Readonly<SessionStateSnapshot>): boolean {
     const nextStatus = mapVaultStatus(snapshot.vaultStatus);
+    const clearedLockRequest = !!this.lockRequest && snapshot.vaultStatus !== "unlocked";
+    if (clearedLockRequest) this.lockRequest = undefined;
+    if (snapshot.vaultStatus === "locked" && !snapshot.lockCleanup) this.requestDiagnostics = undefined;
     // 公钥只在 unlocked 时可见：锁定或未初始化时页面不应继续持有身份投影。
     const nextPublicKeyHex = snapshot.vaultStatus === "unlocked" ? snapshot.activePublicKeyHex : undefined;
     const previous = this.lifecycleSnapshot;
@@ -132,11 +146,13 @@ export class VaultServiceCoordinator implements InternalVaultService {
       || previous.runGeneration !== snapshot.runGeneration
       || previous.walletGeneration !== snapshot.walletGeneration
       || previous.vaultLifecycleRevision !== snapshot.sessionRevision
+      || JSON.stringify(previous.lockCleanup) !== JSON.stringify(snapshot.lockCleanup)
       || JSON.stringify(previous.activeKeyIdentity) !== JSON.stringify(snapshot.activeKeyIdentity);
-    if (!changed) return false;
+    if (!changed) return clearedLockRequest;
 
     this.lifecycleSnapshot = Object.freeze({
       status: nextStatus,
+      lockCleanup: snapshot.lockCleanup,
       ...(nextPublicKeyHex === undefined ? {} : { activePublicKeyHex: nextPublicKeyHex }),
       ...(snapshot.activeKeyIdentity && nextPublicKeyHex ? { activeKeyIdentity: snapshot.activeKeyIdentity } : {}),
       sessionEpoch: snapshot.sessionEpoch,
@@ -152,7 +168,7 @@ export class VaultServiceCoordinator implements InternalVaultService {
   // ============================================================
 
   status(): VaultStatus {
-    return this.lifecycleSnapshot.status;
+    return this.walletState.snapshot().status;
   }
 
   subscribeWalletState(handler: (snapshot: VaultLifecycleSnapshot) => void): () => void {
@@ -194,11 +210,35 @@ export class VaultServiceCoordinator implements InternalVaultService {
   }
 
   async unlock(password: string): Promise<CoordinatorCommandResult> {
+    if (this.lockRequest || this.lifecycleSnapshot.lockCleanup) return { status: "blocked", reason: { key: "vault.lock.cleanupBlocked", fallback: "钱包清理尚未完成，请先重试清理" } };
     return this.coordinatorClient.unlock(password);
   }
 
   async lock(): Promise<CoordinatorCommandResult> {
-    return this.coordinatorClient.lock();
+    const prior = this.lockRequest?.cleanup ?? this.lifecycleSnapshot.lockCleanup;
+    const request = { cleanup: { phase: "pending" as const, attempt: prior?.attempt ?? 0,
+      ...(prior?.diagnostics ? { diagnostics: prior.diagnostics } : {}) } as import("@keymaster/contracts").WalletLockCleanup };
+    this.lockRequest = request;
+    this.walletState.publish();
+    try {
+      const result = await this.coordinatorClient.lock();
+      if (result.status !== "accepted" && result.status !== "ok") {
+        const message = "message" in result ? result.message : `Lock request failed: ${result.status}`;
+        this.failLockRequest(request, message);
+      }
+      return result;
+    } catch (error) {
+      this.failLockRequest(request, error instanceof Error ? error.stack ?? error.message : String(error));
+      throw error;
+    }
+  }
+
+  private failLockRequest(request: NonNullable<VaultServiceCoordinator["lockRequest"]>, error: string): void {
+    if (this.lockRequest !== request) return; // An authoritative lock event already committed.
+    console.error("[wallet-lock] request failed", error);
+    this.requestDiagnostics = [this.requestDiagnostics, error].filter(Boolean).join("\n\n").slice(0, 32768);
+    request.cleanup = { phase: "failed", attempt: request.cleanup.attempt, error, diagnostics: this.requestDiagnostics };
+    this.walletState.publish();
   }
 
   async changePassword(input: { oldPassword: string; newPassword: string }): Promise<void> {

@@ -72,7 +72,14 @@ export interface KeyIdentity extends NetworkIdentity {
   createdAt: string;
 }
 
+/** Missing means cleanup completed (or cold-start locked). Pending/failed forbids unlock. */
+export type WalletLockCleanup = ({ phase: "pending"; attempt: number } | { phase: "failed"; attempt: number; error: string }) & {
+  /** First failure and recent failures survive retries for the current lock cycle. */
+  diagnostics?: string;
+};
+
 export interface VaultLifecycleSnapshot {
+  lockCleanup?: WalletLockCleanup;
   /** 已解锁 Key 的公开元数据；与公钥同一提交点，锁定时省略。 */
   activeKeyIdentity?: KeyIdentity;
   status: VaultStatus;

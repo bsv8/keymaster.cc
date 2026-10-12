@@ -521,6 +521,7 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
 
   /** 用 Key 密码解锁唯一 Key。 */
   async function unlock(password: string): Promise<WalletUnlockResult> {
+    const requestedEpoch = deps.currentSessionEpoch();
     const snapshot = await coldStart();
     if (snapshot.state === "unsupported") {
       throw new StorageRuntimeError("storage_wallet_unsupported", "Local wallet schema is newer than this build");
@@ -533,6 +534,8 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
     }
     const unlocked = await deps.keys.unlock(password);
     try {
+      // 密码解密可能与锁定交错；已撤销的解锁请求不得重新建立会话。
+      if (deps.currentSessionEpoch() !== requestedEpoch) throw new StorageRuntimeError("storage_unavailable", "Wallet unlock was revoked by a session transition");
       const sessionEpoch = deps.generateSessionEpoch();
       // 每次解锁都换新 epoch：旧 grant、任务和句柄立即失效。
       deps.establishSession({

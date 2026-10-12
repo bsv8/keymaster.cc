@@ -1538,7 +1538,15 @@ function parseCoordinatorRequest(value: unknown): CoordinatorRpcRequest {
     case "channel.cancel": return { kind, targetRequestId: target() };
     case "contacts.presence.snapshot": return { kind, expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "unlock": return { kind, password: text(request.password, "unlock.password", 4_096), expectedSessionEpoch: epoch("expectedSessionEpoch") };
-    case "lock": return { kind, expectedSessionEpoch: epoch("expectedSessionEpoch") };
+    case "lock": {
+      let cleanup: Extract<CoordinatorRpcRequest, { kind: "lock" }>["cleanup"];
+      if (request.cleanup !== undefined) {
+        const input = expectRecord(request.cleanup, "lock.cleanup");
+        const action = enumValue(input.action, ["register", "settled"] as const, "lock.cleanup.action");
+        cleanup = action === "register" ? { action } : { action, attempt: boundedNumber(input.attempt, "lock.cleanup.attempt"), ...(input.error === undefined ? {} : { error: text(input.error, "lock.cleanup.error", 16384) }) };
+      }
+      return { kind, expectedSessionEpoch: epoch("expectedSessionEpoch"), ...(cleanup ? { cleanup } : {}) };
+    }
     case "vault.operation": return { kind, operation: parseVaultOperation(request.operation), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "crypto": return { kind, operation: parseCryptoOperation(request.operation), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "background.run-now": case "background.cancel":
@@ -1799,6 +1807,16 @@ function parseCoordinatorVaultOperationResult(value: unknown, field: string): Co
   throw new TypeError(`Coordinator ${field} is unsupported`);
 }
 
+function parseLockCleanup(value: unknown): import("./vault.js").WalletLockCleanup | undefined {
+  if (value === undefined) return undefined;
+  const input = expectRecord(value, "lockCleanup");
+  const phase = enumValue(input.phase, ["pending", "failed"] as const, "lockCleanup.phase");
+  const attempt = boundedNumber(input.attempt, "lockCleanup.attempt");
+  const diagnostics = optionalText(input.diagnostics, "lockCleanup.diagnostics", 32768);
+  const detail = diagnostics === undefined ? {} : { diagnostics };
+  return phase === "pending" ? { phase, attempt, ...detail } : { phase, attempt, ...detail, error: text(input.error, "lockCleanup.error", 8192) };
+}
+
 function parseCoordinatorBootstrapSnapshot(value: unknown, field: string): CoordinatorBootstrapSnapshot {
   const snapshot = expectRecord(value, field);
   const buildId = optionalText(snapshot.buildId, field + ".buildId", 256);
@@ -1837,6 +1855,7 @@ function parseCoordinatorBootstrapSnapshot(value: unknown, field: string): Coord
       };
     })();
   return {
+    ...(snapshot.lockCleanup === undefined ? {} : { lockCleanup: parseLockCleanup(snapshot.lockCleanup) }),
     ...(snapshot.activeKeyIdentity === undefined ? {} : { activeKeyIdentity: parsePublicKeyIdentity(snapshot.activeKeyIdentity) }),
     authorityInstanceId: text(snapshot.authorityInstanceId, field + ".authorityInstanceId", 256),
     runGeneration: text(snapshot.runGeneration, field + ".runGeneration", 256),
@@ -3207,6 +3226,7 @@ function parseSessionStateEvent(value: unknown): SessionStateEvent {
   return {
     topic: "session.state",
     type: "session.state.changed",
+    ...(event.lockCleanup === undefined ? {} : { lockCleanup: parseLockCleanup(event.lockCleanup) }),
     ...(event.activeKeyIdentity === undefined ? {} : { activeKeyIdentity: parsePublicKeyIdentity(event.activeKeyIdentity) }),
     sessionRevision: boundedNumber(event.sessionRevision, "event.sessionRevision"),
     sessionEpoch: text(event.sessionEpoch, "event.sessionEpoch", 256),

@@ -87,6 +87,14 @@ const vaultResources: I18nPluginResources = {
   namespace: "vault",
   resources: {
     en: {
+      "vault.lock.cleaning": "Locking wallet. Waiting for services to exit before unlocking is available.",
+      "vault.lock.cleanupFailed": "Wallet locked. Some services could not finish cleaning up. Retry cleanup before unlocking.",
+      "vault.lock.details": "Lock error details",
+      "vault.lock.retry": "Retry cleanup",
+      "vault.lock.retryFailed": "Cleanup retry failed. Please try again.",
+      "vault.lock.requestFailed": "Lock request failed. Please try again.",
+      "vault.lock.cleanupBlocked": "Wallet cleanup has not completed. Retry cleanup before unlocking.",
+
       "vault.import.title": "Move to RocKey",
       "vault.import.cancel": "Cancel",
       "vault.import.start": "Continue migration",
@@ -340,6 +348,14 @@ const vaultResources: I18nPluginResources = {
       "vault.autolock.saveFailed": "Save failed. Please try again later."
     },
     "zh-CN": {
+      "vault.lock.cleaning": "正在锁定钱包，等待服务退出…完成后可解锁。",
+      "vault.lock.cleanupFailed": "钱包已锁定，但部分服务清理失败。请重试清理，完成后才能解锁。",
+      "vault.lock.details": "锁定错误详情",
+      "vault.lock.retry": "重试清理",
+      "vault.lock.retryFailed": "重试清理失败，请再次重试",
+      "vault.lock.requestFailed": "锁定请求失败，请重试",
+      "vault.lock.cleanupBlocked": "钱包清理尚未完成，请重试清理后再解锁",
+
       "vault.import.title": "迁入 RocKey",
       "vault.import.cancel": "取消",
       "vault.import.start": "继续迁移",

@@ -102,6 +102,7 @@ import {
   __testGetVaultStatus,
   __testInvalidateSession,
   __testLock,
+  __testUnlockAtLifecycle,
   __testRegisterTask,
   __testReadyWorkerUnit,
   __testResetState,
@@ -589,6 +590,41 @@ describe("Session Coordinator worker", () => {
     __testSetStorageSessionResolver(undefined);
     __testSetStorageRuntime(undefined);
     await __testResetWalletStore();
+  });
+
+  it("rejects a real password decrypt that overlaps a later lock", async () => {
+    await initializeTestWallet({ label: "unlock-lock-race", password: "race-pw" });
+    await __testLock();
+    const unlocking = __testUnlockAtLifecycle("race-pw");
+    const revoked = expect(unlocking).rejects.toThrow("Wallet unlock was revoked");
+    await __testLock();
+    await revoked;
+    expect(__testGetVaultStatus()).toBe("locked");
+    expect(__testGetSnapshot().activePublicKeyHex).toBeUndefined();
+  });
+
+  it("keeps every unlock path blocked until all pages report cleanup, with failed-page retry", async () => {
+    await initializeTestWallet({ label: "lock-barrier", password: "lock-pw" });
+    await __testLock({ action: "register" }, "page-a");
+    await __testLock({ action: "register" }, "page-b");
+    await __testLock();
+    expect(__testGetVaultStatus()).toBe("locked");
+    expect(__testGetSnapshot().lockCleanup).toMatchObject({ phase: "pending" });
+    expect((await __testUnlock("lock-pw")).ack.status).toBe("blocked");
+    expect((await __testDispatchStorageControl({ type: "unlock", password: "lock-pw" })).ack.status).toBe("blocked");
+    const first = __testGetSnapshot().lockCleanup!.attempt;
+    await __testLock({ action: "settled", attempt: first }, "page-a");
+    await __testLock({ action: "settled", attempt: first, error: "Page plugin failed to exit" }, "page-b");
+    expect(__testGetSnapshot().lockCleanup).toMatchObject({ phase: "failed", error: "Page plugin failed to exit" });
+    await __testLock();
+    const second = __testGetSnapshot().lockCleanup!.attempt;
+    expect(second).toBeGreaterThan(first);
+    await __testLock({ action: "settled", attempt: first }, "page-b");
+    expect(__testGetSnapshot().lockCleanup?.phase).toBe("pending");
+    await __testLock({ action: "settled", attempt: second }, "page-a");
+    await __testLock({ action: "settled", attempt: second }, "page-b");
+    expect(__testGetSnapshot().lockCleanup).toBeUndefined();
+    expect((await __testUnlock("lock-pw")).ack.status).toBe("accepted");
   });
 
   it("reads the committed Vault identity while an unrelated FIFO request is pending", async () => {

@@ -740,6 +740,11 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     return this.requestCommand(request);
   }
 
+  /** Trusted Window assembly reports cleanup against the authority's current attempt. */
+  async lockCleanup(cleanup: NonNullable<Extract<CoordinatorClientRequest, { kind: "lock" }>["cleanup"]>, epoch = this.bootstrapSnapshotCache.sessionEpoch): Promise<CoordinatorCommandResult> {
+    return this.requestCommand({ kind: "lock", clientId: this.clientId, requestId: this.generateRequestId(), expectedSessionEpoch: epoch, cleanup });
+  }
+
   async vaultOperation<O extends CoordinatorVaultOperation>(operation: O): Promise<CoordinatorValueResult<CoordinatorVaultOperationResultFor<O>>> {
     const request = { kind: "vault.operation" as const, clientId: this.clientId, requestId: this.generateRequestId(), operation, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
     try {
@@ -1397,6 +1402,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         ...this.bootstrapSnapshotCache,
         sessionEpoch: event.sessionEpoch,
         vaultStatus: event.vaultStatus,
+        lockCleanup: event.lockCleanup,
         activePublicKeyHex: event.activePublicKeyHex ?? undefined,
         activeKeyIdentity: event.vaultStatus === "unlocked" ? event.activeKeyIdentity : undefined,
         // session.state 是权威全量投影：运行世代与钱包身份世代都随它一起推进。

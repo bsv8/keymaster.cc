@@ -40,6 +40,7 @@ export function registerP2pkhNavigation(deps: P2pkhNavigationDeps): () => void {
       component: P2pkhTestnetLocalTransactionsPage
     }
   ] as const;
+  let disposed = false;
   const registered = new Set<string>();
   let featuresRegistered = false;
   const register = (route: (typeof testnetRoutes)[number] | { id: string; path: string; label: { key: string; fallback: string }; component: typeof P2pkhMainnetTransactionsPage }) => {
@@ -54,6 +55,7 @@ export function registerP2pkhNavigation(deps: P2pkhNavigationDeps): () => void {
     {id:"p2pkh.mainnet.local-transactions",path:"/p2pkh/mainnet/local-transactions",label:testnetRoutes[1].label,component:P2pkhMainnetLocalTransactionsPage}
   ];
   const syncRoutes = (network: "main" | "test") => {
+    if (disposed || deps.context.scope.state !== "active") return;
     const enabled = network === "test" ? testnetRoutes : mainnetRoutes;
     const disabled = network === "test" ? mainnetRoutes : testnetRoutes;
     for (const route of disabled) unregister(route.id);
@@ -96,7 +98,13 @@ export function registerP2pkhNavigation(deps: P2pkhNavigationDeps): () => void {
   syncRoutes(deps.bsvNetwork);
   const offSettings = deps.onBsvNetworkChange(syncRoutes);
   return () => {
+    if (disposed) return;
+    disposed = true;
     offSettings();
+    // Scoped registries remove this instance's routes/features synchronously on
+    // revoke. Teardown must release local listeners without invoking business
+    // mutation APIs on an already-stopping Scope (or touching a replacement).
+    if (deps.context.scope.state !== "active") { registered.clear(); return; }
     deps.business.unregisterFeature("assets.p2pkh.transactions");
     deps.business.unregisterFeature("assets.p2pkh.local-transactions");
     for (const id of [...registered]) unregister(id);

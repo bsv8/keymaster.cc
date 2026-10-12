@@ -1,3 +1,4 @@
+import { WalletLockBarrier } from "./walletLockBarrier.js";
 import {SignatureHistory} from "@keymaster/plugin-vault/coordinator";
 import { type NetworkIdentity, networkIdentityStorageRoot, sameNetworkIdentity } from "@keymaster/contracts";
 import {createHardwareChannelAdapter} from "@keymaster/plugin-vault/coordinator";
@@ -1097,11 +1098,16 @@ function normalizedCoordinatorOwner(): string | null {
 /** 将 Worker 内唯一 Contacts 在线真值投影为页面可订阅的快照事件。 */
 function publishCoordinatorContactsPresence(): void { contactsPresenceProjection.publish(); }
 
-function publishSessionState(cause: SessionStateEvent["cause"]): void {
+const walletLockBarrier = new WalletLockBarrier(() => publishSessionState("lock", lockRevocationPending));
+let lockRevocationPending = false;
+let globalLockRunning: Promise<void> | undefined;
+let walletRevocationCleanup: Promise<void>[] | undefined;
+
+function publishSessionState(cause: SessionStateEvent["cause"], deferCleanup = false): void {
   // 服务目录与 owner/session 可见性共享同一状态提交点。锁定、解锁、换
   // Key、Storage Root 重绑都会改变 identity；先同步撤权/旋转 exposure，
   // 再广播业务状态，避免页面看到已 unlocked 但仍持有旧 service proxy。
-  reconcileCoordinatorSessionExposures();
+  if (!deferCleanup) reconcileCoordinatorSessionExposures();
   const state: SessionStateEvent = {
     topic: "session.state",
     type: "session.state.changed",
@@ -1109,6 +1115,7 @@ function publishSessionState(cause: SessionStateEvent["cause"]): void {
     sessionRevision: 0,
     sessionEpoch: coordinatorState.sessionEpoch,
     vaultStatus: coordinatorState.vaultStatus,
+    lockCleanup: walletLockBarrier.snapshot(),
     activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex ?? null : null,
     ...(coordinatorState.vaultStatus === "unlocked" ? { activeKeyIdentity: coordinatorActiveKeySummary() } : {}),
     runGeneration: coordinatorState.runGeneration,
@@ -1117,8 +1124,7 @@ function publishSessionState(cause: SessionStateEvent["cause"]): void {
     ...(coordinatorAuthorityRecovery ? { authorityRecovery: coordinatorAuthorityRecovery } : {}),
   };
   publishTopicEvent("session.state", state);
-  workerWalletState.publish();
-  publishCoordinatorContactsPresence();
+  if (!deferCleanup) { workerWalletState.publish(); publishCoordinatorContactsPresence(); }
 }
 
 // ============================================================
@@ -1527,6 +1533,7 @@ const channelSubscriptionStatusSubscribers = new Set<{
 }>();
 /** 旧 owner runtime 的异步清理；新 owner 必须等待它完成。 */
 let satRuntimeRelease: Promise<void> = Promise.resolve();
+let retrySatRuntimeCleanup: (() => Promise<void>) | undefined;
 /** 锁屏/切 owner 的远端 Sat 清理上限；安全边界不能依赖网络返回。 */
 const SAT_RUNTIME_CLEANUP_TIMEOUT_MS = 5_000;
 /** 防止首个 Channel caller 并发创建多个物理订阅协调器。 */
@@ -1839,12 +1846,9 @@ async function ensureSatRuntime(expectedInstanceId?: string, storage?: BorrowedM
   }
 }
 
-async function releaseSatRuntime(
-  reason: string,
-  options: { physicalCleanup?: boolean } = {},
-): Promise<void> {
+async function releaseSatRuntime(reason: string): Promise<void> {
   // 多次 lock/key-switch 可能同时到达；清理任务排队执行，后一个 owner
-  // 永远不会越过前一个 owner 的物理退订和连接关闭。
+  // 必须等前一个 owner 完成本地清理与连接关闭。
   const previousRelease = satRuntimeRelease;
   satRuntimeStartToken += 1;
   satRuntimeStartAbortController?.abort(new Error(`Sat runtime released: ${reason}`));
@@ -1865,8 +1869,8 @@ async function releaseSatRuntime(
   lastSatState = undefined;
   const mux = channelSubscriptionMux;
   const muxStarting = channelSubscriptionMuxStarting;
-  // 先中断 owner inbox/插件订阅的在途网络请求；锁屏仍会在第二阶段
-  // 用一个新的 Mux 对账清理，最后一个页面离开则只保存领域清理意图。
+  // 先中断 owner inbox/插件订阅的在途网络请求并关闭本地 Mux。
+  // 旧授权已撤销，远端订阅由下次启动的新实例查询历史记录后对账。
   mux?.cancelInFlight();
   channelSubscriptionMuxStatusOff?.();
   channelSubscriptionMuxStatusOff = undefined;
@@ -1881,39 +1885,46 @@ async function releaseSatRuntime(
   msfileBitfsRuntime.clearBuyerState();
   coordinatorContactsService?.resetPresence?.();
 
-  const cleanup = previousRelease.then(async () => {
-    // 必须在 runtime.handle.close / provider.shutdown 前清理物理订阅。
-    // 每一步都有上限：远端 Supplier 永不返回时，清理只保留在当前 Worker
-    // 运行态，不能拖延锁屏或阻止后续 owner 建立会话；下次由 SS server
-    // 订阅查询重新取得远端事实。
-    const startedRuntime = runtime ?? await awaitSatCleanup(runtimeStarting ?? Promise.resolve(undefined), "stale runtime start");
-    const physicalCleanup = options.physicalCleanup !== false;
-    // Mux 已在 release 入口取消了旧的物理动作；先推进 Provider 世代，
-    // 再写清理意图，防止旧 Promise 迟到把 unsubscribing 覆盖回去。
-    if (startedRuntime) {
-      await awaitSatCleanup(startedRuntime.handle.preparePhysicalCleanup(), "persist physical cleanup intent");
-    }
-    const startedMux = await awaitSatCleanup(muxStarting ?? Promise.resolve(undefined), "stale mux start");
-    const muxToRelease = mux ?? startedMux;
-    if (muxToRelease) {
-      try {
-        if (physicalCleanup) {
-          await awaitSatCleanup(muxToRelease.clear(), "old owner physical cleanup");
-        }
-      } finally {
-        // clear 超时或 no-client teardown 后也必须取消旧 Mux 的退避重试，
-        // 避免它在新 owner Runtime 建立后继续调用旧连接。
-        muxToRelease.dispose();
+  // 旧启动失败已经由 createSatWorkerServices 释放自身资源；取消/过期启动
+  // 不等于退出失败。立刻接住拒绝，避免等待前一轮清理时产生未处理拒绝。
+  const settledRuntimeStart = runtimeStarting?.catch(() => undefined);
+  const settledMuxStart = muxStarting?.catch(() => undefined);
+  const settledP2pkhStart = p2pkhStarting?.catch(() => undefined);
+  let startedRuntime: typeof runtime;
+  let startedMux: typeof mux;
+  const phases: { label: string; run: () => Promise<void>; pending?: Promise<void>; done?: boolean }[] = [
+    { label: "stale runtime start", run: async () => { startedRuntime = runtime ?? await settledRuntimeStart; } },
+    { label: "stale mux start", run: async () => { startedMux = mux ?? await settledMuxStart; } },
+    { label: "dispose subscriptions", run: async () => { startedMux?.dispose(); } },
+    { label: "stale P2PKH start", run: async () => { await settledP2pkhStart; } },
+    { label: "close runtime handle", run: async () => { startedRuntime?.offIncoming(); startedRuntime?.handle.close(); } },
+    { label: "Sat provider shutdown", run: async () => { await startedRuntime?.provider.shutdown(); } },
+    { label: "close repository", run: async () => { startedRuntime?.repository.close(); } },
+  ];
+  const previousRetry = retrySatRuntimeCleanup;
+  let completed = false;
+  let inFlight: Promise<void> | undefined;
+  const retry = (): Promise<void> => {
+    if (completed) return Promise.resolve();
+    if (inFlight) return inFlight;
+    const run = (async () => {
+      await previousRelease;
+      await previousRetry?.();
+      // 清理超时必须阻止解锁。保留旧运行时及阶段，重试只推进尚未完成的步骤；
+      // 未 settle 的原操作复用 Promise，不能并发发送第二次退订或关闭。
+      for (const phase of phases) {
+        if (phase.done) continue;
+        phase.pending ??= Promise.resolve().then(phase.run).then(() => { phase.done = true; }, error => { phase.pending = undefined; throw error; });
+        await awaitSatCleanup(phase.pending, phase.label);
       }
-    }
-    await awaitSatCleanup(p2pkhStarting ?? Promise.resolve(undefined), "stale P2PKH start");
-    if (startedRuntime) {
-      try { startedRuntime.offIncoming(); } catch { /* ignore */ }
-      try { startedRuntime.handle.close(); } catch { /* ignore */ }
-      await awaitSatCleanup(startedRuntime.provider.shutdown(), "Sat provider shutdown");
-      startedRuntime.repository.close();
-    }
-  });
+      completed = true;
+      if (retrySatRuntimeCleanup === retry) retrySatRuntimeCleanup = undefined;
+    })().finally(() => { if (inFlight === run) inFlight = undefined; });
+    inFlight = run;
+    return run;
+  };
+  retrySatRuntimeCleanup = retry;
+  const cleanup = retry();
   satRuntimeRelease = cleanup.catch((error) => {
     console.warn("[sat-subscription] runtime cleanup failed", error instanceof Error ? error.message : String(error));
   });
@@ -2236,13 +2247,10 @@ async function awaitSatCleanup<T>(operation: Promise<T>, label: string): Promise
   try {
     return await Promise.race([
       operation,
-      new Promise<undefined>((resolve) => {
-        timer = setTimeout(() => resolve(undefined), SAT_RUNTIME_CLEANUP_TIMEOUT_MS);
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out`)), SAT_RUNTIME_CLEANUP_TIMEOUT_MS);
       })
     ]);
-  } catch (error) {
-    console.warn(`[sat-subscription] ${label} failed`, error instanceof Error ? error.message : String(error));
-    return undefined;
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
@@ -2586,6 +2594,7 @@ function fenceCoordinatorPeerSession(
   }
   if (options.physical) {
     coordinatorPeers.delete(state.peer.peerId);
+    walletLockBarrier.remove(state.peer.peerId);
   }
   void drainCoordinatorPeer(state);
   return true;
@@ -3220,7 +3229,7 @@ function workerWalletSnapshot(): import("@keymaster/contracts").VaultLifecycleSn
     activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex : undefined,
     activeKeyIdentity: coordinatorState.vaultStatus === "unlocked" ? coordinatorActiveKeySummary() : undefined,
     sessionEpoch: coordinatorState.sessionEpoch, runGeneration: coordinatorState.runGeneration,
-    walletGeneration: coordinatorState.walletGeneration, vaultLifecycleRevision: sessionRevision };
+    walletGeneration: coordinatorState.walletGeneration, vaultLifecycleRevision: sessionRevision, lockCleanup: walletLockBarrier.snapshot() };
 }
 const workerWalletState = createWalletStateSource(workerWalletSnapshot);
 // Only trusted Worker assembly and fixture tasks hold this private source.
@@ -3688,7 +3697,8 @@ async function buildTopicBaselines(
     }
     const baselineRevision = topic === "session.state" ? sessionRevision : backgroundSnapshotRevision;
     const snapshot = topic === "session.state"
-      ? { topic, type: "session.state.changed" as const, sessionRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, cause: "bootstrap" as const, vaultStatus: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex ?? null : null,
+      ? { topic, type: "session.state.changed" as const, sessionRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, cause: "bootstrap" as const, vaultStatus: coordinatorState.vaultStatus,
+    lockCleanup: walletLockBarrier.snapshot(), activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex ?? null : null,
     ...(coordinatorState.vaultStatus === "unlocked" ? { activeKeyIdentity: coordinatorActiveKeySummary() } : {}), runGeneration: coordinatorState.runGeneration, ...(coordinatorState.walletGeneration ? { walletGeneration: coordinatorState.walletGeneration } : {}), autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs ?? AUTO_LOCK_DEFAULT_TIMEOUT_MS }
         : { topic, type: "background.snapshot.changed" as const, backgroundSnapshotRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshots: getTaskSnapshots(), scheduleSettings: coordinatorState.scheduleSettings, p2pkhSettings: coordinatorMeta.p2pkhSettings };
     return [{ topic, baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot }];
@@ -3827,6 +3837,15 @@ async function executeStorageControl(
     }
     const service = await ensureStorageRuntime(peerId);
     return ok(await service.summary());
+  }
+
+  if (walletLockBarrier.snapshot() && ["unlock", "initialize", "reset-wallet", "change-key-password"].includes(control.type)) {
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "blocked", reason: { key: "vault.lock.cleanupBlocked", fallback: "钱包清理尚未完成，请重试清理后再解锁" } } };
+  }
+
+  if (control.type === "lock") {
+    await performGlobalLock("storage-control");
+    return ok(true);
   }
 
   if (control.type === "initialize") {
@@ -5927,7 +5946,7 @@ async function executeProcessRequest(
       case "unlock":
         return await handleUnlock(requestId, request);
       case "lock":
-        return await handleLock(requestId, request);
+        return await handleLock(requestId, request, actualClientId);
       case "vault.operation":
         return await handleVaultOperation(requestId, request);
       case "crypto":
@@ -5995,6 +6014,11 @@ async function processRequestCore(
   // 断开消息与前一个异步请求的 authority 校验可能交错；断开端口一旦
   // 被登记，后续路径不得再创建 grant、排队任务或取得最终 I/O lease。
   if (revokedCoordinatorPeerIds.has(actualClientId) || requestSignal?.aborted) return disconnectedClientResponse(requestId);
+  const lockCleanup = walletLockBarrier.snapshot();
+  const activatesWallet = request.kind === "unlock"
+    || request.kind === "storage.control" && ["unlock", "initialize", "reset-wallet", "change-key-password"].includes(request.control.type)
+    || request.kind === "vault.operation" && (request.operation.type !== "hardware" || !["state", "disconnect"].includes(request.operation.command.action));
+  if (lockCleanup && activatesWallet) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "blocked", reason: { key: "vault.lock.cleanupBlocked", fallback: lockCleanup.phase === "failed" ? "钱包清理失败，请重试清理后再解锁" : "钱包正在锁定，请等待清理完成" } } };
   const cleanupOnly = request.kind === "lock"
     || request.kind === "storage.cancel"
     || request.kind === "storage.session.abort"
@@ -6123,6 +6147,7 @@ async function handleUnlock(
 }
 
 async function handleUnlockUnsafe(requestId: string, request: { kind: "unlock"; password: string; expectedSessionEpoch: SessionEpoch }): Promise<CoordinatorResponse> {
+  if (walletLockBarrier.snapshot()) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "locked" } };
   return executeWorkerUnlock(requestId, request, {
     session: () => coordinatorState,
     coldStart: async () => storageColdStartState ?? await walletLifecycle?.coldStart(),
@@ -6143,6 +6168,8 @@ async function handleUnlockUnsafe(requestId: string, request: { kind: "unlock"; 
  */
 async function completeUnlockedBinding(cause: SessionStateEvent["cause"] = "unlock"): Promise<void> {
   const publicKeyHex = coordinatorState.activePublicKeyHex;
+  const bindingEpoch = coordinatorState.sessionEpoch;
+  if (walletLockBarrier.snapshot()) throw storageUnavailableError("Wallet cleanup has not completed");
   if (!publicKeyHex) throw storageUnavailableError("Unlocked wallet has no active key");
   try {
     await ensureCoordinatorUpgradeSession();
@@ -6153,6 +6180,7 @@ async function completeUnlockedBinding(cause: SessionStateEvent["cause"] = "unlo
       console.warn("[msfile] BitFS buyer recovery gate remains closed", error instanceof Error ? error.message : String(error));
     }
     await reconcileCoordinatorRuntime();
+    if (coordinatorState.sessionEpoch !== bindingEpoch || coordinatorState.vaultStatus !== "unlocked") throw storageUnavailableError("Wallet unlock was revoked during runtime binding");
   } catch (error) {
     await performGlobalLock("worker-unit-bind-failed");
     throw error;
@@ -6424,6 +6452,7 @@ function adoptUnlockedKey(input: {
   walletGeneration: string;
   sessionEpoch: string;
 }): void {
+  if (walletLockBarrier.snapshot()) { input.privateKeyBytes.fill(0); throw new Error("Wallet cleanup has not completed"); }
   // 旧会话的所有 grant 与任务权限先撤销：解锁只授予新身份，不继承旧句柄。
   activeKeyBackend = "software";
   revokeStorageSessionGrants();
@@ -6449,11 +6478,17 @@ function adoptUnlockedKey(input: {
  */
 function revokeWalletGrants(reason: "lock" | "reset"): void {
   activeKeyBackend = undefined;
-  void hardwareConnections.close();
+  const hardwareCleanup = hardwareConnections.close();
+  walletRevocationCleanup?.push(hardwareCleanup);
+  void hardwareCleanup.catch(() => undefined);
   walletPayments?.close(); walletPayments = undefined; walletPaymentsOpening = undefined;
   revokeStorageSessionGrants();
   releaseMsfileRuntime(reason);
-  void releaseSatRuntime(reason).catch(() => undefined);
+  // 授权已经撤销，不能让退出依赖旧存储句柄写入或旧身份签名。
+  // 本地关闭连接并停止重试；远端订阅由下次启动的历史订阅查询对账。
+  const satCleanup = releaseSatRuntime(reason);
+  walletRevocationCleanup?.push(satCleanup);
+  void satCleanup.catch(() => undefined);
   clearWindowP2pExecutorLeaseLocked();
   stopCoordinatorOwnerWorkerUnits();
 }
@@ -6464,6 +6499,7 @@ function establishWalletSession(input: {
   walletGeneration: string;
   publicKeyHex: string;
 }): void {
+  if (walletLockBarrier.snapshot()) throw new Error("Wallet cleanup has not completed");
   coordinatorState.walletGeneration = input.walletGeneration;
   coordinatorState.sessionEpoch = input.sessionEpoch;
   coordinatorState.activePublicKeyHex = input.publicKeyHex;
@@ -6664,14 +6700,13 @@ function requireWalletLifecycle(): WalletLifecycleService {
 
 async function handleLock(
   requestId: string,
-  request: { kind: "lock"; expectedSessionEpoch: SessionEpoch },
+  request: Extract<CoordinatorClientRequest, { kind: "lock" }>,
+  peerId: string,
 ): Promise<CoordinatorResponse> {
-  await performGlobalLock("manual");
-  return {
-    requestId,
-    sessionEpoch: coordinatorState.sessionEpoch,
-    ack: { status: "accepted" },
-  };
+  if (request.cleanup?.action === "register") walletLockBarrier.register(peerId);
+  else if (request.cleanup?.action === "settled") walletLockBarrier.report(peerId, request.expectedSessionEpoch, request.cleanup.attempt, request.cleanup.error);
+  else void performGlobalLock("manual").catch(error => console.error("[wallet] lock cleanup failed", error));
+  return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "accepted" } };
 }
 
 /**
@@ -6680,50 +6715,78 @@ async function handleLock(
  * 不再有任何跨浏览器 Key 锁、lock.json 租约或持久化心跳：本地钱包只保证
  * 本浏览器本 Origin 的单实例，锁定是完全的内存态迁移。
  */
-async function performGlobalLock(reason: string): Promise<void> {
-  cancelSmartSyncIdleTimer();
-  // 先撤销会话、grant 与任务权限；迟到的写入在数据层检查之前就已经被拒。
-  revokeWalletGrants("lock");
-  // 浏览句柄绑定 session epoch，随 epoch 推进整体作废；这里显式撤销，让
-  // 页面上已经拿到的句柄立刻失效，而不是等到下一次请求再失败。
-  storageBrowseCoordinator.revokeAll();
-  const previousActive = coordinatorState.activePublicKeyHex ? requireCoordinatorNetworkIdentity() : undefined;
-  if (previousActive) void cancelTaskRuntimesByKey(previousActive).catch(() => undefined);
-
-  const lockedEpoch = generateEpoch();
-  coordinatorState.sessionEpoch = lockedEpoch;
+function performGlobalLock(reason: string): Promise<void> {
+  if (globalLockRunning && walletLockBarrier.snapshot()?.phase !== "failed") return globalLockRunning;
+  if (walletLockBarrier.snapshot()) return walletLockBarrier.retry();
+  const backgroundCompletions = [...coordinatorState.taskRuntimes.values()].flatMap(runtime => runtime.completion ? [runtime.completion] : []);
+  const previousOwnerUnits = new Set(COORDINATOR_WORKER_UNIT_CATALOG.filter(unit => unit.scopeKind === "owner-session").map(unit => unit.unitId));
+  // Only the security commit precedes the lock event. A new epoch fences old
+  // RPC/I/O immediately and clearing the key prevents signing. Plugin teardown,
+  // abort callbacks, connection shutdown and directory updates run AFTER it.
+  coordinatorState.sessionEpoch = generateEpoch();
   coordinatorState.vaultStatus = "locked";
-  for (const [, runtime] of coordinatorState.taskRuntimes) {
-    runtime.controller?.abort();
-    if (runtime.timer) clearTimeout(runtime.timer);
-    runtime.state = "blocked";
-    runtime.blockedReason = "Vault is locked";
-    runtime.timer = undefined;
-  }
-
   coordinatorState.activePublicKeyHex = undefined;
-  dropActivePrivateKey();
-  setCoordinatorActiveKeySummary(undefined);
-  workerStorageClients.invalidateAll();
+  dropActivePrivateKey(); setCoordinatorActiveKeySummary(undefined);
   testHarnessActivationSecret = undefined;
   coordinatorState.autoLockDeadline = undefined;
-  vaultAutoLock.pause();
-  stopCoordinatorOwnerWorkerUnits();
-  reconcileCoordinatorRuntime();
+  lockRevocationPending = true;
 
-  closeCoordinatorUpgradeSession(`Coordinator locked: ${reason}`);
-  if (walletLifecycle) await walletLifecycle.lock().catch((error) => {
-    console.warn("[wallet] lifecycle lock failed", error instanceof Error ? error.message : String(error));
+  let revokePending: Promise<Promise<void>[]> | undefined;
+  const revoke = (): Promise<Promise<void>[]> => {
+    if (revokePending) return revokePending;
+    const run = Promise.resolve().then(() => {
+      cancelSmartSyncIdleTimer(); vaultAutoLock.pause();
+      for (const runtime of coordinatorState.taskRuntimes.values()) {
+        runtime.controller?.abort();
+        if (runtime.timer) clearTimeout(runtime.timer);
+        runtime.state = "blocked"; runtime.blockedReason = "Vault is locked"; runtime.timer = undefined;
+      }
+      walletRevocationCleanup = [];
+      try {
+        revokeWalletGrants("lock"); storageBrowseCoordinator.revokeAll();
+        workerStorageClients.invalidateAll(); stopCoordinatorOwnerWorkerUnits();
+        closeCoordinatorUpgradeSession(`Coordinator locked: ${reason}`);
+        reconcileCoordinatorSessionExposures();
+        lockRevocationPending = false;
+        workerWalletState.publish(); publishCoordinatorContactsPresence();
+        return walletRevocationCleanup;
+      } finally { walletRevocationCleanup = undefined; }
+    }).catch(error => { revokePending = undefined; throw error; });
+    revokePending = run;
+    return run;
+  };
+  let firstConnectionCleanup = true;
+  const operations = [
+    { label: "钱包连接", run: async () => {
+      const revocations = await revoke();
+      if (firstConnectionCleanup) {
+        firstConnectionCleanup = false;
+        // The first rejection must reach the UI. Do not silently repeat it
+        // before recording the failure; retries come from the user's button.
+        await Promise.all(revocations);
+      }
+      await hardwareConnections.close(); await retrySatRuntimeCleanup?.();
+    } },
+    { label: "后台插件", run: async () => {
+      await revoke();
+      if (coordinatorRuntimeApp) {
+        await coordinatorRuntimeApp.reconcile();
+        for (const state of coordinatorRuntimeApp.inspect().plugins.filter(plugin => plugin.units.some(unit => previousOwnerUnits.has(unit.unitId)))) {
+          if (state.cleanup?.cleanupIncomplete || state.kind === "stopping" || state.kind === "cleanup-pending") throw new Error(`${state.id}: ${state.error ?? "清理未完成"}\n${JSON.stringify(state.cleanup, null, 2)}`);
+        }
+        synchronizeCoordinatorTaskUnitInstances();
+      }
+    } },
+    { label: "钱包生命周期", run: async () => { await revoke(); if (walletLifecycle) await walletLifecycle.lock(); } },
+    { label: "后台任务", run: async () => { await revoke(); await Promise.allSettled(backgroundCompletions); } },
+  ];
+  const running = walletLockBarrier.begin(coordinatorState.sessionEpoch, operations).finally(() => {
+    if (globalLockRunning === running) globalLockRunning = undefined;
+    emitMsFileState(); emitStorageState();
+    publishTopicEvent("background.snapshot", { type: "background.snapshot.changed", sessionEpoch: coordinatorState.sessionEpoch, snapshots: getTaskSnapshots() });
   });
-
-  emitMsFileState();
-  emitStorageState();
-  publishTopicEvent("background.snapshot", {
-    type: "background.snapshot.changed",
-    sessionEpoch: coordinatorState.sessionEpoch,
-    snapshots: getTaskSnapshots(),
-  });
-  publishSessionState("lock");
+  globalLockRunning = running;
+  return running;
 }
 
 // ============================================================
@@ -7034,6 +7097,7 @@ function buildSnapshot(): CoordinatorBootstrapSnapshot {
     buildId: COORDINATOR_BUILD_ID,
     sessionEpoch: coordinatorState.sessionEpoch,
     vaultStatus: coordinatorState.vaultStatus,
+    lockCleanup: walletLockBarrier.snapshot(),
     activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex : undefined,
     ...(coordinatorState.vaultStatus === "unlocked" ? { activeKeyIdentity: coordinatorActiveKeySummary() } : {}),
     // 钱包身份世代：单 Key 模型下没有 selectedPublicKeyHex（没有可切换的
@@ -7666,7 +7730,7 @@ const coordinatorRuntimePlugins = COORDINATOR_WORKER_UNIT_CATALOG.map((unit) => 
         satWorkerP2pkhAccess = p2pkhAccess;
         context.scope.onRevoke(() => { if (satWorkerP2pkhAccess === p2pkhAccess) satWorkerP2pkhAccess = undefined; });
         const ownedRuntime = await ensureSatRuntime(context.instanceId, context.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(context.consumer, context.scope, ""), () => context.scope.assertActive());
-        context.scope.onRevoke(() => { if (satRuntime === ownedRuntime) void releaseSatRuntime("unit-revoked"); });
+        context.scope.onRevoke(() => { if (satRuntime === ownedRuntime) void releaseSatRuntime("unit-revoked").catch(() => undefined); });
         ready = coordinatorWorkerUnitRegistry.ready(unit.unitId, context.instanceId);
       } else {
         const activated = activateCoordinatorWorkerUnitForRuntime(unit.unitId, context.instanceId);
@@ -8317,6 +8381,7 @@ export async function __testGetCoordinatorUpgradePartition(): Promise<{ revision
 }
 
 export function __testResetState(): void {
+  walletLockBarrier.reset(); lockRevocationPending = false; globalLockRunning = undefined; walletRevocationCleanup = undefined; retrySatRuntimeCleanup = undefined;
   activeKeyBackend = undefined;
   void hardwareConnections.close();
   testDomainUnitReadiness = true;
@@ -8354,9 +8419,9 @@ export function __testResetState(): void {
   // 测试夹具也模拟一次 Root 重装；旧句柄不能跨“重启”复用同一个令牌。
   platformRootToken = {};
   storageStartupFailure = false;
-  // releaseSatRuntime 会同步摘除旧 owner 的全局句柄，并把真实退订放入
+  // releaseSatRuntime 会同步摘除旧 owner 的全局句柄，并把本地退出任务放入
   // satRuntimeRelease；下一次测试创建 runtime 时会等待该 Promise。
-  void releaseSatRuntime("test");
+  void releaseSatRuntime("test").catch(() => undefined);
   testPersistCoordinatorSnapshotFailure = false;
   testCoordinatorSnapshotMetrics.clear();
   testFailNextP2pkhSettingWrite = false;
@@ -9531,14 +9596,21 @@ export async function __testUnlock(password: string): Promise<CoordinatorRespons
   return response;
 }
 
+/** Race regression uses the real lifecycle and KeyHold decrypt, without replacing storage or crypto. */
+export function __testUnlockAtLifecycle(password: string): Promise<import("@keymaster/contracts").WalletUnlockResult> {
+  return requireWalletLifecycle().unlock(password);
+}
+
 /** 修改 Vault 密码。 */
 export async function __testChangePassword(oldPassword: string, newPassword: string): Promise<unknown> {
   return executeVaultOperation({ type: "changePassword", oldPassword, newPassword });
 }
 
 /** 锁定 Vault。 */
-export async function __testLock(): Promise<CoordinatorResponse> {
-  return processRequest({ kind: "lock", requestId: `test-lock-${Date.now()}`, clientId: "test", expectedSessionEpoch: coordinatorState.sessionEpoch });
+export async function __testLock(cleanup?: Extract<CoordinatorClientRequest, { kind: "lock" }>["cleanup"], peerId = "test"): Promise<CoordinatorResponse> {
+  const response = await processRequest({ kind: "lock", requestId: `test-lock-${Date.now()}`, clientId: peerId, expectedSessionEpoch: coordinatorState.sessionEpoch, cleanup });
+  if (!cleanup) await globalLockRunning;
+  return response;
 }
 
 /** 获取 Vault 状态。 */

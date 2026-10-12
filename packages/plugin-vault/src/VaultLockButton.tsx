@@ -63,11 +63,10 @@ export function VaultLockButton() {
   }, [expanded]);
   if (status !== "unlocked") return null;
   const lock = async () => {
-    const deadline = Date.now() + 6000;
-    for (;;) {
-      try { await vault.lock(); return; }
-      catch { if (Date.now() >= deadline) return; await new Promise(resolve => setTimeout(resolve, 400)); }
-    }
+    try {
+      const result = await vault.lock();
+      if (result.status !== "accepted" && result.status !== "ok") setError("message" in result ? result.message : t("vault.lock.requestFailed", { defaultValue: "锁定请求失败，请重试" }));
+    } catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)); }
   };
   const state = hardware?.activity?.state;
   const stateText = state ? t(`vault.panel.${state}`, {defaultValue: {
@@ -81,11 +80,12 @@ export function VaultLockButton() {
     </button>
     <Button variant="ghost" className="app-topbar__lock" iconLeft={<Lock size={16} />} onClick={lock}
       title={t("common.action.lock", { defaultValue: "锁定" })} aria-label={t("common.action.lock", { defaultValue: "锁定" })}>{t("common.action.lock", { defaultValue: "锁定" })}</Button>
+    {error ? <p role="alert">{error}</p> : null}
     <div hidden={!expanded} id="vault-topbar-panel" className="vault-topbar-wallet__panel" style={{"--vault-wallet-top": `${panelTop}px`} as CSSProperties} ref={panel} tabIndex={-1}
       role="region" aria-label={t("vault.panel.wallet", {defaultValue: "我的钱包"})}>
       {stateText ? <p role="status" aria-live="polite">{stateText}</p> : null}
       <PaymentNotificationList execute={payment} visible={expanded} onPending={onPending} text={(name, fallback) => t(`vault.${name}`, {defaultValue: fallback})}/>
-      {error ? <p role="alert">{error}</p> : null}
+
     </div>
   </div>;
 }

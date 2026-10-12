@@ -1,15 +1,16 @@
+import { VaultLockCleanup } from "./VaultLockCleanup.js";
+import { useInternalVault } from "./VaultInternalContext.js";
 // packages/plugin-vault/src/VaultUnlockPage.tsx
 // 解锁页面：输入密码，调用 vault.unlock。
 // 失败时显示明确错误，不暴露明文密码。
 
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { Button, PageHeader, TextInput } from "@keymaster/ui";
-import { usePluginCapability } from "webloom-framework/react";
 import { usePluginI18n } from "@keymaster/runtime";
-import { VAULT_SERVICE_CAPABILITY } from "@keymaster/contracts";
 
 export function VaultUnlockPage() {
-  const vault = usePluginCapability(VAULT_SERVICE_CAPABILITY);
+  const vault = useInternalVault();
+  const wallet = useSyncExternalStore(listener => vault.subscribeWalletState(listener), () => vault.walletSnapshot(), () => vault.walletSnapshot());
   const { t } = usePluginI18n();
   // 触发 languageChanged 重渲染。
   const [password, setPassword] = useState("");
@@ -18,6 +19,7 @@ export function VaultUnlockPage() {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    if (wallet.lockCleanup) return;
     setBusy(true);
     setError(null);
     try {
@@ -33,6 +35,8 @@ export function VaultUnlockPage() {
       setPassword("");
     }
   }
+
+  if (wallet.lockCleanup) return <VaultLockCleanup cleanup={wallet.lockCleanup} />;
 
   return (
     <div className="vault-page vault-page--unlock">

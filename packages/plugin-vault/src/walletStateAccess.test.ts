@@ -19,6 +19,26 @@ async function fixture() {
   return { host, source, provider, get reader() { return reader; }, stranger, view, commit: (changes: Partial<VaultLifecycleSnapshot>) => { committed = { ...committed, ...changes }; source.publish(); } };
 }
 describe("Vault wallet state capability", () => {
+  it("keeps snapshot identity stable until an actual commit, including cleanup state", () => {
+    let committed = initial();
+    const source = createWalletStateSource(() => committed);
+    const before = source.snapshot();
+    expect(source.snapshot()).toBe(before);
+    committed = { ...committed };
+    source.publish();
+    expect(source.snapshot()).toBe(before);
+    committed = { ...committed, status: "locked", lockCleanup: { phase: "pending", attempt: 1 }, vaultLifecycleRevision: 2 };
+    source.publish();
+    const pending = source.snapshot();
+    expect(pending).not.toBe(before);
+    expect(source.snapshot()).toBe(pending);
+    expect(Object.isFrozen(pending.lockCleanup)).toBe(true);
+    committed = { ...committed, lockCleanup: undefined, vaultLifecycleRevision: 3 };
+    source.publish();
+    expect(source.snapshot()).not.toBe(pending);
+    source.dispose();
+  });
+
   it("accepts only an issued, declared consumer with its exact Scope", async () => {
     const f = await fixture(); const access = f.provider.capability(VAULT_WALLET_STATE_CAPABILITY);
     expect(() => access.bind({ ...f.reader.consumer } as PluginConsumer, f.reader.scope)).toThrow(/issued/);

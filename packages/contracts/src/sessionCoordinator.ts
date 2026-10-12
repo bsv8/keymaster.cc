@@ -385,7 +385,7 @@ export type CoordinatorClientRequest =
   | ({ kind: "hello"; clientId: string; requestId: string; /** Coordinator 服务桥的专用双工端口。 */ servicePort?: MessagePort }
     | { kind: "subscribe"; clientId: string; requestId: string; topics: CoordinatorTopic[] }
     | { kind: "unlock"; clientId: string; requestId: string; password: string; expectedSessionEpoch: SessionEpoch }
-    | { kind: "lock"; clientId: string; requestId: string; expectedSessionEpoch: SessionEpoch }
+    | { kind: "lock"; clientId: string; requestId: string; expectedSessionEpoch: SessionEpoch; cleanup?: { action: "register" } | { action: "settled"; attempt: number; error?: string } }
     | { kind: "vault.operation"; clientId: string; requestId: string; operation: CoordinatorVaultOperation; expectedSessionEpoch: SessionEpoch }
     | { kind: "crypto"; clientId: string; requestId: string; operation: CoordinatorCryptoOperation; expectedSessionEpoch: SessionEpoch }
     | { kind: "background.run-now"; clientId: string; requestId: string; taskId: string; expectedSessionEpoch: SessionEpoch }
@@ -628,6 +628,7 @@ export interface CoordinatorStorageStateEvent {
 
 /** The complete public session snapshot. This is the sole cross-tab session event. */
 export interface SessionStateEvent {
+  lockCleanup?: import("./vault.js").WalletLockCleanup;
   activeKeyIdentity?: import("./vault.js").KeyIdentity;
   topic: "session.state";
   type: "session.state.changed";
@@ -715,6 +716,7 @@ export interface CoordinatorSubscribeTopicsResult {
 
 /** Coordinator 公开状态快照。 */
 export interface CoordinatorBootstrapSnapshot {
+  lockCleanup?: import("./vault.js").WalletLockCleanup;
   activeKeyIdentity?: import("./vault.js").KeyIdentity;
   /** SharedWorker 启动身份；意图命令必须绑定此值。 */
   authorityInstanceId: string;

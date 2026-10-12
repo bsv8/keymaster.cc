@@ -1,3 +1,4 @@
+import { VaultLockCleanup } from "./VaultLockCleanup.js";
 import { NetworkIdentitySelect } from "./NetworkIdentitySelect.js";
 import type { BsvNetwork } from "@keymaster/contracts";
 import { KeyImportWizard } from "./import/KeyImportWizard.js";
@@ -39,7 +40,8 @@ export function VaultWalletEntry() {
 
   const { t } = usePluginI18n();
   // 触发 languageChanged 重渲染。
-  const status = useSyncExternalStore(listener => vault.subscribeWalletState(listener), () => vault.status(), () => vault.status());
+  const wallet = useSyncExternalStore(listener => vault.subscribeWalletState(listener), () => vault.walletSnapshot(), () => vault.walletSnapshot());
+  const status = wallet.status;
   const [mode, setMode] = useState<Mode>("welcome");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -53,11 +55,15 @@ export function VaultWalletEntry() {
   // 锁定态只需要知道"这把 Key 叫什么"，好让用户确认自己解锁的是哪个身份。
   // 读取失败不阻断解锁：冷启动路径本身不依赖这个标签。
   useEffect(() => {
+    // The entry stays mounted during post-unlock assembly; keep its identity
+    // and backend so hardware users do not briefly see a software password form.
+    if (status === "unlocked") return;
     if (status !== "locked") {
       setLockedKeyLabel(undefined);
       setBackend(undefined);
       return;
     }
+    setBusy(false);
     let cancelled = false;
     setBackend(undefined);
     setLockedKeyLabel(undefined);
@@ -153,11 +159,13 @@ export function VaultWalletEntry() {
   }
 
   async function unlock() {
-    if (backend !== "software") return;
+    if (busy || status !== "locked" || backend !== "software" || wallet.lockCleanup) return;
     setError(null);
     setBusy(true);
+    let accepted = false;
     try {
       const result = await vault.unlock(password);
+      accepted = result.status === "accepted" || result.status === "already-unlocked";
       if (result.status !== "accepted" && result.status !== "already-unlocked") {
         setError(
           "message" in result
@@ -170,10 +178,14 @@ export function VaultWalletEntry() {
     } catch (err) {
       setError(err instanceof Error ? err.message : t("shell.locked.unlockFailed", { defaultValue: "解锁失败" }));
     } finally {
-      setBusy(false);
+      // RPC completion can precede the authoritative wallet event. Do not end
+      // loading in that gap; successful assembly unmounts this form.
+      if (!accepted) setBusy(false);
       setPassword("");
     }
   }
+
+  if (wallet.lockCleanup) return <OnboardingShell width="narrow"><VaultLockCleanup cleanup={wallet.lockCleanup} /></OnboardingShell>;
 
   // ---------- 未初始化：欢迎页 ----------
   if (mode === "welcome") {
@@ -308,11 +320,14 @@ export function VaultWalletEntry() {
           type="password"
           autoComplete="current-password"
           value={password}
+          disabled={busy || status === "unlocked"}
           onChange={(e) => setPassword(e.currentTarget.value)}
           error={error ?? undefined}
         />
         <div className="locked-shell__actions">
-          <Button onClick={unlock} loading={busy} disabled={!password || backend !== "software"}>
+          {/* Worker acceptance precedes Window assembly. Keep the same loading
+              feedback until App replaces this entry with the ready shell. */}
+          <Button onClick={unlock} loading={busy || status === "unlocked"} disabled={!password || backend !== "software"}>
             {t("common.action.unlock", { defaultValue: "解锁" })}
           </Button>
         </div>

@@ -861,3 +861,22 @@ it('software migration and provisioning remain strict private DTOs and target-bo
  expect(()=>parseCoordinatorResponseFor(recovery,{ack:{status:'ok'},sessionEpoch:'epoch-2',operationResult:{...state,failure:'x'.repeat(513)}})).toThrow();
  expect(()=>parseCoordinatorResponseFor(recovery,{ack:{status:'ok'},sessionEpoch:'epoch-2',operationResult:{...state,pin:'12345678'}})).toThrow();
 });
+
+describe("lock cleanup wire protocol", () => {
+  it("preserves first-failure diagnostics in failed and pending retry events", () => {
+    const diagnostics = "[attempt=1] price: exit failed\nresource=channel-runtime\nError: first failure";
+    const event = { topic: "session.state", type: "session.state.changed", cause: "lock", vaultStatus: "locked", activePublicKeyHex: null, sessionEpoch: "locked", runGeneration: "run", sessionRevision: 2 };
+    const failed = { phase: "failed", attempt: 1, error: "exit failed", diagnostics };
+    expect(parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, { ...event, lockCleanup: failed })).toMatchObject({ lockCleanup: failed });
+    const pending = { phase: "pending", attempt: 2, diagnostics };
+    expect(parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, { ...event, sessionRevision: 3, lockCleanup: pending })).toMatchObject({ lockCleanup: pending });
+  });
+
+  it("preserves registration and attempt-bound page cleanup reports", () => {
+    const base = { kind: "lock", expectedSessionEpoch: "locked-epoch" };
+    expect(COORDINATOR_RPC_CAPABILITY.request.parse({ ...base, cleanup: { action: "register" } })).toMatchObject({ cleanup: { action: "register" } });
+    expect(COORDINATOR_RPC_CAPABILITY.request.parse({ ...base, cleanup: { action: "settled", attempt: 2, error: "Plugin cleanup failed\nresource=teardown\nstack: exit" } })).toMatchObject({ cleanup: { action: "settled", attempt: 2, error: "Plugin cleanup failed\nresource=teardown\nstack: exit" } });
+    expect(() => COORDINATOR_RPC_CAPABILITY.request.parse({ ...base, cleanup: { action: "settled", attempt: -1 } })).toThrow();
+    expect(() => COORDINATOR_RPC_CAPABILITY.request.parse({ ...base, cleanup: { action: "unknown" } })).toThrow();
+  });
+});

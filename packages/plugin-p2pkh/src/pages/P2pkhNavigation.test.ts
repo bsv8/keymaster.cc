@@ -1,6 +1,8 @@
 import { createFixtureHost as createPluginHost } from "@keymaster/runtime/test-support";
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
+import { createLifecycleScope } from "webloom-framework";
+import { createScopedRegistryView } from "webloom-framework/advanced";
 
 import { BUSINESS_REGISTRY_CAPABILITY, type BusinessFeatureRegistry, OWNED_RESOURCE_ACCESS_CAPABILITY, type PluginContext, type PageUiContribution } from "@keymaster/contracts";
 import { registerP2pkhNavigation } from "./P2pkhNavigation.js";
@@ -10,8 +12,10 @@ function setup(bsvNetwork: boolean, initialPath = "/p2pkh/mainnet/transactions")
   const host = createPluginHost({  });
   const entries = new Map<string, PageUiContribution>();
   const routes = { list: () => [...entries.values()].filter((e): e is Extract<PageUiContribution, { kind: "page" }> => e.kind === "page"), byPath: (path: string) => [...entries.values()].find(e => e.kind === "page" && e.path === path) };
-  const pages = { register: (entry: PageUiContribution) => { entries.set(entry.id, entry); }, unregister: (id: string) => { entries.delete(id); } };
-  const context = { capability: () => ({ bind: () => ({}) }) } as unknown as PluginContext;
+  const scope = createLifecycleScope({ kind: "plugin-instance", metadata: { pluginId: "p2pkh" }, instanceId: "navigation-test" });
+  const pageRegistry = { register: (entry: PageUiContribution) => { entries.set(entry.id, entry); }, unregister: (id: string) => { entries.delete(id); } };
+  const pages = createScopedRegistryView(pageRegistry, scope, { name: "p2pkh test routes", registrations: [{ method: "register", idArgument: 0, unregisterMethod: "unregister", ownerInstanceIdProperty: "ownerInstanceId" }] }).view;
+  const context = { scope, capability: () => ({ bind: () => ({}) }) } as unknown as PluginContext;
   const business = host.business as unknown as BusinessFeatureRegistry;
   if (!routes || !business) throw new Error("Host registries are unavailable");
   business.register("shell", { id: "assets", label: { key: "assets", fallback: "Assets" }, order: 1, features: [] });
@@ -31,10 +35,19 @@ function setup(bsvNetwork: boolean, initialPath = "/p2pkh/mainnet/transactions")
       push: (path) => { pushedPaths.push(path); window.history.replaceState({}, "", path); }
     }
   });
-  return { routes, business, setBsvNetwork: (value: boolean) => onSettingsChange?.(value), pushedPaths, dispose };
+  return { scope, routes, business, setBsvNetwork: (value: boolean) => onSettingsChange?.(value), pushedPaths, dispose };
 }
 
 describe("P2PKH navigation registration", () => {
+  it("tears down after real Scope revocation without calling revoked registry mutations", () => {
+    const navigation = setup(false);
+    expect(navigation.routes.list()).toHaveLength(2);
+    navigation.scope.revoke("wallet locked");
+    expect(navigation.routes.list()).toHaveLength(0);
+    expect(() => navigation.dispose()).not.toThrow();
+    expect(() => navigation.dispose()).not.toThrow();
+  });
+
   it("registers only the two testnet routes for a test identity", () => {
     const { routes, dispose } = setup(true);
     expect(routes.list().map((route) => route.path).sort()).toEqual([
