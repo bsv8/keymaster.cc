@@ -989,7 +989,7 @@ async function ensureMsfileRuntime(expectedInstanceId?: string, boundStores?: Ms
   let stores = boundStores;
   if (!stores && testDomainUnitReadiness && coordinatorState.activePublicKeyHex) stores = {
     ownerPublicKeyHex: coordinatorState.activePublicKeyHex.trim().toLowerCase(),
-    settings: createWorkerModuleFileStore("msfile", ""), appSettings: createWorkerModuleFileStore("msfile", "app-settings"),
+    settings: createWorkerModuleFileStore("msfile", ""), appSettings: workerStorageClients.platformFiles("msfile", "app-settings"),
   };
   const runtime = await msfileWorkerLifecycle.ensure(stores, assertScopeActive);
   const unit = activateCoordinatorOwnerWorkerUnit("msfile.coordinator-worker", expectedInstanceId);
@@ -2017,7 +2017,11 @@ const workerStorageClientCapabilities = createScopedStorageClients({
   async openOwnerFileStore({ pluginId, declaration }) {
     const binding = storageWorkerRequests.currentCoordinatorStorageBinding();
     if (!binding) throw storageUnavailableError("Worker file binding is unavailable");
-    const files = createWorkerModuleFileStore(pluginId, declaration.purposeId);
+    // Scoped clients have verified the live consumer and its central declaration.
+    // Platform-managed App settings must use the private platform file entry.
+    const files = declaration.authority === "platform-only"
+      ? workerStorageClients.platformFiles(pluginId, declaration.purposeId)
+      : createWorkerModuleFileStore(pluginId, declaration.purposeId);
     return { ...files, ...declaration, model: "files" as const, ...binding, close: () => { } };
   },
   async openOwnerAppStore({ pluginId, declaration }) {

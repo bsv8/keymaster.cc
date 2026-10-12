@@ -1,4 +1,4 @@
-import { STORAGE_FILE_CLIENTS_CAPABILITY, MSFILE_CONTENT_CAPABILITY, P2PKH_WORKER_PROTOCOL_CAPABILITY, WOC_CAPABILITY } from "@keymaster/contracts";
+import { STORAGE_FILE_CLIENTS_CAPABILITY, MSFILE_CONTENT_CAPABILITY, MSFILE_SERVICE_CAPABILITY, P2PKH_WORKER_PROTOCOL_CAPABILITY, WOC_CAPABILITY } from "@keymaster/contracts";
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bytesToHex, deriveP2pkhAddress } from "@keymaster/plugin-vault/coordinator";
@@ -2418,6 +2418,21 @@ describe("Session Coordinator MSFile RPC lane", () => {
     return __testGetSnapshot().sessionEpoch;
   }
 
+  it("reads and writes platform-managed App settings through the MSFile RPC lane", async () => {
+    await unlockVault();
+    const listed = await __testDispatchMsfileControl({ type: "app-authorizations.list" });
+    expect(listed.ack.status).toBe("ok");
+    expect(listed.operationResult).toEqual([]);
+    const saved = await __testDispatchMsfileControl({
+      type: "app-policy.update",
+      input: { key: { ownerPublicKeyHex: __testGetActivePublicKeyHex()!, publisherPublicKeyHex: identity.publisherPublicKeyHex, appId: identity.appId }, override: { seedMaxPriceSatoshis: "100" } },
+    });
+    expect(saved.ack.status).toBe("ok");
+    expect(await __testListWalletObjectPaths()).toEqual(expect.arrayContaining([
+      expect.stringMatching(/\.keymaster\/system\/app\/app-settings\/app-settings\.json$/),
+    ]));
+  });
+
   it("rejects all data/control/grant traffic while the Vault is locked（审查修复）", async () => {
     // 全新状态：未创建 / 未解锁。
     __testResetState();
@@ -3126,6 +3141,34 @@ describe("Forum Worker 单元的受限网络装配", () => {
   function runtimeDefinitions() {
     return ["vault", "storage", "window-p2p", "woc", "p2pkh", "sat-subscription", "msfile", "forum"].map(__testCoordinatorRuntimePlugin);
   }
+
+  it("loads local-file settings and App authorizations through production scoped storage", async () => {
+    const definitions = runtimeDefinitions();
+    let service: import("@keymaster/contracts").MsFileService | undefined;
+    const consumer = {
+      id: "msfile-settings-consumer", name: "MSFile settings consumer",
+      units: [{ id: "msfile-settings-consumer.worker", runtime: "shared-worker" as const, scopeKind: "owner-session" as const,
+        dependencies: [{ capability: MSFILE_SERVICE_CAPABILITY, sourceRuntime: "shared-worker" as const }] }],
+      setup: async (ctx: NativePluginContext) => { service = ctx.capability(MSFILE_SERVICE_CAPABILITY); },
+    };
+    const host = createNativeWorkerHost({ runtime: "shared-worker",
+      runtimeUnitImplementationRegistry: { get: id => definitions.find(plugin => plugin.manifest.id === id)?.setup ?? consumer.setup },
+    });
+    try {
+      await host.registerAll([...definitions.map(plugin => plugin.manifest), consumer]);
+      expect(host.state(consumer.id).kind).toBe("enabled");
+      expect(service).toBeDefined();
+      await expect(service!.getSettingsSnapshot()).resolves.toHaveProperty("globalSettings");
+      await expect(service!.listAppAuthorizations()).resolves.toEqual([]);
+      await service!.updateAppPriceOverride({
+        key: { ownerPublicKeyHex: __testGetActivePublicKeyHex()!, publisherPublicKeyHex: validPublisherKey(9), appId: "player.example" },
+        override: { seedMaxPriceSatoshis: "100" },
+      });
+      expect(await __testListWalletObjectPaths()).toEqual(expect.arrayContaining([
+        expect.stringMatching(/\.keymaster\/system\/app\/app-settings\/app-settings\.json$/),
+      ]));
+    } finally { await host.dispose(); }
+  });
 
   /** 造一个只消费 Forum 受限网络能力的最小 Worker 插件，用来验证能力真的被发布。 */
   function consumerOfForumNetwork(capture: (network: ForumWorkerNetwork) => void) {

@@ -47,7 +47,7 @@ export class StorageBrowseRpcProxy implements StorageBrowseService {
   private readonly client: StorageBrowseRpcProxyOptions["client"];
   private readonly sessionEpoch: () => string;
   /** 进行中的打开请求；dispose 或世代变化时用来避免留下孤儿句柄。 */
-  private opening: Promise<StorageBrowseSession> | undefined;
+  private opening: { epoch: string; promise: Promise<StorageBrowseSession> } | undefined;
   private session: StorageBrowseSession | undefined;
   private disposed = false;
 
@@ -73,18 +73,20 @@ export class StorageBrowseRpcProxy implements StorageBrowseService {
 
   async openSession(): Promise<StorageBrowseSession> {
     if (this.disposed) throw new StorageRuntimeError("storage_unavailable", "Storage browse proxy is disposed");
+    const epoch = this.sessionEpoch();
     const cached = this.session;
-    if (cached) return cached;
+    if (cached?.sessionEpoch === epoch) return cached;
+    this.forgetSession();
     // 并发调用共享同一次打开：两个句柄意味着两倍的游标预算和两条要清理的路径。
     const pending = this.opening;
-    if (pending) return pending;
-    const opening = this.rpc({ kind: "storage.browse.open", expectedSessionEpoch: this.sessionEpoch() })
+    if (pending?.epoch === epoch) return pending.promise;
+    const promise = this.rpc({ kind: "storage.browse.open", expectedSessionEpoch: epoch })
       .then((result) => {
         const session = unwrap<StorageBrowseSession>(result);
         // 打开期间可能已经 dispose 或切了世代：这份句柄不能再用。
-        if (this.disposed) {
+        if (this.disposed || this.opening !== opening || this.sessionEpoch() !== epoch || session.sessionEpoch !== epoch) {
           void this.closeRpc(session.browseSessionId).catch(() => undefined);
-          throw new StorageRuntimeError("storage_unavailable", "Storage browse proxy is disposed");
+          throw new StorageRuntimeError("storage_unavailable", "Storage browse binding became stale while opening");
         }
         if (this.opening === opening) {
           this.session = session;
@@ -96,8 +98,9 @@ export class StorageBrowseRpcProxy implements StorageBrowseService {
         if (this.opening === opening) this.opening = undefined;
         throw error;
       });
+    const opening = { epoch, promise };
     this.opening = opening;
-    return opening;
+    return promise;
   }
 
   /** 丢弃当前句柄（不通知 Worker）；只在世代已经推进、句柄本就作废时使用。 */
@@ -109,14 +112,22 @@ export class StorageBrowseRpcProxy implements StorageBrowseService {
    * 用句柄发一次数据请求。
    *
    * Worker 返回 storage_unavailable 说明句柄已经因锁定、重置或 Worker 重启作废；
-   * 这里丢掉本地句柄，让下一次调用重新打开，而不是把这个错误直接抛给页面——
-   * 页面正在浏览时锁定属于正常操作，不该表现成一次浏览失败。
+   * 这里丢掉本地句柄。没有旧游标的只读请求可重开一次后重试；分页游标属于旧
+   * 会话，不能借新会话重放。钱包仍锁定时重开会被 Worker 明确拒绝。
    */
   private async request<T>(build: (session: StorageBrowseSession) => StorageBrowsePrivateData, signal?: AbortSignal): Promise<T> {
     if (this.disposed) throw new StorageRuntimeError("storage_unavailable", "Storage browse proxy is disposed");
     const session = await this.openSession();
-    const result = await this.rpc({ kind: "storage.browse.data", data: build(session), expectedSessionEpoch: this.sessionEpoch() }, signal);
-    if (result.status === "error" && result.code === "storage_unavailable") this.forgetSession();
+    const data = build(session);
+    let result = await this.rpc({ kind: "storage.browse.data", data, expectedSessionEpoch: session.sessionEpoch }, signal);
+    if (result.status === "error" && result.code === "storage_unavailable") {
+      if (this.session === session) this.forgetSession();
+      if (!signal?.aborted && (data.type !== "browse.list" || data.cursor === undefined)) {
+        const reopened = await this.openSession();
+        result = await this.rpc({ kind: "storage.browse.data", data: build(reopened), expectedSessionEpoch: reopened.sessionEpoch }, signal);
+        if (result.status === "error" && result.code === "storage_unavailable" && this.session === reopened) this.forgetSession();
+      }
+    }
     return unwrap<T>(result);
   }
 
