@@ -1,9 +1,14 @@
+// @vitest-environment jsdom
+
 import { walletStateFixtureSnapshot, walletStateFixtureAccess } from "@keymaster/runtime/test-support";
 import { createFixtureHost as createPluginHost } from "@keymaster/runtime/test-support";
 // MSFile manifest 的发布与生命周期证据：默认加载、正式路由、首页投影
 // 和 host disable 时的 owner 回收必须使用同一条真实注册路径。
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createElement } from "react";
+import { cleanup, fireEvent, render } from "@testing-library/react";
+import { PluginHostProvider } from "@keymaster/runtime/assembly";
 import type { SessionCoordinatorClient, WindowP2pExecutorLaneRegistry, WindowP2pExecutorLaneContext, VaultService, WindowP2pExecutorLane } from "@keymaster/contracts";
 import { BUSINESS_REGISTRY_CAPABILITY, type PluginContext, CENTRAL_STORAGE_DECLARATIONS, VAULT_WALLET_STATE_CAPABILITY, MSFILE_SERVICE_CAPABILITY, PAGE_UI_RENDERER_CAPABILITY, VAULT_SERVICE_CAPABILITY, WINDOW_P2P_EXECUTOR_CAPABILITY } from "@keymaster/contracts";
 import { pagePlugin, pageSetup } from "@keymaster/plugin-page";
@@ -86,6 +91,23 @@ describe("msfilePlugin manifest", () => {
     expect(Object.prototype.hasOwnProperty.call(host, "systemSettings")).toBe(false);
     expect(host.breadcrumbs.match("/settings/local-files")?.id).toBe("msfile.settings.crumbs");
     expect(pages.renderHome("main", true)).toBeTruthy();
+    const home = () => createElement(PluginHostProvider, { host, children: pages.renderHome("main", true) });
+    const mounted = render(home());
+    try {
+      const fileWidget = mounted.container.querySelector(".msfile-home-file");
+      const collapsed = mounted.container.querySelector('[data-msfile-bucket="collapsed"]');
+      expect(fileWidget).toBeTruthy();
+      expect(collapsed).toBeTruthy();
+      fireEvent.click(collapsed!.querySelector("button")!);
+      expect(mounted.container.querySelector('[data-msfile-bucket="collapsed"]')).toBeNull();
+
+      // A parent render must preserve both the Seed widget and the expanded list.
+      for (let index = 0; index < 3; index += 1) mounted.rerender(home());
+      expect(mounted.container.querySelector(".msfile-home-file")).toBe(fileWidget);
+      expect(mounted.container.querySelector('[data-msfile-bucket="collapsed"]')).toBeNull();
+    } finally {
+      cleanup();
+    }
     expect(host.capabilities.has(MSFILE_SERVICE_CAPABILITY)).toBe(true);
     expect(host.capabilities.has(MSFILE_BUCKET_SERVICE_CAPABILITY)).toBe(true);
     expect(laneRegistry.register).toHaveBeenCalledWith(expect.objectContaining({ laneId: "msfile" }));

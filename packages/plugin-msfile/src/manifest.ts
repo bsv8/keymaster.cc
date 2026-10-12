@@ -977,8 +977,11 @@ const msfilePluginDefinition = {
       kind: "page",
       render: () => createElement(MsFileResourceProvider, { reader, children: createElement(MsFileSettings) }),
     });
-    pages.view.register({ kind: "home", slot: "main", id: "msfile.file-fetch", label: "MSFile", space: { id: "msfile.files", label: { key: "msfile.home.space", fallback: "MSFile files" }, order: 600 }, order: 10, visibleWhen: ({ unlocked }) => unlocked, render: () => createElement(bindMsFileUi(ctx, MsFileHomeFileWidget)) });
-    pages.view.register({ kind: "home", slot: "main", id: "msfile.bucket-storage", label: "MSFile", space: { id: "msfile.files", label: { key: "msfile.home.space", fallback: "MSFile files" }, order: 600 }, order: 20, visibleWhen: ({ unlocked }) => unlocked, render: () => createElement(bindMsFileUi(ctx, MsFileBucketHomeWidget)) });
+    // Bind once per plugin instance so parent renders preserve card state and tasks.
+    const HomeFileWidget = bindMsFileUi(ctx, MsFileHomeFileWidget);
+    const BucketHomeWidget = bindMsFileUi(ctx, MsFileBucketHomeWidget);
+    pages.view.register({ kind: "home", slot: "main", id: "msfile.file-fetch", label: "MSFile", space: { id: "msfile.files", label: { key: "msfile.home.space", fallback: "MSFile files" }, order: 600 }, order: 10, visibleWhen: ({ unlocked }) => unlocked, render: () => createElement(HomeFileWidget) });
+    pages.view.register({ kind: "home", slot: "main", id: "msfile.bucket-storage", label: "MSFile", space: { id: "msfile.files", label: { key: "msfile.home.space", fallback: "MSFile files" }, order: 600 }, order: 20, visibleWhen: ({ unlocked }) => unlocked, render: () => createElement(BucketHomeWidget) });
     const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     business.registerFeature(MSFILE_PLUGIN_ID, "home", {
       id: "home.msfile-file",
