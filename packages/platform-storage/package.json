@@ -8,7 +8,8 @@
     "./coordinator": "./src/coordinator/index.ts",
     "./coordinator/authority": "./src/coordinator/authority.ts",
     "./styles.css": "./src/styles.css",
-    "./assembly": "./src/assembly.ts"
+    "./assembly": "./src/assembly.ts",
+    "./worker": "./src/worker.ts"
   },
   "types": "./src/index.ts",
   "dependencies": {

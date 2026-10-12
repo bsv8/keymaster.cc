@@ -8,7 +8,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { FORUM_WORKER_LANE_ID, FORUM_WORKER_MAX_FRAME_BYTES } from "@keymaster/contracts";
 
-import { createForumWorkerNetwork, type ForumWorkerExecutorBridge, type ForumWorkerScope } from "./forumWorkerNetwork.js";
+import { createForumWorkerNetwork, type ForumWorkerExecutorBridge, type ForumWorkerScope } from "./workerNetwork.js";
 
 /** 可撤销的 scope 替身：撤销后 assertActive 抛错，与真实 scope 语义一致。 */
 function revocableScope() {

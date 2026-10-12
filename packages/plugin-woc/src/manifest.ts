@@ -1,4 +1,4 @@
-import { WOC_WORKER_BROADCAST_CAPABILITY } from "@keymaster/contracts";
+import { VAULT_WALLET_STATE_CAPABILITY, WOC_WORKER_BROADCAST_CAPABILITY } from "@keymaster/contracts";
 import { WOC_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
 import { createElement } from "react";
 import { WocSettingsBlock } from "./pages/WocSettingsPage.js";
@@ -125,6 +125,9 @@ const wocPluginDefinition = {
     runtime: "shared-worker",
     scopeKind: "owner-session",
     provides: [WOC_CAPABILITY, WOC_WORKER_BROADCAST_CAPABILITY, WOC_BSV21_CAPABILITY, WOC_STAS_CAPABILITY, WOC_1SAT_ORDINALS_CAPABILITY],
+    dependencies: defineRuntimeUnitDependencies([
+      { capability: VAULT_WALLET_STATE_CAPABILITY, sourceRuntime: "shared-worker", reason: "链高度任务绑定当前钱包网络身份" },
+    ]),
   }],
   i18n: wocResources,
   async setup(ctx) {

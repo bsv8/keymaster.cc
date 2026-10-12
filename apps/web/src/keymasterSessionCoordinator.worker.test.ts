@@ -34,7 +34,7 @@ import {
   __testSetMsfileRuntimeOverride,
   __testBuildChannelPublicMessageTimes,
   __testBuildChannelSeenMessageKey,
-} from "./keymasterSessionCoordinator.worker.js";
+} from "./assembly/coordinatorWorkerTesting.js";
 import { COORDINATOR_WORKER_UNIT_CATALOG } from "./coordinator/workerUnitCatalog.js";
 import { CoordinatorUnitUnavailableError, isCoordinatorUnitUnavailableError } from "./coordinator/workerUnitAvailability.js";
 import { peerIdFromPublicKeyBytes } from "bitcoin-libp2p/identity";
@@ -141,7 +141,7 @@ import {
   __testSeedCoordinatorSettingsSnapshot,
   __testSeedCoordinatorKeyValueGarbage,
   __testListWalletObjectPaths,
-} from "./keymasterSessionCoordinator.worker.js";
+} from "./assembly/coordinatorWorkerTesting.js";
 import type { PeerController } from "webloom-framework";
 import type {
   WalletColdStartSnapshot,
@@ -1612,7 +1612,8 @@ describe("区块链高度同步与 chain.height 广播", () => {
   it("BitFS 仅使用已同步且网络匹配的高度", async () => {
     __testResetState();
     await expect(__testReadBitfsBlockHeight("main")).rejects.toThrow("尚未由统一同步任务提供");
-    __testSetVaultStatus("unlocked", "a".repeat(64));
+    await bootstrapReadyWallet("chain-height-runtime");
+    __testResetChainHeight();
     __testSetChainHeightProvider(async () => 900_123);
     await __testRegisterRealCoordinatorTasks();
     await __testRunTask(CHAIN_HEIGHT_SYNC_TASK_ID);
@@ -1641,7 +1642,8 @@ describe("区块链高度同步与 chain.height 广播", () => {
 
   it("同步成功后写内存高度并广播 chain.height", async () => {
     __testResetState();
-    __testSetVaultStatus("unlocked", "a".repeat(64));
+    await bootstrapReadyWallet("chain-height-runtime");
+    __testResetChainHeight();
     __testSetChainHeightProvider(async () => 900_123);
     await __testRegisterRealCoordinatorTasks();
 
@@ -1681,7 +1683,8 @@ describe("区块链高度同步与 chain.height 广播", () => {
 
   it("读数未变时刷新来源时间但不推进 revision", async () => {
     __testResetState();
-    __testSetVaultStatus("unlocked", "a".repeat(64));
+    await bootstrapReadyWallet("chain-height-runtime");
+    __testResetChainHeight();
     __testSetChainHeightProvider(async () => 900_123);
     await __testRegisterRealCoordinatorTasks();
 
@@ -1702,7 +1705,8 @@ describe("区块链高度同步与 chain.height 广播", () => {
 
   it("读取失败保留旧高度并把错误留在任务快照上", async () => {
     __testResetState();
-    __testSetVaultStatus("unlocked", "a".repeat(64));
+    await bootstrapReadyWallet("chain-height-runtime");
+    __testResetChainHeight();
     let failing = false;
     __testSetChainHeightProvider(async () => {
       if (failing) throw new Error("provider down");
@@ -1726,7 +1730,8 @@ describe("区块链高度同步与 chain.height 广播", () => {
 
   it("节点返回非法高度时拒绝写入", async () => {
     __testResetState();
-    __testSetVaultStatus("unlocked", "a".repeat(64));
+    await bootstrapReadyWallet("chain-height-runtime");
+    __testResetChainHeight();
     __testSetChainHeightProvider(async () => -1);
     await __testRegisterRealCoordinatorTasks();
 
@@ -1767,7 +1772,8 @@ describe("区块链高度同步与 chain.height 广播", () => {
 
   it("拒绝把链高度间隔设成非法值", async () => {
     __testResetState();
-    __testSetVaultStatus("unlocked", "a".repeat(64));
+    await bootstrapReadyWallet("chain-height-runtime");
+    __testResetChainHeight();
     await __testRegisterRealCoordinatorTasks();
     // 9 秒低于自定义下限 10 秒；45 秒是合法自定义值，不再是这个用例的目标。
     const response = await __testUpdateScheduleSettings({ taskIntervals: { [CHAIN_HEIGHT_SYNC_TASK_ID]: 9_000 } });
@@ -2954,7 +2960,7 @@ describe("单元可用性：ensure* 的结构化不可用契约", () => {
     // 被禁的形态是「await reconcile 之后如果还没起来就抛 not ready」。因此只禁
     // `await` 形式；通知式的 `reconcileCoordinatorRuntime()`（不等、只通知框架
     // 重判）是合法机制，`ensureStorageRuntime` 仍在用。
-    const source = readFileSync(new URL("./keymasterSessionCoordinator.worker.ts", import.meta.url), "utf8");
+    const source = readFileSync(new URL("./assembly/coordinatorWorker.ts", import.meta.url), "utf8");
     for (const name of ["ensureMsfileRuntime", "ensureSatRuntime", "ensureStorageRuntime"]) {
       const body = extractFunctionBody(source, name);
       expect(body, `${name} 不得再 await reconcile 后祈祷就绪`).not.toContain("await reconcileCoordinatorRuntime()");
@@ -2966,12 +2972,12 @@ describe("单元可用性：ensure* 的结构化不可用契约", () => {
     // 构造及异步恢复后调用该判定。检查装配与插件两端，防止搬迁后丢掉门禁。
     const p2pkh = readFileSync(new URL("../../../packages/plugin-p2pkh/src/workerTransferRuntime.ts", import.meta.url), "utf8");
     expect(p2pkh).toContain("deps.assertActive();");
-    const assembly = readFileSync(new URL("./keymasterSessionCoordinator.worker.ts", import.meta.url), "utf8");
-    expect(assembly).toMatch(/createWorkerTransferRuntime\([\s\S]*?assertActive:[\s\S]*?assertCoordinatorUnitConstructible/);
+    const assembly = readFileSync(new URL("./assembly/coordinatorWorker.ts", import.meta.url), "utf8");
+    expect(assembly).toMatch(/createP2pkhWorkerRuntime\([\s\S]*?assertActive:[\s\S]*?assertCoordinatorUnitConstructible/);
     // storage 单元是例外且必须如此：构造前置条件里含「中央存储根已就绪」，而
     // ensureStorageRuntime 正是建立存储根的那一方，对它断言会自锁。因此这里
     // 只覆盖另外三个。
-    const source = readFileSync(new URL("./keymasterSessionCoordinator.worker.ts", import.meta.url), "utf8");
+    const source = readFileSync(new URL("./assembly/coordinatorWorker.ts", import.meta.url), "utf8");
     for (const name of ["ensureMsfileRuntime", "ensureSatRuntime"]) {
       expect(extractFunctionBody(source, name), `${name} 必须走统一可用性判定`)
         .toContain("assertCoordinatorUnitConstructible");
@@ -3017,7 +3023,39 @@ import {
   type ForumWorkerNetwork,
   type VaultWalletState,
 } from "@keymaster/contracts";
-import { __testCoordinatorRuntimePlugin } from "./keymasterSessionCoordinator.worker.js";
+import { __testCoordinatorRuntimePlugin } from "./assembly/coordinatorWorkerTesting.js";
+
+describe("插件自有 WOC Worker 生命周期", () => {
+  it("真实钱包装配后，撤销旧查询句柄并在重启时创建新实例", async () => {
+    await __testResetWalletStore();
+    await bootstrapReadyWallet("woc-worker-ownership");
+    const definitions = ["vault", "storage", "woc"].map(__testCoordinatorRuntimePlugin);
+    const instances: Array<{ id: string; query: import("@keymaster/contracts").WocService }> = [];
+    const { WOC_CAPABILITY } = await import("@keymaster/contracts");
+    const host = createNativeWorkerHost({ runtime: "shared-worker", runtimeUnitImplementationRegistry: {
+      get: id => async context => {
+        const definition = definitions.find(candidate => candidate.manifest.id === id);
+        if (!definition) throw new Error(`Missing production Worker: ${id}`);
+        const teardown = await definition.setup(context);
+        if (id === "woc") instances.push({ id: context.instanceId, query: context.capability(WOC_CAPABILITY) });
+        return async () => { await teardown?.(); };
+      },
+    } });
+    try {
+      await host.registerAll(definitions.map(definition => definition.manifest));
+      expect(host.state("woc").kind).toBe("enabled");
+      const previous = instances[0]!;
+      expect(previous.query.getConfig().baseUrl).toBeTruthy();
+      await host.revoke("woc", "ownership test");
+      expect(() => previous.query.getConfig()).toThrow();
+      await host.retry("woc");
+      expect(host.state("woc").kind).toBe("enabled");
+      expect(instances[1]!.id).not.toBe(previous.id);
+      expect(instances[1]!.query.getConfig().baseUrl).toBeTruthy();
+      expect(() => previous.query.getQueueSnapshot()).toThrow();
+    } finally { await host.dispose(); await __testResetWalletStore(); }
+  });
+});
 
 describe("正式 Worker setup 的钱包状态绑定", () => {
   it("accepts its issued Worker consumer, rejects forged identities and cleans both instance boundaries", async () => {
@@ -3074,7 +3112,6 @@ describe("正式 Worker setup 的钱包状态绑定", () => {
 
 // Forum owner-session Worker 单元（第 1 阶段：受限网络能力）的装配与生命周期。
 describe("Forum Worker 单元的受限网络装配", () => {
-  const OWNER = "02" + "ab".repeat(32);
   const VALID_REQUEST = {
     kind: "forum.roundtrip" as const,
     address: "/ip4/127.0.0.1/tcp/8080/p2p/12D3KooW",
@@ -3082,28 +3119,13 @@ describe("Forum Worker 单元的受限网络装配", () => {
     requestBytesHex: "0102ff",
   };
 
-  beforeEach(() => {
-    __testResetState();
-    __testSetVaultStatus("unlocked", OWNER);
-  });
+  beforeEach(async () => { await bootstrapReadyWallet("forum-host"); });
+  afterEach(async () => { await __testResetWalletStore(); });
 
-  afterEach(() => {
-    __testSetVaultStatus("locked");
-    __testResetState();
-  });
-
-  const dependencies = {
-    id: "forum-worker-test-dependencies", name: "Forum Worker test dependencies",
-    units: [{ id: "forum-worker-test-dependencies.worker", runtime: "shared-worker" as const, scopeKind: "owner-session" as const,
-      provides: [STORAGE_FILE_CLIENTS_CAPABILITY, MSFILE_CONTENT_CAPABILITY, P2PKH_WORKER_PROTOCOL_CAPABILITY, WOC_CAPABILITY],
-    }],
-    setup(ctx: NativePluginContext) {
-      ctx.provide(STORAGE_FILE_CLIENTS_CAPABILITY, { bind: () => { throw new Error("Unused in network-only lifecycle fixture"); } } as never);
-      ctx.provide(MSFILE_CONTENT_CAPABILITY, {} as never);
-      ctx.provide(P2PKH_WORKER_PROTOCOL_CAPABILITY, { getService: async () => { throw new Error("Unused in network-only lifecycle fixture"); } });
-      ctx.provide(WOC_CAPABILITY, {} as never);
-    },
-  };
+  // 所有提供方使用真实生产定义；生命周期验收不以空对象冒充领域 capability。
+  function runtimeDefinitions() {
+    return ["vault", "storage", "window-p2p", "woc", "p2pkh", "sat-subscription", "msfile", "forum"].map(__testCoordinatorRuntimePlugin);
+  }
 
   /** 造一个只消费 Forum 受限网络能力的最小 Worker 插件，用来验证能力真的被发布。 */
   function consumerOfForumNetwork(capture: (network: ForumWorkerNetwork) => void) {
@@ -3123,16 +3145,15 @@ describe("Forum Worker 单元的受限网络装配", () => {
   }
 
   it("发布受限网络能力；没有 Window executor 租约时明确失败而不是退回 Window 本地权威", async () => {
-    const vault = __testCoordinatorRuntimePlugin("vault");
-    const forum = __testCoordinatorRuntimePlugin("forum");
+    const definitions = runtimeDefinitions();
     let network: ForumWorkerNetwork | undefined;
     const consumer = consumerOfForumNetwork((value) => { network = value; });
     const host = createNativeWorkerHost({
       runtime: "shared-worker",
-      runtimeUnitImplementationRegistry: { get: id => (id === "vault" ? vault.setup : id === "forum" ? forum.setup : id === dependencies.id ? dependencies.setup : consumer.setup) },
+      runtimeUnitImplementationRegistry: { get: id => definitions.find(plugin => plugin.manifest.id === id)?.setup ?? consumer.setup },
     });
     try {
-      await host.registerAll([vault.manifest, dependencies, forum.manifest, consumer]);
+      await host.registerAll([...definitions.map(plugin => plugin.manifest), consumer]);
       if (host.state("forum").kind !== "enabled") throw new Error(`forum unit failed: ${JSON.stringify(host.state("forum"))}`);
       expect(host.state("forum").kind).toBe("enabled");
       expect(host.state(consumer.id).kind).toBe("enabled");
@@ -3153,24 +3174,22 @@ describe("Forum Worker 单元的受限网络装配", () => {
   });
 
   it("撤销后被保留的旧能力引用不能再借 bridge 发请求；重建实例后可正常发送", async () => {
-    const vault = __testCoordinatorRuntimePlugin("vault");
-    const forum = __testCoordinatorRuntimePlugin("forum");
+    const definitions = runtimeDefinitions();
     const generations: ForumWorkerNetwork[] = [];
     const host = createNativeWorkerHost({
       runtime: "shared-worker",
       runtimeUnitImplementationRegistry: {
         get: id => {
-          if (id === "vault") return vault.setup;
-          if (id === dependencies.id) return dependencies.setup;
-          if (id !== "forum") return async (ctx: NativePluginContext) => {
+          const definition = definitions.find(plugin => plugin.manifest.id === id);
+          if (definition) return definition.setup;
+          return async (ctx: NativePluginContext) => {
             generations.push(ctx.capability(FORUM_WORKER_NETWORK_CAPABILITY) as ForumWorkerNetwork);
           };
-          return forum.setup;
         },
       },
     });
     try {
-      await host.registerAll([vault.manifest, dependencies, forum.manifest]);
+      await host.registerAll(definitions.map(plugin => plugin.manifest));
       expect(host.state("forum").kind).toBe("enabled");
       expect(generations).toHaveLength(0); // 还没有消费方；先装一个。
 

@@ -7,7 +7,8 @@
     ".": "./src/index.ts",
     "./coordinator": "./src/coordinator.ts",
     "./session-crypto-worker": "./src/sessionCryptoWorker.ts",
-    "./styles.css": "./src/styles.css"
+    "./styles.css": "./src/styles.css",
+    "./worker": "./src/worker.ts"
   },
   "types": "./src/index.ts",
   "dependencies": {

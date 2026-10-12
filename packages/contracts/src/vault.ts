@@ -203,3 +203,16 @@ export function sameWalletSession(a: Readonly<VaultLifecycleSnapshot>, b: Readon
   return a.status === b.status && a.activeKeyIdentity?.bsvNetwork === b.activeKeyIdentity?.bsvNetwork && a.activePublicKeyHex === b.activePublicKeyHex
     && a.sessionEpoch === b.sessionEpoch && a.runGeneration === b.runGeneration && a.walletGeneration === b.walletGeneration;
 }
+
+/** Worker 钱包控制端口：不暴露仓库、私钥或硬件连接对象。 */
+export interface VaultWorkerWalletControl {
+  coldStart(): Promise<import("./index.js").WalletColdStartSnapshot>;
+  persistence(): Promise<{ persisted: boolean }>;
+  closeHardware(): Promise<void>;
+  execute(control: import("./sessionCoordinator.js").CoordinatorStorageControl): Promise<unknown>;
+}
+
+export interface VaultWorkerWalletControlAccess {
+  bind(consumer: PluginConsumer, scope: LifecycleScope): VaultWorkerWalletControl;
+}
+export const VAULT_WORKER_WALLET_CONTROL_CAPABILITY = defineCapability<VaultWorkerWalletControlAccess>({ kind: "local", id: "vault.worker-wallet-control", version: "1" });

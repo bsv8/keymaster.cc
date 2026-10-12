@@ -1,3 +1,4 @@
+import { WINDOW_P2P_WORKER_BRIDGE_CAPABILITY } from "@keymaster/contracts/window-p2p";
 import {
   BREADCRUMB_REGISTRY_CAPABILITY, BUSINESS_REGISTRY_CAPABILITY, CENTRAL_STORAGE_DECLARATIONS,
   FORUM_SERVICE_CAPABILITY, FORUM_WORKER_NETWORK_CAPABILITY, FORUM_WORKER_SERVICE_CAPABILITY, FORUM_WORKER_ATTACHMENT_CAPABILITY,
@@ -49,6 +50,7 @@ const forumPluginDefinition = {
       provides: [capabilityDescriptor(FORUM_WORKER_NETWORK_CAPABILITY), capabilityDescriptor(FORUM_WORKER_SERVICE_CAPABILITY), capabilityDescriptor(FORUM_WORKER_ATTACHMENT_CAPABILITY)],
       dependencies: defineRuntimeUnitDependencies([
         { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "shared-worker", reason: "Forum 配置、缓存与发布任务的唯一仓储" },
+      { capability: WINDOW_P2P_WORKER_BRIDGE_CAPABILITY, sourceRuntime: "shared-worker", reason: "由公共 Window executor 提供受限网络 lane" },
         { capability: VAULT_WALLET_STATE_CAPABILITY, sourceRuntime: "shared-worker", reason: "owner-session 身份与世代" },
         { capability: VAULT_WORKER_CRYPTO_CAPABILITY, sourceRuntime: "shared-worker", reason: "Worker 内规范业务签名" },
         { capability: MSFILE_CONTENT_CAPABILITY, sourceRuntime: "shared-worker", reason: "正文附件统一由 MSFile 获取与保存" },

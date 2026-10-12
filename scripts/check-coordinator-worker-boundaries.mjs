@@ -135,6 +135,11 @@ function recordViolation(file, node, message) {
 }
 
 function inspectImport(file, node, specifier, resolved) {
+  if (resolved && /(?:Testing|\.test|\.spec)\.[cm]?[jt]s$/u.test(resolved)) recordViolation(file, node, "Production Worker must not import test hooks or fixtures");
+  if (file === entry && specifier.startsWith("@keymaster/plugin-")) recordViolation(file, node, "Worker entry must delegate plugin composition to trusted assembly");
+  if (resolved && file.startsWith(resolve(root, "packages") + "/") && resolved.startsWith(resolve(root, "apps/web") + "/")) {
+    recordViolation(file, node, "Worker plugin must not import the application assembly");
+  }
   if (specifier === "@keymaster/runtime") {
     recordViolation(file, node, "Worker runtime code must import @keymaster/runtime/storage or contracts, never the Window runtime barrel");
   }
@@ -165,6 +170,9 @@ function walk(file) {
   }
   const sourceText = readFileSync(file, "utf8");
   const sourceFile = ts.createSourceFile(file, sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  if (file === entry) for (const statement of sourceFile.statements) {
+    if (ts.isFunctionDeclaration(statement) || ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement)) recordViolation(file, statement, "Worker entry must contain only environment/Host assembly, not implementation declarations");
+  }
   for (const imported of collectRuntimeImports(sourceFile)) {
     if (imported.violation) {
       recordViolation(file, imported.node, imported.violation);

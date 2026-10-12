@@ -1,3 +1,4 @@
+import { WINDOW_P2P_WORKER_BRIDGE_CAPABILITY } from "@keymaster/contracts/window-p2p";
 import { VAULT_WORKER_CRYPTO_CAPABILITY, P2PKH_WORKER_TRANSFER_CAPABILITY } from "@keymaster/contracts";
 import { CONTACTS_PRESENCE_CHANNEL_CAPABILITY } from "@keymaster/contracts";
 import { STORAGE_FILE_CLIENTS_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY } from "@keymaster/contracts";
@@ -212,6 +213,7 @@ const satSubscriptionPluginDefinition = {
     provides: [SAT_SUBSCRIPTION_SERVICE_CAPABILITY, SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY, CONTACTS_PRESENCE_CHANNEL_CAPABILITY],
     dependencies: defineRuntimeUnitDependencies([
       { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "shared-worker", reason: "供应商状态的受限文件客户端" },
+      { capability: WINDOW_P2P_WORKER_BRIDGE_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "由公共 Window executor 提供受限网络 lane" },
       { capability: VAULT_WALLET_STATE_CAPABILITY, sourceRuntime: "shared-worker", reason: "供应商会话所属身份" },
       { capability: P2PKH_WORKER_TRANSFER_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "首次充值才解析 P2PKH 的受控 Worker 转账服务" },
     ]),

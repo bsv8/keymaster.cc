@@ -5,10 +5,12 @@
 // 必须填写审计入口，且所有真实后台任务都必须绑定审计入口。未知结果
 // 仍由运行时审计与领域仓库处理，不能由本脚本自动判定成功。
 
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { readFile, readdir } from "node:fs/promises";
+import ts from "typescript";
+import { resolve, relative } from "node:path";
 
-const workerPath = resolve("apps/web/src/keymasterSessionCoordinator.worker.ts");
+const workerPath = resolve("apps/web/src/assembly/coordinatorWorker.ts");
+const entryPath = resolve("apps/web/src/keymasterSessionCoordinator.worker.ts");
 const auditPath = resolve("apps/web/src/coordinator/finalIoAudit.ts");
 const workerUnitCatalogPath = resolve("apps/web/src/coordinator/workerUnitCatalog.ts");
 const workerSource = await readFile(workerPath, "utf8");
@@ -20,90 +22,45 @@ function lineAt(source, index) {
   return source.slice(0, index).split("\n").length;
 }
 
-function matchingCall(source, openIndex) {
-  let depth = 1;
-  let quote = null;
-  let escaped = false;
-  let lineComment = false;
-  let blockComment = false;
-  for (let index = openIndex + 1; index < source.length; index += 1) {
-    const char = source[index];
-    const next = source[index + 1];
-    if (lineComment) {
-      if (char === "\n") lineComment = false;
-      continue;
-    }
-    if (blockComment) {
-      if (char === "*" && next === "/") {
-        blockComment = false;
-        index += 1;
+/** 检查真实调用的最后一个参数，不能由回调内别的 auditOperation 蒙混过关。 */
+function checkFinalIoLeaseCalls(path, source) {
+  const ast = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true);
+  function visit(node) {
+    if (ts.isCallExpression(node)) {
+      const target = node.expression.getText(ast);
+      if (target === "withCoordinatorFinalIoLease" || target === "ports.io.run") {
+        const options = node.arguments[3];
+        const audit = options && ts.isObjectLiteralExpression(options)
+          ? options.properties.find(property => property.name?.getText(ast) === "auditOperation")
+          : undefined;
+        const location = `${relative(process.cwd(), path)}:${lineAt(source, node.getStart(ast))}`;
+        if (!audit) violations.push(`${location} final-I/O 调用缺少显式 auditOperation（审计入口）`);
+        else if (ts.isPropertyAssignment(audit) && ts.isStringLiteral(audit.initializer)
+          && !auditSource.includes(`| "${audit.initializer.text}"`)) {
+          violations.push(`${location} 未登记的审计入口 ${audit.initializer.text}`);
+        }
       }
-      continue;
     }
-    if (quote) {
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === quote) {
-        quote = null;
-      }
-      continue;
-    }
-    if (char === "/" && next === "/") {
-      lineComment = true;
-      index += 1;
-      continue;
-    }
-    if (char === "/" && next === "*") {
-      blockComment = true;
-      index += 1;
-      continue;
-    }
-    if (char === "\"" || char === "'" || char === "`") {
-      quote = char;
-      continue;
-    }
-    if (char === "(") depth += 1;
-    if (char === ")") {
-      depth -= 1;
-      if (depth === 0) return source.slice(openIndex + 1, index);
-    }
+    ts.forEachChild(node, visit);
   }
-  return null;
+  visit(ast);
 }
 
-function checkFinalIoLeaseCalls() {
-  const token = "withCoordinatorFinalIoLease";
-  let from = 0;
-  while (true) {
-    const tokenIndex = workerSource.indexOf(token, from);
-    if (tokenIndex < 0) return;
-    let openIndex = tokenIndex + token.length;
-    while (/\s/u.test(workerSource[openIndex] ?? "")) openIndex += 1;
-    // 跳过泛型函数定义 `withCoordinatorFinalIoLease<T>(...)`；生产调用
-    // 必须是普通函数调用，不能靠泛型定义本身满足审计要求。
-    if (workerSource[openIndex] === "<") {
-      from = openIndex + 1;
-      continue;
+checkFinalIoLeaseCalls(entryPath, await readFile(entryPath, "utf8"));
+checkFinalIoLeaseCalls(workerPath, workerSource);
+// 移入插件的领域调用也必须受同一个门禁约束；不能只检查入口中的转发器。
+async function checkWorkerModules(directory) {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = resolve(directory, entry.name);
+    if (entry.isDirectory()) await checkWorkerModules(path);
+    else if (/^worker.*\.ts$/u.test(entry.name) && !/\.test\.ts$/u.test(entry.name)) {
+      checkFinalIoLeaseCalls(path, await readFile(path, "utf8"));
     }
-    if (workerSource[openIndex] !== "(") {
-      from = openIndex + 1;
-      continue;
-    }
-    const body = matchingCall(workerSource, openIndex);
-    if (body === null) {
-      violations.push(`worker:${lineAt(workerSource, tokenIndex)} final-I/O lease 调用括号不完整`);
-      return;
-    }
-    if (!(/\bauditOperation\s*:/u.test(body) || /\{\s*auditOperation\s*\}/u.test(body))) {
-      violations.push(`worker:${lineAt(workerSource, tokenIndex)} final-I/O lease 调用缺少 auditOperation（审计入口）`);
-    }
-    from = openIndex + body.length + 2;
   }
 }
-
-checkFinalIoLeaseCalls();
+for (const entry of await readdir(resolve("packages"), { withFileTypes: true })) {
+  if (entry.isDirectory()) await checkWorkerModules(resolve("packages", entry.name, "src"));
+}
 
 const productionTaskAuditEntries = [
   ["contacts.presence-probe", "contacts.presence-probe"],

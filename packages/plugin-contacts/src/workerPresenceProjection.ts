@@ -1,6 +1,8 @@
+import { defineWorkerRequestRoute, type CoordinatorClientRequest } from "@keymaster/contracts";
 import type { ContactPresenceMap, ContactsService, CoordinatorContactsPresenceEvent, CoordinatorResponse } from "@keymaster/contracts";
 
 interface PresenceProjectionPorts {
+  admission?: { available(): boolean; blocked(requestId: string): CoordinatorResponse };
   service(): Pick<ContactsService, "getPresenceSnapshot"> | undefined;
   session(): { owner: string | null; epoch: string };
   publish(input: { type: "contacts.presence.changed"; activePublicKeyHex: string | null; presence: ContactPresenceMap }): CoordinatorContactsPresenceEvent;
@@ -42,5 +44,12 @@ export function createWorkerPresenceProjection(ports: PresenceProjectionPorts) {
       return { requestId, sessionEpoch: session.epoch, ack: { status: "error", message: error instanceof Error ? error.message : String(error) } };
     }
   }
-  return { publish, snapshot, current: () => cached, reset: () => { generation += 1; cached = undefined; tail = Promise.resolve(); } };
+  const route = defineWorkerRequestRoute<Extract<CoordinatorClientRequest, { kind: "contacts.presence.snapshot" }>>({
+    kinds: ["contacts.presence.snapshot"], policy: () => ({ scheduling: "serial", validateEpoch: true }),
+    async execute(request, call) {
+      if (ports.admission && !ports.admission.available()) return ports.admission.blocked(call.requestId);
+      return snapshot(call.requestId, request.expectedSessionEpoch);
+    },
+  });
+  return { route, publish, snapshot, current: () => cached, reset: () => { generation += 1; cached = undefined; tail = Promise.resolve(); } };
 }

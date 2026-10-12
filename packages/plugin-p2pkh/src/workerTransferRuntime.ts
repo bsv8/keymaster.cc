@@ -33,7 +33,8 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
   let central: CentralBroadcastService | undefined;
   let protocol: Awaited<ReturnType<typeof createWorkerProtocolRuntime>> | undefined;
   let protocolStarting: Promise<Awaited<ReturnType<typeof createWorkerProtocolRuntime>>> | undefined;
-  function release(): { starting?: Promise<P2pkhService> } {
+  function release(): { starting?: Promise<P2pkhService>; protocolStarting?: typeof protocolStarting } {
+    const pendingProtocol = protocolStarting;
     generation += 1;
     protocol?.dispose();
     protocol = undefined; protocolStarting = undefined; central = undefined;
@@ -43,7 +44,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     currentEpoch = undefined;
     try { old?.onVaultLocked(); } catch { /* cleanup remains idempotent */ }
     try { old?.dispose?.(); } catch { /* cleanup remains idempotent */ }
-    return { starting };
+    return { starting, protocolStarting: pendingProtocol };
   }
   async function ensure(): Promise<P2pkhService> {
     deps.assertActive();
@@ -132,7 +133,8 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     if (protocolStarting) return protocolStarting;
     const owner = currentOwner!; const epoch = currentEpoch!; const token = generation;
     const assertActive = () => { deps.assertActive(); const now = deps.session(); if (generation !== token || !now.unlocked || now.owner !== owner || now.epoch !== epoch) throw new Error("Protocol wallet instance revoked"); };
-    const run = createWorkerProtocolRuntime({ requestPayment: deps.requestPayment, assertActive, owner, storage: deps.storage(), crypto: deps.crypto,
+    const run = createWorkerProtocolRuntime({
+      requestPayment: deps.requestPayment, assertActive, owner, storage: deps.storage(), crypto: deps.crypto,
       central: central!, transfer, query: () => deps.query?.(), snapshot: async network => { const result = await deps.snapshot({ ownerPublicKeyHex: owner, network }, false); assertActive(); return result.status === "ok" ? result.value : { available: false, state: "unavailable", items: [] }; },
     });
     protocolStarting = run;

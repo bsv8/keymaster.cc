@@ -46,7 +46,7 @@ import {
   BREADCRUMB_REGISTRY_CAPABILITY,
   BUSINESS_REGISTRY_CAPABILITY,
   COMMAND_REGISTRY_CAPABILITY,
-  VAULT_WALLET_STATE_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY, VAULT_WORKER_WALLET_CONTROL_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
   PAGE_UI_REGISTRY_CAPABILITY,
   VAULT_LOCAL_SECRET_CAPABILITY,
@@ -642,7 +642,7 @@ const vaultPluginDefinition = {
     storage: CENTRAL_STORAGE_DECLARATIONS.vaultPayments,
     runtime: "shared-worker",
     scopeKind: "root",
-    provides: [COORDINATOR_CRYPTO_RPC_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, VAULT_WORKER_CRYPTO_CAPABILITY],
+    provides: [COORDINATOR_CRYPTO_RPC_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, VAULT_WORKER_CRYPTO_CAPABILITY, VAULT_WORKER_WALLET_CONTROL_CAPABILITY],
   }],
   i18n: { namespace: "vault", resources: Object.fromEntries((["en", "zh-CN"] as const).map(language => [language, Object.assign({}, vaultResources.resources[language], ...[keyImportResources, hexResources, wifResources, jsonFileResources].map(resource => resource.resources[language]))])) },
   setup(ctx) {

@@ -1,3 +1,4 @@
+import { WINDOW_P2P_WORKER_BRIDGE_CAPABILITY } from "@keymaster/contracts/window-p2p";
 import { createPublicMsFileService } from "./publicMsFileService.js";
 import { setupMsFileUriActions } from "./setupUriActions.js";
 import { URI_ACTION_REGISTRY_CAPABILITY } from "@keymaster/contracts";
@@ -829,6 +830,7 @@ const msfilePluginDefinition = {
     provides: [MSFILE_SERVICE_CAPABILITY, MSFILE_CONTENT_CAPABILITY],
     dependencies: defineRuntimeUnitDependencies([
       { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "shared-worker", reason: "文件设置、协议证据与 App 管理设置的受限句柄" },
+      { capability: WINDOW_P2P_WORKER_BRIDGE_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "由公共 Window executor 提供受限网络 lane" },
       { capability: VAULT_WALLET_STATE_CAPABILITY, sourceRuntime: "shared-worker", reason: "文件服务所属钱包身份" },
       { capability: SAT_SUBSCRIPTION_SERVICE_CAPABILITY, sourceRuntime: "shared-worker", reason: "卖方与 Channel 服务依赖同一供应商运行态" },
       { capability: WOC_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "BitFS 资金恢复查询；缺席时文件设置仍可用" },

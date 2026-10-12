@@ -1,3 +1,4 @@
+import { defineCapability, type PluginConsumer, type LifecycleScope } from "webloom-framework";
 // Window P2P executor 的中性 bridge 契约。
 //
 // 这里不能依赖 MSFile 或 SatSubscription。业务插件只把自己的 lane
@@ -51,3 +52,9 @@ export interface WindowP2pExecutorBridge {
   /** 释放 bridge 侧资源；实现必须幂等。 */
   dispose?(): void;
 }
+
+/** 只能由声明依赖的 Worker 实例借用；撤销取消在途 bridge 请求。 */
+export interface WindowP2pWorkerBridgeAccess {
+  bind(consumer: PluginConsumer, scope: LifecycleScope): WindowP2pExecutorBridge;
+}
+export const WINDOW_P2P_WORKER_BRIDGE_CAPABILITY = defineCapability<WindowP2pWorkerBridgeAccess>({kind: "local", id: "window-p2p.worker-bridge", version: "1"});

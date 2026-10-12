@@ -576,6 +576,11 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             "kind": "local",
             "id": "vault.worker-crypto",
             "version": "1"
+          },
+          {
+            "kind": "local",
+            "id": "vault.worker-wallet-control",
+            "version": "1"
           }
         ],
         "privateProvides": [],
@@ -632,7 +637,13 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
         "id": "window-p2p.coordinator-worker",
         "runtime": "shared-worker",
         "scopeKind": "owner-session",
-        "provides": [],
+        "provides": [
+          {
+            "kind": "local",
+            "id": "window-p2p.worker-bridge",
+            "version": "1"
+          }
+        ],
         "privateProvides": [],
         "dependencies": [
           {
@@ -851,6 +862,16 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "capability": {
               "kind": "local",
+              "id": "window-p2p.worker-bridge",
+              "version": "1"
+            },
+            "sourceRuntime": "shared-worker",
+            "reason": "由公共 Window executor 提供受限网络 lane",
+            "optional": true
+          },
+          {
+            "capability": {
+              "kind": "local",
               "id": "vault.wallet-state",
               "version": "1"
             },
@@ -1051,6 +1072,15 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "capability": {
               "kind": "local",
+              "id": "window-p2p.worker-bridge",
+              "version": "1"
+            },
+            "sourceRuntime": "shared-worker",
+            "reason": "由公共 Window executor 提供受限网络 lane"
+          },
+          {
+            "capability": {
+              "kind": "local",
               "id": "vault.wallet-state",
               "version": "1"
             },
@@ -1234,6 +1264,16 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             },
             "sourceRuntime": "shared-worker",
             "reason": "供应商状态的受限文件客户端"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "window-p2p.worker-bridge",
+              "version": "1"
+            },
+            "sourceRuntime": "shared-worker",
+            "reason": "由公共 Window executor 提供受限网络 lane",
+            "optional": true
           },
           {
             "capability": {
@@ -2211,7 +2251,17 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           }
         ],
         "privateProvides": [],
-        "dependencies": [],
+        "dependencies": [
+          {
+            "capability": {
+              "kind": "local",
+              "id": "vault.wallet-state",
+              "version": "1"
+            },
+            "sourceRuntime": "shared-worker",
+            "reason": "链高度任务绑定当前钱包网络身份"
+          }
+        ],
         "permissions": [],
         "storages": []
       }

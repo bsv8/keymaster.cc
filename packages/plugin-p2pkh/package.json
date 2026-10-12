@@ -3,7 +3,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./coordinator": "./src/coordinator.ts",
-    "./styles.css": "./src/styles.css"
+    "./styles.css": "./src/styles.css",
+    "./worker": "./src/worker.ts"
   },
   "private": true,
   "version": "0.1.0",
