@@ -9,6 +9,13 @@
 //   2. 竞态：快速切换用取消加请求序号。迟到响应既不能覆盖新选择，也不能在锁定
 //      之后把旧内容重新画回来。
 //   3. 只读：整个页面没有任何写调用；展开、选中与预览开关只存在于组件内存。
+//
+// 页面只有两个可见区域：文件树与文件内容，二者合成一个等高面板。目录列表已经
+// 移除，目录内容通过展开树查看；「继续加载」入口移进树里，仍能发现未加载的对象。
+// 面包屑跟随选中项：选中文件时显示可导航的父目录链加文件名，选中目录时显示目录
+// 自身路径。内容区一直在：选中文件显示预览与属性，选中目录显示目录信息（路径、
+// 已加载子项数与目录标记），未选中时给出引导。面板高度是固定比例（见 styles.css），
+// 不做桌面/窄屏之外的尺寸计算。
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { StorageBrowsePreview } from "../runtime/storageBrowseTypes.js";
 import { usePluginI18n as useI18n, usePluginLocale as useLocale } from "@keymaster/runtime";
@@ -17,21 +24,21 @@ import { Button, PageHeader } from "@keymaster/ui";
 import {
   applyBrowsePage,
   emptyDirectoryState,
-  isDirectoryComplete,
   isSameNodeIdentity,
   type BrowseDirectoryState,
 } from "./storageBrowseState.js";
 import {
   BROWSE_ROOT_DIRECTORY,
   basename,
+  breadcrumbSegments,
+  directoryChain,
   displayDirectory,
+  parentDirectory,
   type BrowseChildNode,
 } from "./storageBrowseTree.js";
 import { StorageBrowseTreeView } from "./StorageBrowseTreeView.js";
 import { PreviewPane, type BrowsePreviewState } from "./StorageBrowsePreviewPane.js";
 import { PropertiesPane } from "./StorageBrowsePropertiesPane.js";
-import { formatBytes, formatTimestamp } from "./storageBrowseText.js";
-import { browseDisplayPage, BROWSE_DISPLAY_PAGE_SIZE } from "./storageBrowseDisplay.js";
 
 /** 单次列举的页大小；与 Worker 默认一致，页面不放大。 */
 const BROWSE_PAGE_LIMIT = 200;
@@ -63,7 +70,6 @@ export function StorageBrowsePage() {
   const service = useStoragePrivateBrowse();
 
   const [directories, dispatch] = useReducer(directoriesReducer, undefined, initialDirectories);
-  const [currentDirectory, setCurrentDirectory] = useState(BROWSE_ROOT_DIRECTORY);
   const [selected, setSelected] = useState<BrowseChildNode | undefined>(undefined);
   const [preview, setPreview] = useState<BrowsePreviewState | undefined>(undefined);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set<string>());
@@ -74,11 +80,8 @@ export function StorageBrowsePage() {
   const [rawJson, setRawJson] = useState(false);
   const [markdownSource, setMarkdownSource] = useState(false);
   const [kvRaw, setKvRaw] = useState(false);
-  const [treeOpen, setTreeOpen] = useState(false);
   const [notice, setNotice] = useState<string | undefined>(undefined);
   const [refreshToken, setRefreshToken] = useState(0);
-  // 展示分页的页下标；换目录或刷新后回到第一页。
-  const [displayPage, setDisplayPage] = useState(0);
 
   // 回调里要读最新目录状态，但不希望它成为依赖：这两个 ref 是它们的读取通道。
   const directoriesRef = useRef(directories);
@@ -144,15 +147,11 @@ export function StorageBrowsePage() {
       });
   }, [service, t]);
 
+  // 根目录是树的起点：进入页面与刷新后都从它重新开始；展开的其它目录由 refresh 负责。
   useEffect(() => {
     if (!service) return;
-    listDirectory(currentDirectory, false);
-  }, [service, currentDirectory, listDirectory, refreshToken]);
-
-  // 换目录或刷新后回到第一页：新目录的子项从第一条开始就该被看到。
-  useEffect(() => {
-    setDisplayPage(0);
-  }, [currentDirectory, refreshToken]);
+    listDirectory(BROWSE_ROOT_DIRECTORY, false);
+  }, [service, listDirectory, refreshToken]);
 
   const loadPreview = useCallback((node: BrowseChildNode) => {
     if (!service) return;
@@ -188,7 +187,7 @@ export function StorageBrowsePage() {
   }, [service, t]);
 
   useEffect(() => {
-    // 目录也有选中态（属性面板要看它自己的 .dir 标记），但目录没有可预览的内容。
+    // 目录也可以被选中（面包屑与树上的位置），但目录没有可预览的内容。
     if (!selected || selected.kind === "directory") {
       setPreview(undefined);
       return;
@@ -206,17 +205,20 @@ export function StorageBrowsePage() {
   }, [previewPath]);
 
   const refresh = useCallback(() => {
-    // 刷新保留当前位置与展开状态，只把目录缓存作废后按当前路径重新列举。
-    // 选中项交给结果处理：新列表里还在就沿用新元数据；没列到也不会立刻断言删除，
-    // 而是直接核验该路径是否仍可读。
+    // 刷新保留选中项与展开状态，把已加载目录的缓存全部作废后逐个重新列举。
+    // 根目录由上面的 effect 负责；其余已加载目录都是展开可见的，必须一并重取，
+    // 否则它们会掉回「尚未加载」。
+    const loaded = Object.keys(directoriesRef.current)
+      .filter((directory) => directory !== BROWSE_ROOT_DIRECTORY);
     previewController.current?.abort();
     previewSequence.current += 1;
     verifiedPreviews.current.clear();
     setPreview(undefined);
     setNotice(undefined);
     dispatch({ type: "reset" });
+    for (const directory of loaded) listDirectory(directory, false);
     setRefreshToken((token) => token + 1);
-  }, []);
+  }, [listDirectory]);
 
   /**
    * 当前目录重新列举后，决定选中项是保留、换新元数据还是清除。
@@ -280,16 +282,18 @@ export function StorageBrowsePage() {
     [service, t],
   );
 
-  // 刷新只重新列举当前目录，因此第一页回来后就足以开始核对；ref 记录已经核对过的
-  // 那一轮刷新，避免「加载更多」或重渲染重复核对一次。
+  // 刷新后以选中文件所在目录的列表为准做核对；没有选中项时以根目录为准。
+  // ref 记录已经核对过的那一轮刷新，避免「加载更多」或重渲染重复核对一次。
   const reconciledToken = useRef(0);
   useEffect(() => {
     if (refreshToken === 0 || reconciledToken.current === refreshToken) return;
-    const listing = directories[currentDirectory];
+    const current = selectedRef.current;
+    const parent = current ? parentDirectory(current.path) ?? BROWSE_ROOT_DIRECTORY : BROWSE_ROOT_DIRECTORY;
+    const listing = directories[parent];
     if (!listing || listing.loading || listing.error !== undefined) return;
     reconciledToken.current = refreshToken;
-    void reconcileSelection(listing, selectedRef.current);
-  }, [currentDirectory, directories, reconcileSelection, refreshToken]);
+    void reconcileSelection(listing, current);
+  }, [directories, reconcileSelection, refreshToken]);
 
   /** 预览失败后的重试：重新读当前选中项，版本沿用列表元数据。 */
   const retryPreview = useCallback(() => {
@@ -302,16 +306,30 @@ export function StorageBrowsePage() {
     setPanel("preview");
   }, []);
 
+  /**
+   * 进入一个目录：选中它，并把整条父链展开、加载，让它在树里可见。
+   *
+   * 目录没有可展示的内容（内容区只在选中文件时出现），因此「进入目录」的结果就是
+   * 树上的位置与跟随选中项的面包屑，而不是另一个列表。
+   */
   const selectDirectory = useCallback((directory: string) => {
-    setCurrentDirectory(directory);
-    setTreeOpen(false);
-    // 目录同样可以被选中：属性面板要靠它显示该目录自己的 .dir 标记（施工单 F04）。
-    // 它不是列表里的行，因此这里按「种类 + 路径」补一个节点。
-    setSelected((current) =>
-      current?.path === directory && current.kind === "directory"
-        ? current
-        : { path: directory, name: basename(directory), kind: "directory" });
-    if (!directoriesRef.current[directory]) listDirectory(directory, false);
+    setSelected({
+      path: directory,
+      name: directory === BROWSE_ROOT_DIRECTORY ? "" : basename(directory),
+      kind: "directory",
+    });
+    const chain = directoryChain(directory);
+    if (chain.length > 0) {
+      setExpanded((current) => {
+        const next = new Set(current);
+        for (const path of chain) next.add(path);
+        return next;
+      });
+    }
+    // 展开一个尚未列举过的目录时立刻按该前缀加载：点进子目录不必等父目录扫完。
+    for (const path of chain) {
+      if (!directoriesRef.current[path]) listDirectory(path, false);
+    }
   }, [listDirectory]);
 
   const toggleDirectory = useCallback((node: BrowseChildNode) => {
@@ -325,27 +343,33 @@ export function StorageBrowsePage() {
     if (!directoriesRef.current[node.path]) listDirectory(node.path, false);
   }, [listDirectory]);
 
+  /** 树里的存储分页入口：append=false 是失败后的重新列举。 */
+  const loadMore = useCallback((directory: string, append: boolean) => {
+    listDirectory(directory, append);
+  }, [listDirectory]);
+
   const copyPath = useCallback(() => {
     const path = selectedRef.current?.path;
-    if (!path) return;
+    if (path === undefined) return;
     const clipboard = navigator.clipboard;
     if (!clipboard) {
       setNotice(t("storage.browse.copyFailed", { defaultValue: "The path could not be copied." }));
       return;
     }
-    void clipboard.writeText(path).then(
+    // 根目录的内部路径是空串；复制与属性面板一样给出它的显示写法 `/`。
+    void clipboard.writeText(displayDirectory(path)).then(
       () => setNotice(t("storage.browse.pathCopied", { defaultValue: "Path copied to the clipboard." })),
       () => setNotice(t("storage.browse.copyFailed", { defaultValue: "The path could not be copied." })),
     );
   }, [t]);
 
   const rootState = directories[BROWSE_ROOT_DIRECTORY] ?? emptyDirectoryState();
-  const currentState = directories[currentDirectory] ?? emptyDirectoryState();
-  // 固定大小的展示分页：任一时刻只渲染一页，DOM 规模与目录规模无关；翻页让每一个
-  // 已加载子项都仍然可达。存储分页（继续加载）决定「已发现哪些」，展示分页只决定
-  // 「当前显示哪一页」。
-  const listPage = browseDisplayPage(currentState.children, displayPage);
-  const visibleChildren = listPage.visible;
+  // 文件属性里的目录标记来自它所在目录：标记路径由目录推导，刷新时随新元数据更新。
+  const fileParentState = selected?.kind === "file"
+    ? directories[parentDirectory(selected.path) ?? BROWSE_ROOT_DIRECTORY]
+    : undefined;
+  // 目录属性里的标记与子项数来自这个目录自己的加载状态。
+  const selectedDirectoryState = selected?.kind === "directory" ? directories[selected.path] : undefined;
 
   if (!service) {
     return (
@@ -368,26 +392,15 @@ export function StorageBrowsePage() {
           defaultValue: "Read-only view of the files this wallet stores in this browser.",
         })}
         actions={
-          <>
-            <Button
-              size="sm"
-              variant="secondary"
-              className="storage-browse__tree-open"
-              aria-expanded={treeOpen}
-              onClick={() => setTreeOpen((open) => !open)}
-            >
-              {t("storage.browse.showTree", { defaultValue: "Files" })}
-            </Button>
-            <Button size="sm" variant="secondary" onClick={refresh}>
-              {t("storage.browse.refresh", { defaultValue: "Refresh" })}
-            </Button>
-          </>
+          <Button size="sm" variant="secondary" onClick={refresh}>
+            {t("storage.browse.refresh", { defaultValue: "Refresh" })}
+          </Button>
         }
       />
 
       <nav className="storage-browse__crumbs" aria-label={t("storage.browse.crumbs.label", { defaultValue: "Current path" })}>
         <BrowseBreadcrumbs
-          directory={currentDirectory}
+          selected={selected}
           onNavigate={selectDirectory}
           translate={t}
         />
@@ -395,175 +408,86 @@ export function StorageBrowsePage() {
 
       {notice ? <p className="storage-browse__notice" role="status">{notice}</p> : null}
 
-      <div className={"storage-browse__layout" + (treeOpen ? " is-tree-open" : "")}>
+      <div className="storage-browse__layout">
         <aside className="storage-browse__tree-panel">
           <StorageBrowseTreeView
             rootState={rootState}
             expanded={expanded}
-            currentDirectory={currentDirectory}
             selectedPath={selected?.path}
             childrenOf={(directory) => directories[directory]}
             onToggle={toggleDirectory}
             onSelectDirectory={selectDirectory}
             onSelectFile={selectFile}
+            onLoadMore={loadMore}
             translate={t}
           />
         </aside>
 
-        <section className="storage-browse__listing" aria-label={t("storage.browse.listing.label", { defaultValue: "Directory contents" })}>
-          <div className="storage-browse__list-head" aria-hidden="true">
-            <span>{t("storage.browse.column.name", { defaultValue: "Name" })}</span>
-            <span>{t("storage.browse.column.size", { defaultValue: "Size" })}</span>
-            <span>{t("storage.browse.column.modified", { defaultValue: "Modified" })}</span>
-          </div>
-
-          {currentState.error !== undefined ? (
-            <div className="storage-browse__error" role="alert">
-              <p>{currentState.error}</p>
-              <Button size="sm" variant="secondary" onClick={() => listDirectory(currentDirectory, false)}>
-                {t("storage.browse.retry", { defaultValue: "Retry" })}
-              </Button>
-            </div>
-          ) : null}
-
-          {currentState.children.length === 0 ? (
-            <p className="storage-browse__hint">
-              {currentState.loading
-                ? t("storage.browse.loading", { defaultValue: "Loading…" })
-                : currentState.error === undefined
-                  ? t("storage.browse.emptyDirectory", { defaultValue: "This directory is empty." })
-                  : null}
-            </p>
-          ) : (
-            <ul className="storage-browse__list">
-              {visibleChildren.map((node) => (
-                <li key={node.kind + ":" + node.path}>
-                  <button
-                    type="button"
-                    className={"storage-browse__row" + (selected?.path === node.path ? " is-selected" : "")}
-                    onClick={() => node.kind === "directory" ? selectDirectory(node.path) : selectFile(node)}
-                  >
-                    <span className="storage-browse__row-name">
-                      {node.kind === "directory"
-                        ? <span className="storage-browse__row-caret" aria-hidden="true">▸</span>
-                        : null}
-                      {node.name}
-                    </span>
-                    <span className="storage-browse__row-size">
-                      {node.size === undefined ? "—" : formatBytes(node.size)}
-                    </span>
-                    <span className="storage-browse__row-time">
-                      {node.lastModified === undefined ? "" : formatTimestamp(node.lastModified, locale)}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-
-          {listPage.total > visibleChildren.length ? (
-            <div className="storage-browse__more">
-              <p className="storage-browse__hint">
-                {t("storage.browse.renderWindow", {
-                  defaultValue: "Showing {{first}}–{{last}} of {{total}} loaded items.",
-                  first: String(listPage.firstIndex),
-                  last: String(listPage.lastIndex),
-                  total: String(listPage.total),
-                })}
-              </p>
-              <div className="storage-browse__pager">
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={!listPage.hasPrevious}
-                  onClick={() => setDisplayPage(listPage.page - 1)}
-                >
-                  {t("storage.browse.pagePrevious", { defaultValue: "Previous items" })}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={!listPage.hasNext}
-                  onClick={() => setDisplayPage(listPage.page + 1)}
-                >
-                  {t("storage.browse.pageNext", { defaultValue: "Next items" })}
-                </Button>
-              </div>
-            </div>
-          ) : null}
-
-          {!isDirectoryComplete(currentState) ? (
-            <div className="storage-browse__more">
-              <Button
-                size="sm"
-                variant="secondary"
-                loading={currentState.loading}
-                onClick={() => listDirectory(currentDirectory, true)}
-              >
-                {t("storage.browse.loadMore", { defaultValue: "Load more" })}
-              </Button>
-              <p className="storage-browse__hint">
-                {t("storage.browse.partialHint", {
-                  defaultValue: "More objects may exist under this prefix; browsing only reads metadata.",
-                })}
-              </p>
-            </div>
-          ) : null}
-        </section>
-
         <section className="storage-browse__detail" aria-label={t("storage.browse.detail.label", { defaultValue: "File detail" })}>
-          <div className="storage-browse__tabs" role="tablist">
-            <button
-              type="button"
-              role="tab"
-              className={"storage-browse__tab" + (panel === "preview" ? " is-active" : "")}
-              aria-selected={panel === "preview"}
-              onClick={() => setPanel("preview")}
-            >
-              {t("storage.browse.tab.preview", { defaultValue: "Preview" })}
-            </button>
-            <button
-              type="button"
-              role="tab"
-              className={"storage-browse__tab" + (panel === "properties" ? " is-active" : "")}
-              aria-selected={panel === "properties"}
-              onClick={() => setPanel("properties")}
-            >
-              {t("storage.browse.tab.properties", { defaultValue: "Properties" })}
-            </button>
-          </div>
-          {panel === "preview" ? (
-            <PreviewPane
-              state={preview}
-              locale={locale}
-              translate={t}
-              wrapText={wrapText}
-              onToggleWrap={() => setWrapText((value) => !value)}
-              rawJson={rawJson}
-              onToggleRawJson={() => setRawJson((value) => !value)}
-              markdownSource={markdownSource}
-              onToggleMarkdownSource={() => setMarkdownSource((value) => !value)}
-              kvRaw={kvRaw}
-              onToggleKvRaw={() => setKvRaw((value) => !value)}
-              onRetry={retryPreview}
-            />
-          ) : (
+          {selected?.kind === "file" ? (
+            <>
+              <div className="storage-browse__tabs" role="tablist">
+                <button
+                  type="button"
+                  role="tab"
+                  className={"storage-browse__tab" + (panel === "preview" ? " is-active" : "")}
+                  aria-selected={panel === "preview"}
+                  onClick={() => setPanel("preview")}
+                >
+                  {t("storage.browse.tab.preview", { defaultValue: "Preview" })}
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  className={"storage-browse__tab" + (panel === "properties" ? " is-active" : "")}
+                  aria-selected={panel === "properties"}
+                  onClick={() => setPanel("properties")}
+                >
+                  {t("storage.browse.tab.properties", { defaultValue: "Properties" })}
+                </button>
+              </div>
+              {panel === "preview" ? (
+                <PreviewPane
+                  state={preview}
+                  locale={locale}
+                  translate={t}
+                  wrapText={wrapText}
+                  onToggleWrap={() => setWrapText((value) => !value)}
+                  rawJson={rawJson}
+                  onToggleRawJson={() => setRawJson((value) => !value)}
+                  markdownSource={markdownSource}
+                  onToggleMarkdownSource={() => setMarkdownSource((value) => !value)}
+                  kvRaw={kvRaw}
+                  onToggleKvRaw={() => setKvRaw((value) => !value)}
+                  onRetry={retryPreview}
+                />
+              ) : (
+                <PropertiesPane
+                  locale={locale}
+                  translate={t}
+                  selected={selected}
+                  preview={preview?.status === "ready" ? preview.preview : undefined}
+                  // 目录标记取所选文件所在目录的标记。
+                  directoryMarker={fileParentState?.marker}
+                  onCopyPath={copyPath}
+                />
+              )}
+            </>
+          ) : selected?.kind === "directory" ? (
+            // 目录没有内容可预览，但内容区一直在：显示这个目录自己的信息与标记。
             <PropertiesPane
               locale={locale}
               translate={t}
               selected={selected}
-              preview={preview?.status === "ready" ? preview.preview : undefined}
-              // 选中的是文件时补上它所在目录的标记对象；选中的就是目录本身时则
-              // 用这个目录自己的标记。标记路径由目录推导，刷新时随新元数据更新。
-              directoryMarker={
-                selected?.kind === "directory"
-                  ? selected.path === currentDirectory
-                    ? currentState.marker
-                    : directories[selected.path]?.marker
-                  : currentState.marker
-              }
+              preview={undefined}
+              directoryMarker={selectedDirectoryState?.marker}
+              childCount={selectedDirectoryState?.children.length ?? 0}
               onCopyPath={copyPath}
             />
+          ) : (
+            <p className="storage-browse__hint">
+              {t("storage.browse.detail.empty", { defaultValue: "Select a file or directory in the file tree." })}
+            </p>
           )}
         </section>
       </div>
@@ -572,24 +496,27 @@ export function StorageBrowsePage() {
 }
 
 function BrowseBreadcrumbs(props: {
-  directory: string;
+  selected: BrowseChildNode | undefined;
   onNavigate: (directory: string) => void;
   translate: (key: string, values?: Record<string, string | number>) => string;
 }) {
-  const segments = useMemo(() => breadcrumbSegments(props.directory), [props.directory]);
+  const segments = useMemo(() => breadcrumbSegments(props.selected), [props.selected]);
+  const atRoot = segments.length === 0;
   return (
     <>
       <button
         type="button"
-        className={"storage-browse__crumb" + (segments.length === 0 ? " is-current" : "")}
+        className={"storage-browse__crumb" + (atRoot ? " is-current" : "")}
+        aria-current={atRoot ? "location" : undefined}
         onClick={() => props.onNavigate(BROWSE_ROOT_DIRECTORY)}
       >
         {props.translate("storage.browse.crumb.root", { defaultValue: "/" })}
       </button>
       {segments.map((segment, index) => (
         <span key={segment.path} className="storage-browse__crumb-segment">
-          <span className="storage-browse__crumb-sep" aria-hidden="true">/</span>
-          {index === segments.length - 1 ? (
+          {/* 根面包屑本身就是前导 `/`，第一段前不再重复分隔符。 */}
+          {index > 0 ? <span className="storage-browse__crumb-sep" aria-hidden="true">/</span> : null}
+          {segment.current ? (
             <span className="storage-browse__crumb is-current" aria-current="location">
               {segment.name}
             </span>
@@ -602,18 +529,6 @@ function BrowseBreadcrumbs(props: {
       ))}
     </>
   );
-}
-
-export interface BrowseCrumbSegment {
-  name: string;
-  path: string;
-}
-
-/** 把当前目录切成面包屑分段；根目录没有分段。 */
-export function breadcrumbSegments(directory: string): BrowseCrumbSegment[] {
-  if (directory === BROWSE_ROOT_DIRECTORY) return [];
-  const parts = directory.split("/").filter((part) => part.length > 0);
-  return parts.map((name, index) => ({ name, path: parts.slice(0, index + 1).join("/") }));
 }
 
 /** 浏览错误的结构化码；非结构化错误返回 undefined。 */

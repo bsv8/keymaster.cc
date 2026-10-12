@@ -15,7 +15,7 @@ import { I18N_SERVICE_CAPABILITY, BUSINESS_REGISTRY_CAPABILITY, PAGE_UI_REGISTRY
 // setup 负责：
 //   1. 把 Worker 的存储控制 RPC 包成页面侧受限控制器并注册为 capability；
 //   2. 把只读浏览 RPC 包成私有代理，由本实例的页面闭包持有；
-//   3. 通过 page 注册浏览页、只读状态块与既有持久存储授权条；
+//   3. 通过 page 注册浏览页与既有持久存储授权条；
 //   4. 注册只读的 storage.status 资源。
 //
 // 钱包生命周期（创建/导入/解锁/锁定/改密/改名/导出 KeyHold/重置）的权威实现
@@ -37,7 +37,6 @@ import { StorageRpcProxy } from "./coordinator/storageRpcProxy.js";
 import { STORAGE_PRIVATE_BROWSE_CAPABILITY } from "./coordinator/storageBrowsePrivateCapability.js";
 import { StorageBrowseRpcProxy } from "./coordinator/storageBrowseRpcProxy.js";
 import { IndexedDbPersistenceBar } from "./ui/IndexedDbPersistenceBar.js";
-import { StorageStatusBlock } from "./ui/StorageStatusBlock.js";
 import { StorageBrowsePage } from "./ui/StorageBrowsePage.js";
 
 export const STORAGE_PLATFORM_PLUGIN_ID = "storage";
@@ -54,26 +53,15 @@ export const storageResources: I18nPluginResources = {
   resources: {
     en: {
       "storage.status.title": "Local storage",
-      "storage.status.medium": "Wallet data is kept in this browser only. It is not a backup and is not synced between devices.",
-      "storage.status.uninitialized": "No wallet Key yet",
-      "storage.status.locked": "Locked. Enter the Key password to unlock.",
-      "storage.status.ready": "Ready",
       "storage.activity.title": "Storage activity", "storage.activity.read": "Reading", "storage.activity.write": "Writing",
       "storage.activity.reading": "Storage reading", "storage.activity.writing": "Storage writing",
       "storage.activity.readIdle": "Storage reads idle", "storage.activity.writeIdle": "Storage writes idle",
-      "storage.status.corrupt": "Local wallet data is incomplete and cannot be read.",
-      "storage.status.unsupported": "Local data was written by a newer version and cannot be read here.",
-      "storage.status.degraded": "Local storage is temporarily unavailable.",
-      "storage.status.persisted": "The browser granted persistent storage. This still is not a backup.",
-      "storage.status.notPersisted": "The browser may clear this data. Export the encrypted KeyHold if you need to keep it.",
-      "storage.status.usage": "Usage",
       "storage.browse.business.label": "Storage browser",
       "storage.browse.crumb.browse": "Storage",
       "storage.browse.crumb.settings": "Settings",
       "storage.browse.title": "Storage browser",
       "storage.browse.description": "Read-only view of the files this wallet stores in this browser.",
       "storage.browse.refresh": "Refresh",
-      "storage.browse.showTree": "Files",
       "storage.browse.loading": "Loading…",
       "storage.browse.notLoaded": "Not loaded yet.",
       "storage.browse.emptyDirectory": "This directory is empty.",
@@ -84,12 +72,8 @@ export const storageResources: I18nPluginResources = {
       "storage.browse.renderWindow": "Showing {{first}}–{{last}} of {{total}} loaded items.",
       "storage.browse.pagePrevious": "Previous items",
       "storage.browse.pageNext": "Next items",
-      "storage.browse.column.name": "Name",
-      "storage.browse.column.size": "Size",
-      "storage.browse.column.modified": "Modified",
       "storage.browse.crumbs.label": "Current path",
       "storage.browse.crumb.root": "/",
-      "storage.browse.listing.label": "Directory contents",
       "storage.browse.detail.label": "File detail",
       "storage.browse.tree.label": "Storage tree",
       "storage.browse.tree.expand": "Expand {{name}}",
@@ -97,6 +81,7 @@ export const storageResources: I18nPluginResources = {
       "storage.browse.tab.preview": "Preview",
       "storage.browse.tab.properties": "Properties",
       "storage.browse.noSelection": "Select a file to preview it.",
+      "storage.browse.detail.empty": "Select a file or directory in the file tree.",
       "storage.browse.previewLoading": "Loading preview…",
       "storage.browse.previewFailed": "This object could not be read.",
       "storage.browse.truncated": "Showing the first {{shown}} of {{total}} bytes.",
@@ -129,7 +114,9 @@ export const storageResources: I18nPluginResources = {
       "storage.browse.pathCopied": "Path copied to the clipboard.",
       "storage.browse.copyFailed": "The path could not be copied.",
       "storage.browse.properties.noSelection": "Select a file to see its properties.",
-      "storage.browse.properties.directoryHint": "A directory is stored as a folder of objects; its own metadata is the marker below.",
+      "storage.browse.props.type": "Type",
+      "storage.browse.props.directory": "Directory",
+      "storage.browse.props.children": "Loaded direct children",
       "storage.browse.props.path": "Path",
       "storage.browse.props.size": "Size",
       "storage.browse.props.modified": "Modified",
@@ -147,26 +134,15 @@ export const storageResources: I18nPluginResources = {
     },
     "zh-CN": {
       "storage.status.title": "本地存储",
-      "storage.status.medium": "钱包数据只保存在当前浏览器中；这不是备份，也不会跨设备同步。",
-      "storage.status.uninitialized": "还没有钱包 Key",
-      "storage.status.locked": "已锁定，请输入 Key 密码解锁。",
-      "storage.status.ready": "已就绪",
       "storage.activity.title": "存储活动", "storage.activity.read": "读取", "storage.activity.write": "写入",
       "storage.activity.reading": "正在读取存储", "storage.activity.writing": "正在写入存储",
       "storage.activity.readIdle": "存储读取空闲", "storage.activity.writeIdle": "存储写入空闲",
-      "storage.status.corrupt": "本地钱包数据不完整，无法读取。",
-      "storage.status.unsupported": "本地数据由更新版本写入，当前版本无法读取。",
-      "storage.status.degraded": "本地存储暂时不可用。",
-      "storage.status.persisted": "浏览器已授予持久存储权限；这仍然不是备份。",
-      "storage.status.notPersisted": "浏览器可能清理这些数据；如需保留请导出加密 KeyHold。",
-      "storage.status.usage": "已用容量",
       "storage.browse.business.label": "存储浏览器",
       "storage.browse.crumb.browse": "存储",
       "storage.browse.crumb.settings": "设置",
       "storage.browse.title": "存储浏览器",
       "storage.browse.description": "只读查看本钱包保存在当前浏览器中的文件。",
       "storage.browse.refresh": "刷新",
-      "storage.browse.showTree": "文件树",
       "storage.browse.loading": "加载中…",
       "storage.browse.notLoaded": "尚未加载。",
       "storage.browse.emptyDirectory": "此目录为空。",
@@ -177,12 +153,8 @@ export const storageResources: I18nPluginResources = {
       "storage.browse.renderWindow": "正在显示第 {{first}}–{{last}} 项，共加载 {{total}} 项。",
       "storage.browse.pagePrevious": "上一批",
       "storage.browse.pageNext": "下一批",
-      "storage.browse.column.name": "名称",
-      "storage.browse.column.size": "大小",
-      "storage.browse.column.modified": "修改时间",
       "storage.browse.crumbs.label": "当前路径",
       "storage.browse.crumb.root": "/",
-      "storage.browse.listing.label": "目录内容",
       "storage.browse.detail.label": "文件详情",
       "storage.browse.tree.label": "存储树",
       "storage.browse.tree.expand": "展开 {{name}}",
@@ -190,6 +162,7 @@ export const storageResources: I18nPluginResources = {
       "storage.browse.tab.preview": "预览",
       "storage.browse.tab.properties": "属性",
       "storage.browse.noSelection": "选择一个文件以预览。",
+      "storage.browse.detail.empty": "在左侧文件树中选择一个文件或目录。",
       "storage.browse.previewLoading": "正在加载预览…",
       "storage.browse.previewFailed": "此对象无法读取。",
       "storage.browse.truncated": "已显示前 {{shown}} 字节，共 {{total}} 字节。",
@@ -222,7 +195,9 @@ export const storageResources: I18nPluginResources = {
       "storage.browse.pathCopied": "路径已复制到剪贴板。",
       "storage.browse.copyFailed": "路径复制失败。",
       "storage.browse.properties.noSelection": "选择一个文件以查看属性。",
-      "storage.browse.properties.directoryHint": "目录以一组对象保存；它自身的元数据就是下面的标记对象。",
+      "storage.browse.props.type": "类型",
+      "storage.browse.props.directory": "目录",
+      "storage.browse.props.children": "已加载直接子项",
       "storage.browse.props.path": "路径",
       "storage.browse.props.size": "大小",
       "storage.browse.props.modified": "修改时间",
@@ -296,9 +271,6 @@ const storagePlatformPluginDefinition = {
     pages.view.register({ id: "storage.browse", kind: "page", path: "/settings/storage",
       label: { key: "storage.browse.business.label", fallback: "Storage browser" },
       render: () => privateContents(StorageBrowsePage),
-    });
-    pages.view.register({ id: "storage.status", kind: "settings-block", path: "/settings/storage", order: 910,
-      label: { key: "storage.status.title", fallback: "Local storage" }, render: () => privateContents(StorageStatusBlock),
     });
     pages.view.register({ id: "storage.persistence", kind: "header", slot: "above-header", order: 0,
       label: { key: "storage.status.title", fallback: "Local storage" }, render: () => privateContents(IndexedDbPersistenceBar),

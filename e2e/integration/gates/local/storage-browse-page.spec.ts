@@ -49,15 +49,12 @@ test(JOURNEY_ID + "：解锁后存储浏览页经真实 Worker 列出目录", as
     await test.step("打开存储浏览页并离开加载态", async () => {
       await openUnlockedStorageBrowse(page, password);
       await expect(page.locator(".storage-browse-page")).toBeVisible({ timeout: 60_000 });
-      // 同一路径的设置块及 header 由 page 以 Storage consumer 挂载；page 未声明 i18n，
-      // 若把布局 consumer 传给内容，这三类真实 UI 会在能力解析时失败。
-      await expect(page.getByRole("heading", { name: /^Local storage$|^本地存储$/u })).toBeVisible();
       if (!(await page.evaluate(() => navigator.storage.persisted()))) {
         await expect(page.getByTestId("indexeddb-persistence-bar")).toBeVisible();
       }
 
       // 根目录一定至少列出钱包自己的对象。空态与加载态必须能区分开。
-      await expect(page.locator(".storage-browse__list")).toBeVisible({ timeout: 60_000 });
+      await expect(page.locator(".storage-browse__tree")).toBeVisible({ timeout: 60_000 });
       await expect(page.getByText("Loading…")).toHaveCount(0);
       await expect(page.getByText("加载中…")).toHaveCount(0);
       await expect(page.locator(".storage-browse__error")).toHaveCount(0);
@@ -67,7 +64,7 @@ test(JOURNEY_ID + "：解锁后存储浏览页经真实 Worker 列出目录", as
       await reloadAndAssertSameKey(page, ready.keyLabel);
       await unlockWalletInPlace(page, password);
       await expect(page.locator(".storage-browse-page")).toBeVisible({ timeout: 60_000 });
-      await expect(page.locator(".storage-browse__list")).toBeVisible({ timeout: 60_000 });
+      await expect(page.locator(".storage-browse__tree")).toBeVisible({ timeout: 60_000 });
       await expect(page.getByText("Loading…")).toHaveCount(0);
       await expect(page.getByText("加载中…")).toHaveCount(0);
     });
@@ -75,7 +72,7 @@ test(JOURNEY_ID + "：解锁后存储浏览页经真实 Worker 列出目录", as
     await test.step("页内刷新按钮同样离开加载态", async () => {
       const refresh = page.getByRole("button", { name: /^Refresh$|^刷新$/u });
       await refresh.click();
-      await expect(page.locator(".storage-browse__list")).toBeVisible({ timeout: 60_000 });
+      await expect(page.locator(".storage-browse__tree")).toBeVisible({ timeout: 60_000 });
       await expect(page.getByText("Loading…")).toHaveCount(0);
       await expect(page.getByText("加载中…")).toHaveCount(0);
     });
@@ -85,18 +82,18 @@ test(JOURNEY_ID + "：解锁后存储浏览页经真实 Worker 列出目录", as
 });
 
 /**
- * 读取列表窗口当前渲染的行名。
+ * 读取文件树当前渲染的行名。
  *
  * 展示分页是固定页长：无论翻到第几页，窗口里的行数都不变。这里读 DOM 而不是内部
  * 状态，正是因为「渲染量是否有界」本身就是要被真实浏览器证明的性质。
  */
 async function renderedRowNames(page: Page): Promise<string[]> {
-  return await page.locator(".storage-browse__row-name").allTextContents();
+  return await page.locator(".storage-browse__tree-label").allTextContents();
 }
 
-/** 当前目录列表的页码提示（`1–200 of 205`）。 */
+/** 文件树里当前展示页的页码提示（`1–200 of 205`）。 */
 async function pageIndicator(page: Page): Promise<string> {
-  return (await page.locator(".storage-browse__listing .storage-browse__hint").first().textContent() ?? "").trim();
+  return (await page.locator(".storage-browse__tree-page").first().textContent() ?? "").trim();
 }
 
 /**
@@ -118,9 +115,14 @@ test(JOURNEY_ID + "：真实 JSON 对象可预览、可切原文，属性与复�
 
     await test.step("选中 key.json 并按真实内容预览", async () => {
       await openUnlockedStorageBrowse(page, password);
-      const keyRow = page.locator(".storage-browse__list").getByRole("button", { name: "key.json" });
+      const keyRow = page.locator(".storage-browse__tree").getByRole("button", { name: "key.json", exact: true });
       await expect(keyRow).toBeVisible({ timeout: 60_000 });
       await keyRow.click();
+
+      // 内容区在选中文件时才出现：目录点击不会打开它。
+      await expect(page.locator(".storage-browse__detail")).toBeVisible({ timeout: 30_000 });
+      // 面包屑带出文件名，父目录链保持可导航。
+      await expect(page.locator(".storage-browse__crumbs")).toContainText("key.json");
 
       // key.json 是加密 KeyHold：真实内容是 JSON 对象，因此预览必须给出 JSON 树。
       const tree = page.locator(".storage-browse__json");
@@ -161,10 +163,10 @@ test(JOURNEY_ID + "：真实 JSON 对象可预览、可切原文，属性与复�
     });
 
     await test.step("预览不写入钱包", async () => {
-      // 同一路径仍在列表里，版本不变：浏览全程没有写操作。
+      // 同一路径仍在树里，版本不变：浏览全程没有写操作。
       await page.getByRole("tab", { name: /^(Preview|预览)$/u }).click();
       await page.getByRole("button", { name: /^(Refresh|刷新)$/u }).click();
-      await expect(page.locator(".storage-browse__list").getByRole("button", { name: "key.json" }))
+      await expect(page.locator(".storage-browse__tree").getByRole("button", { name: "key.json", exact: true }))
         .toBeVisible({ timeout: 60_000 });
       await expect(page.getByText(/已不存在|no longer exists/iu)).toHaveCount(0);
     });
@@ -176,7 +178,7 @@ test(JOURNEY_ID + "：真实 JSON 对象可预览、可切原文，属性与复�
 /**
  * 业务结果：渲染量与目录规模无关，且已加载的每一项都可达。
  *
- * 覆盖 P06/F03：这是「大量行有界渲染」在真实浏览器里的证明——列表与文件树的 DOM 行数
+ * 覆盖 P06/F03：这是「大量行有界渲染」在真实浏览器里的证明——文件树的 DOM 行数
  * 不超过一个展示页（200），与已加载总量无关。真实钱包里通常没有任何目录超过一个展示
  * 页，因此翻页部分只在真有后续页时执行，否则如实记注解，而不是假装测过。
  */
@@ -190,18 +192,17 @@ test(JOURNEY_ID + "：目录渲染量与目录规模无关", async ({ page, cont
       { keyLabel: "存储分页 Gate Key", password },
     ));
 
-    await test.step("列表与文件树的渲染行数有界", async () => {
+    await test.step("文件树的渲染行数有界", async () => {
       await openUnlockedStorageBrowse(page, password);
-      await expect(page.locator(".storage-browse__list")).toBeVisible({ timeout: 60_000 });
+      await expect(page.locator(".storage-browse__tree")).toBeVisible({ timeout: 60_000 });
       const firstPageRows = await renderedRowNames(page);
       expect(firstPageRows.length).toBeGreaterThan(0);
       expect(firstPageRows.length).toBeLessThanOrEqual(200);
-      expect(await page.locator(".storage-browse__tree-label").count()).toBeLessThanOrEqual(200);
     });
 
     await test.step("有后续页时翻页不增长窗口", async () => {
-      const listing = page.locator(".storage-browse__listing");
-      const next = listing.getByRole("button", { name: /^(Next items|下一批)$/u });
+      const pager = page.locator(".storage-browse__tree-more").first();
+      const next = pager.getByRole("button", { name: /^(Next items|下一批)$/u });
       if (await next.count() === 0 || await next.isDisabled()) {
         test.info().annotations.push({
           type: "note",
@@ -210,13 +211,14 @@ test(JOURNEY_ID + "：目录渲染量与目录规模无关", async ({ page, cont
         return;
       }
       const before = await renderedRowNames(page);
+      const beforeIndicator = await pageIndicator(page);
       await next.click();
-      await expect.poll(async () => (await pageIndicator(page)).includes("200")).toBe(true);
+      await expect.poll(async () => (await pageIndicator(page)) !== beforeIndicator).toBe(true);
       const after = await renderedRowNames(page);
       // 换页之后窗口依然不超过一页，且不与上一页重叠。
       expect(after.length).toBeLessThanOrEqual(200);
       expect(after.some((name) => before.includes(name))).toBe(false);
-      await listing.getByRole("button", { name: /^(Previous items|上一批)$/u }).click();
+      await pager.getByRole("button", { name: /^(Previous items|上一批)$/u }).click();
       await expect.poll(async () => (await renderedRowNames(page)).join("|") === before.join("|")).toBe(true);
     });
   } finally {
@@ -243,7 +245,7 @@ test(JOURNEY_ID + "：锁定清空浏览内容且新 Tab 拿不到浏览授权",
     await test.step("建立本地身份并在浏览页选中一个真实对象", async () => {
       await initializeNewLocalUser({ page }, { keyLabel: "存储锁定 Gate Key", password });
       await openUnlockedStorageBrowse(page, password);
-      const keyRow = page.locator(".storage-browse__list").getByRole("button", { name: "key.json" });
+      const keyRow = page.locator(".storage-browse__tree").getByRole("button", { name: "key.json", exact: true });
       await expect(keyRow).toBeVisible({ timeout: 60_000 });
       await keyRow.click();
       await expect(page.locator(".storage-browse__json")).toBeVisible({ timeout: 60_000 });
@@ -266,8 +268,8 @@ test(JOURNEY_ID + "：锁定清空浏览内容且新 Tab 拿不到浏览授权",
         await other.goto("/settings/storage", { waitUntil: "domcontentloaded" });
         await expect(other.getByRole("heading", { name: /钱包已锁定|Wallet locked/ }))
           .toBeVisible({ timeout: 60_000 });
-        // 未解锁就没有浏览授权：连列表都不该出现。
-        await expect(other.locator(".storage-browse__list")).toHaveCount(0);
+        // 未解锁就没有浏览授权：连树都不该出现。
+        await expect(other.locator(".storage-browse__tree")).toHaveCount(0);
         expect(await other.content()).not.toContain("publicKeyHex");
       } finally {
         await other.close().catch(() => undefined);
@@ -276,7 +278,7 @@ test(JOURNEY_ID + "：锁定清空浏览内容且新 Tab 拿不到浏览授权",
 
     await test.step("重新解锁后浏览恢复可用（撤销不是永久的）", async () => {
       await openUnlockedStorageBrowse(page, password);
-      await expect(page.locator(".storage-browse__list").getByRole("button", { name: "key.json" }))
+      await expect(page.locator(".storage-browse__tree").getByRole("button", { name: "key.json", exact: true }))
         .toBeVisible({ timeout: 60_000 });
     });
   } finally {
@@ -285,7 +287,7 @@ test(JOURNEY_ID + "：锁定清空浏览内容且新 Tab 拿不到浏览授权",
 });
 
 /**
- * 业务结果：窄屏下文件树收为侧栏，目录列表与详情仍可用；键盘可以展开与选中。
+ * 业务结果：窄屏下文件树排在内容框上方；键盘可以进入目录与选中文件。
  *
  * 覆盖 U01：窄屏与键盘可达性此前只有实现与组件断言，这里用真实视口与真实按键补上。
  */
@@ -299,31 +301,45 @@ test(JOURNEY_ID + "：窄屏与键盘下仍可浏览", async ({ page, context },
       { keyLabel: "存储窄屏 Gate Key", password },
     ));
 
-    await test.step("窄屏下文件树默认收起，可以按需打开", async () => {
+    await test.step("窄屏下文件树在内容框上方", async () => {
       await page.setViewportSize({ width: 480, height: 900 });
       await openUnlockedStorageBrowse(page, password);
-      const listing = page.locator(".storage-browse__listing");
-      await expect(listing.locator(".storage-browse__list")).toBeVisible({ timeout: 60_000 });
-      // 窄屏下树默认不可见，但入口必须在：否则目录结构整条不可达。
+      await expect(page.locator(".storage-browse__tree")).toBeVisible({ timeout: 60_000 });
       const treePanel = page.locator(".storage-browse__tree-panel");
-      await expect(treePanel).toBeHidden();
-      const showTree = page.getByRole("button", { name: /^(Files|文件)$/u });
-      await showTree.click();
+      const detail = page.locator(".storage-browse__detail");
       await expect(treePanel).toBeVisible();
+      await expect(detail).toBeVisible();
+      // 上下排列：树的顶部在内容框顶部之上，两个区域都保持可见。
+      const treeBox = await treePanel.boundingBox();
+      const detailBox = await detail.boundingBox();
+      expect(treeBox).not.toBeNull();
+      expect(detailBox).not.toBeNull();
+      expect(treeBox!.y).toBeLessThan(detailBox!.y);
     });
 
-    await test.step("键盘可以聚焦并激活目录行与文件行", async () => {
-      const firstRow = page.locator(".storage-browse__list .storage-browse__row").first();
-      await firstRow.focus();
-      await expect(firstRow).toBeFocused();
+    await test.step("键盘可以进入目录并选中文件", async () => {
+      // 目录行：Enter 展开目录，内容区显示该目录的信息（路径、类型与已加载子项）。
+      const dirRow = page.locator(".storage-browse__tree-row")
+        .filter({ has: page.locator("button.storage-browse__tree-toggle") }).first();
+      const dirLabel = dirRow.locator(".storage-browse__tree-label");
+      await dirLabel.focus();
+      await expect(dirLabel).toBeFocused();
       await page.keyboard.press("Enter");
-      // 激活后要么进入目录（面包屑变化），要么选中文件并开始预览；两者都必须是可见结果。
-      await expect(page.locator(".storage-browse__list")).toBeVisible();
-      // 进入目录会把侧栏收起来（窄屏默认如此），所以键盘下一步之前必须重新打开它。
-      await expect(page.locator(".storage-browse__tree-panel")).toBeHidden();
-      await page.getByRole("button", { name: /^(Files|文件)$/u }).click();
-      // 树里的展开箭头同样可聚焦：键盘用户必须能展开目录而不依赖鼠标。
-      const toggle = page.locator(".storage-browse__tree-toggle").first();
+      await expect(dirRow.locator("button.storage-browse__tree-toggle")).toHaveAttribute("aria-expanded", "true");
+      await expect(page.locator(".storage-browse__properties")).toContainText(/Type|类型/u);
+
+      // 文件行：Enter 打开预览，面包屑带出文件名；树仍在内容框上方。
+      const keyLabel = page.locator(".storage-browse__tree").getByRole("button", { name: "key.json", exact: true });
+      await keyLabel.focus();
+      await expect(keyLabel).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect(page.locator(".storage-browse__json")).toBeVisible({ timeout: 60_000 });
+      await expect(page.locator(".storage-browse__crumbs")).toContainText("key.json");
+      await expect(page.locator(".storage-browse__tree-panel")).toBeVisible();
+    });
+
+    await test.step("树里的展开箭头同样可聚焦并切换展开状态", async () => {
+      const toggle = page.locator("button.storage-browse__tree-toggle").first();
       await toggle.focus();
       await expect(toggle).toBeFocused();
       const before = await toggle.getAttribute("aria-expanded");
