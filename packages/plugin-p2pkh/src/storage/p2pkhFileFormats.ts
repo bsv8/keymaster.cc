@@ -1,8 +1,8 @@
 // P2PKH 桶内文件格式（KeymasterFormats《P2PKH 设置 / 历史》）。
 //
-// 路径（owner 根下，module 根即 `p2pkh/`）：
+// 路径（已绑定 <network>/<publicKeyHex>/ 身份根，module 根即 `p2pkh/`）：
 //   - `p2pkh/setting.json`        偏好与 WoC provider 配置（明文，≤4 KiB）
-//   - `p2pkh/<net>/history.json`  WoC history 元数据（txid / height / fee）
+//   - `p2pkh/history.json`        WoC history 元数据（txid / height / fee）
 //
 // 设计缘由（2026-09-20 解耦）：
 //   - 历史只保存元数据；raw tx、UTXO、花费关系、余额都不落盘；
@@ -222,7 +222,7 @@ export function serializeP2pkhSettingFile(setting: P2pkhResolvedSetting): Uint8A
 /** 历史文件路径（模块根下相对路径）。 */
 export function p2pkhHistoryPath(network: P2pkhFileNetwork): string {
   if (!NETWORKS.includes(network)) throw new Error("P2PKH network is invalid");
-  return `${network}/history.json`;
+  return "history.json";
 }
 
 /**

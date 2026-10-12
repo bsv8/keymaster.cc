@@ -1,4 +1,5 @@
-// P2PKH 桶内文件仓储：setting.json + <net>/history.json。
+// P2PKH 身份根内文件仓储：setting.json + history.json。
+// 网络已由外层 <network>/<publicKeyHex>/ 隔离，模块内不重复分目录。
 //
 // 真值规则（2026-09-20 解耦）：
 //   - raw tx / UTXO / 花费关系不再落盘，也不再有 tx/height 目录；
@@ -32,7 +33,7 @@ function assertNetwork(network: P2pkhFileNetwork): P2pkhFileNetwork {
   return network;
 }
 
-/** Repository 只接收 Host 已绑定的 `p2pkh/` owner 文件根。 */
+/** Repository 只接收 Host 已绑定网络身份的 `p2pkh/` 文件根。 */
 export function createP2pkhFileRepository(files: BorrowedOwnerFileStore) {
   async function readSetting(): Promise<P2pkhResolvedSetting> {
     const object = await files.get(P2PKH_SETTING_FILE_NAME);
@@ -49,7 +50,8 @@ export function createP2pkhFileRepository(files: BorrowedOwnerFileStore) {
   /** 读取一个网络的历史元数据；文件不存在或损坏返回 undefined。 */
   async function readHistory(networkInput: P2pkhFileNetwork): Promise<P2pkhHistoryEntryV1[] | undefined> {
     const network = assertNetwork(networkInput);
-    const object = await files.get(p2pkhHistoryPath(network));
+    // 旧布局仅在新文件不存在时读取；不能用旧历史掩盖新文件损坏。
+    const object = await files.get(p2pkhHistoryPath(network)) ?? await files.get(`${network}/history.json`);
     if (!object) return undefined;
     return parseP2pkhHistoryFile(object.bytes);
   }
@@ -57,7 +59,11 @@ export function createP2pkhFileRepository(files: BorrowedOwnerFileStore) {
   /** 整文件替换一个网络的历史元数据。 */
   async function writeHistory(networkInput: P2pkhFileNetwork, records: readonly P2pkhHistoryEntryV1[]): Promise<void> {
     const network = assertNetwork(networkInput);
-    await files.put(p2pkhHistoryPath(network), serializeP2pkhHistoryFile(records));
+    // 同一提交写入规范路径并移除重复的旧网络目录文件，失败时保留旧真值。
+    await files.batch({ operations: [
+      { type: "put", path: p2pkhHistoryPath(network), bytes: serializeP2pkhHistoryFile(records) },
+      { type: "delete", path: `${network}/history.json` },
+    ] });
   }
 
   /**

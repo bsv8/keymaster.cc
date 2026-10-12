@@ -1,7 +1,7 @@
 // P2PKH 状态仓储（2026-09-20 解耦后的真值模型）。
 //
 // 真值边界：
-//   - 链上历史元数据（txid/height/fee）= `p2pkh/<net>/history.json`；
+//   - 链上历史元数据（txid/height/fee）= `<network>/<publicKeyHex>/p2pkh/history.json`；
 //   - UTXO = 只存在于 Coordinator Worker 内存快照（本仓储不保存、不派生）；
 //   - 资源表、本地提交、协议提交、历史/协议兼容 claim、同步状态 = 仅内存；
 //   - 不再有 raw tx 文件、高度文件、owned outpoint 投影或交易 DAG。

@@ -1,7 +1,7 @@
 // 模块文件存储契约（model: "files"）。
 //
 // 一文件一对象：文件名与 JSON 内容由业务自己的格式规范定义（例如
-// `contacts/<稳定业务ID>.json`、`p2pkh/<net>/tx/<txid>.json`）。
+// `contacts/<稳定业务ID>.json`、`p2pkh/history.json`）。
 // 平台只提供三件事：
 //   - 绑定当前身份世代与模块/App 目录的固定根（见 buildStorageNamespaceRoot）；
 //   - 路径 guard：不许越出根、不许使用系统保留段；

@@ -77,7 +77,7 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
   } satisfies PluginStorageDeclaration),
   /**
    * P2PKH 文件根（空 purpose = 模块根）。
-   * 布局：`p2pkh/setting.json`、`p2pkh/<net>/tx|height/…`。
+   * 布局（已绑定网络身份根）：`p2pkh/setting.json`、`p2pkh/history.json`。
    */
   p2pkhFiles: Object.freeze({
     moduleId: "p2pkh",

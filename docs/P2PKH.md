@@ -12,7 +12,7 @@ UTXO：WoC `unspent/all`（每个 owner + network + address 一次请求）
       → 严格校验 → Coordinator Worker 内存快照（唯一真值，不落盘）
 
 历史：WoC confirmed history（分页）
-      → 只保存 txid / height / fee 元数据（`<net>/history.json`，完整分页成功后整文件替换）
+      → 只保存 txid / height / fee 元数据（`<network>/<publicKeyHex>/p2pkh/history.json`，网络由外层身份根隔离，完整分页成功后整文件替换；兼容读取旧 `<net>/history.json`，下次成功保存时移除旧文件）
 
 详情：打开交易详情页时按 txid 懒加载 raw transaction
       → 临时解析输入/输出用于展示，不写任何派生状态

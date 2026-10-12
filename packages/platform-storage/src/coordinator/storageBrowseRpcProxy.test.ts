@@ -48,7 +48,7 @@ describe("Storage browse proxy recovery", () => {
       await expect(h.proxy.list({ prefix: "" })).resolves.toMatchObject({ entries: [{ path: "notes.txt" }] });
       expect(h.proxy.currentSession()!.browseSessionId).not.toBe(previous.browseSessionId);
       expect(h.call.mock.calls.map(([request]) => request.kind)).toEqual(["storage.browse.open", "storage.browse.data"]);
-      expect(h.call.mock.calls[1][0]).toMatchObject({ expectedSessionEpoch: "epoch-2", data: { browseSessionId: h.proxy.currentSession()!.browseSessionId } });
+      expect(h.call.mock.calls[1]?.[0]).toMatchObject({ expectedSessionEpoch: "epoch-2", data: { browseSessionId: h.proxy.currentSession()!.browseSessionId } });
     } finally { h.close(); }
   });
 
