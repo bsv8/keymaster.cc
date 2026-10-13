@@ -1049,11 +1049,8 @@ describe("ProtocolPopupPage topbar origin settings", () => {
     const service = makeFakeService();
     service.getOriginSettings = vi.fn(async (origin: string) => ({
       origin,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 30,
       updatedAt: 0

@@ -5,7 +5,7 @@
 
 import { webRTCDirect } from "@libp2p/webrtc";
 import { webSockets } from "@libp2p/websockets";
-import { createHost } from "bitcoin-libp2p/libp2p";
+import { createPreparedHost as createHost } from "@keymaster/p2p-host";
 import type {
   WindowP2pCoordinatorControl,
   WindowP2pExecutorError,

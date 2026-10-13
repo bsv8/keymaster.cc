@@ -1,3 +1,4 @@
+import { defineWorkerRequestRoute } from "@keymaster/contracts";
 import type { CoordinatorResponse, CoordinatorVaultStatus, SessionEpoch } from "@keymaster/contracts";
 import { AUTO_LOCK_NEVER_TIMEOUT_MS, isValidAutoLockTimeoutMs, normalizeAutoLockTimeoutMs } from "@keymaster/contracts";
 
@@ -55,5 +56,8 @@ export function createWorkerAutoLock(ports: WorkerAutoLockPorts) {
     ports.publishSettings();
     return { requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "accepted" } };
   }
-  return { reset, pause, update };
+  const route = defineWorkerRequestRoute<Extract<import("@keymaster/contracts").CoordinatorClientRequest, { kind: "autolock.settings.update" }>>({
+    kinds: ["autolock.settings.update"], policy: () => ({ scheduling: "serial", validateEpoch: true }), execute: (request, call) => update(call.requestId, request),
+  });
+  return { route, reset, pause, update };
 }

@@ -50,6 +50,7 @@ async function createHost(input: {
     ? { ...lockedSnapshot(), status, activePublicKeyHex: undefined, walletGeneration: "" }
     : { ...lockedSnapshot(), status };
   const vault = {
+    coldStart: async () => ({ state: "ready" as const, key: { publicKeyHex: "02".padEnd(66, "a"), label: "Primary", backend: "software" as const } }),
     status: () => status,
     walletSnapshot: () => snapshot,
     subscribeWalletState: (handler: (next: VaultLifecycleSnapshot) => void) => {
@@ -58,12 +59,12 @@ async function createHost(input: {
     },
     getCurrentKey: async () => {
       if (input.currentKey === undefined || input.currentKey === undefined) {
-        return { publicKeyHex: PUBLIC_KEY, label: input.currentKey ?? "Primary", format: "generated", capabilities: ["p2pkh"], createdAt: "2026-09-08T00:00:00.000Z" };
+        return {bsvNetwork: "main" as const,  publicKeyHex: PUBLIC_KEY, label: input.currentKey ?? "Primary", format: "generated", capabilities: ["p2pkh"], createdAt: "2026-09-08T00:00:00.000Z" };
       }
       return undefined;
     },
     hasVault: async () => status !== "uninitialized",
-    initialize: input.initialize ?? vi.fn(async (plan: WalletInitializePlan) => ({
+    initialize: input.initialize ?? vi.fn(async (plan: WalletInitializePlan) => ({bsvNetwork: "main" as const,
       publicKeyHex: PUBLIC_KEY,
       label: "我的钱包",
       capabilities: ["p2pkh"],
@@ -83,8 +84,8 @@ async function createHost(input: {
     disposeAllAppViewSessions: () => undefined,
   } as unknown as VaultService;
   const walletState: VaultWalletState = {
-    snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: status === "unlocked" ? PUBLIC_KEY : undefined }))(), () => ({ publicKeyHex: PUBLIC_KEY, label: "Primary", capabilities: ["p2pkh"], createdAt: "2026-09-08T00:00:00.000Z" })),
-    
+    snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: status === "unlocked" ? PUBLIC_KEY : undefined }))(), () => ({bsvNetwork: "main" as const,  publicKeyHex: PUBLIC_KEY, label: "Primary", capabilities: ["p2pkh"], createdAt: "2026-09-08T00:00:00.000Z" })),
+
     subscribe: () => () => undefined,
   };
   const host = createPluginHost({
@@ -152,7 +153,7 @@ describe("LockedShell uninitialized mode", () => {
   });
 
   it("creates the wallet through one atomic initialize plan", async () => {
-    const initialize = vi.fn(async (plan: WalletInitializePlan) => ({
+    const initialize = vi.fn(async (plan: WalletInitializePlan) => ({bsvNetwork: "main" as const,
       publicKeyHex: PUBLIC_KEY,
       label: "我的钱包",
       capabilities: ["p2pkh"],
@@ -170,7 +171,7 @@ describe("LockedShell uninitialized mode", () => {
     const plan = initialize.mock.calls[0]![0] as unknown as Record<string, unknown>;
     expect(plan).toMatchObject({
       transactionId: expect.any(String),
-      firstKey: { kind: "generate", label: "My Wallet", capabilities: ["p2pkh"], password: "wallet-password-1" },
+      firstKey: {bsvNetwork: "main" as const,  kind: "generate", label: "My Wallet", capabilities: ["p2pkh"], password: "wallet-password-1" },
     });
     expect(plan.bucketLabel).toBeUndefined();
     expect(plan.backend).toBeUndefined();

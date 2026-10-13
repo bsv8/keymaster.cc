@@ -12,6 +12,7 @@
 import type {
   ActiveKeyCrypto,
   BsvNetwork,
+  ForumAttachmentContent,
   ForumBudgetConfirmation,
   ForumConfig,
   ForumBroadcastState,
@@ -22,6 +23,7 @@ import type {
   ForumListPage,
   ForumListRequest,
   ForumNodeDetail,
+  ForumPublicationReachability,
   ForumPublishPrepareInput,
   ForumPublishPhase,
   ForumPublishTask,
@@ -61,12 +63,18 @@ import {
 import { createForumIndexClient, ForumBusinessError, ForumResultShapeError } from "./indexClient.js";
 import { ForumListStore } from "./listStore.js";
 import { ForumTrustError, rootEvidenceIsUsable, verifyForumRoot } from "./rootTrust.js";
-import { createForumRepository, type ForumRepository, type ForumIndexCacheEntry } from "../storage/forumRepository.js";
+import type { ForumSelfOutputService } from "./forumSelfOutputs.js";
+import {
+  createForumRepository,
+  type ForumDispatchLeaseHandle,
+  type ForumIndexCacheEntry,
+  type ForumRepository,
+} from "../storage/forumRepository.js";
 import {
   buildFeeBreakdown,
   buildForumProtocolOutputs,
+  estimateMinerFeeBudget,
   ForumProtocolError,
-  planForumFunding,
   reconcileMinerFee,
   totalFeeSatoshis,
   verifyChangeTipQuote,
@@ -74,6 +82,7 @@ import {
   verifyReplyQuote,
   type ForumQuoteFields,
 } from "../publish/forumProtocol.js";
+import { FORUM_FEE_RATE_SATOSHIS_PER_KB } from "./forumFundingSource.js";
 import {
   createForumRoundtripClient,
   createHttpsTransport,
@@ -90,6 +99,10 @@ export const FORUM_MAX_MARKDOWN_BYTES = FORUM_MARKDOWN_MAX_BYTES;
 
 export interface ForumServiceDeps {
   repository: ForumRepository;
+  /** Provider scope cancellation, independent of the caller Window. */
+  signal?: AbortSignal;
+  /** Instance-owned funding source; Worker never uses the legacy Window singleton. */
+  fundingSource?(): ForumFundingSource | undefined;
   content: MsFileContentService;
   /** 当前 owner 的受控签名能力；私钥不进入本模块。 */
   activeCrypto(): Promise<ActiveKeyCrypto>;
@@ -120,6 +133,8 @@ export interface ForumServiceDeps {
    * 来源都不替代身份，配置的论坛公钥才是信任锚。
    */
   fetchRootRaw(input: { readonly network: BsvNetwork; readonly txid: string }, options?: { signal?: AbortSignal }): Promise<Uint8Array>;
+  /** 自有输出服务（FT05：识别 / 保护 / 归集）。缺席时这三项明确不可用。 */
+  selfOutputs?(): ForumSelfOutputService | undefined;
   /** 当前会话世代；锁定/切 Key/Scope 撤销后变化，迟到结果据此丢弃。 */
   sessionEpoch(): string;
   now?(): number;
@@ -146,8 +161,9 @@ const PHASE_TRANSITIONS: Readonly<Record<ForumPublishPhase, readonly ForumPublis
   signed: ["quoted"],
   quoted: ["budget-confirmed"],
   "budget-confirmed": ["funding-prepared", "reconciling"],
-  "funding-prepared": ["quote-rechecked", "raw-prepared"],
-  "quote-rechecked": ["raw-prepared"],
+  // 资金准备与报价复核之间允许回到费用确认：报价变了就重新确认，而不是照旧发。
+  "funding-prepared": ["quote-rechecked", "raw-prepared", "budget-confirmed"],
+  "quote-rechecked": ["raw-prepared", "budget-confirmed"],
   // raw-prepared 之后可以先记 broadcast-dispatched，也可以直接进入对账或等待索引：
   // 派发与首次观测在同一次调用里完成，中间态不一定被单独持久化。
   "raw-prepared": ["broadcast-dispatched", "reconciling", "awaiting-index", "failed"],
@@ -155,7 +171,7 @@ const PHASE_TRANSITIONS: Readonly<Record<ForumPublishPhase, readonly ForumPublis
   reconciling: ["awaiting-index", "indexed-mempool", "indexed-confirmed", "reconciling", "failed"],
   "awaiting-index": ["indexed-mempool", "indexed-confirmed", "reconciling"],
   "indexed-mempool": ["indexed-confirmed", "reconciling"],
-  "indexed-confirmed": ["reconciling"],
+  "indexed-confirmed": [],
   failed: ["draft", "reconciling"],
 });
 
@@ -178,6 +194,96 @@ function assertPhaseAdvance(from: ForumPublishPhase, to: ForumPublishPhase): voi
   if (!canAdvancePublishPhase(from, to)) throw new ForumPublishTransitionError(from, to);
 }
 
+/** 已经构造过协议交易的阶段：资金可能被在途交易花费，一律不可回收。 */
+const POST_PROTOCOL_TX_PHASES: readonly ForumPublishPhase[] = Object.freeze([
+  "raw-prepared", "broadcast-dispatched", "reconciling", "awaiting-index", "indexed-mempool", "indexed-confirmed",
+]);
+
+/** 派发前的三个阶段，按发生顺序排列。 */
+type DispatchPreparedPhase = "funding-prepared" | "quote-rechecked" | "raw-prepared";
+
+/**
+ * 租约不可用时各路径自己的处理结果。
+ *
+ * `unavailable` 表示别的标签页正在处理这笔任务：**没有做任何写入**。
+ * 该做什么由调用方决定——发布可以对账，取消必须拒绝，回收必须拒绝。
+ */
+export type DispatchLeaseOutcome<T> =
+  | { readonly kind: "ran"; readonly value: T }
+  | { readonly kind: "unavailable"; readonly leaseHolderId?: string };
+
+/**
+ * 派发期间可用的持有权上下文。
+ *
+ * 它只暴露三件事：核对持有权、带令牌写任务、以及租约本身。执行流程不能绕过它们
+ * 直接调 `writeTask`，否则栅栏令牌就形同虚设。
+ */
+interface DispatchLeaseContext {
+  readonly lease: ForumDispatchLeaseHandle;
+  /** 不可逆动作前调用；租约被接管或过期时抛错。 */
+  assertHeld(): Promise<void>;
+  /** 带栅栏令牌写任务。 */
+  writeTask(task: ForumPublishTask): Promise<void>;
+}
+
+/**
+ * 派发租约的有效期。
+ *
+ * 取得租约到构造、验签、派发与首次对账通常在几秒内，因此给一分钟余量；上限的
+ * 作用是「上一个标签页崩了以后任务仍可被接管」，不是限制正常流程的时长。
+ */
+const FORUM_DISPATCH_LEASE_TTL_MS = 60_000;
+
+const DISPATCH_PREPARED_PHASES: readonly DispatchPreparedPhase[] = Object.freeze([
+  "funding-prepared",
+  "quote-rechecked",
+  "raw-prepared",
+]);
+
+/** 阶段在派发前序列中的位置；不在序列里返回 -1。 */
+function dispatchPreparedIndex(phase: ForumPublishPhase): number {
+  return DISPATCH_PREPARED_PHASES.indexOf(phase as DispatchPreparedPhase);
+}
+
+/** 固定 1 sat 数据输出的金额；位置固定，所以金额恒定。 */
+const FORUM_DATA_OUTPUT_SATOSHIS = 1n;
+
+/**
+ * 按报价算出固定输出的**金额序列**。
+ *
+ * 只在这里算一次金额，`confirmBudget`、`buildAndSubmit` 的资金额度与最终 raw 复核
+ * 都取自同一个函数，避免「确认的额度」和「实际构造的布局」各算各的。
+ * 索引费为零仍保留 vout 0：位置是协议的一部分，不因金额为零而消失。
+ */
+export function fixedOutputValues(kind: "reply" | "changetip", quote: ForumQuoteSnapshot): readonly bigint[] {
+  const indexPrice = forumAmountToBigInt(quote.indexPrice) ?? 0n;
+  const values: bigint[] = [indexPrice, FORUM_DATA_OUTPUT_SATOSHIS];
+  if (kind === "reply") {
+    // 父价为零时省略 vout 2：不生成零值打赏输出。
+    const parentTipPrice = forumAmountToBigInt(quote.parentTipPrice ?? "0") ?? 0n;
+    if (parentTipPrice > 0n) values.push(parentTipPrice);
+  }
+  return values;
+}
+
+/**
+ * 复核后的报价是否改变了已确认的费用。
+ *
+ * 只比较进入交易输出的两项：索引费与父作者金额。`last_block_height` 与 `indexSig`
+ * 一定随每次报价变化，它们是承诺本身而不是费用，不构成「费用变化」。
+ */
+export function quoteDiffersFromBudget(
+  budget: ForumBudgetConfirmation | undefined,
+  quote: ForumQuoteSnapshot,
+  kind: "reply" | "changetip",
+): boolean {
+  if (budget === undefined) return true;
+  const confirmedIndex = findingOf(budget, "index-price");
+  const confirmedTip = findingOf(budget, "parent-author-tip") ?? "0";
+  const expectedTip = kind === "reply" ? quote.parentTipPrice ?? "0" : "0";
+  return confirmedIndex !== quote.indexPrice || confirmedTip !== expectedTip;
+}
+
 export function createForumService(deps: ForumServiceDeps): ForumService {
   const now = deps.now ?? Date.now;
   const randomId = deps.randomId ?? defaultRandomId;
@@ -187,10 +293,28 @@ export function createForumService(deps: ForumServiceDeps): ForumService {
    *
    * 这是「多页不重复发布」的落点：所有会推进任务阶段的入口都在同一把锁里重新读取
    * 任务，因此第二个页面看到的一定是第一个页面已经写入的阶段与 submissionId，
-   * 从而落到对账而不是重新构造。锁只在进程内——同一浏览器多个标签页各自持有
-   * 一个 Window 实例，跨标签的互斥仍然要靠持久 submission 对账兜底。
+   * 从而落到对账而不是重新构造。同一 owner-session Worker 的所有窗口共享此锁；
+   * 持久租约和 submission 证据继续负责中断恢复。
    */
+  deps.signal?.addEventListener("abort", () => {
+    for (const connection of connections.values()) { connection.client.dispose(); void connection.transport.dispose().catch(() => undefined); }
+    connections.clear();
+  }, { once: true });
   const taskLocks = new Map<string, Promise<unknown>>();
+  /**
+   * 当前页面实例的稳定标识。
+   *
+   * 挂在 Window 全局上而不是 Map 上：同一页面重入必须拿到同一个 id（否则自己会
+   * 把自己的租约当成别人的），而同一浏览器的不同标签页各有各的全局。
+   */
+  const holderId = (): string => {
+    const scope = globalThis as { __forumDispatchHolderId?: string };
+    if (typeof scope.__forumDispatchHolderId === "string" && scope.__forumDispatchHolderId.length > 0) {
+      return scope.__forumDispatchHolderId;
+    }
+    scope.__forumDispatchHolderId = randomId();
+    return scope.__forumDispatchHolderId;
+  };
   const listStores = new Map<string, ForumListStore>();
 
   /** 会话 fence：锁定、切 Key 或 Scope 撤销后，迟到结果不得写入。 */
@@ -258,9 +382,13 @@ export function createForumService(deps: ForumServiceDeps): ForumService {
             endpoint,
             forumPublicKeyHex: config.forumPublicKeyHex.toLowerCase(),
           });
+    const scopedTransport: ForumTransport = {
+      ...transport,
+      exchange: (bytes, signal) => transport.exchange(bytes, deps.signal ? AbortSignal.any([deps.signal, signal]) : signal),
+    };
     const client = createForumRoundtripClient({
       signer,
-      transport,
+      transport: scopedTransport,
       forumPublicKeyHex: config.forumPublicKeyHex.toLowerCase(),
       callerPublicKeyHex: ownerPublicKeyHex,
     });
@@ -343,7 +471,13 @@ export function createForumService(deps: ForumServiceDeps): ForumService {
         index.assertFresh();
         const page = await loadPage(index.client, input, cursor, snapshotHeight, signal);
         // 缓存标注离线/旧快照，不能作为当前报价与付款的真值。
-        await persistCache(config, input, page).catch(() => undefined);
+        //
+        // 写失败不能静默：缓存写不进去（路径不接受 64 位 hash、记录损坏、存储不可用）
+        // 会让离线阅读悄悄失效，而页面上看不出任何症状。因此记一笔诊断日志，让它
+        // 可被追查；读取路径仍然 fail closed（拿不到缓存就是没有缓存）。
+        await persistCache(config, input, page).catch((error: unknown) => {
+          console.warn("[forum] index cache write failed", input.operation, input.parentTxid, error);
+        });
         return page;
       },
     );
@@ -364,6 +498,9 @@ export function createForumService(deps: ForumServiceDeps): ForumService {
    */
   const reconcileTask = async (taskId: string, options?: { signal?: AbortSignal }): Promise<ForumPublishTask> => {
     const task = await requireTask(taskId);
+    // B 已由论坛按真实区块位置确认，是终态；停止重复查询，不能因暂时的
+    // 网络失败或滞后的 A 响应把它降级。A 则继续对账，允许超时后再入块。
+    if (task.phase === "indexed-confirmed") return task;
     if (task.txid === undefined || task.submissionId === undefined) {
       // 没有 txid 或提交编号说明还没有派发证据；此时只允许走 cancelUndispatched。
       return task;
@@ -441,6 +578,269 @@ export function createForumService(deps: ForumServiceDeps): ForumService {
     return next;
   };
 
+  /**
+   * 请求报价并独立验证 indexSig。
+   *
+   * 首次报价与资金准备后的复核走同一条路：请求参数完全相同，验证方式也相同——
+   * 都用**将要上链的输出**重建 indexSig，而不是相信响应里的字段。
+   */
+  const requestQuote = async (
+    task: ForumPublishTask,
+    parent: ForumNodeDetail,
+    options?: { signal?: AbortSignal },
+  ): Promise<ForumQuoteSnapshot> => {
+    if (task.operatorSigHex === undefined) throw new ForumProtocolError("no-operator-sig", "任务还没有 operatorSig");
+    const config = await requireConfig(task.forumConfigId);
+    const { ownerPublicKeyHex, epoch } = await signingPort();
+    if (ownerPublicKeyHex !== task.ownerPublicKeyHex) {
+      throw new ForumIdentityError(`任务属于 ${task.ownerPublicKeyHex.slice(0, 16)}…，当前身份是 ${ownerPublicKeyHex.slice(0, 16)}…`);
+    }
+    const connection = await connectionFor(config);
+    const op = task.kind === "reply" ? "quote_reply" : "quote_changetip";
+    const args: Record<string, string> =
+      task.kind === "reply"
+        ? {
+            kind: "bsv8.reply.1",
+            parent_txid: parent.txid,
+            parent_publickey: parent.authorPublicKeyHex,
+            reply_masterseedhash: task.replyMasterSeedHash as string,
+            tip_price: task.tipPrice,
+            operatorSig: task.operatorSigHex,
+          }
+        : {
+            kind: "bsv8.changetip.1",
+            parent_txid: parent.txid,
+            tip_price: task.tipPrice,
+            operatorSig: task.operatorSigHex,
+          };
+    const outcome = await connection.client.call({ op, args }, options?.signal);
+    assertFresh(epoch, ownerPublicKeyHex);
+    if (!outcome.ok) {
+      throw new ForumBusinessError(outcome.error.code, outcome.error.message);
+    }
+    const quote = parseQuote(outcome.result, task.kind);
+    if (task.kind === "reply") {
+      verifyReplyQuote({
+        forumPublicKeyHex: task.forumPublicKeyHex,
+        parentTxid: parent.txid,
+        parentPublicKeyHex: parent.authorPublicKeyHex,
+        replyMasterSeedHash: task.replyMasterSeedHash as string,
+        tipPrice: task.tipPrice,
+        operatorSigHex: task.operatorSigHex,
+        clientPublicKeyHex: ownerPublicKeyHex,
+        quote,
+      });
+    } else {
+      verifyChangeTipQuote({
+        forumPublicKeyHex: task.forumPublicKeyHex,
+        parentTxid: parent.txid,
+        tipPrice: task.tipPrice,
+        operatorSigHex: task.operatorSigHex,
+        clientPublicKeyHex: ownerPublicKeyHex,
+        quote,
+      });
+    }
+    return quote;
+  };
+
+  /**
+   * 落盘派发前的三个阶段之一。
+   *
+   * 已推进到更后面的阶段时不回退：崩溃恢复重跑同一段流程必须幂等，否则第二次
+   * 运行会自己和自己冲突。真正要往回走的是费用变化，那由 `rollbackToBudget` 明确表达。
+   */
+  const persistDispatchPhase = async (
+    task: ForumPublishTask,
+    phase: DispatchPreparedPhase,
+    lease: DispatchLeaseContext,
+    next: ForumPublishTask,
+  ): Promise<ForumPublishTask> => {
+    const reached = dispatchPreparedIndex(task.phase);
+    const target = reached >= dispatchPreparedIndex(phase) ? task.phase : phase;
+    if (reached < dispatchPreparedIndex(phase)) assertPhaseAdvance(task.phase, phase);
+    const saved: ForumPublishTask = { ...next, phase: target, updatedAtMs: now() };
+    // 走租约上下文写入：租约已被接管时，令牌落后会让这一次写入直接失败，
+    // 从而不会把接管方的进展覆盖成旧持有者的过期状态。
+    await lease.writeTask(saved);
+    return saved;
+  };
+
+  /**
+   * 冻结正文到 MSFile。
+   *
+   * 冻结即归一化：统一 LF、去掉 BOM。发布后原始字节不再改动，因此规范化只在这里
+   * 做一次，后续都按 hash 引用。
+   */
+  const freezeOnly = async (
+    markdown: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<{ seedHashHex: string; bytes: string }> => {
+    const bytes = normalizeForumMarkdownForPublish(markdown);
+    if (bytes.byteLength > FORUM_MAX_MARKDOWN_BYTES) {
+      throw new ForumProtocolError("markdown-oversize", `正文 ${bytes.byteLength} 字节超过 ${FORUM_MAX_MARKDOWN_BYTES} 字节上限`);
+    }
+    const imported = await deps.content.importContent({
+      bytes,
+      fileName: "post.md",
+      mediaType: "text/markdown; charset=utf-8",
+      ...(options?.signal ? { signal: options.signal } : {}),
+    });
+    return { seedHashHex: imported.seedHashHex, bytes: imported.byteLength };
+  };
+
+  /**
+   * 读发布可达性证据。
+   *
+   * 查询失败按「不可达」处理而不是当作可达：这里唯一的可选答案是「读者能不能取到」，
+   * 拿不到证据时不能显示成能。
+   */
+  const reachabilityOf = async (
+    configId: string,
+    seedHashHex: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<ForumPublicationReachability> => {
+    void configId;
+    try {
+      const evidence = await deps.content.publicationReachability(seedHashHex, options);
+      return {
+        seedHashHex,
+        reachable: evidence.published,
+        sourceIds: evidence.sourceIds,
+        detail: evidence.detail,
+        observedAtMs: now(),
+      };
+    } catch {
+      return {
+        seedHashHex,
+        reachable: false,
+        sourceIds: [],
+        detail: "无法取得发布可达性证据；不据此声称正文已可被读者获取",
+        observedAtMs: now(),
+      };
+    }
+  };
+
+  /**
+   * 费用或父状态变化后回到费用确认。
+   *
+   * 已经花出去的专用资金保留原记录（它仍然受保护），但预算必须由用户重新确认：
+   * 费用变化意味着「用户点头同意的数字」不再等于实际要付的数字。
+   */
+  const rollbackToBudget = async (task: ForumPublishTask, reason: string): Promise<ForumPublishTask> => {
+    assertPhaseAdvance(task.phase, "budget-confirmed");
+    const rolled: ForumPublishTask = {
+      ...task,
+      budget: undefined,
+      phase: "budget-confirmed",
+      failureCode: "quote-changed",
+      updatedAtMs: now(),
+    };
+    await deps.repository.writeTask(rolled);
+    throw new ForumProtocolError("quote-changed", reason);
+  };
+
+  /**
+   * 派发前的跨标签页仲裁。
+   *
+   * 顺序是「先拿租约，再重读任务，再动钱」：
+   *
+   *   1. 取得租约。失败说明另一个标签页在处理，直接落到对账。
+   *   2. **重新读取任务**。拿租约之前读到的阶段可能已经过期——另一个页面可能
+   *      已经提交并释放了租约。只用锁外的旧 task 会按过期状态重新构造一遍。
+   *   3. 执行期间持续续租，并在每个不可逆动作前核对持有权。慢请求或页面被
+   *      暂停超过 TTL 后，`assertHeld` 会失败并阻止后续动作。
+   *   4. 阶段推进带栅栏令牌写入：租约被接管后，旧持有者的写入一定失败。
+   *
+   * 这仍然不是 Worker 级仲裁（签名与状态转换跑在 Window），但跨标签页的
+   * 重复资金准备与重复派发在这里被挡住，且失效路径是 fail closed 的。
+   */
+  const withDispatchLease = async <T>(
+    stale: ForumPublishTask,
+    run: (lease: DispatchLeaseContext, current: ForumPublishTask) => Promise<T>,
+  ): Promise<DispatchLeaseOutcome<T>> => {
+    const holder = holderId();
+    const lease = await deps.repository.acquireDispatchLease(
+      {
+        taskId: stale.taskId,
+        holderId: holder,
+        ownerPublicKeyHex: stale.ownerPublicKeyHex,
+        acquiredAtMs: now(),
+      },
+      FORUM_DISPATCH_LEASE_TTL_MS,
+    );
+    // 拿不到租约只报告「有人在处理」，**不做任何写入、也不代替调用方决定业务语义**：
+    // 发布可以对账原提交，取消必须拒绝，回收必须拒绝。把这段业务判断塞进辅助函数
+    // 会让「取消」被悄悄改写成「对账」——那正是预签名取消被绕过的原因。
+    if (lease === undefined) {
+      return { kind: "unavailable" };
+    }
+    const renewTimer = startLeaseRenewal(lease, holder);
+    try {
+      // 拿到租约后重读：此刻的阶段才是真的当前状态。
+      const current = await requireTask(stale.taskId);
+      const context: DispatchLeaseContext = {
+        lease,
+        /** 不可逆动作前的持有权核对；续租失败也算失去租约。 */
+        assertHeld: async () => {
+          await lease.assertHeld();
+        },
+        /** 带栅栏令牌写任务；令牌落后时仓储直接拒绝。 */
+        writeTask: (task) => deps.repository.writeTask(task, { fencingToken: lease.lease.fencingToken }),
+      };
+      return { kind: "ran", value: await run(context, current) };
+    } finally {
+      renewTimer.stop();
+      await lease.release();
+    }
+  };
+
+  /**
+   * 发布路径的租约封装。
+   *
+   * 发布是唯一允许在拿不到租约时退化为「只对账」的动作：那里已经有原提交，
+   * 对账不会花第二次钱。取消与回收没有这个性质，因此它们各自处理不可用分支。
+   */
+  const withDispatchLeaseForPublish = async <T extends ForumPublishTask>(
+    stale: ForumPublishTask,
+    run: (lease: DispatchLeaseContext, current: ForumPublishTask) => Promise<T>,
+  ): Promise<T> => {
+    const outcome = await withDispatchLease(stale, run);
+    if (outcome.kind === "ran") return outcome.value;
+    if (stale.submissionId !== undefined && stale.txid !== undefined) {
+      return (await reconcileTask(stale.taskId)) as T;
+    }
+    throw new ForumProtocolError(
+      "dispatch-leased",
+      `发布任务 ${stale.taskId} 正由另一个页面处理，本次不做资金准备或派发`,
+    );
+  };
+
+  /**
+   * 定期续租。
+   *
+   * 不续租的话，一次慢的报价或签名就会让租约过期并被接管，旧持有者随后还能
+   * 继续构造——那是「互斥看起来成立、实际不成立」的典型。续租失败立即停：
+   * 此时租约已经不是自己的了。
+   */
+  const startLeaseRenewal = (lease: ForumDispatchLeaseHandle, holder: string): { stop(): void } => {
+    const timer = setInterval(() => {
+      void (async () => {
+        const renewed = await lease.renew(lease.lease).catch(() => undefined);
+        if (renewed === undefined) {
+          // 失去租约：停止续租，后续 assertHeld 会阻止所有不可逆动作。
+          clearInterval(timer);
+          return;
+        }
+        lease.lease = renewed;
+      })();
+    }, Math.max(1_000, Math.floor(FORUM_DISPATCH_LEASE_TTL_MS / 3)));
+    return {
+      stop() {
+        clearInterval(timer);
+        void holder;
+      },
+    };
+  };
   return {
     async listConfigs(): Promise<readonly ForumConfig[]> {
       const ids = await deps.repository.listConfigIds();
@@ -522,6 +922,55 @@ export function createForumService(deps: ForumServiceDeps): ForumService {
     },
 
     /**
+     * 读取已验证附件的字节。
+     *
+     * 读取链路是「先本地附件，再按需远程」：
+     *
+     *   1. **先**用附件入口试本地：`openVerifiedAttachment` 不套 Markdown 的 1 MiB
+     *      上限，所以本地的大附件在这里就能读到。走正文 `ensureContent` 会先被正文
+     *      限额拦住，附件入口等于永远到不了。
+     *   2. 本地没有时，`ensureContent` 才负责调度获取（含远程），此时才允许付费：
+     *      这是用户明确点开附件的动作，与列表浏览的「不得自动购买」规则不冲突。
+     *
+     * 拿不到就返回 undefined，界面据此显示「未获取」，而不是展示一个空图片框并声称
+     * 附件已就绪。
+     */
+    async readAttachmentContent(configId, seedHashHex, options): Promise<ForumAttachmentContent | undefined> {
+      void configId;
+      const local = await deps.content.openVerifiedAttachment(seedHashHex, options);
+      if (local !== undefined) {
+        return {
+          seedHashHex: local.seedHashHex,
+          bytes: local.bytes,
+          byteLength: local.byteLength,
+          ...(local.mediaType === undefined ? {} : { mediaType: local.mediaType }),
+          ...(local.fileName === undefined ? {} : { fileName: local.fileName }),
+        };
+      }
+      // 本地没有：交给 MSFile 调度远程获取。用户点开附件是明确的获取授权，
+      // 价格上限仍由 MSFile 的既有买方设置约束，Forum 不自己决定付多少。
+      //
+      // `asAttachment` 不可省：默认的正文 1 MiB 限额会在下载完成后把一份完整落盘的
+      // 2 MiB 图片判成 too-large，于是下面的附件读取永远拿不到它。
+      const ensured = await deps.content.ensureContent({
+        seedHashHex,
+        allowPurchase: true,
+        asAttachment: true,
+        ...(options?.signal ? { signal: options.signal } : {}),
+      });
+      if (ensured.state !== "verified") return undefined;
+      const fetched = await deps.content.openVerifiedAttachment(seedHashHex, options);
+      if (fetched === undefined) return undefined;
+      return {
+        seedHashHex: fetched.seedHashHex,
+        bytes: fetched.bytes,
+        byteLength: fetched.byteLength,
+        ...(fetched.mediaType === undefined ? {} : { mediaType: fetched.mediaType }),
+        ...(fetched.fileName === undefined ? {} : { fileName: fetched.fileName }),
+      };
+    },
+
+    /**
      * 用户明确「阅读」时调用：先请求 MSFile 获取，再读已验证正文。
      *
      * 这是唯一允许为正文付费的入口；列表浏览与展开回复只走 `readContent` 的
@@ -542,20 +991,27 @@ export function createForumService(deps: ForumServiceDeps): ForumService {
       return readVerifiedReading(deps.content, seedHashHex, options);
     },
 
-    async freezeContent(configId, markdown, options): Promise<{ seedHashHex: string; bytes: string }> {
+async freezeContent(configId, markdown, options): Promise<{ seedHashHex: string; bytes: string }> {
+      const { seedHashHex, bytes } = await freezeOnly(markdown, options);
       void configId;
-      // 冻结即归一化：统一 LF、去掉 BOM。发布后原始字节不再改动。
-      const bytes = normalizeForumMarkdownForPublish(markdown);
-      if (bytes.byteLength > FORUM_MARKDOWN_MAX_BYTES) {
-        throw new ForumProtocolError("markdown-oversize", `正文 ${bytes.byteLength} 字节超过 ${FORUM_MARKDOWN_MAX_BYTES} 字节上限`);
-      }
-      const imported = await deps.content.importContent({
-        bytes,
-        fileName: "post.md",
-        mediaType: "text/markdown; charset=utf-8",
-        ...(options?.signal ? { signal: options.signal } : {}),
-      });
-      return { seedHashHex: imported.seedHashHex, bytes: imported.byteLength };
+      return { seedHashHex, bytes };
+    },
+
+    /**
+     * 冻结正文并记录发布可达性。
+     *
+     * 两条事实分开：正文冻结进 MSFile 是链上发布的前提；读者能否取得那份内容是
+     * 发布渠道的事。渠道缺失**不阻止**冻结（链上 data 输出照样指向这个 seed hash），
+     * 但可达性必须被记录下来，否则界面只能显示「已发布」，而读者根本取不到。
+     */
+    async preparePublishContent(configId, markdown, options): Promise<{ seedHashHex: string; bytes: string; publication: ForumPublicationReachability }> {
+      const { seedHashHex, bytes } = await freezeOnly(markdown, options);
+      const publication = await reachabilityOf(configId, seedHashHex, options);
+      return { seedHashHex, bytes, publication };
+    },
+
+    async publicationReachability(configId, seedHashHex, options): Promise<ForumPublicationReachability> {
+      return reachabilityOf(configId, seedHashHex, options);
     },
 
     async preparePublish(input: ForumPublishPrepareInput): Promise<ForumPublishTask> {
@@ -613,7 +1069,6 @@ export function createForumService(deps: ForumServiceDeps): ForumService {
         // 另一个页面已经把任务推进到派发之后：不再重新报价。
         return reconcileTask(taskId, options);
       }
-      const config = await requireConfig(task.forumConfigId);
       const { port, ownerPublicKeyHex, epoch } = await signingPort();
       if (ownerPublicKeyHex !== task.ownerPublicKeyHex) {
         // 恢复时不把旧授权句柄当成当前身份的授权。
@@ -626,68 +1081,24 @@ export function createForumService(deps: ForumServiceDeps): ForumService {
         replyMasterSeedHash: task.replyMasterSeedHash ?? undefined,
         tipPrice: task.tipPrice,
       });
-      const updated: ForumPublishTask = {
+      const signed: ForumPublishTask = {
         ...task,
         operatorSigHex: bytesToHex(operatorSig),
         phase: "signed",
         updatedAtMs: now(),
       };
-      await deps.repository.writeTask(updated);
-
-      const connection = await connectionFor(config);
-      const op = task.kind === "reply" ? "quote_reply" : "quote_changetip";
-      const args: Record<string, string> =
-        task.kind === "reply"
-          ? {
-              kind: "bsv8.reply.1",
-              parent_txid: parent.txid,
-              parent_publickey: parent.authorPublicKeyHex,
-              reply_masterseedhash: updated.replyMasterSeedHash as string,
-              tip_price: task.tipPrice,
-              operatorSig: updated.operatorSigHex as string,
-            }
-          : {
-              kind: "bsv8.changetip.1",
-              parent_txid: parent.txid,
-              tip_price: task.tipPrice,
-              operatorSig: updated.operatorSigHex as string,
-            };
-      const outcome = await connection.client.call({ op, args }, options?.signal);
-      assertFresh(epoch, ownerPublicKeyHex);
-      if (!outcome.ok) {
-        throw new ForumBusinessError(outcome.error.code, outcome.error.message);
-      }
-      const quote = parseQuote(outcome.result, task.kind);
-      // 广播前复核：客户端自己用将要上链的输出重建并验证 indexSig。
-      if (task.kind === "reply") {
-        verifyReplyQuote({
-          forumPublicKeyHex: task.forumPublicKeyHex,
-          parentTxid: parent.txid,
-          parentPublicKeyHex: parent.authorPublicKeyHex,
-          replyMasterSeedHash: updated.replyMasterSeedHash as string,
-          tipPrice: task.tipPrice,
-          operatorSigHex: updated.operatorSigHex as string,
-          clientPublicKeyHex: ownerPublicKeyHex,
-          quote,
-        });
-      } else {
-        verifyChangeTipQuote({
-          forumPublicKeyHex: task.forumPublicKeyHex,
-          parentTxid: parent.txid,
-          tipPrice: task.tipPrice,
-          operatorSigHex: updated.operatorSigHex as string,
-          clientPublicKeyHex: ownerPublicKeyHex,
-          quote,
-        });
-      }
-      assertPhaseAdvance(updated.phase, "quoted");
-      const quoted: ForumPublishTask = { ...updated, quote, phase: "quoted", updatedAtMs: now() };
+      assertPhaseAdvance(task.phase, "signed");
+      await deps.repository.writeTask(signed);
+      // 签名先落盘再报价：报价请求失败时仍然留着 operatorSig，恢复不必重签。
+      const quote = await requestQuote(signed, parent, options);
+      assertPhaseAdvance("signed", "quoted");
+      const quoted: ForumPublishTask = { ...signed, quote, phase: "quoted", updatedAtMs: now() };
       await deps.repository.writeTask(quoted);
       return quoted;
       });
     },
 
-    async confirmBudget(taskId: string): Promise<ForumBudgetConfirmation> {
+    async confirmBudget(taskId: string, options?: { signal?: AbortSignal }): Promise<ForumBudgetConfirmation> {
       return withTaskLock(taskId, async (task) => {
       if (task.submissionId !== undefined) {
         // 已经派发：费用确认不再有意义，避免界面把预算改到一笔已广播的交易上。
@@ -695,14 +1106,29 @@ export function createForumService(deps: ForumServiceDeps): ForumService {
       }
       const quote = task.quote;
       if (quote === undefined) throw new ForumProtocolError("no-quote", "任务还没有报价");
-      const funding = task.funding;
-      const minerFee = estimateProtocolMinerFee(task, funding);
+      const sources = (deps.fundingSource ?? fundingSources)?.();
+      if (sources === undefined) throw new ForumProtocolError("funding-unavailable", "没有可用的资金来源，无法计算费用");
+      // 两笔交易的费用都按当前报价算：协议矿工费预算由固定输出数决定，
+      // 资金准备矿工费由 P2PKH 的同源估算给出。首次确认时预算还不存在，
+      // 因此绝不能从 budget 里读矿工费——那会得到 0。
+      const fixedOutputs = fixedOutputValues(task.kind, quote);
+      const minerFeeBudgetSatoshis = estimateMinerFeeBudget({
+        inputCount: 1,
+        outputCount: fixedOutputs.length,
+        feeRateSatoshisPerKb: FORUM_FEE_RATE_SATOSHIS_PER_KB,
+      });
+      const plan = await sources.planDedicatedFunding({
+        network: task.network,
+        fixedOutputsSatoshis: fixedOutputs.reduce((total, value) => total + value, 0n),
+        protocolMinerFeeBudgetSatoshis: minerFeeBudgetSatoshis,
+        feeRateSatoshisPerKb: FORUM_FEE_RATE_SATOSHIS_PER_KB,
+      });
       const items: ForumFeeBreakdownItem[] = buildFeeBreakdown({
         kind: task.kind,
         indexPrice: quote.indexPrice,
         ...(quote.parentTipPrice === undefined ? {} : { parentTipPrice: quote.parentTipPrice }),
-        protocolMinerFee: minerFee.toString(),
-        ...(funding === undefined ? {} : { fundingMinerFee: "0" }),
+        fundingMinerFee: plan.fundingMinerFeeSatoshis.toString(),
+        protocolMinerFee: minerFeeBudgetSatoshis.toString(),
       });
       const budget: ForumBudgetConfirmation = {
         version: (task.budget?.version ?? 0) + 1,
@@ -710,58 +1136,102 @@ export function createForumService(deps: ForumServiceDeps): ForumService {
         totalSatoshis: totalFeeSatoshis(items),
         confirmedAtMs: now(),
       };
+      // 报价变化后回到费用确认是合法路径，不算阶段回退。
       assertPhaseAdvance(task.phase, "budget-confirmed");
+      void options;
       await deps.repository.writeTask({ ...task, budget, phase: "budget-confirmed", updatedAtMs: now() });
       return budget;
       });
     },
 
     async buildAndSubmit(taskId: string, options): Promise<ForumPublishTask> {
-      return withTaskLock(taskId, async (task) => {
-      // 锁内重读：另一个页面可能已经派发或已经失败。
+      return withTaskLock(taskId, async (stale) => withDispatchLeaseForPublish(stale, async (lease, current) => {
+      // 注意：这里的 `task` 是**取得租约之后**重读的那一份，不是锁外读到的旧阶段。
+      const task = current;
       if (task.submissionId !== undefined) return reconcileTask(taskId, options);
       if (task.phase === "failed") {
         throw new ForumProtocolError("task-failed", "该发布任务已处于失败状态，不能重新派发");
       }
       if (task.budget === undefined) throw new ForumProtocolError("no-budget", "费用尚未确认");
       if (task.quote === undefined) throw new ForumProtocolError("no-quote", "任务还没有报价");
+      const sources = (deps.fundingSource ?? fundingSources)?.();
+      if (sources === undefined) throw new ForumProtocolError("funding-unavailable", "没有可用的资金来源，无法准备专用资金 UTXO");
       const spend = deps.protocolSpend();
       if (spend === undefined) {
         throw new ForumProtocolError("no-funding", "P2PKH 协议资金能力不可用，无法发布");
       }
+      // 用户确认的矿工费预算是协议交易唯一的费用上限。缺省或零说明没有真正确认过，
+      // 此时不能因为「恰好能构造出交易」就继续。
+      const minerFeeBudgetSatoshis = forumAmountToBigInt(findingOf(task.budget, "protocol-miner-fee") ?? "") ?? 0n;
+      if (minerFeeBudgetSatoshis <= 0n) {
+        throw new ForumProtocolError("no-fee-budget", "费用确认里没有协议矿工费预算，拒绝按未确认的额度派发");
+      }
       const parent = await getNodeFor(task.forumConfigId, task.targetTxid, options);
-      const funding = await ensureDedicatedFunding(task, options);
 
-      // 1. 先按固定输出布局构建无找零交易。
+      // 1. 按当前报价算固定输出与专用资金额度。只准备所需金额：协议交易没有找零
+      //    输出，多拆出来的部分会直接变成矿工费。
+      const quotedOutputs = fixedOutputValues(task.kind, task.quote);
+      const quotedMinerFeeBudget = estimateMinerFeeBudget({
+        inputCount: 1,
+        outputCount: quotedOutputs.length,
+        feeRateSatoshisPerKb: FORUM_FEE_RATE_SATOSHIS_PER_KB,
+      });
+      const fundingPlan = await sources.planDedicatedFunding({
+        network: task.network,
+        fixedOutputsSatoshis: quotedOutputs.reduce((total, value) => total + value, 0n),
+        protocolMinerFeeBudgetSatoshis: minerFeeBudgetSatoshis,
+        feeRateSatoshisPerKb: FORUM_FEE_RATE_SATOSHIS_PER_KB,
+      });
+      if (quotedMinerFeeBudget > minerFeeBudgetSatoshis) {
+        // 确认的预算已经不足以覆盖本次固定输出布局：回到费用确认而不是硬发。
+        return rollbackToBudget(task, "确认的矿工费预算不足以覆盖本次固定输出布局，请重新确认费用");
+      }
+      // 准备资金是不可逆动作（会广播一笔拆钱交易）：动钱之前核对持有权。
+      await lease.assertHeld();
+      const funding = await ensureDedicatedFunding(task, fundingPlan.requiredSatoshis, (deps.fundingSource ?? fundingSources)?.());
+
+      // 2. 落盘资金准备阶段：这一步已经把不可逆的钱花出去了，必须有阶段证据。
+      const prepared = await persistDispatchPhase(task, "funding-prepared", lease, {
+        ...task,
+        funding: { txid: funding.txid, vout: funding.input.vout, rawTxHex: funding.rawTxHex },
+      });
+
+      // 3. 资金准备后重新询价：费用或父状态变了就回到确认，让用户重新决定。
+      const rechecked = await requestQuote(prepared, parent, options);
+      if (quoteDiffersFromBudget(prepared.budget, rechecked, prepared.kind)) {
+        return rollbackToBudget(
+          { ...prepared, quote: rechecked },
+          "资金准备后报价已变化，请重新确认费用",
+        );
+      }
+      const recheckedOutputs = fixedOutputValues(prepared.kind, rechecked);
+      if (recheckedOutputs.length !== quotedOutputs.length) {
+        return rollbackToBudget({ ...prepared, quote: rechecked }, "资金准备后父状态变化导致输出数改变，请重新确认费用");
+      }
+      const recheckedTask = await persistDispatchPhase(prepared, "quote-rechecked", lease, { ...prepared, quote: rechecked });
+
+      // 4. 按复核后的报价构建固定输出的无找零交易。
       const outputs = buildForumProtocolOutputs({
-        kind: task.kind,
+        kind: recheckedTask.kind,
         parentTxidHex: parent.txid,
         parentPublicKeyHex: parent.authorPublicKeyHex,
-        ...(task.replyMasterSeedHash === undefined ? {} : { replyMasterSeedHashHex: task.replyMasterSeedHash }),
-        tipPrice: forumAmountToBigInt(task.tipPrice) ?? 0n,
-        operatorSig: hexToBytes(task.operatorSigHex as string),
-        lastBlockHeight: forumAmountToBigInt(task.quote.lastBlockHeight) ?? 0n,
-        indexSig: hexToBytes(task.quote.indexSigHex),
-        clientPublicKeyHex: task.ownerPublicKeyHex,
-        quote: task.quote,
-        ...(task.quote.parentTipPrice === undefined ? {} : { parentTipPriceSatoshis: forumAmountToBigInt(task.quote.parentTipPrice) ?? 0n }),
-      });
-      const fixedOutputsSatoshis = outputs.reduce((total, output) => total + output.value, 0n);
-
-      // 2. 专用资金必须覆盖固定输出 + 用户确认的矿工费预算；差额只在预算内成为矿工费。
-      const minerFeeBudgetSatoshis = forumAmountToBigInt(findingOf(task.budget, "protocol-miner-fee")) ?? 0n;
-      const plan = planForumFunding({
-        availableSatoshis: funding.availableSatoshis,
-        fixedOutputsSatoshis,
-        maxMinerFeeSatoshis: minerFeeBudgetSatoshis,
-        feeRateSatoshisPerKb: 1,
+        ...(recheckedTask.replyMasterSeedHash === undefined ? {} : { replyMasterSeedHashHex: recheckedTask.replyMasterSeedHash }),
+        tipPrice: forumAmountToBigInt(recheckedTask.tipPrice) ?? 0n,
+        operatorSig: hexToBytes(recheckedTask.operatorSigHex as string),
+        lastBlockHeight: forumAmountToBigInt(rechecked.lastBlockHeight) ?? 0n,
+        indexSig: hexToBytes(rechecked.indexSigHex),
+        clientPublicKeyHex: recheckedTask.ownerPublicKeyHex,
+        quote: rechecked,
+        ...(rechecked.parentTipPrice === undefined ? {} : { parentTipPriceSatoshis: forumAmountToBigInt(rechecked.parentTipPrice) ?? 0n }),
       });
 
-      // 3. prepare 只构造并签名，不派发；这一步结束仍未产生不可逆副作用。
-      const preview = await spend.prepare({
-        ownerPublicKeyHex: task.ownerPublicKeyHex,
+      // 5. 显式 presign 产生已授权签名和持久占用，尚未广播；后续必须对账同一提交。
+      //    受控无找零：输入超出固定输出的差额必须精确成为矿工费，且不超过
+      //    用户确认的预算。零值输出是固定位置协议输出的一部分（索引费为 0 的 vout 0）。
+      const preview = await spend.presign({
+        ownerPublicKeyHex: recheckedTask.ownerPublicKeyHex,
         requestingPluginId: "forum",
-        network: task.network,
+        network: recheckedTask.network,
         // 只花专用资金 UTXO；钱包大额余额差不会直接变成矿工费。
         inputs: [funding.input],
         outputs: outputs.map((output, index) => ({
@@ -770,15 +1240,18 @@ export function createForumService(deps: ForumServiceDeps): ForumService {
           scriptHex: bytesToHex(output.lockingScript),
           label: `forum-vout-${index}`,
         })),
-        feeRateSatoshisPerKb: 1,
-        // 不提供 changeAddress：协议交易没有找零输出。
+        feeRateSatoshisPerKb: FORUM_FEE_RATE_SATOSHIS_PER_KB,
+        noChangeRule: {
+          maxMinerFeeSatoshis: requireSafeWalletSatoshis(minerFeeBudgetSatoshis, "协议矿工费预算"),
+          allowZeroValueOutputs: true,
+        },
       });
 
-      // 4. 广播前复核：raw 自己就是证据，从它重建并验签、核对输出数与费用。
+      // 6. 广播前复核：raw 自己就是证据，从它重建并验签、核对输出数与费用。
       const rawBytes = protocolHexToBytes(preview.rawTxHex);
       verifyFinalRaw({
-        forumPublicKeyHex: task.forumPublicKeyHex,
-        kind: task.kind,
+        forumPublicKeyHex: recheckedTask.forumPublicKeyHex,
+        kind: recheckedTask.kind,
         rawTxBytes: rawBytes,
         expectedTxid: preview.txid,
       });
@@ -787,8 +1260,8 @@ export function createForumService(deps: ForumServiceDeps): ForumService {
         totalInputSatoshis: funding.availableSatoshis,
         outputs: outputs.map((output) => ({ value: output.value, lockingScript: output.lockingScript })),
         serializedSizeBytes: rawTxHexByteLength(preview.rawTxHex),
-        feeRateSatoshisPerKb: 1,
-        maxMinerFeeSatoshis: minerFeeBudgetSatoshis > 0n ? minerFeeBudgetSatoshis : plan.minerFeeBudgetSatoshis,
+        feeRateSatoshisPerKb: FORUM_FEE_RATE_SATOSHIS_PER_KB,
+        maxMinerFeeSatoshis: minerFeeBudgetSatoshis,
       });
       // prepare 报告的是 number；跨回协议金额前先确认没有越过安全整数。
       const reportedFee = BigInt(requireSafeWalletSatoshis(BigInt(preview.estimatedFeeSatoshis), "prepare 报告的矿工费"));
@@ -799,54 +1272,151 @@ export function createForumService(deps: ForumServiceDeps): ForumService {
         );
       }
 
-      // 5. 派发前把提交编号、raw 与 txid 落盘。不可逆动作之前必须有证据，
+      // 7. 派发前把提交编号、raw 与 txid 落盘。不可逆动作之前必须有证据，
       //    否则广播成功后响应丢失就会没有任何可对账的东西。
-      assertPhaseAdvance(task.phase, "raw-prepared");
-      const prepared: ForumPublishTask = {
-        ...task,
+      const rawPrepared = await persistDispatchPhase(recheckedTask, "raw-prepared", lease, {
+        ...recheckedTask,
         funding: { txid: funding.txid, vout: funding.input.vout, rawTxHex: funding.rawTxHex },
         submissionId: preview.submissionId,
         finalRawTxHex: preview.rawTxHex,
         txid: preview.txid,
         broadcastState: "not-dispatched",
-        phase: "raw-prepared",
-        updatedAtMs: now(),
-      };
-      await deps.repository.writeTask(prepared);
+      });
 
-      // 6. 才派发。
+      // 8. 才派发。派发前再核对一次持有权：构造 raw 的过程可能已经超过 TTL。
+      await lease.assertHeld();
       const result = await spend.submit(preview);
       const dispatched: ForumPublishTask = {
-        ...prepared,
+        ...rawPrepared,
         broadcastState: mapBroadcastState(result.status),
         phase: result.status === "unknown" ? "reconciling" : "awaiting-index",
         updatedAtMs: now(),
       };
       assertPhaseAdvance("raw-prepared", dispatched.phase === "reconciling" ? "reconciling" : "awaiting-index");
       await deps.repository.writeTask(dispatched);
-      // 7. 派发后立即对账原提交，让链上与索引状态有第一份观测。
+      // 9. 派发后立即对账原提交，让链上与索引状态有第一份观测。
       return reconcileTask(taskId, options);
-      });
+      }));
     },
 
     reconcile: (taskId, options) => reconcileTask(taskId, options),
 
+    listSelfOutputs: (input) => requireSelfOutputs().list(input.network, input.txids, input.signal),
+
+    async protectSelfOutputs(outputs, network) {
+      return requireSelfOutputs().protect(outputs, network);
+    },
+
+    async unprotectSelfOutputs(outputs) {
+      requireSelfOutputs().unprotect(outputs);
+    },
+
+    async sweepSelfOutputs(input) {
+      const sources = (deps.fundingSource ?? fundingSources)?.();
+      if (sources === undefined) throw new ForumProtocolError("funding-unavailable", "没有可用的资金来源，无法归集自有输出");
+      return requireSelfOutputs().sweep({
+        network: input.network,
+        outpoints: input.outpoints,
+        feeRateSatoshisPerKb: input.feeRateSatoshisPerKb ?? FORUM_FEE_RATE_SATOSHIS_PER_KB,
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+      });
+    },
+
+    /**
+     * 显式回收任务的当前专用资金。
+     *
+     * 所有可失败的判断都在**不可逆动作之前**完成，而且**锁外与租约内各做一次**：
+     * 取得租约期间任务可能被另一个标签页取消或推进，只在锁外判一次就会拿着过期的
+     * 结论去改任务状态（例如把并发的 `failed` 覆盖成 `budget-confirmed`）。
+     *
+     * 与发布、取消共用同一把派发租约，因此回收期间不会有另一条路径在动这笔任务。
+     *
+     * 回收**当前**资金必然改变任务，但怎么改取决于任务是否已被取消：
+     *   - 未取消：钱扫回钱包后这笔任务没有资金可用，必须回到 `budget-confirmed`；
+     *   - 已取消（`failed` + `cancelled`）：保持取消状态，只清资金引用——
+     *     把它改回 `budget-confirmed` 等于替用户把一个已取消的发布重新激活。
+     */
+    async recoverFunding(taskId) {
+      const sources = (deps.fundingSource ?? fundingSources)?.();
+      if (sources === undefined) throw new ForumProtocolError("funding-unavailable", "没有可用的资金来源，无法回收专用资金");
+      if (sources.recoverDedicatedFunding === undefined) {
+        throw new ForumProtocolError("funding-unavailable", "该资金来源不支持显式回收");
+      }
+      const task = await requireTask(taskId);
+      const expected = task.funding === undefined
+        ? undefined
+        : { txid: task.funding.txid, vout: task.funding.vout };
+      // 锁外先判一次：明显不可回收时不必去抢租约。
+      await assertFundingRecoverable(task, expected);
+      const outcome = await withDispatchLease(task, async (lease, reread) => {
+        // 租约内重判：等待期间任务可能已被取消或推进。
+        const current = reread;
+        const target = await assertFundingRecoverable(current, expected);
+        await lease.assertHeld();
+        const recovered = await sources.recoverDedicatedFunding!({
+          ownerPublicKeyHex: current.ownerPublicKeyHex,
+          network: current.network,
+          taskId: current.taskId,
+          feeRateSatoshisPerKb: FORUM_FEE_RATE_SATOSHIS_PER_KB,
+          // 依据：由本服务仲裁后声明这笔钱不再被任何任务引用。
+          reason: { unused: true },
+        });
+        await lease.writeTask({
+          ...current,
+          phase: target === "reactivate" ? "budget-confirmed" : current.phase,
+          failureCode: target === "reactivate" ? "funding-recovered" : current.failureCode,
+          funding: undefined,
+          budget: target === "reactivate" ? undefined : current.budget,
+          updatedAtMs: now(),
+        });
+        return { txid: recovered.txid, recoveredSatoshis: recovered.recoveredSatoshis };
+      });
+      if (outcome.kind === "ran") return outcome.value;
+      // 别人正在处理这笔任务：回收涉及不可逆动作，一律拒绝，绝不「顺便」改状态。
+      throw new ForumProtocolError("dispatch-leased", `发布任务 ${task.taskId} 正由另一个页面处理，本次不回收专用资金`);
+    },
+
+    /**
+     * 取消未派发的任务。
+     *
+     * 与发布、回收共用派发租约：取消与回收交错时，谁后取得租约谁按重读到的状态
+     * 判断，不会用一个标签页的过期视图覆盖另一个标签页刚写下的取消结果。
+     */
+    /**
+     * 取消未派发的任务。
+     *
+     * 判据是**持久提交的实际派发状态**，不是「有没有 submissionId」：
+     * `raw-prepared` 阶段就已经保存了 submissionId，此时它完全可能仍是明确未派发。
+     * 按 submissionId 一刀切拒绝会让用户永远取消不掉刚预签名的任务；反过来只看
+     * 阶段而不查提交，又会在已派发时错误地释放占用。
+     *
+     * 因此分三步，每步都以观察到的广播状态为准：
+     *   1. 锁外看任务自己的 `broadcastState`（没有 submission 时它就是「未派发」）；
+     *   2. 取得租约后重读任务，再向钱包查**同一个**持久提交的实际状态；
+     *   3. 只有 `not-dispatched` / `definitely-not-dispatched` 才释放占用并标记取消，
+     *      `unknown` 一律拒绝——「查不到」不是「没派发」。
+     *
+     * 与发布、回收共用派发租约：取消与回收交错时谁都不覆盖对方的结论。
+     */
     async cancelUndispatched(taskId: string): Promise<void> {
       const task = await requireTask(taskId);
-      if (task.broadcastState === "dispatched" || task.broadcastState === "unknown") {
-        // 已派发或未知的输入不得提前释放，否则可能双花同一笔资金。
-        throw new ForumProtocolError("not-cancellable", "交易已派发或结果未知，不能释放输入占用");
-      }
-      const spend = deps.protocolSpend();
-      if (spend?.releasePreparedSubmission !== undefined && task.submissionId !== undefined && task.txid !== undefined) {
-        await spend.releasePreparedSubmission({
-          ownerPublicKeyHex: task.ownerPublicKeyHex,
-          network: task.network,
-          txid: task.txid,
-          submissionId: task.submissionId,
-        });
-      }
-      await deps.repository.writeTask({ ...task, phase: "failed", failureCode: "cancelled", updatedAtMs: now() });
+      assertCancellable(task, task.broadcastState);
+      const outcome = await withDispatchLease(task, async (lease, reread) => {
+        await lease.assertHeld();
+        const current = reread;
+        const observed = await observeCurrentBroadcastState(current);
+        assertCancellable(current, observed);
+        // 有持久预签名提交就必须真的释放：提交还在准备态时留着它，普通转账会撞上
+        // 占用，而任务一旦标成已取消，这笔占用就没有任何人会再去处理它。
+        // 因此释放能力缺失或释放失败都**不允许**标记取消，任务状态保持原样。
+        await releasePreparedSubmissionIfAny(current);
+        await lease.writeTask({ ...current, phase: "failed", failureCode: "cancelled", updatedAtMs: now() });
+        return current;
+      });
+      if (outcome.kind === "ran") return;
+      // 别人正在处理这笔任务：取消必须拒绝，不能退化成对账——
+      // 那会把用户的「取消」悄悄变成「等它派发」。
+      throw new ForumProtocolError("dispatch-leased", `发布任务 ${task.taskId} 正由另一个页面处理，本次不执行取消`);
     },
 
     async listPublishTasks(configId): Promise<readonly ForumPublishTask[]> {
@@ -896,6 +1466,9 @@ export function createForumService(deps: ForumServiceDeps): ForumService {
    *
    * `run` 收到的是**锁内重新读取**的任务：调用方在锁外读到的阶段可能已经被另一个
    * 页面推进，所以不能直接用。
+   *
+   * 这把锁只在进程内。同一浏览器的第二个标签页持有另一个 Window 实例，因此
+   * 不可逆动作还要靠派发租约（owner 文件存储的条件写）跨标签页互斥。
    */
   async function withTaskLock<T>(taskId: string, run: (task: ForumPublishTask) => Promise<T>): Promise<T> {
     const previous = taskLocks.get(taskId) ?? Promise.resolve();
@@ -914,6 +1487,140 @@ export function createForumService(deps: ForumServiceDeps): ForumService {
       release();
       if (taskLocks.get(taskId) === held) taskLocks.delete(taskId);
     }
+  }
+
+  /**
+   * 释放本任务的预签名提交；没有提交时什么都不做。
+   *
+   * 「没有提交」和「有提交但释放不了」是两回事：后者必须失败。少了这一步，一个
+   * 预签名但未派发的任务会被标成已取消，而它那笔还没释放的占用就此悬空。
+   */
+  async function releasePreparedSubmissionIfAny(task: ForumPublishTask): Promise<void> {
+    if (task.submissionId === undefined) return;
+    const release = deps.protocolSpend()?.releasePreparedSubmission;
+    if (release === undefined) {
+      throw new ForumProtocolError(
+        "release-unavailable",
+        "当前无法释放预签名提交占用，不能标记任务为已取消",
+      );
+    }
+    if (task.txid === undefined) {
+      throw new ForumProtocolError(
+        "release-unavailable",
+        `提交 ${task.submissionId} 没有 txid 证据，无法确认释放对象`,
+      );
+    }
+    await release({
+      ownerPublicKeyHex: task.ownerPublicKeyHex,
+      network: task.network,
+      txid: task.txid,
+      submissionId: task.submissionId,
+    });
+  }
+
+  /**
+   * 任务当前广播状态：优先看钱包对**同一个持久提交**的观察，没有提交时就是未派发。
+   *
+   * 观察缺席或抛错一律返回 `unknown`：无法证明未派发时不允许释放占用。
+   */
+  async function observeCurrentBroadcastState(task: ForumPublishTask): Promise<ForumBroadcastState> {
+    if (task.submissionId === undefined) return "not-dispatched";
+    const observe = deps.observeBroadcast;
+    if (observe === undefined) return "unknown";
+    try {
+      return await observe({
+        ownerPublicKeyHex: task.ownerPublicKeyHex,
+        network: task.network,
+        txid: task.txid ?? "",
+        submissionId: task.submissionId,
+      });
+    } catch {
+      return "unknown";
+    }
+  }
+
+  /**
+   * 取消判据：`not-dispatched` 与 `definitely-not-dispatched` 可以取消。
+   *
+   * 其余全部拒绝，包括 `unknown`——「查不到」不是「没派发」，按可取消处理会让
+   * 一笔可能已经上链的交易失去占用保护。
+   */
+  function assertCancellable(task: ForumPublishTask, state: ForumBroadcastState): void {
+    if (state === "not-dispatched" || state === "definitely-not-dispatched") return;
+    throw new ForumProtocolError(
+      "not-cancellable",
+      `交易广播状态为 ${state}，只有明确未派发才能取消并释放输入占用`,
+    );
+  }
+
+  /**
+   * 回收前的统一判据。
+   *
+   * 锁外（避免无谓抢租约）与租约内（防止并发覆盖）调用的是同一份，因此两条路径
+   * 不会出现「锁外通过、锁内才发现不行」的偏差。
+   *
+   * 返回回收成功后任务该怎么落地：`reactivate` 回到费用确认，`stay-cancelled`
+   * 保持取消状态。
+   */
+  async function assertFundingRecoverable(
+    task: ForumPublishTask,
+    expected: { txid: string; vout: number } | undefined,
+  ): Promise<"reactivate" | "stay-cancelled"> {
+    if (task.ownerPublicKeyHex !== deps.ownerPublicKeyHex().toLowerCase()) {
+      throw new ForumProtocolError("owner-mismatch", "该任务属于别的 owner，不能回收它的资金");
+    }
+    const cancelled = task.phase === "failed" && task.failureCode === "cancelled";
+    // 任务自己的广播状态说不派发就不派发：`dispatched`/`unknown` 一律拒绝，
+    // 这里不接受「大概没派发」。
+    if (task.broadcastState === "dispatched" || task.broadcastState === "unknown") {
+      throw new ForumProtocolError("already-dispatched", "该任务已派发或结果未知，不能回收它的专用资金");
+    }
+    // 取消后的任务仍然可以回收——取消只说明不再发布，钱还是用户的。
+    if (task.phase === "failed" && !cancelled) {
+      throw new ForumProtocolError("phase-conflict", `任务处于失败状态（${task.failureCode ?? "未知"}），只有已取消的任务可以回收资金`);
+    }
+    // 存在持久提交时，光看任务状态不够：预签名阶段就已经保存了 submissionId。
+    // 判断依据必须是**同一个提交的实际派发状态**：
+    //   - 未取消：提交随时可能被派发，直接拒绝；
+    //   - 已取消：取消链路已按「明确未派发才释放」释放过它，这里再核一次，
+    //     证明确认它确实没有进入网络。历史提交证据保留在任务上不删除。
+    if (task.submissionId !== undefined) {
+      if (!cancelled) {
+        throw new ForumProtocolError("already-dispatched", "该任务存在尚未确认释放的预签名提交，不能回收专用资金");
+      }
+      const observed = await observeCurrentBroadcastState(task);
+      if (observed !== "not-dispatched" && observed !== "definitely-not-dispatched") {
+        throw new ForumProtocolError(
+          "already-dispatched",
+          `已取消任务的提交 ${task.submissionId} 当前状态为 ${observed}，不能确认它未派发，不回收专用资金`,
+        );
+      }
+    }
+    if (POST_PROTOCOL_TX_PHASES.includes(task.phase)) {
+      throw new ForumProtocolError("phase-conflict", `阶段 ${task.phase} 已经过了构造协议交易这一步，不能回收当前资金`);
+    }
+    if (task.funding === undefined) {
+      throw new ForumProtocolError("funding-unavailable", "该任务没有已准备的专用资金可回收");
+    }
+    // 资金坐标必须逐项一致：只比 txid 会漏掉「同一笔交易的不同 vout」。
+    if (expected !== undefined && (task.funding.txid !== expected.txid || task.funding.vout !== expected.vout)) {
+      throw new ForumProtocolError("funding-unavailable", "任务资金已变化，请重新查看后再回收");
+    }
+    if (cancelled) return "stay-cancelled";
+    // 回收后必须能回到费用确认，否则钱扫走了任务却卡在原阶段。
+    if (!canAdvancePublishPhase(task.phase, "budget-confirmed")) {
+      throw new ForumPublishTransitionError(task.phase, "budget-confirmed");
+    }
+    return "reactivate";
+  }
+
+  /** 自有输出服务缺席时明确失败，而不是静默返回「没有自有输出」。 */
+  function requireSelfOutputs(): ForumSelfOutputService {
+    const outputs = deps.selfOutputs?.();
+    if (outputs === undefined) {
+      throw new ForumProtocolError("self-outputs-unavailable", "自有输出能力不可用（缺少链数据源或协议 spend）");
+    }
+    return outputs;
   }
 
   async function requireTask(taskId: string): Promise<ForumPublishTask> {
@@ -1001,14 +1708,6 @@ function mapBroadcastState(status: string): ForumPublishTask["broadcastState"] {
       // unknown 不是失败，也不能据此判定未广播。
       return "unknown";
   }
-}
-
-function estimateProtocolMinerFee(task: ForumPublishTask, funding: ForumPublishTask["funding"]): bigint {
-  void funding;
-  const budget = task.budget;
-  if (budget === undefined) return 0n;
-  const item = budget.items.find((candidate) => candidate.label === "protocol-miner-fee");
-  return forumAmountToBigInt(item?.amountSatoshis ?? "0") ?? 0n;
 }
 
 function emptyNode(): ForumReadingView["node"] {
@@ -1227,78 +1926,146 @@ interface DedicatedFunding {
  *
  * 关键约束：`ProtocolSpendService` 只使用调用方给的输入，自己不选币，所以这里
  * 必须提供一个真实存在、金额已知、且不是被保护输入的 UTXO。
+ *
+ * 额度必须等于本次报价下的「固定输出 + 确认的矿工费预算」：协议交易没有找零
+ * 输出，拆多了的部分会直接变成矿工费。已有记录覆盖不了本次报价时作废并重备，
+ * 被作废的 UTXO 同时解除保护登记，因此钱不会被锁死。
  */
-async function ensureDedicatedFunding(task: ForumPublishTask, options?: { signal?: AbortSignal }): Promise<DedicatedFunding> {
-  const sources = fundingSources?.();
+async function ensureDedicatedFunding(
+  task: ForumPublishTask,
+  requiredSatoshis: bigint,
+  sources: ForumFundingSource | undefined,
+): Promise<DedicatedFunding> {
   if (sources === undefined) {
     throw new ForumProtocolError("funding-unavailable", "没有可用的资金来源，无法准备专用资金 UTXO");
   }
-  // 1. 复查专用资金记录：已有可用 UTXO 就直接用，避免每次发布都重新拆钱。
-  const existing = await sources.readDedicatedFunding(task.ownerPublicKeyHex, task.network, task.taskId);
+  // 1. 复查专用资金记录：额度够且未花费就直接用，避免每次发布都重新拆钱。
+  //
+  //    `readDedicatedFunding` 已经让 P2PKH 核对过链上状态并恢复保护登记：Forum 自己
+  //    的记录不足以证明「这个 UTXO 还能花」，绕开核对就会拿已花费的输出继续构造。
+  //    这里再比一次额度，是因为「够花」与「本次报价要多少」是两个问题。
+  const existing = await sources.readDedicatedFunding(task.ownerPublicKeyHex, task.network, task.taskId, requiredSatoshis);
   if (existing !== undefined) {
     const spent = await sources.isSpent(task.network, existing.txid, existing.vout);
-    if (!spent) {
+    const available = BigInt(existing.valueSatoshis);
+    if (!spent && available >= requiredSatoshis) {
       return {
         txid: existing.txid,
         vout: existing.vout,
         rawTxHex: existing.rawTxHex,
-        availableSatoshis: BigInt(existing.valueSatoshis),
+        availableSatoshis: available,
         input: {
           txid: existing.txid,
           vout: existing.vout,
-          value: requireSafeWalletSatoshis(BigInt(existing.valueSatoshis), "专用资金 UTXO 金额"),
+          value: requireSafeWalletSatoshis(available, "专用资金 UTXO 金额"),
           address: existing.address,
         },
       };
     }
-    // 记录指向的 UTXO 已被花费：作废记录并重新准备。
+    // 已被花费，或额度覆盖不了本次报价：作废记录并按新额度重新准备。
     await sources.clearDedicatedFunding(task.ownerPublicKeyHex, task.network, task.taskId);
   }
 
-  // 2. 没有可用专用资金时，按固定输出加矿工费预算从钱包准备一笔。
-  //    论坛此时的固定输出总额尚未确定（要先拿到父节点价格），因此这里只确保
-  //    一笔足以覆盖最小 publish 的专用资金，真正的额度复核在调用方完成。
-  const requiredSatoshis = sources.minimumDedicatedFundingSatoshis(task.network);
+  // 2. 没有可用专用资金时，按本次报价的固定输出加矿工费预算准备一笔。
   const prepared = await sources.prepareDedicatedFunding({
     ownerPublicKeyHex: task.ownerPublicKeyHex,
     network: task.network,
     taskId: task.taskId,
     requiredSatoshis,
   });
+  const value = BigInt(prepared.valueSatoshis);
+  if (value < requiredSatoshis) {
+    throw new ForumProtocolError(
+      "funding-insufficient",
+      `专用资金 ${value} sat 不足：本次发布需要 ${requiredSatoshis} sat`,
+    );
+  }
   return {
     txid: prepared.txid,
     vout: prepared.vout,
     rawTxHex: prepared.rawTxHex,
-    availableSatoshis: BigInt(prepared.valueSatoshis),
+    availableSatoshis: value,
     input: {
       txid: prepared.txid,
       vout: prepared.vout,
-      value: requireSafeWalletSatoshis(BigInt(prepared.valueSatoshis), "专用资金 UTXO 金额"),
+      value: requireSafeWalletSatoshis(value, "专用资金 UTXO 金额"),
       address: prepared.address,
     },
   };
 }
 
+/** 专用资金记录；`ownerPublicKeyHex` 让恢复路径能拒绝别的身份的记录。 */
+export interface ForumFundingRecord {
+  readonly fundingId?: string;
+  readonly txid: string;
+  readonly vout: number;
+  readonly rawTxHex: string;
+  readonly valueSatoshis: string;
+  readonly address: string;
+  readonly ownerPublicKeyHex?: string;
+}
+
+/** 一次发布的资金计划：两笔交易的费用分别给出。 */
+export interface ForumFundingPlan {
+  /** 专用 UTXO 的目标金额 = 协议固定输出 + 协议矿工费预算。 */
+  readonly requiredSatoshis: bigint;
+  /** 资金准备交易自身的矿工费（聪）。 */
+  readonly fundingMinerFeeSatoshis: bigint;
+}
+
 /**
  * 专用资金来源。
  *
- * 装配期注入：把「读专用资金 / 判断是否已花费 / 准备新资金 / 作废记录」交给
- * P2PKH 与链数据源。Forum 不自己选币、不拼资金准备交易，也不接触私钥。
+ * 装配期注入：把「读专用资金 / 判断是否已花费 / 计划额度 / 准备新资金 / 作废记录」
+ * 交给 P2PKH 与链数据源。Forum 不自己选币、不拼资金准备交易，也不接触私钥。
  */
 export interface ForumFundingSource {
+  /**
+   * 读并核对专用资金记录。
+   *
+   * `requiredSatoshis` 让实现能在核对阶段就判断额度是否够：额度不足时返回 undefined，
+   * 调用方因此不会拿一个不够用的 UTXO 去构造协议交易（那条路只会得到 funding-insufficient
+   * 并反复重试同一笔旧资金）。
+   */
   readDedicatedFunding(
     ownerPublicKeyHex: string,
     network: BsvNetwork,
     taskId: string,
-  ): Promise<{ txid: string; vout: number; rawTxHex: string; valueSatoshis: string; address: string } | undefined>;
+    requiredSatoshis: bigint,
+  ): Promise<ForumFundingRecord | undefined>;
   isSpent(network: BsvNetwork, txid: string, vout: number): Promise<boolean>;
+  /**
+   * 按本次报价算专用资金额度与资金准备矿工费。
+   *
+   * 单独给出是因为两笔交易的费用要同时进费用确认：额度只由固定输出与确认过的
+   * 矿工费预算决定，不能用一个固定上界代替。
+   */
+  planDedicatedFunding(input: {
+    readonly network: BsvNetwork;
+    readonly fixedOutputsSatoshis: bigint;
+    readonly protocolMinerFeeBudgetSatoshis: bigint;
+    readonly feeRateSatoshisPerKb: number;
+  }): Promise<ForumFundingPlan>;
   prepareDedicatedFunding(input: {
     ownerPublicKeyHex: string;
     network: BsvNetwork;
     taskId: string;
     requiredSatoshis: bigint;
-  }): Promise<{ txid: string; vout: number; rawTxHex: string; valueSatoshis: string; address: string }>;
+  }): Promise<ForumFundingRecord>;
   clearDedicatedFunding(ownerPublicKeyHex: string, network: BsvNetwork, taskId: string): Promise<void>;
+  /**
+   * 显式回收：把这笔专用资金扫回 owner 地址。
+   *
+   * 缺席表示该资金来源没有回收能力（例如不做 on-chain 观察的实现），此时调用方必须
+   * 明确失败，不能假装「已经不需要这笔钱」。
+   */
+  recoverDedicatedFunding?(input: {
+    ownerPublicKeyHex: string;
+    network: BsvNetwork;
+    taskId: string;
+    feeRateSatoshisPerKb: number;
+    reason: { supersededBy: string } | { unused: true };
+  }): Promise<{ txid: string; recoveredSatoshis: string }>;
   /** 按 outpoint 查这笔专用资金的链上状态。 */
   observeFunding(input: {
     ownerPublicKeyHex: string;
@@ -1307,8 +2074,6 @@ export interface ForumFundingSource {
     txid: string;
     vout: number;
   }): Promise<string>;
-  /** 单次发布的最小专用资金额度：固定输出上界加矿工费预算。 */
-  minimumDedicatedFundingSatoshis(network: BsvNetwork): bigint;
 }
 
 let fundingSources: (() => ForumFundingSource | undefined) | undefined;

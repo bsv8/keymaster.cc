@@ -1,3 +1,4 @@
+import { validateNetworkIdentity, sameNetworkIdentity } from "@keymaster/contracts";
 // packages/plugin-protocol/src/sessionWindowBootstrap.ts
 // Session Window 启动模式 + launcher 一次性 bootstrap consume（direct call）。
 //
@@ -265,6 +266,7 @@ export async function consumeLauncherBootstrap(
  *     `sessionRuntimeBootstrap`。
  */
 export interface LauncherHandoffInput {
+  networkIdentity: import("@keymaster/contracts").NetworkIdentity;
   appId: string;
   appOrigin: string;
   appUrl: string;
@@ -306,10 +308,11 @@ export function buildAppBootstrapPayload(input: LauncherHandoffInput): AppBootst
     throw new Error("Launcher handoff sessionRuntimeBootstrap.ownerPublicKeyHex mismatch");
   }
   const identity = input.sessionRuntimeBootstrap.crypto?.getIdentity?.();
-  if (!identity || identity.publicKeyHex !== input.ownerPublicKeyHex) {
+  if (!identity || identity.publicKeyHex !== input.ownerPublicKeyHex || !sameNetworkIdentity(validateNetworkIdentity(identity), validateNetworkIdentity(input.networkIdentity)) || !sameNetworkIdentity(input.networkIdentity, input.sessionRuntimeBootstrap.networkIdentity)) {
     throw new Error("Launcher handoff sessionRuntimeBootstrap.crypto identity invalid");
   }
   return {
+    networkIdentity: validateNetworkIdentity(input.networkIdentity),
     app: {
       appId: input.appId,
       appOrigin: input.appOrigin,

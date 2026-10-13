@@ -110,21 +110,27 @@
   overflow-wrap: anywhere;
 }
 
-.sat-subscription-settings__supplier > div:nth-of-type(4),
-.sat-subscription-settings__supplier > div:nth-of-type(5),
-.sat-subscription-settings__supplier > div:nth-of-type(6) {
+.sat-subscription-settings__server-uris {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sat-subscription-settings__supplier > .sat-subscription-settings__service-actions,
+.sat-subscription-settings__supplier > .sat-subscription-settings__amounts,
+.sat-subscription-settings__supplier > .sat-subscription-settings__billing {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }
 
-.sat-subscription-settings__supplier > div:nth-of-type(4),
-.sat-subscription-settings__supplier > div:nth-of-type(5) {
+.sat-subscription-settings__service-actions,
+.sat-subscription-settings__amounts {
   padding-top: 2px;
 }
 
-.sat-subscription-settings__supplier > div:nth-of-type(5) input {
+.sat-subscription-settings__amounts input {
   width: 150px;
   min-width: 120px;
 }
@@ -354,7 +360,7 @@
     padding: 12px;
   }
 
-  .sat-subscription-settings__supplier > div:nth-of-type(5) input {
+  .sat-subscription-settings__amounts input {
     flex: 1 1 140px;
     width: auto;
   }

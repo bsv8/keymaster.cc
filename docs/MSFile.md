@@ -1,5 +1,7 @@
 # MSFile
 
+Forum 等 Worker 消费方的远程内容读取，通过 `createMsFileWorkerBitfsService` 组合本地文件服务与现有 BitFS 控制队列。需求发现、报价、购买与关池仍由原买方运行时处理；原 owner/sessionEpoch、scope 和最终 I/O 租约继续约束调用。本地文件服务不能代替远程购买能力。
+
 MSFile 通过受控 P2P 网络按内容哈希查询和读取 Seed/Block。插件默认包含并启用官方 BSV8
 供应商，local 来源也始终参与统一查询；用户自建供应商和金额策略才需要额外配置。没有可用
 transport 时远程读取会安全失败，但不会为未配置的用户供应商建立隐式连接。
@@ -91,3 +93,10 @@ Keymaster 当前已经把 local msfile、BitFS 买方、BitFS 卖方、专款账
 - Vault 只通过受限 DER digest signer 提供签名；session journal、交易 outbox 和 exact evidence 在发送或广播前持久化，迟到结果受 owner/generation fence 拒绝。
 
 尚未接线的业务分支包括 Kind 8–11 仲裁与取回流程；真实浏览器、网络和部署环境验收以[集成测试覆盖矩阵](./集成测试/覆盖矩阵.md)为准。需求与施工背景见 [BitFS 本地代理与卖方模式需求](./proposals/msfile/BitFS本地代理与卖方模式需求.md) 和 [施工单](./proposals/msfile/BitFS本地代理与卖方模式施工单.md)。
+
+
+## Forum 内容接入
+
+Forum Worker 消费 MSFile Worker 的内容能力。正文和附件统一获取、校验并保存到现有 `msfiles/`，Forum 只保存内容 hash 与可重建展示投影，不建立正文副本。正文按原 1 MiB 上限处理，附件保持独立 32 MiB 上限；已校验附件由 Forum 的 stream 以 256 KiB 分块传给 Window 展示，页面持有的对象 URL 随页面资源释放。
+
+发布可达性读取真实卖方运行单元状态：只有 `ready`/`selling` 才报告已发布；索引中、配置错误、降级或未启用均不能作为他人可读取的成功证据。真实 BitFS 开池和他人取用仍待部署验收。

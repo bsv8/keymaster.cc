@@ -3,18 +3,17 @@
 //
 // 设计缘由：
 //   - fee pool 不再接收 raw 私钥材料 / PrivateKey 对象；
-//   - 所有需要签名的路径都通过显式 `signDigest` capability；
+//   - 整个交易及证据提交钱包核心，由钱包核算渠道额度；
 //   - 交易编解码只保留本文件内最小实现，避免把私钥边界扩散到
 //     protocol service。
 //
-// 施工单 001：signDigest 必须显式携带 format 字段
+// VLP 施工：不得退回盲签摘要，也不得为估算大小反复签名。
 
 import { Hash } from "@bsv/sdk";
 import {
   clientVerifyServerSpendSig,
   clientVerifyServerUpdateSig
 } from "keymaster-multisig-pool";
-import type { EcdsaSignatureFormat } from "@keymaster/contracts";
 
 /** `FINAL_LOCKTIME`：close_and_recreate 的 close 部分用。 */
 export const FINAL_LOCKTIME = 0xffffffff;
@@ -35,16 +34,6 @@ export interface FeepoolSdkBaseTxResponse {
 
 export interface FeepoolSdkDraftTxResponse {
   txHex: string;
-}
-
-export interface FeePoolSignDigest {
-  publicKeyHex: string;
-  digest: ArrayBuffer;
-  format: EcdsaSignatureFormat;
-}
-
-export interface FeePoolSigner {
-  signDigest(input: FeePoolSignDigest): Promise<{ publicKeyHex: string; format: EcdsaSignatureFormat; signature: ArrayBuffer }>;
 }
 
 interface TxInput {
@@ -235,72 +224,22 @@ function deserializeTx(bytes: Uint8Array): UnsignedTx {
   return { version, inputs, outputs, lockTime };
 }
 
-function calcBip143Sighash(
-  tx: UnsignedTx,
-  inputIndex: number,
-  scriptCode: Uint8Array,
-  prevValue: number
-): Uint8Array {
-  const prevoutsConcat = concatBytes(
-    ...tx.inputs.map((i) => concatBytes(hexToBytes(i.prevTxid).reverse(), u32LE(i.prevVout)))
-  );
-  const hashPrevouts = dsha256(prevoutsConcat);
-  const sequencesConcat = concatBytes(...tx.inputs.map((i) => u32LE(i.sequence)));
-  const hashSequence = dsha256(sequencesConcat);
-  const outputsConcat = concatBytes(
-    ...tx.outputs.map((o) => concatBytes(u64LE(o.value), encodeVarInt(o.script.length), o.script))
-  );
-  const hashOutputs = dsha256(outputsConcat);
-  const input = tx.inputs[inputIndex];
-  if (!input) throw new Error(`Missing input ${inputIndex}`);
-  return concatBytes(
-    u32LE(tx.version),
-    hashPrevouts,
-    hashSequence,
-    hexToBytes(input.prevTxid).reverse(),
-    u32LE(input.prevVout),
-    encodeVarInt(scriptCode.length),
-    scriptCode,
-    u64LE(prevValue),
-    u32LE(input.sequence),
-    hashOutputs,
-    u32LE(tx.lockTime),
-    u32LE(SIGHASH_ALL_FORKID)
-  );
+/** 从未签名原文取出证据编号；最终真实性仍由钱包按 txid 核验。 */
+export function feePoolInputTxids(rawTxHex: string): string[] {
+  return deserializeTx(hexToBytes(rawTxHex)).inputs.map(i=>i.prevTxid);
 }
-
-async function signP2pkhInputs(
-  unsigned: UnsignedTx,
-  utxos: FeepoolSdkUtxo[],
-  signDerDigest: (digest: Uint8Array) => Promise<Uint8Array>,
-  publicKeyHex: string
-): Promise<string> {
-  const pub = hexToBytes(publicKeyHex);
-  const signedInputs: TxInput[] = unsigned.inputs.map((i) => ({ ...i, scriptSig: new Uint8Array(0) }));
-  for (let i = 0; i < unsigned.inputs.length; i++) {
-    const utxo = utxos[i];
-    if (!utxo) throw new Error(`Missing UTXO for input ${i}`);
-    const scriptCode = p2pkhLockScript(publicKeyHex);
-    const sighash = calcBip143Sighash(unsigned, i, scriptCode, utxo.satoshis);
-    const der = await signDerDigest(sighash);
-    // P1: 断言返回的是 DER 签名（0x30 开头），防止 compact 混入交易
-    if (der.length < 8 || der[0] !== 0x30) {
-      throw new Error("signP2pkhInputs: expected DER signature from signDerDigest");
-    }
-    const sigWithType = concatBytes(der, new Uint8Array([SIGHASH_ALL_FORKID]));
-    signedInputs[i] = {
-      prevTxid: unsigned.inputs[i]!.prevTxid,
-      prevVout: unsigned.inputs[i]!.prevVout,
-      sequence: unsigned.inputs[i]!.sequence,
-      scriptSig: concatBytes(
-        encodeVarInt(sigWithType.length),
-        sigWithType,
-        encodeVarInt(pub.length),
-        pub
-      )
-    };
-  }
-  return bytesToHex(serializeTx({ ...unsigned, inputs: signedInputs }));
+/** 接口只能接收整个未签名交易；钱包负责脚本/金额核验及一次额度预占。 */
+export type FeePoolTransactionSigner = (rawTxHex: string) => Promise<string[]>;
+async function signP2pkhInputs(unsigned: UnsignedTx, signTransaction: FeePoolTransactionSigner, publicKeyHex: string): Promise<string> {
+  const signatures=await signTransaction(bytesToHex(serializeTx(unsigned)));
+  if(signatures.length!==unsigned.inputs.length)throw new Error('Invalid wallet signature count');
+  const pub=hexToBytes(publicKeyHex);
+  const inputs=unsigned.inputs.map((input,i)=>{
+    const signature=hexToBytes(signatures[i]!);
+    if(signature.length<9 || signature[0]!==0x30 || signature.at(-1)!==SIGHASH_ALL_FORKID)throw new Error('Invalid wallet transaction signature');
+    return {...input,scriptSig:concatBytes(encodeVarInt(signature.length),signature,Uint8Array.of(pub.length),pub)};
+  });
+  return bytesToHex(serializeTx({...unsigned,inputs}));
 }
 
 function buildUnsignedBaseTx(params: {
@@ -356,8 +295,7 @@ function buildUnsignedSpendTx(params: {
 export async function sdkBuildBaseTx(params: {
   clientUtxos: FeepoolSdkUtxo[];
   clientPublicKeyHex: string;
-  /** P1: 此回调必须返回 DER 格式签名（0x30 开头），不得返回 compact。 */
-  signDigest: (digest: Uint8Array) => Promise<Uint8Array>;
+  signTransaction: FeePoolTransactionSigner;
   serverPublicKeyHex: string;
   feepoolAmount: number;
   feeRate: number;
@@ -375,14 +313,12 @@ export async function sdkBuildBaseTx(params: {
     feepoolAmount: params.feepoolAmount,
     changeAmount: initialChange
   });
-  let signedHex = await signP2pkhInputs(unsigned, params.clientUtxos, params.signDigest, params.clientPublicKeyHex);
-  const firstSize = signedHex.length / 2;
-  const firstFee = Math.max(1, Math.floor((firstSize / 1000) * params.feeRate));
-  if (totalValue < params.feepoolAmount + firstFee) {
-    throw new Error(`余额不足，需要 ${params.feepoolAmount + firstFee}，拥有 ${totalValue}`);
-  }
-  unsigned.outputs[1]!.value = totalValue - params.feepoolAmount - firstFee;
-  signedHex = await signP2pkhInputs(unsigned, params.clientUtxos, params.signDigest, params.clientPublicKeyHex);
+  // DER 长度变化不应导致多次签名、多次预占额度。108 是单个 P2PKH 解锁脚本的上界。
+  const upperSize=serializeTx(unsigned).length+108*unsigned.inputs.length;
+  const fee=Math.max(1,Math.ceil(upperSize*params.feeRate/1000));
+  if(totalValue<params.feepoolAmount+fee)throw new Error('Insufficient balance for fee pool funding fee');
+  unsigned.outputs[1]!.value=totalValue-params.feepoolAmount-fee;
+  const signedHex=await signP2pkhInputs(unsigned,params.signTransaction,params.clientPublicKeyHex);
   return {
     txHex: signedHex,
     txid: calcTxidFromRawTxHex(signedHex),
@@ -440,36 +376,18 @@ export async function sdkLoadDraftSpendTx(params: {
 }
 
 export async function sdkClientSignInitialSpendTx(params: {
-  txHex: string;
-  totalAmount: number;
-  /** P1: 此回调必须返回 DER 格式签名。 */
-  signDigest: (digest: Uint8Array) => Promise<Uint8Array>;
-  clientPublicKeyHex: string;
-  serverPublicKeyHex: string;
+  txHex: string; totalAmount: number; signTransaction: FeePoolTransactionSigner; clientPublicKeyHex: string; serverPublicKeyHex: string;
 }): Promise<Uint8Array> {
-  const tx = deserializeTx(hexToBytes(params.txHex));
-  const scriptCode = dualMultisigScript(params.serverPublicKeyHex, params.clientPublicKeyHex);
-  const sighash = calcBip143Sighash(tx, 0, scriptCode, params.totalAmount);
-  const der = await params.signDigest(sighash);
-  // P1: 断言返回的是 DER 签名
-  if (der.length < 8 || der[0] !== 0x30) {
-    throw new Error("sdkClientSignInitialSpendTx: expected DER signature");
-  }
-  return concatBytes(der, new Uint8Array([SIGHASH_ALL_FORKID]));
+  const signatures=await params.signTransaction(params.txHex);
+  if(signatures.length!==1)throw new Error('Invalid fee pool signature count');
+  const signature=hexToBytes(signatures[0]!);
+  if(signature[0]!==0x30||signature.at(-1)!==SIGHASH_ALL_FORKID)throw new Error('Invalid fee pool signature');
+  return signature;
 }
-
 export async function sdkClientSignUpdatedSpendTx(params: {
-  txHex: string;
-  sourceSatoshis: number;
-  signDigest: (digest: Uint8Array) => Promise<Uint8Array>;
-  clientPublicKeyHex: string;
-  serverPublicKeyHex: string;
+  txHex: string; sourceSatoshis: number; signTransaction: FeePoolTransactionSigner; clientPublicKeyHex: string; serverPublicKeyHex: string;
 }): Promise<Uint8Array> {
-  const tx = deserializeTx(hexToBytes(params.txHex));
-  const scriptCode = dualMultisigScript(params.serverPublicKeyHex, params.clientPublicKeyHex);
-  const sighash = calcBip143Sighash(tx, 0, scriptCode, params.sourceSatoshis);
-  const der = await params.signDigest(sighash);
-  return concatBytes(der, new Uint8Array([SIGHASH_ALL_FORKID]));
+  return sdkClientSignInitialSpendTx({...params,totalAmount:params.sourceSatoshis});
 }
 
 export async function sdkVerifyServerInitialSpendSig(params: {

@@ -47,6 +47,28 @@ test(JOURNEY_ID + "：新用户初始化、刷新恢复、锁定和重新解锁"
       { keyLabel: "集成测试钱包 Key", password },
     ));
 
+    await test.step("顶栏显示唯一软件钱包、渠道设置，窄屏和 Escape 不破坏会话", async () => {
+      const walletButton = page.getByRole("button", {name: /^(钱包|Wallet)$/u});
+      await expect(walletButton).toBeVisible(); await walletButton.click();
+      const panel = page.getByRole("region", {name: /^(钱包|Wallet)$/u});
+      await expect(panel).toBeVisible();
+      await expect(panel.getByText(ready.publicKeyHex, {exact: true})).toBeVisible();
+      await expect(panel.getByText(/^(软件钱包|Software wallet)$/u)).toBeVisible();
+      await panel.getByRole("button", {name: /消费渠道与额度|Spending channels and limits/u}).click();
+      await expect(panel.getByRole("alert")).toHaveCount(0);
+      await page.setViewportSize({width: 390, height: 720});
+      const bounds = await panel.boundingBox();
+      expect(bounds).not.toBeNull(); expect(bounds!.x).toBeGreaterThanOrEqual(0);
+      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
+      await page.keyboard.press("Escape"); await expect(panel).toHaveCount(0);
+      await expect(walletButton).toBeFocused();
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      await expect(walletButton).toBeInViewport();
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.setViewportSize({width: 1280, height: 720});
+      await expect(readWalletPublicKey(page)).resolves.toBe(ready.publicKeyHex);
+    });
+
     // 存储真值：按 KeymasterFormats 检查 `key.json` 与 `.keymaster/meta`。
     const initialStorage = await test.step("检查钱包固定路径符合 KeymasterFormats", async () =>
       assertWalletStorage(page, {

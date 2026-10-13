@@ -8,7 +8,7 @@
 //   1. Forum 的生产源码不 import 任何 `node:` 内置模块；
 //   2. roundtrip SDK 的 HTTP **客户端**在允许集合内，而它的 `node:http` 适配
 //      （toNodeHandler）只出现在 SDK 自己的类型签名里，不进入 Forum 依赖图；
-//   3. Worker 侧入口（coordinator.ts）不导出装配、UI、仓储、lane 或传输；
+//   3. Worker 入口允许任务仓储与 HTTP 客户端，不引入 Window 装配、UI 或 Host；
 //   4. JCS 外壳与 CBOR 业务签名由两个不同模块提供，不会互相顶替。
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -54,7 +54,7 @@ describe("浏览器入口边界", () => {
     expect(text).toContain("FORUM_HTTP_PATH");
   });
 
-  it("Worker 侧入口不导出装配、UI、仓储、lane 或传输", () => {
+  it("Worker 侧入口不导出 Window 装配、UI 或网络 Host", () => {
     const text = readFileSync(join(process.cwd(), PLUGIN_ROOT, "src", "coordinator.ts"), "utf8");
     // 只看真实的 import/export 语句：注释里提到 manifest 之类的词不算依赖。
     const edges = [...text.matchAll(/(?:from\s+|import\s*\(\s*)["']([^"']+)["']/gu)].map((match) => match[1] as string);
@@ -67,8 +67,6 @@ describe("浏览器入口边界", () => {
       "manifest.js",
       "pages.js",
       "ForumResourceContext",
-      "forumRepository",
-      "forumService",
       "ForumP2pLane",
       "roundtripClient",
       "createHttpsTransport",
@@ -85,7 +83,12 @@ describe("浏览器入口边界", () => {
     }
     // 模块图里也没有任何传输层或 React 依赖。
     expect(edges.join(" ")).not.toMatch(/key-roundtrip|bitcoin-libp2p|@multiformats|react|plugin-msfile/u);
-    // 协议与领域纯逻辑确实被导出，供未来 Worker 单元或集成测试复用。
+    // 任务仓储和 Worker 服务已迁入，Window 只消费代理，不能重建本地发布权威。
+    expect(text).toContain("createForumWorkerService");
+    expect(text).toContain("createForumRepository");
+    const manifest = readFileSync(join(process.cwd(), PLUGIN_ROOT, "src", "manifest.ts"), "utf8");
+    expect(manifest).not.toMatch(/createForumService\s*\(/u);
+    expect(manifest).toContain("createForumServiceProxy");
     expect(text).toContain("verifyForumRoot");
     expect(text).toContain("ForumListStore");
     expect(text).toContain("verifyFinalRaw");

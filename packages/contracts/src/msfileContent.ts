@@ -72,6 +72,14 @@ export interface MsFileContentEnsureInput {
    * 才允许触发获取。
    */
   readonly allowPurchase?: boolean;
+  /**
+   * 按**附件**限额验证，而不是正文限额。
+   *
+   * 正文默认 1 MiB，那是 Markdown 的规则；媒体附件可以更大。不带这个标志时，一份
+   * 完整落盘的 2 MiB 图片会在下载后的校验里被判 `too-large`，于是附件入口永远读不到
+   * 它——内容已经在本地，却因为用了正文上限而「取不到」。
+   */
+  readonly asAttachment?: boolean;
   readonly signal?: AbortSignal;
 }
 
@@ -93,6 +101,15 @@ export interface MsFileContentService {
   ensureContent(input: MsFileContentEnsureInput): Promise<MsFileContentStatus>;
   /** 只读本地已验证内容；不完整或不存在时返回 undefined，不触发网络。 */
   openVerifiedContent(seedHashHex: string, options?: { signal?: AbortSignal }): Promise<MsFileVerifiedContent | undefined>;
+  /**
+   * 附件用的已验证内容读取。
+   *
+   * 与 `openVerifiedContent` 同一套完整性验证，但不复用正文的解码/限额假设：
+   * 附件是任意媒体类型，字节数也可能大于 Markdown 的 1 MiB 上限。调用方自己按
+   * `mediaType` 决定怎么渲染或提供下载，MSFile 只保证「读到的字节就是那个 hash
+   * 对应的完整内容」。
+   */
+  openVerifiedAttachment(seedHashHex: string, options?: { signal?: AbortSignal }): Promise<MsFileVerifiedContent | undefined>;
   /** 把调用方提供的字节按 MSFile 布局存入；返回其 seed hash。 */
   importContent(input: MsFileContentImportInput): Promise<{ readonly seedHashHex: string; readonly byteLength: MsFileSatoshiAmount }>;
   /** 当前状态；不触发网络。 */

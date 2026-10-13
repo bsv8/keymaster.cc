@@ -6,7 +6,7 @@ export interface ChannelProtocolRelationsDependencies {
   ownerPublicKeyHex(): string | undefined;
   pruneRelated?(now: number): void;
 }
-interface PendingChannelPing {
+export interface PendingChannelPing {
   /** 创建 Ping 时绑定的 owner session epoch。 */
   ownerSessionEpoch: SessionEpoch;
   /** 创建 Ping 时绑定的 owner 公钥。 */

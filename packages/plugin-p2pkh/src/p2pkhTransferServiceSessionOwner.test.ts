@@ -1,3 +1,6 @@
+import {paymentRequester, fundingCoin, previousTransactions, cleanupPayments} from '../../../Coding/keymaster/vaultlink-integration/test/transfer-fixture.mjs';
+import {afterEach} from 'vitest';
+afterEach(cleanupPayments);
 import { describe, expect, it, vi } from "vitest";
 import { deriveP2pkhAddress } from "./p2pkhSigner.js";
 import { createP2pkhTransferService } from "./p2pkhTransferService.js";
@@ -8,8 +11,8 @@ const OWNER_B = deriveP2pkhAddress("00000000000000000000000000000000000000000000
 const RECIPIENT = deriveP2pkhAddress("0000000000000000000000000000000000000000000000000000000000000002", "main");
 
 function makeRepository(owner: typeof OWNER_A) {
-  const resource: P2pkhKeyResource = { resourceId: makeResourceId("main"), publicKeyHex: owner.publicKeyHex, label: "owner", address: owner.address, network: "main", createdAt: "2024-01-01T00:00:00.000Z", generation: 0 };
-  const utxo: P2pkhUtxo = { id: "funding", resourceId: resource.resourceId, publicKeyHex: owner.publicKeyHex, network: "main", address: owner.address, txid: "09".repeat(32), vout: 0, value: 3_000, status: "confirmed", isSpentInMempoolTx: false, syncedAt: resource.createdAt };
+  const resource: P2pkhKeyResource = {  resourceId: makeResourceId("main"), publicKeyHex: owner.publicKeyHex, label: "owner", address: owner.address, network: "main", createdAt: "2024-01-01T00:00:00.000Z", generation: 0 };
+  const utxo: P2pkhUtxo = { id: "funding", resourceId: resource.resourceId, publicKeyHex: owner.publicKeyHex, network: "main", address: owner.address, ...fundingCoin(owner.publicKeyHex, 3000), status: "confirmed", isSpentInMempoolTx: false, syncedAt: resource.createdAt };
   return {
     resource, utxo,
     async getResource(id: string) { return id === resource.resourceId ? resource : undefined; },
@@ -19,7 +22,7 @@ function makeRepository(owner: typeof OWNER_A) {
 }
 
 function makeVault() {
-  return { status: () => "unlocked", createActiveKeyCrypto: async (publicKeyHex: string) => ({ deriveP2pkhAddress: async (input: { network: "main" | "test" }) => ({ ...deriveP2pkhAddress(publicKeyHex === OWNER_A.publicKeyHex ? "00000000000000000000000000000000000000000000000000000000000000a1" : "00000000000000000000000000000000000000000000000000000000000000b1", input.network) }), signDigest: async () => ({ publicKeyHex, format: "der" as const, signature: new Uint8Array(64).buffer }) }) } as never;
+  return { status: () => "unlocked", requestPayment: paymentRequester("00000000000000000000000000000000000000000000000000000000000000b1"), createActiveKeyCrypto: async (publicKeyHex: string) => ({ deriveP2pkhAddress: async (input: { network: "main" | "test" }) => ({ ...deriveP2pkhAddress(publicKeyHex === OWNER_A.publicKeyHex ? "00000000000000000000000000000000000000000000000000000000000000a1" : "00000000000000000000000000000000000000000000000000000000000000b1", input.network) }), signDigest: async () => ({ publicKeyHex, format: "der" as const, signature: new Uint8Array(64).buffer }) }) } as never;
 }
 
 describe("ordinary P2PKH transfer owner binding", () => {
@@ -28,6 +31,7 @@ describe("ordinary P2PKH transfer owner binding", () => {
     const loadedOwners: string[] = [];
     const stores = new Map<string, ReturnType<typeof makeRepository>>();
     const service = createP2pkhTransferService({
+    previousTransactions,
       vault: makeVault(),
       messageBus: { publish: vi.fn(), subscribe: vi.fn(() => () => undefined) } as never,
       getStore: async (publicKeyHex) => { openedOwners.push(publicKeyHex); if (!stores.has(publicKeyHex)) stores.set(publicKeyHex, makeRepository(publicKeyHex === OWNER_A.publicKeyHex ? OWNER_A : OWNER_B)); return stores.get(publicKeyHex) as never; },
@@ -37,8 +41,8 @@ describe("ordinary P2PKH transfer owner binding", () => {
         return store ? [store.utxo] : [{ id: "x", resourceId: resource.resourceId, publicKeyHex: ownerPublicKeyHex, network: "main" as const, address: resource.address, txid: "09".repeat(32), vout: 0, value: 3_000, status: "confirmed" as const, isSpentInMempoolTx: false, syncedAt: resource.createdAt }];
       },
       broadcastWithCoordinator: async () => ({ status: "ok" as const, value: { status: "accepted" }, sessionEpoch: "test-epoch" }),
-      getActiveKey: () => ({ publicKeyHex: OWNER_A.publicKeyHex, label: "a", capabilities: [], createdAt: "now" }),
-      getKeyForOwner: async (publicKeyHex) => ({ publicKeyHex, label: "b", capabilities: [], createdAt: "now" }),
+      getActiveKey: () => ({bsvNetwork: "main" as const,  publicKeyHex: OWNER_A.publicKeyHex, label: "a", capabilities: [], createdAt: "now" }),
+      getKeyForOwner: async (publicKeyHex) => ({bsvNetwork: "main" as const,  publicKeyHex, label: "b", capabilities: [], createdAt: "now" }),
     });
     await service.prepare({ ownerPublicKeyHex: OWNER_B.publicKeyHex, assetId: "bsv", recipientAddress: RECIPIENT.address, amountSatoshis: 1_000, feeRateSatoshisPerKb: 1 });
     expect(openedOwners).toContain(OWNER_B.publicKeyHex);

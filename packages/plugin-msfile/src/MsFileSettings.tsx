@@ -718,71 +718,89 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
         </div>
       </section>
 
-      <h3>{t("msfile.settings.bitfsBuyer.title", { defaultValue: "BitFS 买方自动购买" })}</h3>
-      <p className="msfile-settings__hint">
-        {t("msfile.settings.bitfsBuyer.hint", { defaultValue: "自动购买默认关闭。启用后只在完整 Block 单价不高于下方上限时自动开始；该上限按单块计算，不限制文件总价。强制下载仍由每个文件任务单独决定；单文件卖家数决定同时参与传输的费用池数量。" })}
-      </p>
-      <div className="msfile-settings__form">
-        <label className="msfile-settings__checkbox">
-          <input
-            type="checkbox"
-            checked={bitfsBuyerDraft.buyerAutoPurchaseEnabled}
-            onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, buyerAutoPurchaseEnabled: event.target.checked }))}
-          />
-          <span>{t("msfile.settings.bitfsBuyer.enabled", { defaultValue: "允许合格报价自动开始购买" })}</span>
-        </label>
-        <label>
-          <span>{t("msfile.settings.bitfsBuyer.maxBlockPrice", { defaultValue: "自动购买完整 Block 最高价（聪）" })}</span>
-          <input
-            inputMode="numeric"
-            value={bitfsBuyerDraft.maxFullBlockPriceSatoshis}
-            onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, maxFullBlockPriceSatoshis: event.target.value }))}
-          />
-        </label>
-        <label>
-          <span>{t("msfile.settings.bitfsBuyer.priority", { defaultValue: "卖家选择优先级" })}</span>
-          <select
-            value={bitfsBuyerDraft.sellerSelectionPriority}
-            onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, sellerSelectionPriority: event.target.value as MsFileBitfsBuyerSettings["sellerSelectionPriority"] }))}
-          >
-            <option value="price">{t("msfile.settings.bitfsBuyer.priority.price", { defaultValue: "价格优先" })}</option>
-            <option value="recent-speed">{t("msfile.settings.bitfsBuyer.priority.speed", { defaultValue: "最近速度优先（无速度记录时按价格）" })}</option>
-          </select>
-        </label>
-        <label>
-          <span>{t("msfile.settings.bitfsBuyer.concurrency", { defaultValue: "同时购买文件任务数（1–16）" })}</span>
-          <input
-            type="number"
-            min={1}
-            max={MSFILE_BITFS_BUYER_LIMITS.maxConcurrentDownloads}
-            value={bitfsBuyerDraft.maxConcurrentDownloads}
-            onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, maxConcurrentDownloads: event.target.value }))}
-          />
-        </label>
-        <label>
-          <span>{t("msfile.settings.bitfsBuyer.sellerConcurrency", { defaultValue: "单个文件同时传输的卖家数（1–16）" })}</span>
-          <input
-            type="number"
-            min={1}
-            max={MSFILE_BITFS_BUYER_LIMITS.maxConcurrentSellerSessions}
-            value={bitfsBuyerDraft.maxConcurrentSellerSessions}
-            onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, maxConcurrentSellerSessions: event.target.value }))}
-          />
-        </label>
-        <label>
-          <span>{t("msfile.settings.bitfsBuyer.blocksPerBatch", { defaultValue: "每次请求的文件块数（1–16，默认 10）" })}</span>
-          <input
-            type="number"
-            min={1}
-            max={MSFILE_BITFS_BUYER_LIMITS.blocksPerBatch}
-            value={bitfsBuyerDraft.blocksPerBatch}
-            onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, blocksPerBatch: event.target.value }))}
-          />
-        </label>
-        <Button onClick={() => void saveBitfsBuyerSettings()}>
-          {t("msfile.settings.bitfsBuyer.save", { defaultValue: "保存 BitFS 买方设置" })}
-        </Button>
-      </div>
+      <section className="msfile-settings__section" id="msfile-buying" aria-labelledby="msfile-buying-title">
+        <header className="msfile-settings__section-header">
+          <div>
+            <h2 id="msfile-buying-title">{t("msfile.settings.bitfsBuyer.title", { defaultValue: "BitFS 买方自动购买" })}</h2>
+            <p>
+              {t("msfile.settings.bitfsBuyer.hint", { defaultValue: "自动购买默认关闭。启用后只在完整 Block 单价不高于下方上限时自动开始；该上限按单块计算，不限制文件总价。强制下载仍由每个文件任务单独决定；单文件卖家数决定同时参与传输的费用池数量。" })}
+            </p>
+          </div>
+        </header>
+        <div className="msfile-settings__form-grid">
+          <label className="msfile-settings__checkbox is-wide">
+            <input
+              type="checkbox"
+              checked={bitfsBuyerDraft.buyerAutoPurchaseEnabled}
+              onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, buyerAutoPurchaseEnabled: event.target.checked }))}
+            />
+            <span>{t("msfile.settings.bitfsBuyer.enabled", { defaultValue: "允许合格报价自动开始购买" })}</span>
+          </label>
+          <div className="msfile-settings__field">
+            <label htmlFor="msfile-buyer-maxBlockPrice">{t("msfile.settings.bitfsBuyer.maxBlockPrice", { defaultValue: "自动购买完整 Block 最高价（聪）" })}</label>
+            <input
+              id="msfile-buyer-maxBlockPrice"
+              className="msfile-settings__control"
+              inputMode="numeric"
+              value={bitfsBuyerDraft.maxFullBlockPriceSatoshis}
+              onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, maxFullBlockPriceSatoshis: event.target.value }))}
+            />
+          </div>
+          <div className="msfile-settings__field">
+            <label htmlFor="msfile-buyer-priority">{t("msfile.settings.bitfsBuyer.priority", { defaultValue: "卖家选择优先级" })}</label>
+            <select
+              id="msfile-buyer-priority"
+              className="msfile-settings__control"
+              value={bitfsBuyerDraft.sellerSelectionPriority}
+              onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, sellerSelectionPriority: event.target.value as MsFileBitfsBuyerSettings["sellerSelectionPriority"] }))}
+            >
+              <option value="price">{t("msfile.settings.bitfsBuyer.priority.price", { defaultValue: "价格优先" })}</option>
+              <option value="recent-speed">{t("msfile.settings.bitfsBuyer.priority.speed", { defaultValue: "最近速度优先（无速度记录时按价格）" })}</option>
+            </select>
+          </div>
+          <div className="msfile-settings__field">
+            <label htmlFor="msfile-buyer-concurrency">{t("msfile.settings.bitfsBuyer.concurrency", { defaultValue: "同时购买文件任务数（1–16）" })}</label>
+            <input
+              id="msfile-buyer-concurrency"
+              className="msfile-settings__control"
+              type="number"
+              min={1}
+              max={MSFILE_BITFS_BUYER_LIMITS.maxConcurrentDownloads}
+              value={bitfsBuyerDraft.maxConcurrentDownloads}
+              onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, maxConcurrentDownloads: event.target.value }))}
+            />
+          </div>
+          <div className="msfile-settings__field">
+            <label htmlFor="msfile-buyer-sellerConcurrency">{t("msfile.settings.bitfsBuyer.sellerConcurrency", { defaultValue: "单个文件同时传输的卖家数（1–16）" })}</label>
+            <input
+              id="msfile-buyer-sellerConcurrency"
+              className="msfile-settings__control"
+              type="number"
+              min={1}
+              max={MSFILE_BITFS_BUYER_LIMITS.maxConcurrentSellerSessions}
+              value={bitfsBuyerDraft.maxConcurrentSellerSessions}
+              onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, maxConcurrentSellerSessions: event.target.value }))}
+            />
+          </div>
+          <div className="msfile-settings__field">
+            <label htmlFor="msfile-buyer-blocksPerBatch">{t("msfile.settings.bitfsBuyer.blocksPerBatch", { defaultValue: "每次请求的文件块数（1–16，默认 10）" })}</label>
+            <input
+              id="msfile-buyer-blocksPerBatch"
+              className="msfile-settings__control"
+              type="number"
+              min={1}
+              max={MSFILE_BITFS_BUYER_LIMITS.blocksPerBatch}
+              value={bitfsBuyerDraft.blocksPerBatch}
+              onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, blocksPerBatch: event.target.value }))}
+            />
+          </div>
+        </div>
+        <div className="msfile-settings__section-actions">
+          <Button onClick={() => void saveBitfsBuyerSettings()}>
+            {t("msfile.settings.bitfsBuyer.save", { defaultValue: "保存 BitFS 买方设置" })}
+          </Button>
+        </div>
+      </section>
 
       <section className="msfile-settings__section" id="msfile-sources" aria-labelledby="msfile-sources-title">
         <header className="msfile-settings__section-header">

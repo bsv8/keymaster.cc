@@ -167,12 +167,9 @@ describe("OriginSettingsTray — 面板样式（施工单 002）", () => {
     const service = makeMockService();
     service.getOriginSettingsImpl = async (origin) => ({
       origin,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
-      cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      cipherAutoApproveEnabled: false,
       confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
@@ -193,12 +190,9 @@ describe("OriginSettingsTray — 面板样式（施工单 002）", () => {
     const service = makeMockService();
     service.getOriginSettingsImpl = async (origin) => ({
       origin,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
-      cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      cipherAutoApproveEnabled: false,
       confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
@@ -219,12 +213,9 @@ describe("OriginSettingsTray — 复选框即时提交（施工单 002）", () =
     const service = makeMockService();
     service.getOriginSettingsImpl = async (origin) => ({
       origin,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
-      cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      cipherAutoApproveEnabled: false,
       confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
@@ -233,26 +224,23 @@ describe("OriginSettingsTray — 复选框即时提交（施工单 002）", () =
     await act(async () => {
       await flushMicrotasks();
     });
-    const checkbox = findCheckboxByLabel(/Auto-approve p2pkh/);
+    const checkbox = findCheckboxByLabel(/账户信息获取/);
     expect(checkbox.checked).toBe(false);
     await act(async () => {
       fireEvent.click(checkbox);
       await flushMicrotasks();
     });
     expect(service.setOriginSettingsCalls.length).toBe(1);
-    expect(service.setOriginSettingsCalls[0]!.p2pkhAutoApproveEnabled).toBe(true);
+    expect(service.setOriginSettingsCalls[0]!.identityAutoApproveEnabled).toBe(true);
   });
 
   it("rolls back checkbox state when setOriginSettings rejects", async () => {
     const service = makeMockService();
     service.getOriginSettingsImpl = async (origin) => ({
       origin,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
-      cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      cipherAutoApproveEnabled: false,
       confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
@@ -264,7 +252,7 @@ describe("OriginSettingsTray — 复选框即时提交（施工单 002）", () =
     await act(async () => {
       await flushMicrotasks();
     });
-    const checkbox = findCheckboxByLabel(/Auto-approve p2pkh/);
+    const checkbox = findCheckboxByLabel(/账户信息获取/);
     await act(async () => {
       fireEvent.click(checkbox);
       await flushMicrotasks();
@@ -282,12 +270,9 @@ describe("OriginSettingsTray — 数字输入编辑态 + blur/Enter 提交（施
     const service = makeMockService();
     service.getOriginSettingsImpl = async (origin) => ({
       origin,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
-      cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      cipherAutoApproveEnabled: false,
       confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
@@ -296,7 +281,7 @@ describe("OriginSettingsTray — 数字输入编辑态 + blur/Enter 提交（施
     await act(async () => {
       await flushMicrotasks();
     });
-    const input = findNumberInputByLabel(/Max satoshis for auto-approve/);
+    const input = findNumberInputByLabel(/Fee-pool default initial fund/);
     // onChange → 仅更新编辑态，不提交。
     await act(async () => {
       fireEvent.change(input, { target: { value: "123" } });
@@ -309,19 +294,16 @@ describe("OriginSettingsTray — 数字输入编辑态 + blur/Enter 提交（施
       await flushMicrotasks();
     });
     expect(service.setOriginSettingsCalls.length).toBe(1);
-    expect(service.setOriginSettingsCalls[0]!.p2pkhAutoApproveMaxSatoshis).toBe(123);
+    expect(service.setOriginSettingsCalls[0]!.feePoolDefaultFundSatoshis).toBe(123);
   });
 
   it("submits on Enter key in number input", async () => {
     const service = makeMockService();
     service.getOriginSettingsImpl = async (origin) => ({
       origin,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
-      cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      cipherAutoApproveEnabled: false,
       confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
@@ -330,7 +312,7 @@ describe("OriginSettingsTray — 数字输入编辑态 + blur/Enter 提交（施
     await act(async () => {
       await flushMicrotasks();
     });
-    const input = findNumberInputByLabel(/Max satoshis for auto-approve/);
+    const input = findNumberInputByLabel(/Fee-pool default initial fund/);
     await act(async () => {
       fireEvent.change(input, { target: { value: "456" } });
       await flushMicrotasks();
@@ -341,19 +323,16 @@ describe("OriginSettingsTray — 数字输入编辑态 + blur/Enter 提交（施
       await flushMicrotasks();
     });
     expect(service.setOriginSettingsCalls.length).toBe(1);
-    expect(service.setOriginSettingsCalls[0]!.p2pkhAutoApproveMaxSatoshis).toBe(456);
+    expect(service.setOriginSettingsCalls[0]!.feePoolDefaultFundSatoshis).toBe(456);
   });
 
   it("rolls back number input value when submission rejects", async () => {
     const service = makeMockService();
     service.getOriginSettingsImpl = async (origin) => ({
       origin,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 100,
       identityAutoApproveEnabled: false,
+      feePoolDefaultFundSatoshis: 100,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
-      feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
@@ -365,7 +344,7 @@ describe("OriginSettingsTray — 数字输入编辑态 + blur/Enter 提交（施
     await act(async () => {
       await flushMicrotasks();
     });
-    const input = findNumberInputByLabel(/Max satoshis for auto-approve/);
+    const input = findNumberInputByLabel(/Fee-pool default initial fund/);
     expect(input.value).toBe("100");
     await act(async () => {
       fireEvent.focus(input);
@@ -384,12 +363,9 @@ describe("OriginSettingsTray — 数字输入编辑态 + blur/Enter 提交（施
     const service = makeMockService();
     service.getOriginSettingsImpl = async (origin) => ({
       origin,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
-      cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      cipherAutoApproveEnabled: false,
       confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
@@ -398,8 +374,8 @@ describe("OriginSettingsTray — 数字输入编辑态 + blur/Enter 提交（施
     await act(async () => {
       await flushMicrotasks();
     });
-    const input = findNumberInputByLabel(/Max satoshis for auto-approve/);
-    // 负数 → 0：触发 0 → 0 幂等不写库。所以这里先改 record.p2pkhAutoApproveMaxSatoshis 让首次 blur 真正落库。
+    const input = findNumberInputByLabel(/Fee-pool default initial fund/);
+    // 负数 → 0：触发 0 → 0 幂等不写库。所以这里先改 record.feePoolDefaultFundSatoshis 让首次 blur 真正落库。
     await act(async () => {
       fireEvent.change(input, { target: { value: "1" } });
       fireEvent.blur(input);
@@ -407,7 +383,7 @@ describe("OriginSettingsTray — 数字输入编辑态 + blur/Enter 提交（施
       await flushMicrotasks();
     });
     expect(service.setOriginSettingsCalls.length).toBe(1);
-    expect(service.setOriginSettingsCalls[0]!.p2pkhAutoApproveMaxSatoshis).toBe(1);
+    expect(service.setOriginSettingsCalls[0]!.feePoolDefaultFundSatoshis).toBe(1);
     // 再输入负数 → 规范化为 0 → 提交 0。
     await act(async () => {
       fireEvent.change(input, { target: { value: "-5" } });
@@ -416,7 +392,7 @@ describe("OriginSettingsTray — 数字输入编辑态 + blur/Enter 提交（施
       await flushMicrotasks();
     });
     expect(service.setOriginSettingsCalls.length).toBe(2);
-    expect(service.setOriginSettingsCalls[1]!.p2pkhAutoApproveMaxSatoshis).toBe(0);
+    expect(service.setOriginSettingsCalls[1]!.feePoolDefaultFundSatoshis).toBe(0);
     expect(input.value).toBe("0");
   });
 
@@ -424,12 +400,9 @@ describe("OriginSettingsTray — 数字输入编辑态 + blur/Enter 提交（施
     const service = makeMockService();
     service.getOriginSettingsImpl = async (origin) => ({
       origin,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
-      cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      cipherAutoApproveEnabled: false,
       confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
@@ -438,7 +411,7 @@ describe("OriginSettingsTray — 数字输入编辑态 + blur/Enter 提交（施
     await act(async () => {
       await flushMicrotasks();
     });
-    const input = findNumberInputByLabel(/Max satoshis for auto-approve/);
+    const input = findNumberInputByLabel(/Fee-pool default initial fund/);
     // 第一次：0 → 50，落库。
     await act(async () => {
       fireEvent.focus(input);
@@ -463,12 +436,9 @@ describe("OriginSettingsTray — origin 切换（施工单 002）", () => {
     const service = makeMockService();
     service.getOriginSettingsImpl = async (origin) => ({
       origin,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
-      cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      cipherAutoApproveEnabled: false,
       confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
@@ -479,7 +449,7 @@ describe("OriginSettingsTray — origin 切换（施工单 002）", () => {
     await act(async () => {
       await flushMicrotasks();
     });
-    const input = findNumberInputByLabel(/Max satoshis for auto-approve/);
+    const input = findNumberInputByLabel(/Fee-pool default initial fund/);
     // 用户在 demo origin 输入 "777" 但不提交 → 仍是编辑态。
     await act(async () => {
       fireEvent.change(input, { target: { value: "777" } });
@@ -490,12 +460,9 @@ describe("OriginSettingsTray — origin 切换（施工单 002）", () => {
     // 切到 other origin + 不同的真值 → 编辑态丢弃，按新真值渲染。
     service.getOriginSettingsImpl = async (origin) => ({
       origin,
-      p2pkhAutoApproveEnabled: true,
-      p2pkhAutoApproveMaxSatoshis: 999,
-      identityAutoApproveEnabled: false,
+      identityAutoApproveEnabled: true,
+      feePoolDefaultFundSatoshis: 999,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
-      feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
@@ -505,7 +472,7 @@ describe("OriginSettingsTray — origin 切换（施工单 002）", () => {
       );
       await flushMicrotasks();
     });
-    const newInput = findNumberInputByLabel(/Max satoshis for auto-approve/);
+    const newInput = findNumberInputByLabel(/Fee-pool default initial fund/);
     expect(newInput.value).toBe("999");
   });
 });
@@ -553,12 +520,9 @@ describe("OriginSettingsTray — in-flight commit 跨 origin 切换（施工单 
     // demo origin 的初始真值。
     service.getOriginSettingsImpl = async (origin) => ({
       origin,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
-      cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      cipherAutoApproveEnabled: false,
       confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
@@ -576,21 +540,18 @@ describe("OriginSettingsTray — in-flight commit 跨 origin 切换（施工单 
       await flushMicrotasks();
     });
     // demo origin：点复选框 → commit 进入 await。
-    const checkbox = findCheckboxByLabel(/Auto-approve p2pkh/);
+    const checkbox = findCheckboxByLabel(/账户信息获取/);
     await act(async () => {
       fireEvent.click(checkbox);
       await flushMicrotasks();
     });
     expect(service.setOriginSettingsCalls.length).toBe(1);
-    // 切到 other origin，配置为 p2pkhAutoApproveEnabled=true。
+    // 切到 other origin，配置为 identityAutoApproveEnabled=true。
     service.getOriginSettingsImpl = async (origin) => ({
       origin,
-      p2pkhAutoApproveEnabled: true,
-      p2pkhAutoApproveMaxSatoshis: 0,
-      identityAutoApproveEnabled: false,
-      cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
+      identityAutoApproveEnabled: true,
       feePoolDefaultFundSatoshis: 0,
+      cipherAutoApproveEnabled: false,
       confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
@@ -601,10 +562,10 @@ describe("OriginSettingsTray — in-flight commit 跨 origin 切换（施工单 
       await flushMicrotasks();
     });
     // 新 origin 面板就位（真值 checked=true）。
-    const newCheckbox = findCheckboxByLabel(/Auto-approve p2pkh/);
+    const newCheckbox = findCheckboxByLabel(/账户信息获取/);
     expect(newCheckbox.checked).toBe(true);
     // 现在旧 commit reject → 如果 generation gate 不存在，会把 record
-    // 回滚到 demo origin 的 prev（p2pkhAutoApproveEnabled=false），并
+    // 回滚到 demo origin 的 prev（identityAutoApproveEnabled=false），并
     // 把 demo origin 的报错显示在新 origin 面板上。
     await act(async () => {
       rejectSet(new Error("DB unavailable"));
@@ -620,12 +581,9 @@ describe("OriginSettingsTray — in-flight commit 跨 origin 切换（施工单 
     const service = makeMockService();
     service.getOriginSettingsImpl = async (origin) => ({
       origin,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
-      cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      cipherAutoApproveEnabled: false,
       confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
@@ -641,7 +599,7 @@ describe("OriginSettingsTray — in-flight commit 跨 origin 切换（施工单 
     await act(async () => {
       await flushMicrotasks();
     });
-    const checkbox = findCheckboxByLabel(/Auto-approve p2pkh/);
+    const checkbox = findCheckboxByLabel(/账户信息获取/);
     await act(async () => {
       fireEvent.click(checkbox);
       await flushMicrotasks();
@@ -649,12 +607,9 @@ describe("OriginSettingsTray — in-flight commit 跨 origin 切换（施工单 
     // 切到 other origin。
     service.getOriginSettingsImpl = async (origin) => ({
       origin,
-      p2pkhAutoApproveEnabled: true,
-      p2pkhAutoApproveMaxSatoshis: 123,
-      identityAutoApproveEnabled: false,
+      identityAutoApproveEnabled: true,
+      feePoolDefaultFundSatoshis: 123,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
-      feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
@@ -664,8 +619,8 @@ describe("OriginSettingsTray — in-flight commit 跨 origin 切换（施工单 
       );
       await flushMicrotasks();
     });
-    const newCheckbox = findCheckboxByLabel(/Auto-approve p2pkh/);
-    const newInput = findNumberInputByLabel(/Max satoshis for auto-approve/);
+    const newCheckbox = findCheckboxByLabel(/账户信息获取/);
+    const newInput = findNumberInputByLabel(/Fee-pool default initial fund/);
     expect(newCheckbox.checked).toBe(true);
     expect(newInput.value).toBe("123");
     // 旧 commit 成功 resolve → 旧 commit finally 不应触发任何污染新 origin 的 setState。
@@ -684,12 +639,9 @@ describe("OriginSettingsTray — in-flight commit 跨 origin 切换（施工单 
     const service = makeMockService();
     service.getOriginSettingsImpl = async (origin) => ({
       origin,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
-      cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      cipherAutoApproveEnabled: false,
       confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
@@ -706,7 +658,7 @@ describe("OriginSettingsTray — in-flight commit 跨 origin 切换（施工单 
       await flushMicrotasks();
     });
     // demo origin：在数字输入里输入 500 然后 blur → commit 进入 await。
-    const input = findNumberInputByLabel(/Max satoshis for auto-approve/);
+    const input = findNumberInputByLabel(/Fee-pool default initial fund/);
     await act(async () => {
       fireEvent.focus(input);
       fireEvent.change(input, { target: { value: "500" } });
@@ -718,12 +670,9 @@ describe("OriginSettingsTray — in-flight commit 跨 origin 切换（施工单 
     // 切到 other origin + 不同真值。
     service.getOriginSettingsImpl = async (origin) => ({
       origin,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 888,
       identityAutoApproveEnabled: false,
+      feePoolDefaultFundSatoshis: 888,
       cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
-      feePoolDefaultFundSatoshis: 0,
       confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
@@ -733,7 +682,7 @@ describe("OriginSettingsTray — in-flight commit 跨 origin 切换（施工单 
       );
       await flushMicrotasks();
     });
-    const newInput = findNumberInputByLabel(/Max satoshis for auto-approve/);
+    const newInput = findNumberInputByLabel(/Fee-pool default initial fund/);
     expect(newInput.value).toBe("888");
     // 旧 commit reject → 不应把新 origin 数字字段回滚到 demo origin 的 0，
     // 也不应显示错误。
@@ -754,12 +703,9 @@ describe("OriginSettingsTray — confirmTimeoutSeconds (003)", () => {
     const service = makeMockService();
     service.getOriginSettingsImpl = async (origin) => ({
       origin,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
-      cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      cipherAutoApproveEnabled: false,
       confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
@@ -784,12 +730,9 @@ describe("OriginSettingsTray — confirmTimeoutSeconds (003)", () => {
     const service = makeMockService();
     service.getOriginSettingsImpl = async (origin) => ({
       origin,
-      p2pkhAutoApproveEnabled: false,
-      p2pkhAutoApproveMaxSatoshis: 0,
       identityAutoApproveEnabled: false,
-      cipherAutoApproveEnabled: false,
-      feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      cipherAutoApproveEnabled: false,
       confirmTimeoutSeconds: 100,
       updatedAt: 0
     });

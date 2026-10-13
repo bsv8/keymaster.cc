@@ -32,6 +32,7 @@ export default defineConfig({
           environment: "node",
           include: [
             "packages/**/*.test.ts",
+            "Coding/keymaster/vaultlink-integration/test/**/*.test.ts",
             "packages/**/*.spec.ts",
             "apps/**/*.test.ts",
             "apps/**/*.spec.ts"
@@ -45,6 +46,7 @@ export default defineConfig({
           environment: "jsdom",
           include: [
             "packages/**/*.test.tsx",
+            "Coding/keymaster/vaultlink-integration/test/**/*.test.tsx",
             "packages/**/*.spec.tsx",
             "apps/**/*.test.tsx",
             "apps/**/*.spec.tsx"

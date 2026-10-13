@@ -8,6 +8,9 @@ import type { PluginStorageDeclaration } from "./access.js";
  * 复制这些坐标再拼物理路径。
  */
 export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
+  vaultPayments: Object.freeze({
+    moduleId: "vault", purposeId: "payments", authority: "platform-only", model: "files", schemaVersion: 1,
+  } satisfies PluginStorageDeclaration),
   coordinatorSettings: Object.freeze({
     moduleId: "coordinator",
     purposeId: "settings",
@@ -74,7 +77,7 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
   } satisfies PluginStorageDeclaration),
   /**
    * P2PKH 文件根（空 purpose = 模块根）。
-   * 布局：`p2pkh/setting.json`、`p2pkh/<net>/tx|height/…`。
+   * 布局（已绑定网络身份根）：`p2pkh/setting.json`、`p2pkh/history.json`。
    */
   p2pkhFiles: Object.freeze({
     moduleId: "p2pkh",
@@ -193,6 +196,7 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
 
 /** manifest pluginId 到中央声明的绑定目录。 */
 export const SYSTEM_STORAGE_DECLARATIONS: Readonly<Record<string, readonly PluginStorageDeclaration[]>> = Object.freeze({
+  vault: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.vaultPayments]),
   "bsv-price": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.bsvPrice]),
   "collectible-1satordinals": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.ordinalsMintHistory]),
   contacts: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook]),

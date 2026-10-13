@@ -81,7 +81,7 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
     unitId: "vault.coordinator-worker",
     taskIds: [],
     serviceIds: ["vault.walletState", "vault.crypto"],
-    storagePurposes: [],
+    storagePurposes: ["payments"],
     finalIoAuditEntries: [],
   },
   {
@@ -114,6 +114,14 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
     serviceIds: ["contacts.service"],
     storagePurposes: ["address-book"],
     finalIoAuditEntries: [{ taskId: "contacts.presence-probe", operation: "contacts.presence-probe" }],
+  },
+  {
+    unitId: "forum.coordinator-worker",
+    // Owner-session Forum owns config/cache/tasks and publishing arbitration.
+    taskIds: [],
+    serviceIds: ["forum.network", "forum.service"],
+    storagePurposes: [""],
+    finalIoAuditEntries: [],
   },
   {
     unitId: "p2pkh.coordinator-worker",

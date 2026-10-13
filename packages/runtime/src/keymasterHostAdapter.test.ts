@@ -2,7 +2,7 @@ import { createFixtureHost as createKeymasterPluginHost } from "@keymaster/runti
 import { describe, expect, it } from "vitest";
 import { defineCapability } from "webloom-framework";
 import { createWindowAppFromHost, registerPlugins } from "webloom-framework/advanced";
-import { defineRuntimeUnitDependencies, type CoordinatorUnitUnavailableReason, type PluginSetup } from "@keymaster/contracts";
+import { RESOURCE_REGISTRY_CAPABILITY, defineRuntimeUnitDependencies, type CoordinatorUnitUnavailableReason, type PluginSetup } from "@keymaster/contracts";
 
 import { getWebLoomHost } from "./pluginHostContract.js";
 
@@ -18,6 +18,85 @@ const DEPENDENCY_CAPABILITY = defineCapability<{ ready: boolean }>({
 });
 
 describe("Keymaster WebLoom v4 adapter", () => {
+
+  it("rebuilds Window storage resources after wallet reset and reinitialization", async () => {
+    let instances = 0;
+    const host = createKeymasterPluginHost({
+      runtime: "window-main",
+      initialRuntimeIdentity: {
+        vaultStatus: "locked", sessionEpoch: "session:1",
+        walletGeneration: "wallet:1", runGeneration: "run:1",
+      },
+      runtimeUnitImplementationRegistry: { get: () => (context) => {
+        instances += 1;
+        context.provide(LOCAL_CAPABILITY, { ok: true });
+        context.capability(RESOURCE_REGISTRY_CAPABILITY).register({
+          id: "adapter.storage-status", scope: "global",
+          key: () => ["adapter.storage-status"],
+          load: async () => ({ ok: true }), invalidation: "immediate",
+        });
+      } },
+    });
+    await host.register({
+      id: "storage-proxy", name: "Storage proxy",
+      units: [{ id: "storage-proxy.window", runtime: "window-main",
+        scopeKind: "storage", provides: [LOCAL_CAPABILITY],
+        dependencies: defineRuntimeUnitDependencies([
+          { capability: RESOURCE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "Register storage status" },
+        ]) }],
+    });
+    expect(host.state("storage-proxy")).toMatchObject({ kind: "enabled" });
+    const initialScope = host.scope("storage-proxy");
+
+    await host.transitionRuntimeIdentity({
+      vaultStatus: "uninitialized", sessionEpoch: "session:2", runGeneration: "run:1",
+    });
+    expect(initialScope?.state).not.toBe("active");
+    expect(host.state("storage-proxy").kind).toBe("enabled");
+    expect(host.capabilities.get(LOCAL_CAPABILITY)).toEqual({ ok: true });
+    expect(host.resourceRegistry?.get("adapter.storage-status")).toBeDefined();
+    const resetScope = host.scope("storage-proxy");
+    expect(resetScope?.identity.instanceId).not.toBe(initialScope?.identity.instanceId);
+
+    await host.transitionRuntimeIdentity({
+      vaultStatus: "locked", sessionEpoch: "session:3",
+      walletGeneration: "wallet:2", runGeneration: "run:1",
+    });
+    expect(resetScope?.state).not.toBe("active");
+    expect(host.capabilities.get(LOCAL_CAPABILITY)).toEqual({ ok: true });
+    expect(host.resourceRegistry?.get("adapter.storage-status")).toBeDefined();
+    expect(instances).toBe(3);
+    await host.dispose("test");
+  });
+
+  it("blocks identity retry while real owner teardown is pending, then accepts late cleanup", async () => {
+    let finish!: () => void;
+    const teardown = new Promise<void>(resolve => { finish = resolve; });
+    const identity = { vaultStatus: "unlocked" as const, ownerPublicKeyHex: "owner", sessionEpoch: "unlocked", runGeneration: "run", walletGeneration: "wallet" };
+    const host = createKeymasterPluginHost({
+      runtime: "window-main", initialRuntimeIdentity: identity, lifecycleCleanupTimeoutMs: 1,
+      runtimeUnitImplementationRegistry: { get: () => context => {
+        context.provide(LOCAL_CAPABILITY, { ok: true });
+        return () => teardown;
+      } },
+    });
+    await host.register({
+      id: "slow-owner", name: "Slow owner",
+      units: [{ id: "slow-owner.window", runtime: "window-main", scopeKind: "owner-session", provides: [LOCAL_CAPABILITY], dependencies: [] }],
+    });
+    const scope = host.scope("slow-owner");
+    const locked = { ...identity, vaultStatus: "locked" as const, ownerPublicKeyHex: undefined, sessionEpoch: "locked" };
+    const transition = host.transitionRuntimeIdentity(locked);
+    expect(scope?.state).not.toBe("active");
+    expect(host.capabilities.has(LOCAL_CAPABILITY)).toBe(false);
+    await expect(transition).rejects.toThrow("slow-owner");
+    await expect(host.transitionRuntimeIdentity(locked)).rejects.toThrow("slow-owner");
+    finish();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await host.transitionRuntimeIdentity(locked);
+    expect(host.state("slow-owner").kind).toBe("blocked");
+    await host.dispose("test");
+  });
 
   it("allows staged native WebLoom implementations after WindowApp takes ownership", async () => {
     const host = createKeymasterPluginHost({

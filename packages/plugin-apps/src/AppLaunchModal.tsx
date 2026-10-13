@@ -1,12 +1,12 @@
 import { useWalletState } from "@keymaster/runtime";
 import { sameWalletSession, type VaultLifecycleSnapshot, requireUnlockedWalletIdentity } from "@keymaster/contracts";
 // packages/plugin-apps/src/AppLaunchModal.tsx
-// appView 启动授权 modal：确认当前唯一 Key 的身份 + 输入 Vault 密码。
+// appView 启动授权 modal：确认当前唯一 Key；软件输入密码，硬件使用已验证连接。
 //
 // 设计缘由：
 //   - 单 Key 本地钱包（docs/存储.md）之后 appView 只能绑定当前唯一 Key，
 //     所以这里没有 Key 选择器：只读展示这把 Key 的身份，并要求重新输入
-//     密码来创建独立 appView session；
+//     软件密码或设备连接来创建独立 appView session，不在页面输入设备 PIN；
 //   - modal 只收集输入，不直接调用 protocol service。
 
 import { useEffect, useRef, useState } from "react";
@@ -38,6 +38,7 @@ export function AppLaunchModal({
   const [currentKey, setCurrentKey] = useState<KeyIdentity | null>(null);
   const [password, setPassword] = useState("");
   const [loadError, setLoadError] = useState<string | null>(null);
+  const hardware = currentKey?.backend === "hardware";
 
   const close = useRef(onClose);
   close.current = onClose;
@@ -74,8 +75,8 @@ export function AppLaunchModal({
   }, [open]);
 
   async function submit() {
-    if (!currentKey || !password || !entry || !boundSession.current || !sameWalletSession(boundSession.current, walletState.snapshot())) return;
-    await onConfirm({ publicKeyHex: currentKey.publicKeyHex, password });
+    if (!currentKey || (!hardware && !password) || !entry || !boundSession.current || !sameWalletSession(boundSession.current, walletState.snapshot())) return;
+    await onConfirm({ publicKeyHex: currentKey.publicKeyHex, password: hardware ? "" : password });
   }
 
   return (
@@ -97,7 +98,7 @@ export function AppLaunchModal({
           <Button
             onClick={() => void submit()}
             loading={busy}
-            disabled={busy || !password || currentKey === null}
+            disabled={busy || (!hardware && !password) || currentKey === null}
             data-testid="app-launch-confirm"
           >
             {t("apps.open.cta", { defaultValue: "Open App" })}
@@ -129,14 +130,15 @@ export function AppLaunchModal({
         </span>
       </div>
       {loadError ? <div className="apps-launch-modal__error">{loadError}</div> : null}
-      <TextInput
+      {hardware ? <p>{t("apps.launch.hardware", {defaultValue: "使用已连接并在设备上解锁的 RocKey。PIN 只在设备上输入。"})}</p> : <TextInput
         label={t("apps.launch.password", { defaultValue: "Vault password" })}
         type="password"
         autoComplete="current-password"
         value={password}
         onChange={(e) => setPassword(e.currentTarget.value)}
         error={error ?? undefined}
-      />
+      />}
+      {hardware && error ? <div className="apps-launch-modal__error" role="alert">{error}</div> : null}
       {loadError ? (
         <div className="apps-launch-modal__error">{loadError}</div>
       ) : null}

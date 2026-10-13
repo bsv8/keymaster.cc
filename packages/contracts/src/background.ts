@@ -1,3 +1,4 @@
+import type { NetworkIdentity } from "./networkIdentity.js";
 // packages/contracts/src/background.ts
 // 后台任务通用契约。
 import { defineCapability } from "webloom-framework";
@@ -149,7 +150,7 @@ export type BackgroundCommandResult =
  * 调 `formatShortPublicKey(publicKeyHex)` 现算短公钥；本接口**不**持
  * 有 `fingerprint` 字段，也**不**通过 MessageBus 透传短公钥。
  */
-export interface BackgroundTaskKeyScope {
+export interface BackgroundTaskKeyScope extends NetworkIdentity {
   publicKeyHex: string;
   label?: string;
 }
@@ -314,7 +315,7 @@ export interface BackgroundService {
    *
    * 硬切换 001 收口：入参是 publicKeyHex。
    */
-  cancelByKey(publicKeyHex: string): Promise<void | BackgroundCommandResult>;
+  cancelByKey(identity: NetworkIdentity): Promise<void | BackgroundCommandResult>;
 
   /**
    * 读取同步管理设置（任务 id -> 间隔毫秒）。

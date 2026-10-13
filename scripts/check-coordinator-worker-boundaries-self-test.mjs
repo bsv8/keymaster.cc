@@ -116,14 +116,18 @@ expectRejected(
   "non-static import-equals external module reference",
 );
 
+expectRejected(
+  "business implementation in Worker entry",
+  { "apps/web/src/keymasterSessionCoordinator.worker.ts": "function handleBusinessRequest() {}\n" },
+  "Worker entry must contain only environment/Host assembly",
+);
+
 expectAccepted("type-only and worker-safe graph", {
   "apps/web/src/keymasterSessionCoordinator.worker.ts": [
     'import type { FixtureType } from "./types.ts";',
     'import { workerSafeRuntime } from "@keymaster/runtime/storage";',
     'import "./worker-side-effect.ts";',
-    'export async function load(): Promise<typeof workerSafeRuntime | FixtureType> {',
-    '  return import("./worker-leaf.ts");',
-    "}",
+    'void import("./worker-leaf.ts");',
   ].join("\n"),
   "apps/web/src/types.ts": "export interface FixtureType { ok: true }\n",
   "apps/web/src/worker-side-effect.ts": "export const sideEffect = true;\n",

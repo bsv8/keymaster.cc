@@ -93,7 +93,7 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
       const protocolSpend = this.getProtocolSpend();
       if (!protocolSpend) throw new Error("P2PKH protocol spend capability is unavailable");
       if (signal.aborted) throw new DOMException("BitFS funding prepare was cancelled", "AbortError");
-      const preview = await protocolSpend.prepare(value.input);
+      const preview = await protocolSpend.presign(value.input);
       if (signal.aborted) {
         await protocolSpend.releasePrepared?.(preview);
         throw new DOMException("BitFS funding prepare was cancelled", "AbortError");

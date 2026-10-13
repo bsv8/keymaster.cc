@@ -21,7 +21,7 @@ function validate(entry: PageUiContribution): void {
     if (entry.slot !== "main" && entry.slot !== "aside") throw new TypeError("Invalid home slot");
     if (entry.space && (!entry.space.id || !Number.isFinite(entry.space.order) || !entry.space.label)) throw new TypeError("Invalid home space");
   } else if (entry.kind === "frame") {
-    if (!["unlocked-shell", "wallet-entry", "wallet-guard", "storage-guard", "protocol-popup", "onboarding", "uri-action"].includes(entry.slot)) throw new TypeError("Invalid frame slot");
+    if (!["unlocked-shell", "wallet-entry", "wallet-recovery", "wallet-guard", "storage-guard", "protocol-popup", "onboarding", "uri-action"].includes(entry.slot)) throw new TypeError("Invalid frame slot");
   } else if (entry.kind !== "header" || (entry.slot !== "topbar" && entry.slot !== "above-header")) throw new TypeError("Invalid contribution kind or slot");
 }
 function Contents({ entry, location }: { entry: PageUiContribution; location: PageUiLocation }) { return <>{entry.render(location)}</>; }

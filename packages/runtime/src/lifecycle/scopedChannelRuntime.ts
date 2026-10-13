@@ -86,11 +86,25 @@ function registerCallback(
 }
 
 /** 创建绑定一个插件实例的 Channel 视图；不改变 Coordinator 的物理连接。 */
-export function createScopedChannelRuntime(base: ChannelRuntime, scope: LifecycleScope): ChannelRuntime {
+export function createScopedChannelRuntime(
+  base: ChannelRuntime,
+  scope: LifecycleScope,
+  // Trusted Host identity projection: an authority session transition already
+  // removed the old owner's callers in the Coordinator. Local plugin disable
+  // leaves that identity unchanged and still must explicitly release its caller.
+  isSessionRevoked: () => boolean = () => false,
+): ChannelRuntime {
   let subscriptionGeneration = 0;
   let subscriptionLease: SubscriptionLease | undefined;
 
   const releaseSubscription = (lease = subscriptionLease): Promise<void> => {
+    if (isSessionRevoked()) {
+      // Global lock/key change already cleared the authoritative caller registry.
+      // Finish local teardown without querying the now-revoked provider or
+      // attempting a new subscription RPC under the next session's identity.
+      subscriptionLease = undefined;
+      return Promise.resolve();
+    }
     if (!lease) return Promise.resolve();
     if (lease.releasePromise) return lease.releasePromise;
     // 直接调用而不是放进 Promise.then：scope.revoke() 后页面可能马上关闭

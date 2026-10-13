@@ -26,6 +26,7 @@ import type {
   WalletUserFacingError,
 } from "@keymaster/contracts";
 import {
+  validateBsvNetwork,
   KEYHOLD_LIMITS,
   WALLET_CURRENT_SCHEMA_VERSION,
   WALLET_META_FORMAT,
@@ -34,6 +35,8 @@ import {
 } from "@keymaster/contracts";
 import * as secp256k1 from "@noble/secp256k1";
 import type { WalletVaultLifecycleStore } from "@keymaster/contracts/storage-internal";
+import { validateHardwareKeyDocument, type HardwareKeyDocumentV1 } from "@keymaster/vaultlink-integration";
+import { parseMigrationJournal, type MigrationJournal } from "@keymaster/vaultlink-integration/migration";
 import type { WalletKeyRepository } from "./walletKeyRepository.js";
 import { createKeyHoldDocument, serializeKeyHoldDocument } from "./keyholdDocument.js";
 import { StorageRuntimeError, storageErrorCode, WALLET_INITIALIZATION_PATH } from "@keymaster/contracts/storage-internal";
@@ -42,6 +45,8 @@ import { StorageRuntimeError, storageErrorCode, WALLET_INITIALIZATION_PATH } fro
 const SESSION_EPOCH_PATTERN = /^[0-9a-f-]{36}$/u;
 
 export interface WalletLifecycleDeps {
+  /** Fixed-path public migration record; only the trusted bootstrap port can read it. */
+  readMigration?: () => Promise<Uint8Array | undefined>;
   /** 正式本地介质。 */
   store: WalletVaultLifecycleStore;
   /** 固定路径的单 Key 仓储；只用于解锁、改密、改名和导出。 */
@@ -51,7 +56,7 @@ export interface WalletLifecycleDeps {
   /** 生成会话 epoch。 */
   generateSessionEpoch: () => string;
   /** 生成公开地址（用于 Key 摘要展示）。 */
-  deriveAddress: (publicKeyHex: string) => string | undefined;
+  deriveAddress: (publicKeyHex: string, bsvNetwork: import("@keymaster/contracts").BsvNetwork) => string | undefined;
   /**
    * 撤销运行期授权。
    *
@@ -137,6 +142,8 @@ function userFacingError(input: {
 export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletLifecycleService & {
   /** 当前钱包身份世代；未初始化时为空串。 */
   walletGeneration(): string;
+  /** Worker 内部：调用方已完成设备配对与持有权证明。 */
+  initializeHardware(document: HardwareKeyDocumentV1): Promise<WalletMetaV1>;
   /** 校验某个 grant 的世代是否仍然是当前的。 */
   isGrantLive(input: { walletGeneration: string; sessionEpoch: string; runGeneration: string }): boolean;
   /** 撤销指定 App 的授权并清空它的独立目录。 */
@@ -181,6 +188,18 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
    * 可恢复的数据。
    */
   async function coldStart(): Promise<WalletColdStartSnapshot> {
+    let migration: MigrationJournal | undefined;
+    try {
+      const bytes = await deps.readMigration?.();
+      if (bytes) migration = parseMigrationJournal(bytes);
+    } catch {
+      walletGeneration = "";
+      return { state: "corrupt", reason: "Backend migration record is unreadable; recovery is required" };
+    }
+    if (migration && migration.phase !== "complete") {
+      walletGeneration = migration.walletGeneration;
+      return { state: "corrupt", reason: `Backend migration ${migration.migrationId} is unfinished (${migration.phase}); recover this migration before unlocking` };
+    }
     const metaRecord = await deps.store.readMeta();
     let meta: WalletMetaV1 | undefined;
     let metaCorrupt = false;
@@ -203,15 +222,26 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
     let key: WalletColdStartSnapshot["key"];
     let keyPresent = false;
     let keyCorrupt = false;
+    let identityUpgradeReason: string | undefined;
     try {
       const keyHold = await deps.keys.read();
       if (keyHold) {
         keyPresent = true;
-        key = { publicKeyHex: keyHold.document.publicKeyHex, label: keyHold.document.label };
+        key = { bsvNetwork: keyHold.document.bsvNetwork, publicKeyHex: keyHold.document.publicKeyHex, label: keyHold.document.label, backend: keyHold.backend };
+        if (keyHold.backend === "hardware" && keyHold.document.walletGeneration !== meta?.walletGeneration) {
+          keyCorrupt = true;
+        }
       }
-    } catch {
+    } catch (error) {
       keyPresent = true;
       keyCorrupt = true;
+      if(error instanceof Error && error.message === "Wallet network is missing; explicit identity upgrade is required") identityUpgradeReason = error.message;
+    }
+
+    if (migration && (!meta?.initialized || migration.walletGeneration !== meta.walletGeneration
+      || migration.bsvNetwork !== key?.bsvNetwork || migration.publicKeyHex !== key?.publicKeyHex || migration.target !== key?.backend)) {
+      walletGeneration = meta?.walletGeneration ?? "";
+      return { state: "corrupt", ...(meta ? { meta } : {}), reason: "Completed backend migration does not match the current wallet" };
     }
 
     if (!metaRecord && !keyPresent) {
@@ -230,7 +260,7 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
       return {
         state: "corrupt",
         ...(meta === undefined ? {} : { meta }),
-        reason: metaCorrupt || keyCorrupt ? "wallet meta or key hold is unreadable" : "wallet initialization record is incomplete",
+        reason: identityUpgradeReason ?? (metaCorrupt || keyCorrupt ? "wallet meta or key hold is unreadable" : "wallet initialization record is incomplete"),
       };
     }
     if (!meta) {
@@ -255,6 +285,7 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
 
   /** Key 摘要的公钥/地址/能力组装。 */
   function summarize(input: {
+    bsvNetwork: import("@keymaster/contracts").BsvNetwork;
     publicKeyHex: string;
     label: string;
     format: string;
@@ -263,9 +294,10 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
     source?: string;
   }): WalletKeySummary {
     return {
+      bsvNetwork: input.bsvNetwork,
       publicKeyHex: input.publicKeyHex,
       label: input.label,
-      address: deps.deriveAddress(input.publicKeyHex) ?? input.publicKeyHex,
+      address: deps.deriveAddress(input.publicKeyHex, input.bsvNetwork) ?? input.publicKeyHex,
       format: input.format,
       capabilities: input.capabilities,
       createdAt: input.createdAt,
@@ -280,10 +312,29 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
    * 失败或取消时整批 abort，IndexedDB 里不会留下可被当作完整钱包使用的
    * 半成品。
    */
+  async function initializeHardware(candidate: HardwareKeyDocumentV1): Promise<WalletMetaV1> {
+    const document = validateHardwareKeyDocument(candidate);
+    secp256k1.Point.fromHex(document.publicKeyHex);
+    if ((await coldStart()).state !== "uninitialized") throw new StorageRuntimeError("storage_conflict", "Wallet already has a Key");
+    const createdAt = new Date(now()).toISOString();
+    const meta: WalletMetaV1 = {format: WALLET_META_FORMAT, version: 1, schemaVersion: WALLET_CURRENT_SCHEMA_VERSION,
+      initialized: true, walletGeneration: document.walletGeneration, createdAt};
+    await deps.store.batch({operations: [
+      {type: "put", path: "key.json", bytes: encode(document), contentType: "application/json"},
+      {type: "put", path: WALLET_META_PATH, bytes: encode(meta), contentType: "application/json"},
+      {type: "put", path: WALLET_INITIALIZATION_PATH, bytes: encode({format: "keymaster.wallet-initialization", version: 1,
+        initializedAt: createdAt, walletGeneration: document.walletGeneration}), contentType: "application/json"},
+    ], conditions: [{path: "key.json", ifNoneMatch: true}]});
+    walletGeneration = document.walletGeneration;
+    emit({type: "initialized", walletGeneration});
+    return meta;
+  }
+
   async function initialize(plan: WalletInitializePlan): Promise<WalletInitializeResult> {
     let draft: WalletInitializePlan["firstKey"];
     try {
       draft = plan.firstKey;
+      validateBsvNetwork(draft.bsvNetwork);
       if (!draft || (draft.kind !== "generate" && draft.kind !== "import")) {
         throw new StorageRuntimeError("storage_identity_required", "Wallet draft is invalid");
       }
@@ -352,7 +403,7 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
     let documentLabel: string;
     try {
       const document = await createKeyHoldDocument(
-        { label: draft.label, privateKey: privateKeyBytes },
+        { bsvNetwork: draft.bsvNetwork, label: draft.label, privateKey: privateKeyBytes },
         draft.password,
       );
       // 身份一致性校验：派生出的公钥必须与文档声明一致，否则拒绝提交。
@@ -443,7 +494,7 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
     // 提交已经成功；此时才把私钥副本交给 Worker，随后本方法立即清零。
     // 交接必须是独占副本：Worker 会一直持有它到锁定或换 Key。
     deps.adoptUnlockedKey?.({
-      identity: { publicKeyHex, label: documentLabel, capabilities: [...draft.capabilities], createdAt },
+      identity: { bsvNetwork: draft.bsvNetwork, publicKeyHex, label: documentLabel, capabilities: [...draft.capabilities], createdAt },
       privateKeyBytes: new Uint8Array(privateKeyBytes),
       publicKeyHex,
       walletGeneration: walletIdentity,
@@ -456,6 +507,7 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
     return {
       ok: true,
       key: summarize({
+      bsvNetwork: draft.bsvNetwork,
         publicKeyHex,
         label: documentLabel,
         format,
@@ -469,6 +521,7 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
 
   /** 用 Key 密码解锁唯一 Key。 */
   async function unlock(password: string): Promise<WalletUnlockResult> {
+    const requestedEpoch = deps.currentSessionEpoch();
     const snapshot = await coldStart();
     if (snapshot.state === "unsupported") {
       throw new StorageRuntimeError("storage_wallet_unsupported", "Local wallet schema is newer than this build");
@@ -481,6 +534,8 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
     }
     const unlocked = await deps.keys.unlock(password);
     try {
+      // 密码解密可能与锁定交错；已撤销的解锁请求不得重新建立会话。
+      if (deps.currentSessionEpoch() !== requestedEpoch) throw new StorageRuntimeError("storage_unavailable", "Wallet unlock was revoked by a session transition");
       const sessionEpoch = deps.generateSessionEpoch();
       // 每次解锁都换新 epoch：旧 grant、任务和句柄立即失效。
       deps.establishSession({
@@ -491,7 +546,7 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
       // 认证通过后才把私钥副本交给 Worker；本方法随即清零，不向外泄漏。
       // 交接的是独占副本：下面的 finally 只清零本服务的缓冲区。
       deps.adoptUnlockedKey?.({
-        identity: { publicKeyHex: unlocked.document.publicKeyHex, label: unlocked.document.label, capabilities: ["p2pkh"], createdAt: snapshot.meta?.createdAt ?? "" },
+        identity: { bsvNetwork: unlocked.document.bsvNetwork, publicKeyHex: unlocked.document.publicKeyHex, label: unlocked.document.label, capabilities: ["p2pkh"], createdAt: snapshot.meta?.createdAt ?? "" },
         privateKeyBytes: new Uint8Array(unlocked.privateKeyBytes),
         publicKeyHex: unlocked.document.publicKeyHex,
         walletGeneration: snapshot.meta?.walletGeneration ?? walletGeneration,
@@ -499,6 +554,7 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
       });
       emit({ type: "unlocked", sessionEpoch, walletGeneration: snapshot.meta?.walletGeneration ?? walletGeneration });
       return {
+        bsvNetwork: unlocked.document.bsvNetwork,
         sessionEpoch,
         walletGeneration: snapshot.meta?.walletGeneration ?? walletGeneration,
         publicKeyHex: unlocked.document.publicKeyHex,
@@ -592,6 +648,7 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
   return {
     coldStart,
     initialize,
+    initializeHardware,
     unlock,
     verifyPassword,
     lock,

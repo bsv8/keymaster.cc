@@ -6,6 +6,7 @@
 import {
   isValidMsFileHashHex,
   isValidMsFileSupplierPublicKeyHex,
+  isValidMsFileSourceId,
   MSFILE_BLOCK_SIZE_BYTES,
   MSFILE_DIGEST_SIZE_BYTES,
   MSFILE_MAX_BLOCK_BYTES,
@@ -124,7 +125,10 @@ export class MsFileVodSource {
   private initializing: Promise<void> | undefined;
 
   constructor(input: MsFileVodSourceInput, options: MsFileVodSourceOptions = {}) {
-    if (!isValidMsFileHashHex(input.seedHashHex) || !isValidMsFileSupplierPublicKeyHex(input.supplierPublicKeyHex)) {
+    const validSource = input.sourceId !== undefined
+      ? input.supplierPublicKeyHex === undefined && isValidMsFileSourceId(input.sourceId)
+      : isValidMsFileSupplierPublicKeyHex(input.supplierPublicKeyHex);
+    if (!isValidMsFileHashHex(input.seedHashHex) || !validSource) {
       throw new MsFileMediaError("msfile_media_configuration");
     }
     if (typeof input.fileSizeBytes !== "bigint" || input.fileSizeBytes < 0n || input.fileSizeBytes > MAX_SAFE_BIGINT) {

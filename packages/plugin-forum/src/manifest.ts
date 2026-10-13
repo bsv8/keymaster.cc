@@ -1,54 +1,17 @@
-// Forum 插件装配。
-//
-// 运行单元：Window-only。这个版本没有把 Forum 放进 owner-session Worker，
-// 理由是浏览器里必须运行的部分（libp2p lane、HTTPS 传输、Markdown renderer、
-// 资源 URL）本来就在 Window，而且：
-//   - 私钥边界不依赖单元归属。`ActiveKeyCrypto` 在 Window 里也是 Coordinator
-//     crypto RPC 的客户端，签名请求走 MessagePort，私钥始终留在 Worker；
-//   - Forum 的配置、索引缓存与发布任务都在受限 owner 文件句柄里，跨页面状态
-//     通过订阅而不是跨 Runtime 调用。
-//
-// 依赖全部是既有 capability：Vault 提供受控签名与身份，MSFile 提供内容，P2PKH
-// 提供资金与广播，Window P2P 提供唯一 Host 与 lane。Forum 不新建其中任何一个。
-
+import { WINDOW_P2P_WORKER_BRIDGE_CAPABILITY } from "@keymaster/contracts/window-p2p";
 import {
-  BREADCRUMB_REGISTRY_CAPABILITY,
-  BUSINESS_REGISTRY_CAPABILITY,
-  CENTRAL_STORAGE_DECLARATIONS,
-  FORUM_SERVICE_CAPABILITY,
-  I18N_SERVICE_CAPABILITY,
-  MSFILE_CONTENT_CAPABILITY,
-  OWNED_RESOURCE_ACCESS_CAPABILITY,
-  P2PKH_FUNDING_CAPABILITY,
-  P2PKH_PROTOCOL_SPEND_CAPABILITY,
-  P2PKH_SUBMISSION_OBSERVER_CAPABILITY,
-  PAGE_UI_REGISTRY_CAPABILITY,
-  PROTECTED_OUTPOINT_REGISTRY_CAPABILITY,
-  RESOURCE_REGISTRY_CAPABILITY,
-  STORAGE_FILE_CLIENTS_CAPABILITY,
-  VAULT_SERVICE_CAPABILITY,
-  VAULT_WALLET_STATE_CAPABILITY,
-  WINDOW_P2P_EXECUTOR_CAPABILITY,
-  WOC_CAPABILITY,
-  capabilityDescriptor,
-  defineRuntimeUnitDependencies,
-  type ActiveKeyCrypto,
-  type PluginContext,
-  type PluginManifest,
-  type PluginSetup,
-  type BsvNetwork,
-  type ForumBroadcastState,
-  type ForumService,
-  type ProtocolSubmissionObservation,
-  type WocService,
+  BREADCRUMB_REGISTRY_CAPABILITY, BUSINESS_REGISTRY_CAPABILITY, CENTRAL_STORAGE_DECLARATIONS,
+  FORUM_SERVICE_CAPABILITY, FORUM_WORKER_NETWORK_CAPABILITY, FORUM_WORKER_SERVICE_CAPABILITY, FORUM_WORKER_ATTACHMENT_CAPABILITY,
+  I18N_SERVICE_CAPABILITY, MSFILE_CONTENT_CAPABILITY, OWNED_RESOURCE_ACCESS_CAPABILITY,
+  P2PKH_WORKER_PROTOCOL_CAPABILITY, PAGE_UI_REGISTRY_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY,
+  STORAGE_FILE_CLIENTS_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, VAULT_WORKER_CRYPTO_CAPABILITY,
+  WINDOW_P2P_EXECUTOR_CAPABILITY, WOC_CAPABILITY, capabilityDescriptor, defineRuntimeUnitDependencies,
+  type PluginContext, type PluginManifest, type PluginSetup,
 } from "@keymaster/contracts";
 import { createElement, type ReactNode } from "react";
 
-import { createForumService, setForumFundingSource, type ForumFundingSource } from "./domain/forumService.js";
-import { ForumTrustError } from "./domain/rootTrust.js";
-import { createForumFundingSource } from "./domain/forumFundingSource.js";
+import { createForumServiceProxy } from "./forumServiceProxy.js";
 import { ForumP2pLane } from "./network/forumP2pLane.js";
-import { createForumRepository } from "./storage/forumRepository.js";
 import { forumResources } from "./resources.js";
 import { ForumResourceProvider, type ForumUiContextValue } from "./ForumResourceContext.js";
 import { ForumBoardPage, ForumHomePage, ForumPostPage, ForumPostsPage, ForumPublishPage } from "./pages.js";
@@ -56,7 +19,6 @@ import { ForumBoardPage, ForumHomePage, ForumPostPage, ForumPostsPage, ForumPubl
 export const FORUM_PLUGIN_ID = "forum";
 
 /** Forum 仓储的存储 purpose；空串表示 `forum/` 模块根，与中央声明一致。 */
-const FORUM_STORAGE_PURPOSE = "";
 
 const forumPluginDefinition = {
   id: FORUM_PLUGIN_ID,
@@ -68,19 +30,10 @@ const forumPluginDefinition = {
       runtime: "window-main",
       scopeKind: "owner-session",
       provides: [capabilityDescriptor(FORUM_SERVICE_CAPABILITY)],
-      // Forum 只存配置、根验证证据、索引缓存、阅读位置、展示投影与发布任务；
-      // 正文本体在 MSFile，不在这里。
-      storage: CENTRAL_STORAGE_DECLARATIONS.forumFiles,
       dependencies: defineRuntimeUnitDependencies([
-        { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "论坛配置与发布任务的受限文件句柄" },
-        { capability: VAULT_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "受控 active key 签名与 owner 身份" },
-        { capability: VAULT_WALLET_STATE_CAPABILITY, sourceRuntime: "window-main", reason: "锁定/切 Key 时中止连接与新签名" },
-        { capability: MSFILE_CONTENT_CAPABILITY, sourceRuntime: "window-main", reason: "正文与附件的统一获取、验证与读取" },
-        { capability: P2PKH_PROTOCOL_SPEND_CAPABILITY, optional: true, sourceRuntime: "window-main", reason: "无找零构建与统一广播" },
-        { capability: P2PKH_FUNDING_CAPABILITY, optional: true, sourceRuntime: "window-main", reason: "专用资金 UTXO 的选币、准备交易与保护登记" },
-        { capability: P2PKH_SUBMISSION_OBSERVER_CAPABILITY, optional: true, sourceRuntime: "window-main", reason: "恢复时对账同一个持久提交，不重建不二次派发" },
-        { capability: WOC_CAPABILITY, optional: true, reason: "按 (network, txid) 取创世根 raw 与链上/广播对账证据" },
-        { capability: WINDOW_P2P_EXECUTOR_CAPABILITY, optional: true, reason: "WSS 与 WebRTC Direct 走唯一 Window Host 的 forum lane" },
+        { capability: FORUM_WORKER_ATTACHMENT_CAPABILITY, sourceRuntime: "shared-worker", reason: "已验证附件分块交付给 Window 展示" },
+        { capability: FORUM_WORKER_SERVICE_CAPABILITY, sourceRuntime: "shared-worker", reason: "唯一 owner-session Forum 任务与发布权威；不可用时阻止发布" },
+        { capability: WINDOW_P2P_EXECUTOR_CAPABILITY, sourceRuntime: "window-main", reason: "注册 Forum lane，共用唯一网络 Host" },
         { capability: RESOURCE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册论坛资源投影" },
         { capability: OWNED_RESOURCE_ACCESS_CAPABILITY, reason: "UI 读取所属实例资源" },
         { capability: PAGE_UI_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册论坛页面" },
@@ -88,6 +41,22 @@ const forumPluginDefinition = {
         { capability: BUSINESS_REGISTRY_CAPABILITY, reason: "首页业务导航入口" },
         { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "界面文案" },
       ]),
+    },
+    {
+      id: "forum.coordinator-worker",
+      runtime: "shared-worker",
+      scopeKind: "owner-session",
+      storage: CENTRAL_STORAGE_DECLARATIONS.forumFiles,
+      provides: [capabilityDescriptor(FORUM_WORKER_NETWORK_CAPABILITY), capabilityDescriptor(FORUM_WORKER_SERVICE_CAPABILITY), capabilityDescriptor(FORUM_WORKER_ATTACHMENT_CAPABILITY)],
+      dependencies: defineRuntimeUnitDependencies([
+        { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "shared-worker", reason: "Forum 配置、缓存与发布任务的唯一仓储" },
+      { capability: WINDOW_P2P_WORKER_BRIDGE_CAPABILITY, sourceRuntime: "shared-worker", reason: "由公共 Window executor 提供受限网络 lane" },
+        { capability: VAULT_WALLET_STATE_CAPABILITY, sourceRuntime: "shared-worker", reason: "owner-session 身份与世代" },
+        { capability: VAULT_WORKER_CRYPTO_CAPABILITY, sourceRuntime: "shared-worker", reason: "Worker 内规范业务签名" },
+        { capability: MSFILE_CONTENT_CAPABILITY, sourceRuntime: "shared-worker", reason: "正文附件统一由 MSFile 获取与保存" },
+        { capability: P2PKH_WORKER_PROTOCOL_CAPABILITY, sourceRuntime: "shared-worker", reason: "钱包权威的协议资金、签名、广播与同提交观测" },
+        { capability: WOC_CAPABILITY, sourceRuntime: "shared-worker", reason: "根 raw 和链上观测" },
+      ], "shared-worker"),
     },
   ],
   i18n: forumResources,
@@ -97,165 +66,15 @@ export const forumPlugin = forumPluginDefinition;
 
 /** 装配：注册 lane、提供 Forum 服务与页面；teardown 释放全部资源。 */
 const setup: PluginSetup = (ctx: PluginContext) => {
-  const walletState = ctx.capability(VAULT_WALLET_STATE_CAPABILITY).bind(ctx.consumer, ctx.scope);
-  const vault = ctx.capability(VAULT_SERVICE_CAPABILITY);
-  const content = ctx.capability(MSFILE_CONTENT_CAPABILITY);
-  const store = ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, FORUM_STORAGE_PURPOSE);
-  // 创世 raw 与链上/广播对账都走既有链数据源；缺席时这两项能力明确不可用，
-  // 不回退去请求论坛站点（它没有这个接口）。
-  const woc = ctx.optionalCapability(WOC_CAPABILITY);
-
   const lane = new ForumP2pLane();
-  // Forum 只注册自己的 lane；公共 Host、lease 与身份 signer 由 Window P2P 拥有。
-  const offLane = ctx.capability(WINDOW_P2P_EXECUTOR_CAPABILITY).register(lane);
-  const deps = { submissionObserver: ctx.optionalCapability(P2PKH_SUBMISSION_OBSERVER_CAPABILITY) };
-
-  // 当前 owner 的受控签名能力；锁定或切 Key 后必须重新取得，不复用旧授权句柄。
-  let activeCrypto: ActiveKeyCrypto | undefined;
-  let activeCryptoOwner: string | undefined;
-
-  const currentOwner = (): string => {
-    const owner = walletState.snapshot().activePublicKeyHex;
-    if (typeof owner !== "string" || owner.length === 0) {
-      throw new ForumOwnerUnavailableError();
-    }
-    return owner.toLowerCase();
-  };
-
-  const releaseCrypto = (reason: string): void => {
-    activeCrypto?.dispose(reason);
-    activeCrypto = undefined;
-    activeCryptoOwner = undefined;
-  };
-
-  const service = createForumService({
-    repository: createForumRepository(store),
-    content,
-    async activeCrypto(): Promise<ActiveKeyCrypto> {
-      const owner = currentOwner();
-      if (activeCrypto !== undefined && activeCryptoOwner === owner) return activeCrypto;
-      releaseCrypto("owner-changed");
-      const crypto = await vault.createActiveKeyCrypto(owner);
-      activeCrypto = crypto;
-      activeCryptoOwner = owner;
-      return crypto;
-    },
-    ownerPublicKeyHex: currentOwner,
-    protocolSpend: () => ctx.optionalCapability(P2PKH_PROTOCOL_SPEND_CAPABILITY),
-    // Window 内直接调用同一个 lane 实例：Host 的取得、身份 pin 与超时策略只有一份。
-    dispatchP2p: (operation, signal) => lane.call(operation as Parameters<ForumP2pLane["call"]>[0], signal),
-    fetchRootRaw: (input, options) => fetchForumRootRaw(input, woc, options?.signal),
-    sessionEpoch: () => walletState.snapshot().sessionEpoch,
-    observeChain: async (network, txid, signal) => {
-      // 链上观测来自链数据源；不可用时保持上一份证据而不是猜。
-      if (woc === undefined) return "unknown";
-      const observation = await woc.getTransactionObservation(network, txid, signal === undefined ? {} : { signal });
-      // 链上「已确认」与 Forum「已确认索引」是两件事，这里只表达前者。
-      if (observation.observation === "confirmed") return "confirmed";
-      if (observation.observation === "unconfirmed") return "mempool";
-      return "absent";
-    },
-    observeBroadcast: async ({ ownerPublicKeyHex, network, txid, submissionId }) => {
-      const control = deps.submissionObserver;
-      if (control === undefined) return "unknown";
-      return mapSubmissionObservation(
-        await control.observeProtocolSubmission({ ownerPublicKeyHex, network, txid, submissionId }),
-      );
-    },
-  });
-
-  // 专用资金来源：选币、资金准备交易与专用 UTXO 记账都归 P2PKH，
-  // Forum 只消费结果并按 outpoint 花费。
-  setForumFundingSource(() => createForumFundingSource({
-    protocolSpend: () => ctx.optionalCapability(P2PKH_PROTOCOL_SPEND_CAPABILITY),
-    funding: () => ctx.optionalCapability(P2PKH_FUNDING_CAPABILITY),
-    protectedOutpoints: ctx.capability(PROTECTED_OUTPOINT_REGISTRY_CAPABILITY),
-    woc,
-    repository: createForumRepository(store),
-  }));
-
+  ctx.capability(WINDOW_P2P_EXECUTOR_CAPABILITY).register(lane);
+  const service = createForumServiceProxy(ctx.capability(FORUM_WORKER_SERVICE_CAPABILITY), ctx.capability(FORUM_WORKER_ATTACHMENT_CAPABILITY));
   ctx.provide(FORUM_SERVICE_CAPABILITY, service);
-  const offUi = registerForumPages(ctx, service);
-  // 锁定、切 Key 或 Scope 撤销后立刻释放签名能力；已有发布任务保留公开证据，
-  // 恢复时重新取得当前身份的能力，不恢复旧授权句柄。
-  const offWallet = walletState.subscribe(() => {
-    if (activeCryptoOwner !== undefined && activeCryptoOwner !== safeOwner(walletState.snapshot().activePublicKeyHex)) {
-      releaseCrypto("owner-changed");
-    }
-  });
+  registerForumPages(ctx);
+  // Registrations belong to ctx.scope and are removed by the framework on revoke.
+  // Calling revoked registry proxies during teardown would fail cleanup.
 
-  return () => {
-    setForumFundingSource(undefined);
-    releaseCrypto("plugin-disposed");
-    offWallet();
-    offUi();
-    offLane();
-  };
 };
-
-/**
- * 按 (network, txid) 取创世根 raw。
- *
- * 来源是链数据源而不是论坛站点：服务端只注册 `/roundtrip` 与 `/readyz`，向它
- * GET 拿不到交易。返回的 hex 会被 `verifyForumRoot` 独立核对 txid、输出结构与
- * forumSig，因此数据源同样不替代身份。
- */
-async function fetchForumRootRaw(
-  input: { readonly network: BsvNetwork; readonly txid: string },
-  woc: Pick<WocService, "getRawTransaction"> | undefined,
-  signal?: AbortSignal,
-): Promise<Uint8Array> {
-  if (woc?.getRawTransaction === undefined) {
-    throw new ForumTrustError("chain-source-unavailable", "链数据源不可用，无法按 (network, txid) 取得创世 raw");
-  }
-  const rawTxHex = await woc.getRawTransaction(input.network, input.txid, signal === undefined ? {} : { signal });
-  const trimmed = rawTxHex.trim();
-  if (!/^[0-9a-fA-F]+$/.test(trimmed) || trimmed.length % 2 !== 0) {
-    throw new ForumTrustError("root-raw-format", `链数据源返回的 raw 不是 hex：${trimmed.slice(0, 32)}…`);
-  }
-  const out = new Uint8Array(trimmed.length / 2);
-  for (let index = 0; index < out.length; index += 1) out[index] = Number.parseInt(trimmed.slice(index * 2, index * 2 + 2), 16);
-  if (out.byteLength === 0 || out.byteLength > 1024 * 1024) {
-    throw new ForumTrustError("root-raw-size", `根 raw 体积异常：${out.byteLength} 字节`);
-  }
-  return out;
-}
-
-/**
- * 提交观测 → 发布广播状态。
- *
- * `dropped` 与 `rejected` 是各自的终态：都意味着这笔交易没有留在网络里，但原因
- * 不同，界面必须区分，不能都折成「已观测未确认」。
- */
-function mapSubmissionObservation(observation: ProtocolSubmissionObservation): ForumBroadcastState {
-  switch (observation) {
-    case "not-dispatched":
-      return "definitely-not-dispatched";
-    case "dispatched":
-      return "dispatched";
-    case "observed-unconfirmed":
-      return "observed-unconfirmed";
-    case "observed-confirmed":
-      return "observed-confirmed";
-    case "dropped":
-    case "rejected":
-      return "not-dispatched";
-    default:
-      return "unknown";
-  }
-}
-
-function safeOwner(value: string | null | undefined): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value.toLowerCase() : undefined;
-}
-
-export class ForumOwnerUnavailableError extends Error {
-  constructor() {
-    super("当前钱包未解锁，没有 Forum 身份");
-    this.name = "ForumOwnerUnavailableError";
-  }
-}
-
 
 /**
  * 注册论坛页面。
@@ -264,7 +83,7 @@ export class ForumOwnerUnavailableError extends Error {
  * 每个页面都包在 `ForumResourceProvider` 里，资源与订阅因此绑定该页面 Scope：
  * 退出或身份失效时随之释放。
  */
-function registerForumPages(ctx: PluginContext, forum: ForumService): () => void {
+function registerForumPages(ctx: PluginContext): void {
   // UI 使用当前 Scope 下的服务实例，而不是装配时闭包里的那一份。
   const scoped = ctx.capability(FORUM_SERVICE_CAPABILITY);
   const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope).view;
@@ -329,12 +148,6 @@ function registerForumPages(ctx: PluginContext, forum: ForumService): () => void
     entry: { path: "/forum", routeId: "forum.home", visibleWhen: ({ unlocked }: { unlocked: boolean }) => unlocked },
   });
 
-  return () => {
-    for (const id of ["forum.publish", "forum.post", "forum.posts", "forum.boards", "forum.home"]) pages.unregister(id);
-    business.unregisterFeature("forum.home");
-    // breadcrumb provider 由 Scope 生命周期托管，没有显式注销入口。
-    void forum;
-  };
 }
 
 export const forumSetup = setup;

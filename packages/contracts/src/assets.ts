@@ -128,6 +128,8 @@ export interface AssetRegistry {
  * payload 不携带金额、UTXO、token 数据，只表达"哪个 provider 的哪类数据已变更"。
  */
 export interface AssetDataInvalidationEvent {
+  /** 完整归属；无活动身份的清空通知可省略。 */
+  networkIdentity?: import("./networkIdentity.js").NetworkIdentity;
   /** 发生变更的 provider id。 */
   providerId: string;
   /** 变更归属的 key namespace（可选）。 */
@@ -149,7 +151,7 @@ export interface AssetDataInvalidationEvent {
  * 页面收到通知后只重读本地 K-V，不发起网络请求。
  *
  * 合并语义（由 runtime 实现）：
- * - 同一 `providerId + publicKeyHex` 的同一 microtask 内事件合并
+ * - 同一 `providerId + bsvNetwork + publicKeyHex` 的同一 microtask 内事件合并
  * - `kinds` 求并集
  * - `revision` 取最新事件
  */

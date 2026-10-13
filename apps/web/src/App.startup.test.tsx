@@ -129,6 +129,7 @@ vi.mock("webloom-framework/react", () => ({
       subscribe: () => () => {}, revision: () => 0,
       renderFrame: (slot: string, children?: ReactNode) => {
         if (slot === "storage-guard") return children;
+        if (slot === "wallet-guard") return <div data-testid="wallet-guard">{children}</div>;
         if (slot === "protocol-popup") return <div data-testid="protocol-popup">protocol</div>;
         if (slot === "unlocked-shell") return <div data-testid="unlocked-shell">unlocked</div>;
         if (slot === "wallet-entry") {

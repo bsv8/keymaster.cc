@@ -1,0 +1,233 @@
+{
+  "package": "@vaultlink/sdk",
+  "version": "0.2.0-draft.1",
+  "wireVersion": 2,
+  "sourceCommit": "5e91963068a90e8d0d216ca2b9aba318f5b4c869",
+  "files": {
+    "LICENSE": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef",
+    "dist/bsv.d.ts": "d96eae3f00801faa12299afa57c4472d04179bf8109373eaca5d61a7bcece2fc",
+    "dist/bsv.js": "85e0752680adac53d0ce5a80138ddd7fd77dbb83bd01a7356673a1934526ba26",
+    "dist/bytes.d.ts": "47f299c87f4779831934cb8b3e533b32b4951743de70ac37d408c7cc311ec05f",
+    "dist/bytes.js": "fae47b4166b9cd1f3e1b8609ad6d796a8a3b1443ab3b57b1bb50aa8584139916",
+    "dist/cbor.d.ts": "4bd5f3318de7e9bc086bf5bc6c85276f53fa29a9e9555cec2ece0c7147590c83",
+    "dist/cbor.js": "143db72a814d6c4d02f051de5d74422a40ee9b98b9a3c43ca3a42d39b8a4023f",
+    "dist/client.d.ts": "0c513e7ddfb7c3e01b40f03eae463cdb4bd3d50d4cc82bdf314629e531ab9d99",
+    "dist/client.js": "31d2c8d979f079211c92467baa0edd7aed05aec8940b5838f80cbb23db7eaac1",
+    "dist/crypto.d.ts": "d8cc227d17705411858283c4c231ca6365fa7f8818dbb5c4d799f49b21664ec9",
+    "dist/crypto.js": "dad5a714a3a5a33ec3471e19e719ade55e30d0ffdd56a0a3f92944466d2d1660",
+    "dist/device.d.ts": "129387db80add5952af2fbaf8f129010f2f0985b008b57aab5ea6fc201e38876",
+    "dist/device.js": "a39d450311c46459c853a579f3df47c7f29087f142f60fcc5a213b5bfb6ccf08",
+    "dist/feepool.d.ts": "393ca7790e851958031e0a7449941c08d64d527f28ea6a133ded1f4e40bf2360",
+    "dist/feepool.js": "a81c646b5b7b55e9499979e604bd421b2178d5e25babaef000c1cde13cbc40fb",
+    "dist/fragments.d.ts": "e66c18cb619cb551dc77bbf407c0c9c0d9904ccffffb5b4a9ef7d95f79c51069",
+    "dist/fragments.js": "829ed28c60b3c2bd62b79042bf2f822e780c7bb75d388228a59a5f21c469c662",
+    "dist/frame.d.ts": "df04929fd8d67511ea7397fbce147c19b871db8cc015e84de10c7f3952314a47",
+    "dist/frame.js": "fdd0c8e31bb30ff0260e8d9c3eee777380e532050f0d952b5c2a23bd9766d519",
+    "dist/handshake.d.ts": "39729073089d5c7878d3dc9d4f53cf82d38e96d8db89337fad1bec86d5ee5d26",
+    "dist/handshake.js": "8e6f6e7d9461124c485877ad3b4f2f70baf8281b67778af4cc72076bfd1bc193",
+    "dist/index.d.ts": "a4e60414fef81f1f9832df33d504f440685fab1aa832694af00efc91be6e6887",
+    "dist/index.js": "a4e60414fef81f1f9832df33d504f440685fab1aa832694af00efc91be6e6887",
+    "dist/local-secret.d.ts": "9d2d88b3511d6c164c681737be32a86365b2212d609b572c65c62dd1d5a560eb",
+    "dist/local-secret.js": "3530903b4ff4cd09799100a2eae59dd185ddaaf9d431a3b4f6c0deb9c510d361",
+    "dist/payment-operation.d.ts": "9ad5c761f7c187da724668264e9836ff9990ab8327c80d88729f47df0d3600ee",
+    "dist/payment-operation.js": "92d35cab9c706044a9b0ea6b2b273d08777fdb373d4d2931e324070e69d55dcc",
+    "dist/payment.d.ts": "fa61303d058cf9a5ee016b67efac46bef3ceacc4806ec012574d0c6b5cbc0804",
+    "dist/payment.js": "bb146ff106a9f3af8bd2e01115508d030ca10d7f35808323ec2cb8fcd8675ebc",
+    "dist/requests.d.ts": "cf5e486596fe70f7cf51389e465203f4be545b6ca4269a21569f641e3ee9e8e7",
+    "dist/requests.js": "b3f49cb5fafb2daa8209f651269fafe9d8db5c9ffdc7bbdd2415d032f89d4700",
+    "dist/session.d.ts": "48b5e59850f649965a046d8f2e4813b987520417c739bfaff6ae1503058e5921",
+    "dist/session.js": "8c0eff745a107ecf7e76bc73ff513f519435b088740fa6bcef69258a44dd5d44",
+    "dist/standard.d.ts": "9f364bfde08f6c5fd3a92feb7a88da8c54e4573743765bed0a9606316832ce01",
+    "dist/standard.js": "1a4489344f088e3d04d4e82d98f8f222acdff1751660402145d58532fa384159",
+    "dist/transport.d.ts": "ca3a22832be1c30f0efe14751fe1428a1743c0b1ebc7a8b69f2ab81cad13ffeb",
+    "dist/transport.js": "04b5c3eba4bc2a79e0faaaabc04f0ec59a498ee2e81a2387da437ef40020fc21",
+    "package.json": "ba801aebf3bf6edaa43251756258fa1638fd9e7b2f8e24e04c492706da1e606e",
+    "dist/connect-envelope.d.ts": "bf978311b63ce7c6c7e196a48b772c2393be9f89073aa69738bab11bc5f24ec4",
+    "dist/connect-envelope.js": "5248d87616a11d2fc7bcfaac425fd89ac0037c3597919e90e94ad2abbe279b36",
+    "dist/channel.js": "eb971e5cedd9eb20d013ea40f7e195b0e6d054a041f573723789d049c2133ebf",
+    "dist/jcs.js": "5a23df83f284bed5ffb1edd4713800791fa9a64b7cbf99a1e270d23d354c1ac7",
+    "dist/channel.d.ts": "6d83169a0de52d537cabaf2ac9299b783f780492d6367b70a10ecbb14694bf90",
+    "dist/jcs.d.ts": "7b67deea09ff9c9c45355a2fb825efe0969a73ab5788025a8a6198f8074117d4",
+    "dist/bitfs-wire.js": "6fce306717f67cef47087af41186abe8061ece91c998eedeee06a0df24ff0ee3",
+    "dist/bitfs-wire.d.ts": "64d75023e4df920d79b5c49f341ce08111ea3b7d940b18ae166eac0079d6d815",
+    "dist/network-identity.d.ts": "406064dc9adb0c8ae900f3ec9af98e032366d8add6a218211818f98df775e5b4",
+    "dist/network-identity.js": "6e8e34baaa40d2d9d5c229b57c039d6488c078c1dafb6cdd3897e34dfb849354",
+    "dist/policy-transfer.d.ts": "9f244229c5f0d5679052f4770df5208910b41bef3a08ecfd13d72af83aae2de1",
+    "dist/policy-transfer.js": "cfd1ff192f55ff5a0e3969f1c83581e8f989890c383f011dc14eeadd0ad0eaf9",
+    "dist/migration.d.ts": "3adfc6dd4bbda58c7249519f3c4f5ed1a0a0e868ef561be75f40f790d7aa3113",
+    "dist/migration.js": "f80702fc4d4bf91efaf369503fd16a3836c3a22515b9d5ea1f4e448f7d4dd789",
+    "dist/secret-value.js": "b0b13f4c7a6cedaa09cf6372c810d197f29d521e0e224eae4d9f1272ced55c40",
+    "dist/secret-value.d.ts": "1b5a138fd71249e50fd69752876e0a579da67dd1b4ec5bab8e13d5a3cb3107ae",
+    "dist/signing-channel.js": "c987c4d4e13292a65352870334a680b095a049a5925c8da202ef35f898c0a1ed",
+    "dist/signing-channel.d.ts": "29b45b4477b5fadc938036fb52c5323675029db7472f515bb402605d756b0302"
+  },
+  "sourceOverrides": {
+    "reason": "渠道授权施工工作区增量，sourceCommit 为网络身份基线；实际消费副本由 files 的 SHA256 固定，未宣称本轮已提交",
+    "sourceDirectory": "/Users/david/Workspaces/BSV8_VaultLinkProtocol/Coding/BSV8_VaultLinkProtocol",
+    "snapshotSha256": "0e7e6468ec8f60610f42f494ee312eb58544d7a2beff393f4f2c1543910fbc88",
+    "files": {
+      "dist/bsv.d.ts": {
+        "sha256": "d96eae3f00801faa12299afa57c4472d04179bf8109373eaca5d61a7bcece2fc"
+      },
+      "dist/bsv.js": {
+        "sha256": "85e0752680adac53d0ce5a80138ddd7fd77dbb83bd01a7356673a1934526ba26"
+      },
+      "dist/bytes.d.ts": {
+        "sha256": "47f299c87f4779831934cb8b3e533b32b4951743de70ac37d408c7cc311ec05f"
+      },
+      "dist/bytes.js": {
+        "sha256": "fae47b4166b9cd1f3e1b8609ad6d796a8a3b1443ab3b57b1bb50aa8584139916"
+      },
+      "dist/cbor.d.ts": {
+        "sha256": "4bd5f3318de7e9bc086bf5bc6c85276f53fa29a9e9555cec2ece0c7147590c83"
+      },
+      "dist/cbor.js": {
+        "sha256": "143db72a814d6c4d02f051de5d74422a40ee9b98b9a3c43ca3a42d39b8a4023f"
+      },
+      "dist/client.d.ts": {
+        "sha256": "0c513e7ddfb7c3e01b40f03eae463cdb4bd3d50d4cc82bdf314629e531ab9d99"
+      },
+      "dist/client.js": {
+        "sha256": "31d2c8d979f079211c92467baa0edd7aed05aec8940b5838f80cbb23db7eaac1"
+      },
+      "dist/crypto.d.ts": {
+        "sha256": "d8cc227d17705411858283c4c231ca6365fa7f8818dbb5c4d799f49b21664ec9"
+      },
+      "dist/crypto.js": {
+        "sha256": "dad5a714a3a5a33ec3471e19e719ade55e30d0ffdd56a0a3f92944466d2d1660"
+      },
+      "dist/device.d.ts": {
+        "sha256": "129387db80add5952af2fbaf8f129010f2f0985b008b57aab5ea6fc201e38876"
+      },
+      "dist/device.js": {
+        "sha256": "a39d450311c46459c853a579f3df47c7f29087f142f60fcc5a213b5bfb6ccf08"
+      },
+      "dist/feepool.d.ts": {
+        "sha256": "393ca7790e851958031e0a7449941c08d64d527f28ea6a133ded1f4e40bf2360"
+      },
+      "dist/feepool.js": {
+        "sha256": "a81c646b5b7b55e9499979e604bd421b2178d5e25babaef000c1cde13cbc40fb"
+      },
+      "dist/fragments.d.ts": {
+        "sha256": "e66c18cb619cb551dc77bbf407c0c9c0d9904ccffffb5b4a9ef7d95f79c51069"
+      },
+      "dist/fragments.js": {
+        "sha256": "829ed28c60b3c2bd62b79042bf2f822e780c7bb75d388228a59a5f21c469c662"
+      },
+      "dist/frame.d.ts": {
+        "sha256": "df04929fd8d67511ea7397fbce147c19b871db8cc015e84de10c7f3952314a47"
+      },
+      "dist/frame.js": {
+        "sha256": "fdd0c8e31bb30ff0260e8d9c3eee777380e532050f0d952b5c2a23bd9766d519"
+      },
+      "dist/handshake.d.ts": {
+        "sha256": "39729073089d5c7878d3dc9d4f53cf82d38e96d8db89337fad1bec86d5ee5d26"
+      },
+      "dist/handshake.js": {
+        "sha256": "8e6f6e7d9461124c485877ad3b4f2f70baf8281b67778af4cc72076bfd1bc193"
+      },
+      "dist/index.d.ts": {
+        "sha256": "a4e60414fef81f1f9832df33d504f440685fab1aa832694af00efc91be6e6887"
+      },
+      "dist/index.js": {
+        "sha256": "a4e60414fef81f1f9832df33d504f440685fab1aa832694af00efc91be6e6887"
+      },
+      "dist/local-secret.d.ts": {
+        "sha256": "9d2d88b3511d6c164c681737be32a86365b2212d609b572c65c62dd1d5a560eb"
+      },
+      "dist/local-secret.js": {
+        "sha256": "3530903b4ff4cd09799100a2eae59dd185ddaaf9d431a3b4f6c0deb9c510d361"
+      },
+      "dist/payment-operation.d.ts": {
+        "sha256": "9ad5c761f7c187da724668264e9836ff9990ab8327c80d88729f47df0d3600ee"
+      },
+      "dist/payment-operation.js": {
+        "sha256": "92d35cab9c706044a9b0ea6b2b273d08777fdb373d4d2931e324070e69d55dcc"
+      },
+      "dist/payment.d.ts": {
+        "sha256": "fa61303d058cf9a5ee016b67efac46bef3ceacc4806ec012574d0c6b5cbc0804"
+      },
+      "dist/payment.js": {
+        "sha256": "bb146ff106a9f3af8bd2e01115508d030ca10d7f35808323ec2cb8fcd8675ebc"
+      },
+      "dist/requests.d.ts": {
+        "sha256": "cf5e486596fe70f7cf51389e465203f4be545b6ca4269a21569f641e3ee9e8e7"
+      },
+      "dist/requests.js": {
+        "sha256": "b3f49cb5fafb2daa8209f651269fafe9d8db5c9ffdc7bbdd2415d032f89d4700"
+      },
+      "dist/session.d.ts": {
+        "sha256": "48b5e59850f649965a046d8f2e4813b987520417c739bfaff6ae1503058e5921"
+      },
+      "dist/session.js": {
+        "sha256": "8c0eff745a107ecf7e76bc73ff513f519435b088740fa6bcef69258a44dd5d44"
+      },
+      "dist/standard.d.ts": {
+        "sha256": "9f364bfde08f6c5fd3a92feb7a88da8c54e4573743765bed0a9606316832ce01"
+      },
+      "dist/standard.js": {
+        "sha256": "1a4489344f088e3d04d4e82d98f8f222acdff1751660402145d58532fa384159"
+      },
+      "dist/transport.d.ts": {
+        "sha256": "ca3a22832be1c30f0efe14751fe1428a1743c0b1ebc7a8b69f2ab81cad13ffeb"
+      },
+      "dist/transport.js": {
+        "sha256": "04b5c3eba4bc2a79e0faaaabc04f0ec59a498ee2e81a2387da437ef40020fc21"
+      },
+      "dist/connect-envelope.d.ts": {
+        "sha256": "bf978311b63ce7c6c7e196a48b772c2393be9f89073aa69738bab11bc5f24ec4"
+      },
+      "dist/connect-envelope.js": {
+        "sha256": "5248d87616a11d2fc7bcfaac425fd89ac0037c3597919e90e94ad2abbe279b36"
+      },
+      "dist/channel.js": {
+        "sha256": "eb971e5cedd9eb20d013ea40f7e195b0e6d054a041f573723789d049c2133ebf"
+      },
+      "dist/jcs.js": {
+        "sha256": "5a23df83f284bed5ffb1edd4713800791fa9a64b7cbf99a1e270d23d354c1ac7"
+      },
+      "dist/channel.d.ts": {
+        "sha256": "6d83169a0de52d537cabaf2ac9299b783f780492d6367b70a10ecbb14694bf90"
+      },
+      "dist/jcs.d.ts": {
+        "sha256": "7b67deea09ff9c9c45355a2fb825efe0969a73ab5788025a8a6198f8074117d4"
+      },
+      "dist/bitfs-wire.js": {
+        "sha256": "6fce306717f67cef47087af41186abe8061ece91c998eedeee06a0df24ff0ee3"
+      },
+      "dist/bitfs-wire.d.ts": {
+        "sha256": "64d75023e4df920d79b5c49f341ce08111ea3b7d940b18ae166eac0079d6d815"
+      },
+      "dist/network-identity.d.ts": {
+        "sha256": "406064dc9adb0c8ae900f3ec9af98e032366d8add6a218211818f98df775e5b4"
+      },
+      "dist/network-identity.js": {
+        "sha256": "6e8e34baaa40d2d9d5c229b57c039d6488c078c1dafb6cdd3897e34dfb849354"
+      },
+      "dist/policy-transfer.d.ts": {
+        "sha256": "9f244229c5f0d5679052f4770df5208910b41bef3a08ecfd13d72af83aae2de1"
+      },
+      "dist/policy-transfer.js": {
+        "sha256": "cfd1ff192f55ff5a0e3969f1c83581e8f989890c383f011dc14eeadd0ad0eaf9"
+      },
+      "dist/migration.d.ts": {
+        "sha256": "3adfc6dd4bbda58c7249519f3c4f5ed1a0a0e868ef561be75f40f790d7aa3113"
+      },
+      "dist/migration.js": {
+        "sha256": "f80702fc4d4bf91efaf369503fd16a3836c3a22515b9d5ea1f4e448f7d4dd789"
+      },
+      "dist/secret-value.js": {
+        "sha256": "b0b13f4c7a6cedaa09cf6372c810d197f29d521e0e224eae4d9f1272ced55c40"
+      },
+      "dist/secret-value.d.ts": {
+        "sha256": "1b5a138fd71249e50fd69752876e0a579da67dd1b4ec5bab8e13d5a3cb3107ae"
+      },
+      "dist/signing-channel.js": {
+        "sha256": "c987c4d4e13292a65352870334a680b095a049a5925c8da202ef35f898c0a1ed"
+      },
+      "dist/signing-channel.d.ts": {
+        "sha256": "29b45b4477b5fadc938036fb52c5323675029db7472f515bb402605d756b0302"
+      }
+    }
+  }
+}

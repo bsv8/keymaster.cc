@@ -77,11 +77,11 @@ function emitMessageBus(type: string, payload?: unknown) {
 }
 
 // --- assetDataNotifier mock ---
-const dataNotifierListeners: Array<(event: { providerId: string; kinds: string[]; publicKeyHex?: string }) => void> = [];
+const dataNotifierListeners: Array<(event: { providerId: string; kinds: string[]; networkIdentity?: import("@keymaster/contracts").NetworkIdentity; publicKeyHex?: string }) => void> = [];
 
 const mockDataNotifier = {
   emit: vi.fn(),
-  subscribe: vi.fn((handler: (event: { providerId: string; kinds: string[]; publicKeyHex?: string }) => void) => {
+  subscribe: vi.fn((handler: (event: { providerId: string; kinds: string[]; networkIdentity?: import("@keymaster/contracts").NetworkIdentity; publicKeyHex?: string }) => void) => {
     dataNotifierListeners.push(handler);
     return () => {
       const idx = dataNotifierListeners.indexOf(handler);
@@ -102,7 +102,7 @@ function createMockCtx() {
     ["storage.kv-clients", { bind: () => ({}) }],
     ["p2pkh.service", { onGlobalSettingsChange }],
     ["woc.stas.service", {}],
-    ["vault.wallet-state", { bind: () => ({ subscribe: onActiveChange, snapshot: () => ({ activePublicKeyHex: "pk1" }), isInitializing: () => false, openOwnerAppStore: vi.fn() }) }],
+    ["vault.wallet-state", { bind: () => ({ subscribe: onActiveChange, snapshot: () => ({ activePublicKeyHex: "pk1", activeKeyIdentity: { bsvNetwork: "main", publicKeyHex: "pk1" } }), isInitializing: () => false, openOwnerAppStore: vi.fn() }) }],
     ["token.registry", { register: tokenRegister }],
     ["background.registry", { register }],
     ["runtime.messageBus", mockMessageBus],
@@ -152,7 +152,7 @@ describe("stasTokenPlugin manifest", () => {
     const { ctx, trigger } = createMockCtx();
     stasTokenSetup(ctx as never);
 
-    dataNotifierListeners.forEach((h) => h({
+    dataNotifierListeners.forEach((h) => h({ networkIdentity: {bsvNetwork: "main", publicKeyHex: "pk1"},
       providerId: "p2pkh",
       kinds: ["resource"],
       publicKeyHex: "pk1",
@@ -168,7 +168,7 @@ describe("stasTokenPlugin manifest", () => {
     const { ctx, trigger } = createMockCtx();
     stasTokenSetup(ctx as never);
 
-    dataNotifierListeners.forEach((h) => h({
+    dataNotifierListeners.forEach((h) => h({ networkIdentity: {bsvNetwork: "main", publicKeyHex: "pk1"},
       providerId: "p2pkh",
       kinds: ["resource"],
       publicKeyHex: "pk1",
@@ -183,7 +183,7 @@ describe("stasTokenPlugin manifest", () => {
     const { ctx, trigger } = createMockCtx();
     stasTokenSetup(ctx as never);
 
-    dataNotifierListeners.forEach((h) => h({
+    dataNotifierListeners.forEach((h) => h({ networkIdentity: {bsvNetwork: "main", publicKeyHex: "pk_other"},
       providerId: "p2pkh",
       kinds: ["resource"],
       publicKeyHex: "pk_other",
@@ -201,7 +201,7 @@ describe("stasTokenPlugin manifest", () => {
     });
     const { ctx, trigger } = createMockCtx();
     stasTokenSetup(ctx as never);
-    dataNotifierListeners.forEach(handler => handler({ providerId: "p2pkh", kinds: ["resource"], publicKeyHex: "pk1" }));
+    dataNotifierListeners.forEach(handler => handler({ networkIdentity: {bsvNetwork: "main", publicKeyHex: "pk1"}, providerId: "p2pkh", kinds: ["resource"], publicKeyHex: "pk1" }));
     ctx.scope.state = "stopping";
     finish();
     await mockPendingList.catch(() => {});

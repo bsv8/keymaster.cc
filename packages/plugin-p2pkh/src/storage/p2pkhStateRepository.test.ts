@@ -4,7 +4,7 @@ import { p2pkhAddressToScriptHex } from "../p2pkhTransactionParser.js";
 import { createMemoryOwnerFileStore, type MemoryOwnerFileStore } from "./testSupport/memoryOwnerFileStore.js";
 
 const OWNER_A = "02" + "11".repeat(32);
-const resource = {
+const resource = {bsvNetwork: "main" as const,
   resourceId: "p2pkh:main",
   publicKeyHex: OWNER_A,
   label: "test",

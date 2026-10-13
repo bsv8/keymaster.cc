@@ -1,9 +1,10 @@
+import type { NetworkIdentity as importNetworkIdentity } from "./networkIdentity.js";
 import { defineCapability, type PluginConsumer, type LifecycleScope } from "webloom-framework";
 import type { AppIdentitySnapshot } from "./appIdentity.js";
 import type { StorageRuntimeController } from "./storage/runtime.js";
 
 /** Verified session facts; callers cannot choose a module, purpose or physical App directory. */
-export interface AppStorageBinding {
+export interface AppStorageBinding extends importNetworkIdentity {
   connectSessionId: string;
   transportOrigin: string;
   appIdentity: AppIdentitySnapshot;

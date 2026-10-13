@@ -16,6 +16,15 @@ function seedFor(hashes: readonly string[]): Uint8Array {
 }
 
 describe("MsFileVodSource", () => {
+  it.each(["local-bitfs", `remote-proxy:02${"11".repeat(32)}`])("通过正式来源 %s 校验并读取 Block", async sourceId => {
+    const block = new Uint8Array([1, 2, 3]);
+    const blockHash = await hash(block);
+    const seed = seedFor([blockHash]);
+    const source = new MsFileVodSource({ sourceId, seedHashHex: await hash(seed), fileSizeBytes: 3n,
+      declaredMediaType: "audio/mpeg", reader: new FakeMsFileReader({ seed, blocks: new Map([[blockHash, block]]) }) });
+    try { expect(await source.readBlockAt(0)).toEqual(block); } finally { await source.dispose(); }
+  });
+
   it("先读 Seed/Block 0，重复 Hash 只发一个 Read，并限制窗口占用", async () => {
     // 这里使用小 Block 不可改变生产 Block 大小；文件大小决定最后块的
     // 精确长度，所以测试内容以一个真实 256 KiB block 作为计划。

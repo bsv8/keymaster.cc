@@ -12,6 +12,7 @@
 | Connect | [Connect](./Connect.md) | 外部 App 会话、能力和身份边界 |
 | P2PKH | [P2PKH](./P2PKH.md) | 链上事实、本地交易和转账 |
 | MSFile | [MSFile](./MSFile.md) | 文件读取、价格、并发和媒体播放 |
+| Forum | [Forum](./Forum.md) | 索引浏览、正文与签名发布、资金回收 |
 | BitFS 文件买卖 | [BitFS 文档索引](./bitfs/README.md) | 买方、卖方、资金、交易、签名和恢复 |
 | SatSubscription / Channel | [SatSubscription 与 Channel](./SatSubscription与Channel.md) | 供应商、频道、消息和 SPI 资金 |
 | 集成测试 | [集成测试](./集成测试/README.md) | 测试层级、运行方法和证据状态 |
@@ -31,7 +32,7 @@
 
 - [Vault 软硬件统一需求](./proposals/rockey/Vault软硬件统一需求.md)与[施工单](./proposals/rockey/Vault软硬件统一施工单.md)：未实施。统一软件 Worker 与 Rockey ESP32 后端，保留同 Key 身份和数据，定义注销、USB、操作白名单、设备会话撤权及三按钮长文授权；共同协议草案与固件需求在同级 Rockey 仓库维护。
 
-- [Forum 客户端需求](./proposals/forum/Forum客户端需求.md)与[施工单](./proposals/forum/Forum客户端施工单.md)：**部分实施，未验收**。论坛索引与分页浏览、MSFile 正文获取和统一存储、Markdown 展示、作者签名发布、专用资金与索引恢复。协议层有 TS↔Go 黄金向量互操作证据；FT05（自有特殊输出识别、保护与归集）未实现；真实服务端、浏览器、广播与索引观测保持未验证（见 `集成测试/覆盖矩阵.yaml` 的 `KM-FORUM-001`/`KM-FORUM-002`）。
+- [Forum 客户端需求](./proposals/forum/Forum客户端需求.md)与[施工单](./proposals/forum/Forum客户端施工单.md)：**代码已实施，真实最小冒烟通过，完整资源矩阵部分验收**。Worker 发布权威、P2PKH 协议资金/持久提交与 MSFile 内容接入均已装配；真实 Chromium 双页配置共享、锁定和恢复已验证。真实 HTTPS 联合发布、广播后 Go 索引为 A，以及双独立客户端经 MSFile Hash 发现、购买正文、关池和卖方离线后本地阅读已通过；WSS/Direct、浏览器重启和完整资源边界仍待验证（见覆盖矩阵 `KM-FORUM-001`/`KM-FORUM-002`）。
 
 - [单 Key 钱包状态收口施工单](./proposals/webloom-0.6/单Key钱包状态收口施工单.md)：待实施。将 Keyspace 身份读取/变化通知收进 Vault 只读状态能力，迁移消费者后删除旧 API，保留会话与钱包世代失效规则。
 

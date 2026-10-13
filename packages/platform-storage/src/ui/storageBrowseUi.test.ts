@@ -14,12 +14,15 @@ import {
 } from "./storageBrowseState.js";
 import {
   BROWSE_ROOT_DIRECTORY,
+  breadcrumbSegments,
+  directoryChain,
   directoryChildPrefix,
   displayDirectory,
   foldDirectoryEntries,
   joinDirectory,
   mergeDirectoryChildren,
   parentDirectory,
+  type BrowseChildNode,
 } from "./storageBrowseTree.js";
 import {
   buildJsonTree,
@@ -189,6 +192,36 @@ describe("directory paging state (F03/U01)", () => {
     expect(joinDirectory(BROWSE_ROOT_DIRECTORY, "apps")).toBe("apps");
     expect(parentDirectory("apps/a")).toBe("apps");
     expect(parentDirectory("apps")).toBeUndefined();
+  });
+});
+
+describe("directory navigation helpers", () => {
+  it("expands a directory together with its whole ancestor chain", () => {
+    expect(directoryChain(BROWSE_ROOT_DIRECTORY)).toEqual([]);
+    expect(directoryChain("apps")).toEqual(["apps"]);
+    expect(directoryChain("apps/a/b")).toEqual(["apps", "apps/a", "apps/a/b"]);
+  });
+
+  it("builds a breadcrumb that follows the selection", () => {
+    const directory: BrowseChildNode = { path: "apps/a", name: "a", kind: "directory" };
+    expect(breadcrumbSegments(undefined)).toEqual([]);
+    expect(breadcrumbSegments(directory)).toEqual([
+      { name: "apps", path: "apps", current: false },
+      { name: "a", path: "apps/a", current: true },
+    ]);
+    // 选中目录时最后一段是当前位置；只有根目录选中时没有分段。
+    expect(breadcrumbSegments({ path: BROWSE_ROOT_DIRECTORY, name: "", kind: "directory" })).toEqual([]);
+
+    // 选中文件时显示父目录链加文件名：父目录可导航，文件名是当前位置。
+    const file: BrowseChildNode = { path: "apps/a/notes.txt", name: "notes.txt", kind: "file" };
+    expect(breadcrumbSegments(file)).toEqual([
+      { name: "apps", path: "apps", current: false },
+      { name: "a", path: "apps/a", current: false },
+      { name: "notes.txt", path: "apps/a/notes.txt", current: true },
+    ]);
+    expect(breadcrumbSegments({ path: "key.json", name: "key.json", kind: "file" })).toEqual([
+      { name: "key.json", path: "key.json", current: true },
+    ]);
   });
 });
 

@@ -66,6 +66,51 @@ export function parentDirectory(path: string): string | undefined {
   return path.slice(0, index);
 }
 
+/**
+ * 目录本身与它的全部祖先，从第一层排到目录自身；根目录没有链。
+ *
+ * 树只渲染已展开目录的子级，因此「进入目录」必须把整条链都展开并加载，
+ * 否则被选中的目录在树里不可见。
+ */
+export function directoryChain(directory: string): string[] {
+  if (directory === BROWSE_ROOT_DIRECTORY) return [];
+  const parts = directory.split("/").filter((part) => part.length > 0);
+  return parts.map((_, index) => parts.slice(0, index + 1).join("/"));
+}
+
+/** 面包屑分段：path 是该分段可导航到的目录，current 表示当前位置。 */
+export interface BrowseCrumbSegment {
+  name: string;
+  path: string;
+  /** true 表示这里是当前位置：显示为文本，不作为导航按钮。 */
+  current: boolean;
+}
+
+/**
+ * 面包屑跟随选中项。
+ *
+ * 选中文件时显示它所在目录的可导航分段，最后一段是文件名；选中目录时显示目录
+ * 自身路径，最后一段是当前目录。没有选中项时只有根。
+ */
+export function breadcrumbSegments(selected: BrowseChildNode | undefined): BrowseCrumbSegment[] {
+  if (!selected) return [];
+  const directory = selected.kind === "file"
+    ? parentDirectory(selected.path) ?? BROWSE_ROOT_DIRECTORY
+    : selected.path;
+  const parts = directory === BROWSE_ROOT_DIRECTORY ? [] : directory.split("/").filter((part) => part.length > 0);
+  const segments = parts.map((name, index) => ({
+    name,
+    path: parts.slice(0, index + 1).join("/"),
+    current: false,
+  }));
+  if (selected.kind === "file") {
+    segments.push({ name: selected.name, path: selected.path, current: true });
+  } else if (segments.length > 0) {
+    segments[segments.length - 1]!.current = true;
+  }
+  return segments;
+}
+
 /** 目录自身的标记对象路径，例如 apps/<name>/.dir。 */
 export function directoryMarkerPath(directory: string): string {
   return `${directory}/.dir`;

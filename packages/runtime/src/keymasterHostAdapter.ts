@@ -401,7 +401,11 @@ export function createKeymasterPluginHost(
       if (key === CHANNEL_RUNTIME_CAPABILITY.id) {
         if (!scopedChannelFactory) {
           const factory = context.capability(CHANNEL_RUNTIME_CAPABILITY);
-          const scopedRuntime = createScopedChannelRuntime(factory.forPlugin(manifest.id), context.scope);
+          const channelSession = runtimeIdentityKey(runtimeIdentity);
+          const channelUnit = currentUnit(manifest, hostRuntime);
+          const ownerBound = channelUnit?.scopeKind === "owner-session" || channelUnit?.scopeKind === "connect-session";
+          const scopedRuntime = createScopedChannelRuntime(factory.forPlugin(manifest.id), context.scope,
+            () => ownerBound && context.scope.state !== "active" && runtimeIdentityKey(runtimeIdentity) !== channelSession);
           scopedChannelFactory = {
             forPlugin: (_claimedPluginId: string) => scopedRuntime,
             forSystem: (_claimedSystemId: string) => {
@@ -580,6 +584,9 @@ export function createKeymasterPluginHost(
 
   coreHost = createWebLoomPluginHost({
     runtime: hostRuntime,
+    // Owner-session RPC providers appear only after unlock. Validate their declared
+    // remote dependency now; Host activation still requires the actual remote service.
+    externalRuntimeDependencies: hostRuntime === "window-main",
     privateCapabilities: options.privateCapabilities,
     runtimeSlotBindings: options.runtimeSlotBindings,
     rootAttributes: attributesFromRuntimeIdentity(runtimeIdentity),
@@ -872,6 +879,18 @@ export function createKeymasterPluginHost(
     resourceRegistry: legacyResourceRegistry,
   };
 
+  // Keep the old cleanup result visible across retry attempts; the framework may
+  // finish timed-out disposers later. Equal identity must still check that result.
+  let identityCleanupPlugins: string[] = [];
+  const assertIdentityCleanup = () => {
+    for (const pluginId of identityCleanupPlugins) {
+      const state = coreHost!.state(pluginId);
+      if (state.cleanup?.cleanupIncomplete || state.kind === "cleanup-pending" || state.kind === "stopping") {
+        throw new Error(`${pluginId}: ${state.error ?? "Plugin cleanup did not complete"}\n${JSON.stringify(state.cleanup, null, 2)}`);
+      }
+    }
+  };
+
   bindWebLoomHost(legacyHost, coreHost);
   keymasterRemoteRuntimeAttachers.set(legacyHost, attachRemoteRuntime);
   return legacyHost;
@@ -883,7 +902,7 @@ export function createKeymasterPluginHost(
     }
     const previous = transitionPromise;
     const run = async (): Promise<void> => {
-      if (runtimeIdentityKey(runtimeIdentity) === runtimeIdentityKey(next)) return;
+      if (runtimeIdentityKey(runtimeIdentity) === runtimeIdentityKey(next)) { assertIdentityCleanup(); return; }
       const previousIdentity = runtimeIdentity;
       const runChanged = previousIdentity?.runGeneration !== next.runGeneration;
       const storageChanged = runChanged || (previousIdentity?.walletGeneration ?? "unknown")
@@ -910,13 +929,19 @@ export function createKeymasterPluginHost(
           });
         }
       }
+      assertIdentityCleanup();
+      identityCleanupPlugins = toSuspend.map(item => item.pluginId);
       runtimeIdentity = { ...next };
       // 先撤销旧实例，再等待清理；只在新钱包/会话条件就绪后重建。
-      // 存储尚未绑定时维持 blocked，等待下一次带世代的身份事件。
-      const storageReadyForIdentity = next.walletGeneration !== undefined;
+      // Window 存储代理也提供未初始化钱包的状态与创建入口；重置后必须
+      // 在空身份下重建，否则 storage.status 和 storage-guard 会永久缺失。
+      // Worker 的数据运行时仍然需要已经绑定的钱包世代。
+      const storageReadyForIdentity = next.walletGeneration !== undefined
+        || (hostRuntime === "window-main" && next.vaultStatus === "uninitialized");
       // 全部旧实例同步围栏后才开始等待，避免新会话消费者短暂读取
       // 尚未撤销的旧会话提供方，或在提供方异步重建期间提前启动。
       await Promise.all(toSuspend.map(item => coreHost!.revoke(item.pluginId, "runtime identity changed")));
+      assertIdentityCleanup();
       for (const item of toSuspend) {
         if (item.shouldRestart && (item.scopeKind === "storage" ? storageReadyForIdentity : next.vaultStatus === "unlocked")) {
           // 在新身份下重建本地实例。

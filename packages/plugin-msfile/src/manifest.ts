@@ -1,3 +1,4 @@
+import { WINDOW_P2P_WORKER_BRIDGE_CAPABILITY } from "@keymaster/contracts/window-p2p";
 import { createPublicMsFileService } from "./publicMsFileService.js";
 import { setupMsFileUriActions } from "./setupUriActions.js";
 import { URI_ACTION_REGISTRY_CAPABILITY } from "@keymaster/contracts";
@@ -38,6 +39,7 @@ import { MsFileHomeFileWidget } from "./MsFileHomeFileWidget.js";
 import { MsFileSettings } from "./MsFileSettings.js";
 import { MsFileBucketHomeWidget, MsFileBucketPage } from "./MsFileBucketPage.js";
 import { MSFILE_BUCKET_SERVICE_CAPABILITY, createMsFileBucketService } from "./msfileBucketService.js";
+import { createMsFileSellerPublicationEvidence } from "./msfilePublicationEvidence.js";
 import { createMsFileContentService } from "./msfileContentService.js";
 import { createMsFileRemoteContentFetcher } from "./msfileRemoteContentFetcher.js";
 import { disposeAllMsFileMediaSessions, registerMsFileMediaResource } from "./msfileMediaResource.js";
@@ -361,6 +363,7 @@ const resources: I18nPluginResources = {
       "msfile.bucket.list.retry": "Retry",
       "msfile.bucket.list.empty": "No stored seeds yet",
       "msfile.bucket.list.emptyHint": "Choose a file above; it is split into MasterSeed blocks, and the seed file plus blocks are stored in this bucket.",
+      "msfile.bucket.stored.title": "Stored content",
       "msfile.bucket.column.seed": "Seed Hash",
       "msfile.bucket.column.name": "File name",
       "msfile.bucket.column.type": "Type",
@@ -378,6 +381,10 @@ const resources: I18nPluginResources = {
       "msfile.bucket.action.deleteConfirmTitle": "Delete this entry?",
       "msfile.bucket.action.deleteConfirmBody": "This deletes the seed file, metadata, and every block under that seed's directory; other seeds are unaffected.",
       "msfile.bucket.action.deleteConfirm": "Delete",
+      "msfile.bucket.action.copy": "Copy",
+      "msfile.bucket.action.copySeed": "Copy full Seed Hash",
+      "msfile.bucket.action.copied": "Copied",
+      "msfile.bucket.action.copyFailed": "Copy failed",
       "msfile.bucket.status.previewing": "Reading blocks…",
       "msfile.bucket.status.downloading": "Reading and verifying blocks…",
       "msfile.bucket.status.verifying": "Verifying the whole entry…",
@@ -721,6 +728,7 @@ const resources: I18nPluginResources = {
       "msfile.bucket.list.retry": "重试",
       "msfile.bucket.list.empty": "还没有已存储的种子",
       "msfile.bucket.list.emptyHint": "选择上面的文件上传；上传完成后会按 MasterSeed 制作种子文件并写入文件块。",
+      "msfile.bucket.stored.title": "已存储内容",
       "msfile.bucket.column.seed": "Seed Hash",
       "msfile.bucket.column.name": "文件名",
       "msfile.bucket.column.type": "类型",
@@ -738,6 +746,10 @@ const resources: I18nPluginResources = {
       "msfile.bucket.action.deleteConfirmTitle": "删除这个条目？",
       "msfile.bucket.action.deleteConfirmBody": "将删除种子、元数据以及该种子目录下的全部文件块；其它种子不受影响。",
       "msfile.bucket.action.deleteConfirm": "删除",
+      "msfile.bucket.action.copy": "复制",
+      "msfile.bucket.action.copySeed": "复制完整 Seed Hash",
+      "msfile.bucket.action.copied": "已复制",
+      "msfile.bucket.action.copyFailed": "复制失败",
       "msfile.bucket.status.previewing": "正在读取文件块…",
       "msfile.bucket.status.downloading": "正在读取并校验文件块…",
       "msfile.bucket.status.verifying": "正在完整校验…",
@@ -815,9 +827,10 @@ const msfilePluginDefinition = {
       CENTRAL_STORAGE_DECLARATIONS.bitfsJournalFiles,
       CENTRAL_STORAGE_DECLARATIONS.appSettingsFiles,
     ],
-    provides: [MSFILE_SERVICE_CAPABILITY],
+    provides: [MSFILE_SERVICE_CAPABILITY, MSFILE_CONTENT_CAPABILITY],
     dependencies: defineRuntimeUnitDependencies([
       { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "shared-worker", reason: "文件设置、协议证据与 App 管理设置的受限句柄" },
+      { capability: WINDOW_P2P_WORKER_BRIDGE_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "由公共 Window executor 提供受限网络 lane" },
       { capability: VAULT_WALLET_STATE_CAPABILITY, sourceRuntime: "shared-worker", reason: "文件服务所属钱包身份" },
       { capability: SAT_SUBSCRIPTION_SERVICE_CAPABILITY, sourceRuntime: "shared-worker", reason: "卖方与 Channel 服务依赖同一供应商运行态" },
       { capability: WOC_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "BitFS 资金恢复查询；缺席时文件设置仍可用" },
@@ -852,6 +865,9 @@ const msfilePluginDefinition = {
       // 远程获取复用既有 BitFS 买方通道：stat → 发布需求 → 已验签报价 → 购买。
       // 不注入这个 fetcher 时本地缺失的内容永远无法取得，只能报「无可用渠道」。
       remote: createMsFileRemoteContentFetcher({ service }),
+      // 发布渠道：判据在 msfilePublicationEvidence 里，manifest 只是装配它。
+      // 卖方运行单元就绪时本地内容才真的能被读者取到，与上面的下载来源无关。
+      publication: createMsFileSellerPublicationEvidence(service),
     });
     ctx.provide(MSFILE_CONTENT_CAPABILITY, contentService);
 
@@ -961,8 +977,11 @@ const msfilePluginDefinition = {
       kind: "page",
       render: () => createElement(MsFileResourceProvider, { reader, children: createElement(MsFileSettings) }),
     });
-    pages.view.register({ kind: "home", slot: "main", id: "msfile.file-fetch", label: "MSFile", space: { id: "msfile.files", label: { key: "msfile.home.space", fallback: "MSFile files" }, order: 600 }, order: 10, visibleWhen: ({ unlocked }) => unlocked, render: () => createElement(bindMsFileUi(ctx, MsFileHomeFileWidget)) });
-    pages.view.register({ kind: "home", slot: "main", id: "msfile.bucket-storage", label: "MSFile", space: { id: "msfile.files", label: { key: "msfile.home.space", fallback: "MSFile files" }, order: 600 }, order: 20, visibleWhen: ({ unlocked }) => unlocked, render: () => createElement(bindMsFileUi(ctx, MsFileBucketHomeWidget)) });
+    // Bind once per plugin instance so parent renders preserve card state and tasks.
+    const HomeFileWidget = bindMsFileUi(ctx, MsFileHomeFileWidget);
+    const BucketHomeWidget = bindMsFileUi(ctx, MsFileBucketHomeWidget);
+    pages.view.register({ kind: "home", slot: "main", id: "msfile.file-fetch", label: "MSFile", space: { id: "msfile.files", label: { key: "msfile.home.space", fallback: "MSFile files" }, order: 600 }, order: 10, visibleWhen: ({ unlocked }) => unlocked, render: () => createElement(HomeFileWidget) });
+    pages.view.register({ kind: "home", slot: "main", id: "msfile.bucket-storage", label: "MSFile", space: { id: "msfile.files", label: { key: "msfile.home.space", fallback: "MSFile files" }, order: 600 }, order: 20, visibleWhen: ({ unlocked }) => unlocked, render: () => createElement(BucketHomeWidget) });
     const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     business.registerFeature(MSFILE_PLUGIN_ID, "home", {
       id: "home.msfile-file",

@@ -27,7 +27,7 @@ const COMPRESSED_PUBLIC_KEY = /^(02|03)[0-9a-f]{64}$/u;
 /** P2PKH 设置资源的最小页面投影。字段含义：是否把 testnet 纳入转账范围。 */
 interface TransferNetworkSettings {
   /** 是否启用 testnet；关闭时页面只允许主网。 */
-  includeTestnet?: boolean;
+  bsvNetwork?: "main" | "test";
 }
 
 interface RecipientCandidate {
@@ -207,11 +207,11 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
     [],
     (snapshot) => snapshot.data ?? { status: "booting", sessionEpoch: "boot", runGeneration: "boot", vaultLifecycleRevision: 0 }
   );
-  const includeTestnet = useResourceViewSelector<TransferNetworkSettings, boolean>(
+  const bsvNetwork = useResourceViewSelector<TransferNetworkSettings, "main" | "test">(
     reader,
     "p2pkh.settings",
     [],
-    (snapshot) => snapshot.data?.includeTestnet === true
+    (snapshot) => snapshot.data?.bsvNetwork ?? "main"
   );
   const contacts = useResourceViewSelector<Contact[], Contact[]>(
     reader,
@@ -241,12 +241,12 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
         return {
           kind: "address",
           address,
-          network: includeTestnet && networkFromParam(urlParams.get("network")) === "test" ? "test" : "main"
+          network: bsvNetwork
         };
       }
       const parsedAddress = codec.parseAddress(address);
       if (!parsedAddress) return { kind: "invalid", error: "invalidAddress" };
-      if (parsedAddress.network === "test" && !includeTestnet) {
+      if (parsedAddress.network !== bsvNetwork) {
         return { kind: "invalid", error: "testnetDisabled" };
       }
       if (publicKeyHex) {
@@ -270,29 +270,25 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
     return {
       kind: "public-key",
       publicKeyHex,
-      network: includeTestnet && requestedNetwork === "test" ? "test" : "main"
+      network: bsvNetwork
     };
-  }, [codec, includeTestnet, urlParams]);
+  }, [codec, bsvNetwork, urlParams]);
 
   const [inputMode, setInputMode] = useState<"contacts" | "manual">("contacts");
   const [manualInput, setManualInput] = useState("");
-  const [publicNetwork, setPublicNetwork] = useState<BsvNetwork>(urlRecipient.network ?? "main");
-  const [networkChanged, setNetworkChanged] = useState(false);
   const [addressCopied, setAddressCopied] = useState(false);
 
   useEffect(() => {
     if (urlRecipient.kind === "none") {
       setInputMode("contacts");
       setManualInput("");
-      setPublicNetwork("main");
-      setNetworkChanged(false);
+
       setAddressCopied(false);
       return;
     }
     setInputMode("manual");
     setManualInput("");
-    setPublicNetwork(urlRecipient.network ?? "main");
-    setNetworkChanged(false);
+
     setAddressCopied(false);
   }, [locationSearch, urlRecipient.kind, urlRecipient.network]);
 
@@ -301,12 +297,12 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
     if (!value) return { searching: false };
     const publicKeyHex = normalizePublicKey(value);
     if (publicKeyHex) {
-      return { candidate: makePublicCandidate(publicKeyHex, includeTestnet ? publicNetwork : "main", contacts, codec, "manual"), searching: false };
+      return { candidate: makePublicCandidate(publicKeyHex, bsvNetwork, contacts, codec, "manual"), searching: false };
     }
     if (codec) {
       const parsedAddress = codec.parseAddress(value);
       if (parsedAddress) {
-        if (parsedAddress.network === "test" && !includeTestnet) return { error: "testnetDisabled", searching: false };
+        if (parsedAddress.network !== bsvNetwork) return { error: "testnetDisabled", searching: false };
         return {
           candidate: makeAddressCandidate(value, parsedAddress.network, parsedAddress, contacts, codec),
           searching: false
@@ -315,25 +311,25 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
     }
     if (isAddressLike(value)) return { error: "invalidAddress", searching: false };
     return { searching: true };
-  }, [codec, contacts, includeTestnet, manualInput, publicNetwork]);
+  }, [codec, contacts, bsvNetwork, manualInput]);
 
   const urlCandidate = useMemo<RecipientCandidate | undefined>(() => {
     if (urlRecipient.kind === "public-key" && urlRecipient.publicKeyHex) {
-      return makePublicCandidate(urlRecipient.publicKeyHex, includeTestnet ? publicNetwork : "main", contacts, codec);
+      return makePublicCandidate(urlRecipient.publicKeyHex, bsvNetwork, contacts, codec);
     }
     if (urlRecipient.kind === "address" && urlRecipient.address && urlRecipient.network) {
       return makeAddressCandidate(urlRecipient.address, urlRecipient.network, urlRecipient.parsedAddress, contacts, codec, urlRecipient.publicKeyHex);
     }
     return undefined;
-  }, [codec, contacts, includeTestnet, publicNetwork, urlRecipient]);
+  }, [codec, contacts, bsvNetwork, urlRecipient]);
 
   const candidate = urlRecipient.kind === "none" ? manualResolution.candidate : urlCandidate;
   const candidateError = urlRecipient.kind === "invalid" ? urlRecipient.error : manualResolution.error;
   const p2pkhOffers = useMemo(() => offers.filter((offer) => {
     if (offer.providerId !== "p2pkh") return false;
     if (offer.assetId !== "bsv" && offer.assetId !== "bsvtest") return false;
-    return includeTestnet || offerNetwork(offer) !== "test";
-  }), [includeTestnet, offers]);
+    return offerNetwork(offer) === bsvNetwork;
+  }), [bsvNetwork, offers]);
   const selectedOffer = useMemo(() => {
     if (!candidate) return undefined;
     return p2pkhOffers.find((offer) => offerNetwork(offer) === candidate.network);
@@ -354,21 +350,11 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
     router.push("/transfer");
   }
 
-  function changePublicNetwork(network: BsvNetwork) {
-    setPublicNetwork(network);
-    setNetworkChanged(true);
-    setAddressCopied(false);
-  }
 
   async function copyRecipientAddress(address: string) {
-    try {
-      await navigator.clipboard.writeText(address);
-      setAddressCopied(true);
-    } catch {
-      setAddressCopied(false);
-    }
+    try { await navigator.clipboard.writeText(address); setAddressCopied(true); }
+    catch { setAddressCopied(false); }
   }
-
   function sourceLabel(candidateValue: RecipientCandidate): string {
     if (candidateValue.kind === "address") {
       return candidateValue.contactName
@@ -402,7 +388,7 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
     const errorText = urlRecipient.error === "conflict"
       ? t("p2pkh.transferPage.page.recipient.conflict", { defaultValue: "公钥与地址不一致，已阻断转账。" })
       : urlRecipient.error === "testnetDisabled"
-        ? t("p2pkh.transferPage.page.recipient.testnetDisabled", { defaultValue: "未启用 testnet，请在设置中开启。" })
+        ? t("p2pkh.transferPage.page.recipient.testnetDisabled", { defaultValue: "收款地址的网络与当前身份不一致。" })
         : urlRecipient.error === "invalidPublicKey"
           ? t("p2pkh.transferPage.page.recipient.invalidPublicKey", { defaultValue: "公钥必须是压缩格式的 33 字节 hex 公钥。" })
           : t("p2pkh.transferPage.page.recipient.invalidAddress", { defaultValue: "这不是有效的 P2PKH 地址，请从对应资产入口转账。" });
@@ -415,7 +401,6 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
     );
   }
 
-  const showPublicNetworkSelector = includeTestnet && candidate?.kind !== "address";
   const canMountWidget = Boolean(candidate?.recipient || candidate?.publicKeyHex || candidate?.address);
 
   return (
@@ -458,16 +443,6 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
             </div>
             <span className={`transfer-page__recipient-source is-${candidate.kind}`} data-testid="recipient-source">{sourceLabel(candidate)}</span>
             {candidate.kind === "address" && !candidate.contactName ? <span className="transfer-page__recipient-warning">{t("p2pkh.transferPage.page.recipient.unknownAddress", { defaultValue: "陌生地址" })}</span> : null}
-            {candidate.kind === "public-key" && includeTestnet ? (
-              <label>
-                {t("p2pkh.transferPage.page.recipient.network", { defaultValue: "网络" })}
-                <select aria-label={t("p2pkh.transferPage.page.recipient.network", { defaultValue: "网络" })} value={candidate.network} onChange={(event) => changePublicNetwork(event.currentTarget.value as BsvNetwork)}>
-                  <option value="main">{networkLabel("main")}</option>
-                  <option value="test">{networkLabel("test")}</option>
-                </select>
-              </label>
-            ) : null}
-            {networkChanged ? <p>{t("p2pkh.transferPage.page.recipient.networkChanged", { defaultValue: "地址已更新，请重新核对。" })}</p> : null}
             <button type="button" onClick={clearRecipient}>{t("p2pkh.transferPage.page.recipient.change", { defaultValue: "更换收款方" })}</button>
           </div>
         ) : (
@@ -495,17 +470,8 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
                 label={t("p2pkh.transferPage.page.recipient.address", { defaultValue: "收款地址" })}
                 placeholder={t("p2pkh.transferPage.page.recipient.inputPlaceholder", { defaultValue: "粘贴公钥、地址，或搜索联系人" })}
                 value={manualInput}
-                onChange={(event) => { setManualInput(event.currentTarget.value); setNetworkChanged(false); }}
+                onChange={(event) => { setManualInput(event.currentTarget.value); }}
               />
-            ) : null}
-            {showPublicNetworkSelector ? (
-              <label>
-                {t("p2pkh.transferPage.page.recipient.network", { defaultValue: "网络" })}
-                <select aria-label={t("p2pkh.transferPage.page.recipient.network", { defaultValue: "网络" })} value={publicNetwork} onChange={(event) => changePublicNetwork(event.currentTarget.value as BsvNetwork)}>
-                  <option value="main">{networkLabel("main")}</option>
-                  <option value="test">{networkLabel("test")}</option>
-                </select>
-              </label>
             ) : null}
             {manualResolution.searching ? (
               <div className="transfer-page__contact-search" data-testid="contact-search-results">
@@ -522,7 +488,7 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
         {candidateError ? (
           <p className="transfer-page__error">
             {candidateError === "testnetDisabled"
-              ? t("p2pkh.transferPage.page.recipient.testnetDisabled", { defaultValue: "未启用 testnet，请在设置中开启。" })
+              ? t("p2pkh.transferPage.page.recipient.testnetDisabled", { defaultValue: "收款地址的网络与当前身份不一致。" })
               : t("p2pkh.transferPage.page.recipient.invalidAddress", { defaultValue: "这不是有效的 P2PKH 地址，请从对应资产入口转账。" })}
           </p>
         ) : null}
@@ -538,10 +504,9 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
             {candidate.address ? (
               <button type="button" onClick={() => void copyRecipientAddress(candidate.address!)}>{addressCopied ? t("p2pkh.transferPage.page.recipient.copied", { defaultValue: "已复制" }) : t("p2pkh.transferPage.page.recipient.copy", { defaultValue: "复制地址" })}</button>
             ) : null}
-            {networkChanged ? <p>{t("p2pkh.transferPage.page.recipient.networkChanged", { defaultValue: "地址已更新，请重新核对。" })}</p> : null}
           </div>
         ) : null}
-        {includeTestnet && candidate?.kind === "address" ? (
+        {candidate?.kind === "address" ? (
           <label>
             {t("p2pkh.transferPage.page.recipient.network", { defaultValue: "网络" })}
             <select aria-label={t("p2pkh.transferPage.page.recipient.network", { defaultValue: "网络" })} value={candidate.network} disabled onChange={() => undefined}>

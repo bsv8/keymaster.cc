@@ -2,8 +2,13 @@
 //
 // 这里只呈现 Worker 返回的元数据与页面已知的目录标记对象路径。完整路径、完整
 // 哈希、完整公钥都必须原样出现：树里为了排版做的缩写只属于树。
+//
+// 文件显示大小、时间、版本与内容类型；目录显示它是什么以及已加载的直接子项数，
+// 空目录仍有自己的 .dir 标记可以在下面追踪。目录没有大小或时间汇总，因为那些
+// 字段对目录没有展示意义。
 import type { StorageBrowsePreview } from "../runtime/storageBrowseTypes.js";
 import type { BrowseChildNode, BrowseDirectoryMarker } from "./storageBrowseTree.js";
+import { displayDirectory } from "./storageBrowseTree.js";
 import { formatBytes, formatTimestamp } from "./storageBrowseText.js";
 import type { BrowseTranslate } from "./StorageBrowsePreviewPane.js";
 
@@ -14,8 +19,10 @@ export interface PropertiesPaneProps {
   selected: BrowseChildNode | undefined;
   /** 该文件的预览结果；属性即使预览失败也继续可用。 */
   preview: StorageBrowsePreview | undefined;
-  /** 当前目录自己的 .dir 标记元数据。 */
+  /** 目录节点：它自己的 .dir 标记；文件节点：所在目录的 .dir 标记。 */
   directoryMarker: BrowseDirectoryMarker | undefined;
+  /** 目录节点：已加载的直接子项数量。 */
+  childCount?: number;
   /** 复制完整路径。 */
   onCopyPath: () => void;
 }
@@ -32,40 +39,42 @@ export function PropertiesPane(props: PropertiesPaneProps) {
   return (
     <div className="storage-browse__properties">
       <div className="storage-browse__path-row">
-        <code className="storage-browse__path">{selected.path}</code>
+        <code className="storage-browse__path">{displayDirectory(selected.path)}</code>
         <button type="button" className="storage-browse__copy" onClick={props.onCopyPath}>
           {t("storage.browse.copyPath", { defaultValue: "Copy path" })}
         </button>
       </div>
       {selected.kind === "directory" ? (
-        <p className="storage-browse__hint">
-          {t("storage.browse.properties.directoryHint", {
-            defaultValue: "A directory is stored as a folder of objects; its own metadata is the marker below.",
-          })}
-        </p>
-      ) : null}
-      <dl className="storage-browse__props">
-        <dt>{t("storage.browse.props.size", { defaultValue: "Size" })}</dt>
-        <dd>
-          {selected.size === undefined
-            ? "—"
-            : formatBytes(selected.size) + " (" + String(selected.size) + " B)"}
-        </dd>
-        <dt>{t("storage.browse.props.modified", { defaultValue: "Modified" })}</dt>
-        <dd>
-          {selected.lastModified === undefined
-            ? "—"
-            : formatTimestamp(selected.lastModified, props.locale)}
-        </dd>
-        <dt>{t("storage.browse.props.revision", { defaultValue: "Revision" })}</dt>
-        <dd><code>{selected.revision ?? "—"}</code></dd>
-        <dt>{t("storage.browse.props.contentType", { defaultValue: "Content type" })}</dt>
-        <dd>
-          <code>{props.preview?.contentType ?? selected.contentType ?? "—"}</code>
-        </dd>
-        <dt>{t("storage.browse.props.format", { defaultValue: "Preview format" })}</dt>
-        <dd>{props.preview ? props.preview.format : "—"}</dd>
-      </dl>
+        <dl className="storage-browse__props">
+          <dt>{t("storage.browse.props.type", { defaultValue: "Type" })}</dt>
+          <dd>{t("storage.browse.props.directory", { defaultValue: "Directory" })}</dd>
+          <dt>{t("storage.browse.props.children", { defaultValue: "Loaded direct children" })}</dt>
+          <dd>{String(props.childCount ?? 0)}</dd>
+        </dl>
+      ) : (
+        <dl className="storage-browse__props">
+          <dt>{t("storage.browse.props.size", { defaultValue: "Size" })}</dt>
+          <dd>
+            {selected.size === undefined
+              ? "—"
+              : formatBytes(selected.size) + " (" + String(selected.size) + " B)"}
+          </dd>
+          <dt>{t("storage.browse.props.modified", { defaultValue: "Modified" })}</dt>
+          <dd>
+            {selected.lastModified === undefined
+              ? "—"
+              : formatTimestamp(selected.lastModified, props.locale)}
+          </dd>
+          <dt>{t("storage.browse.props.revision", { defaultValue: "Revision" })}</dt>
+          <dd><code>{selected.revision ?? "—"}</code></dd>
+          <dt>{t("storage.browse.props.contentType", { defaultValue: "Content type" })}</dt>
+          <dd>
+            <code>{props.preview?.contentType ?? selected.contentType ?? "—"}</code>
+          </dd>
+          <dt>{t("storage.browse.props.format", { defaultValue: "Preview format" })}</dt>
+          <dd>{props.preview ? props.preview.format : "—"}</dd>
+        </dl>
+      )}
       {props.directoryMarker ? (
         <section className="storage-browse__marker">
           <h3 className="storage-browse__marker-title">

@@ -19,7 +19,7 @@ import {
 
 interface MsFileMediaPlayerProps {
   seedHashHex: string;
-  supplierPublicKeyHex: string;
+  sourceId: string;
   fileSizeBytes: bigint;
   declaredMediaType: string;
   filename: string;
@@ -83,7 +83,7 @@ function debugText(snapshot: MsFileMediaSnapshot): string {
 export function MsFileMediaPlayer(props: MsFileMediaPlayerProps) {
   const {
     seedHashHex,
-    supplierPublicKeyHex,
+    sourceId,
     fileSizeBytes,
     declaredMediaType,
     filename,
@@ -103,7 +103,7 @@ export function MsFileMediaPlayer(props: MsFileMediaPlayerProps) {
   const mediaArgs = msFileMediaResourceArgs({
     taskToken,
     seedHashHex,
-    sourceId: supplierPublicKeyHex,
+    sourceId,
     fileSizeBytes,
     declaredMediaType,
     mediaBlockReadConcurrency,

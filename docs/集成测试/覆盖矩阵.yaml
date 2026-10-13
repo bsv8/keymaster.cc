@@ -309,7 +309,7 @@
         "J-LOCAL-INIT-MENU",
         "J-LOCAL-INIT-IMPORTED"
       ],
-      "evidence": "本地新建钱包 Journey 已验证刷新、锁定、正确密码重新解锁；导入 Key Journey 验证导入结果；错误密码和并发锁定仍未执行；2026-10-03：0.6 工作树再次验证同一 Key 的刷新、锁定和重新解锁，执行档 e2e/runs/local-integration/local-integration-mur7p3u8-3db38e98553a；Vault 私有 API/领域归属迁移尚未验收",
+      "evidence": "本地新建钱包 Journey 已验证刷新、锁定、正确密码重新解锁；导入 Key Journey 验证导入结果；错误密码和并发锁定仍未执行；2026-10-03：0.6 工作树再次验证同一 Key 的刷新、锁定和重新解锁，执行档 e2e/runs/local-integration/local-integration-mur7p3u8-3db38e98553a；Vault 私有 API/领域归属迁移尚未验收；2026-10-10：VLP/RocKey 受限 Connect/Channel/BitFS/网络签名和额度宿主互通 12/12，SDK 52/52，相关软件回归 42/42；这是实际密码学/C++/磁盘证据，未算作实体硬件 Journey，双向迁移和真实 USB/PIN/掉电门禁仍未完成。记录见 docs/proposals/rockey/Vault软硬件统一施工单.md 最新增量。；2026-10-10 最新施工：完整 Keymaster 宿主回归 312 文件/2699 用例通过，类型/107 契约结构/73 契约用例/326 Worker 模块边界和生产构建扫描通过；VLP SDK 54/54。迁移 journal 绑定真实 Key/meta/付款账本并原子提交，冷启动未完成迁移禁止普通解锁；重连拒绝丢失累计/关闭会话/付款墓碑的设备账本。信用信息本期取消，不作为阻断或已实现。设备私钥双向迁移及实体 USB/PIN/掉电仍未完成，维持部分覆盖。；2026-10-10：硬迁软真实生产代码加密链路、原子 KeyHold/bank/journal 提交、独立 KeyStore/PIN 擦除、旧 Key 存在/不存在的受限恢复入口已施工；提交点原生夹具只作为逻辑证据，未冒充实体掉电。SDK 57/57、原生 14/14、全量 315 文件/2713 用例、生产构建通过；RocKey 主机 1564、五语言发布20261010T113241Z-0156bb1。软件迁硬、安全归档、ProtocolSpend 预签收口、真实 USB/实体 PIN/Flash 掉电未验收，保留部分覆盖。；2026-10-10 最终：SDK 消费接入及双向同 Key 迁移、v3 安全归档和预览/预签代码完成；真实产品 C++ 加密互通 14/14，SDK 61/61，RocKey 主机 1572/1572、五语言发布构建通过；Keymaster 最终全量 316 文件/2721 用例、类型/契约/边界/生产扫描通过。真实 Chromium 初始化 local-integration-mv2e1gau-a233551d76f4 1/1，覆盖新建、错误密码、刷新恢复、锁定/解锁及顶栏。实际 USB/实体 PIN/Flash 掉电仍未执行，需求保留部分覆盖。最终依据 ../BSV8_VaultLinkProtocol/reports/2026-10-10-三项目施工验收.md。",
       "status": "部分覆盖",
       "source_refs": {
         "packages": [
@@ -601,9 +601,10 @@
         "J-REAL-SATSUB-MESSAGE",
         "J-REAL-SATSUB-SERVER-SETTINGS",
         "J-REAL-SATSUB-DEFAULT-SETTINGS",
-        "J-REAL-BITFS-PURCHASE"
+        "J-REAL-BITFS-PURCHASE",
+        "J-REAL-FORUM-PURCHASE"
       ],
-      "evidence": "2026-09-14：新增真实 Chromium /settings/system-status 广播网关 Journey，使用仓库外 satsubscription.json 的 multiaddr 和 publickeyhex，先比较错误 pin 的页面失败，再验证正确 pin 的页面 online；2026-09-18：J-REAL-SATSUB-MESSAGE 从仓库外源码启动正式服务与一次性 PostgreSQL，验证真实 /ssp/1.0.0 订阅、Publish 广播和白名单 0 扣费；2026-09-20：J-REAL-SATSUB-SERVER-SETTINGS 单免费用户验证本地供应商红绿灯 online、刷新 SPI 余额、刷新远端订阅，一次性库预置 3 条正式正扣费账单后以每页 2 条完成真实 SSP 查询第 1 页→第 2 页→第 1 页翻页（同一会话复用 fromMs/toMs/limit）；充值、消费、重复 request_id、WebRTC Direct 和双方账本对账仍未执行；2026-09-20：J-REAL-SATSUB-DEFAULT-SETTINGS 直连内置 bsv8 缺省网关验证红绿灯 online 与 SPI/订阅/空账单只读查询",
+      "evidence": "2026-09-14：新增真实 Chromium /settings/system-status 广播网关 Journey，使用仓库外 satsubscription.json 的 multiaddr 和 publickeyhex，先比较错误 pin 的页面失败，再验证正确 pin 的页面 online；2026-09-18：J-REAL-SATSUB-MESSAGE 从仓库外源码启动正式服务与一次性 PostgreSQL，验证真实 /ssp/1.0.0 订阅、Publish 广播和白名单 0 扣费；2026-09-20：J-REAL-SATSUB-SERVER-SETTINGS 单免费用户验证本地供应商红绿灯 online、刷新 SPI 余额、刷新远端订阅，一次性库预置 3 条正式正扣费账单后以每页 2 条完成真实 SSP 查询第 1 页→第 2 页→第 1 页翻页（同一会话复用 fromMs/toMs/limit）；充值、消费、重复 request_id、WebRTC Direct 和双方账本对账仍未执行；2026-09-20：J-REAL-SATSUB-DEFAULT-SETTINGS 直连内置 bsv8 缺省网关验证红绿灯 online 与 SPI/订阅/空账单只读查询 2026-10-09：J-REAL-FORUM-PURCHASE 真实运行 1 passed（3.5 分钟），证据 e2e/runs/forum/forum-mv0t0fwj-8c2c3c7835dc/state/purchase.json 与双方公开协议档案。两个独立 Chromium/Worker/钱包：Go Forum 将帖子自主索引为 mempool（A）；买方从论坛取得 Seed Hash，经现有 MSFile Hash 需求发现唯一持有者、真实 BitFS WebRTC 购买，双方 completed/closed、费用池关闭，关池原交易核验卖方收款 2 sat，下载正文逐字节一致，卖方离线后本地阅读且付款计划不变。修复 lane 身份冲突、Worker BitFS 接线、签名长度费用震荡和关池账本并发条件写。使用正式 Go 生成并真实广播的本轮论坛根，不伪造索引或跳过区块校验。Forum WSS/Direct、正式 TLS、浏览器重启、真实 B/超时补回、资金竞态及完整验收矩阵保持未验证，需求整体仍为部分覆盖。",
       "status": "部分覆盖",
       "source_refs": {
         "packages": [
@@ -646,9 +647,10 @@
         "G-MSFILE-PRODUCTION-RUNTIME",
         "J-REAL-MSFILE-NAS",
         "J-REAL-MSFILE-OFFICIAL",
-        "J-REAL-BITFS-PURCHASE"
+        "J-REAL-BITFS-PURCHASE",
+        "J-REAL-FORUM-PURCHASE"
       ],
-      "evidence": "2026-09-19：MSFile 内置 BSV8 官方供应商（系统缺省、不可删除）；J-REAL-MSFILE-NAS 用真实 Chromium 页面在 /settings/local-files 保存金额上限并 pin cmd/msfile-nas 的 WebRTC Direct 地址，校验文本预览、二进制下载 SHA-256 对账和供应商 Read 计数；J-REAL-MSFILE-OFFICIAL 对官方 msfiles 服务的 wav/mp3/mp4 做原生 Range 播放打开、Hello.md 做文本预览打开，并记录 Range/206 证据；2026-09-22：local-bitfs 来源、卖方设置与 Seed 索引、已验证 Hash 请求匹配与 BitFS stream 通道已有单元测试证据（Worker 集成测试覆盖页面上传后命中索引、重复/未命中静默、会话建立与关闭），真实公网供应商写入/发布 Journey 与 WebSocket/WSS、WebRTC Direct 浏览器互操作仍未执行",
+      "evidence": "2026-09-19：MSFile 内置 BSV8 官方供应商（系统缺省、不可删除）；J-REAL-MSFILE-NAS 用真实 Chromium 页面在 /settings/local-files 保存金额上限并 pin cmd/msfile-nas 的 WebRTC Direct 地址，校验文本预览、二进制下载 SHA-256 对账和供应商 Read 计数；J-REAL-MSFILE-OFFICIAL 对官方 msfiles 服务的 wav/mp3/mp4 做原生 Range 播放打开、Hello.md 做文本预览打开，并记录 Range/206 证据；2026-09-22：local-bitfs 来源、卖方设置与 Seed 索引、已验证 Hash 请求匹配与 BitFS stream 通道已有单元测试证据（Worker 集成测试覆盖页面上传后命中索引、重复/未命中静默、会话建立与关闭），真实公网供应商写入/发布 Journey 与 WebSocket/WSS、WebRTC Direct 浏览器互操作仍未执行 2026-10-09：J-REAL-FORUM-PURCHASE 真实运行 1 passed（3.5 分钟），证据 e2e/runs/forum/forum-mv0t0fwj-8c2c3c7835dc/state/purchase.json 与双方公开协议档案。两个独立 Chromium/Worker/钱包：Go Forum 将帖子自主索引为 mempool（A）；买方从论坛取得 Seed Hash，经现有 MSFile Hash 需求发现唯一持有者、真实 BitFS WebRTC 购买，双方 completed/closed、费用池关闭，关池原交易核验卖方收款 2 sat，下载正文逐字节一致，卖方离线后本地阅读且付款计划不变。修复 lane 身份冲突、Worker BitFS 接线、签名长度费用震荡和关池账本并发条件写。使用正式 Go 生成并真实广播的本轮论坛根，不伪造索引或跳过区块校验。Forum WSS/Direct、正式 TLS、浏览器重启、真实 B/超时补回、资金竞态及完整验收矩阵保持未验证，需求整体仍为部分覆盖。；2026-10-10：VLP/RocKey 受限 Connect/Channel/BitFS/网络签名和额度宿主互通 12/12，SDK 52/52，相关软件回归 42/42；这是实际密码学/C++/磁盘证据，未算作实体硬件 Journey，双向迁移和真实 USB/PIN/掉电门禁仍未完成。记录见 docs/proposals/rockey/Vault软硬件统一施工单.md 最新增量。；2026-10-10 最新施工：完整 Keymaster 宿主回归 312 文件/2699 用例通过，类型/107 契约结构/73 契约用例/326 Worker 模块边界和生产构建扫描通过；VLP SDK 54/54。迁移 journal 绑定真实 Key/meta/付款账本并原子提交，冷启动未完成迁移禁止普通解锁；重连拒绝丢失累计/关闭会话/付款墓碑的设备账本。信用信息本期取消，不作为阻断或已实现。设备私钥双向迁移及实体 USB/PIN/掉电仍未完成，维持部分覆盖。",
       "status": "部分覆盖",
       "source_refs": {
         "packages": [
@@ -690,7 +692,7 @@
         "G-DEPLOYMENT-COORDINATOR-RECOVERY",
         "G-MSFILE-PRODUCTION-RUNTIME"
       ],
-      "evidence": "部署 Build ID 和外部 AppView Journey、不可逆 I/O Gate、Coordinator recovery Gate 已归一化；目标部署 Connect/Popup 需受保护环境执行；2026-10-04 本次 WebLoom 0.6 本地收口：正式 registry 0.6.0，25 产品/36 单元；263 个测试文件通过，真实 Chromium local-integration-musmezh7-3f4c3ae16fd3 全部 20 项通过。Storage 私有 UI/框架 RPC、实例消费与反射边界、Worker 领域归属及两个 Worker/两页槽位已验证。独立 KeymasterConnectDemo 生产页面在 4184 与真实钱包 4201 完成 login、identity.get、intent.sign、cipher encrypt/decrypt、App 文件 put/get/list/delete、price get/subscribe/unsubscribe、resume/logout；验签与返回文件内容也通过。用户确认本次只做 Demo/Keymaster 本地验收，线上交接不属于本次任务；真实资金及公网 MSFile 的历史独立门禁不由本地结果替代。",
+      "evidence": "部署 Build ID 和外部 AppView Journey、不可逆 I/O Gate、Coordinator recovery Gate 已归一化；目标部署 Connect/Popup 需受保护环境执行；2026-10-04 本次 WebLoom 0.6 本地收口：正式 registry 0.6.0，25 产品/36 单元；263 个测试文件通过，真实 Chromium local-integration-musmezh7-3f4c3ae16fd3 全部 20 项通过。Storage 私有 UI/框架 RPC、实例消费与反射边界、Worker 领域归属及两个 Worker/两页槽位已验证。独立 KeymasterConnectDemo 生产页面在 4184 与真实钱包 4201 完成 login、identity.get、intent.sign、cipher encrypt/decrypt、App 文件 put/get/list/delete、price get/subscribe/unsubscribe、resume/logout；验签与返回文件内容也通过。用户确认本次只做 Demo/Keymaster 本地验收，线上交接不属于本次任务；真实资金及公网 MSFile 的历史独立门禁不由本地结果替代。；2026-10-10：VLP/RocKey 受限 Connect/Channel/BitFS/网络签名和额度宿主互通 12/12，SDK 52/52，相关软件回归 42/42；这是实际密码学/C++/磁盘证据，未算作实体硬件 Journey，双向迁移和真实 USB/PIN/掉电门禁仍未完成。记录见 docs/proposals/rockey/Vault软硬件统一施工单.md 最新增量。；2026-10-10 最新施工：完整 Keymaster 宿主回归 312 文件/2699 用例通过，类型/107 契约结构/73 契约用例/326 Worker 模块边界和生产构建扫描通过；VLP SDK 54/54。迁移 journal 绑定真实 Key/meta/付款账本并原子提交，冷启动未完成迁移禁止普通解锁；重连拒绝丢失累计/关闭会话/付款墓碑的设备账本。信用信息本期取消，不作为阻断或已实现。设备私钥双向迁移及实体 USB/PIN/掉电仍未完成，维持部分覆盖。；2026-10-10：本期已完成注册渠道、单笔/同连接累计额度、软硬超额许可与仅提高当前会话额度，SDK 两端账本连续性及未知保留已自动验证；信用查询本期撤销。未冒称所有外部 App 或实体硬件 Journey 已通过。",
       "status": "部分覆盖",
       "source_refs": {
         "packages": [
@@ -758,20 +760,22 @@
       "user_role": "已解锁并想确认钱包本地存了什么的用户",
       "user_goal": "在设置里沿真实逻辑路径浏览本钱包保存的文件与目录，并预览内容与元数据",
       "starting_state": "钱包已解锁，IndexedDB 中已有联系人、系统与 App 对象；页面已装配 storage 浏览能力",
-      "expected_result": "/settings/storage 展示文件树、当前目录列表与面包屑，选中文件可预览 JSON/Markdown/TXT 并查看完整路径、大小、时间、版本和内容类型；浏览动作不写入钱包",
+      "expected_result": "/settings/storage 展示文件树、跟随选中项的面包屑与常驻内容区：点击文件预览 JSON/Markdown/TXT 并查看完整路径、大小、时间、版本和内容类型，点击目录显示目录信息与标记；浏览动作不写入钱包",
       "technical_truths": [
         "浏览是独立的平台只读能力，访问链路为页面 → 平台专属只读代理 → Coordinator → WalletStore，普通插件、Connect App 与第三方拿不到根浏览权限",
         "浏览授权由 Coordinator 在已验证的 peer 上下文里签发并与端口绑定；请求里不存在可自报的身份字段，自报单元 id 不换取任何权限",
         "读取有三重栅栏：并发闸入场复核、读取返回后复核授权、返回前检查取消；读取期间被锁定或撤销时一个字节都不返回",
         "浏览服务在类型上只有元数据列举和单对象读取，没有写入方法",
-        "节点身份是完整逻辑路径，零字节 .dir 折叠为目录且标记可在属性面板追踪，同名文件与同名目录都可见",
-        "每个目录维护独立游标；是否扫完只看游标，一页折叠后没有新增子项时继续加载入口仍保留",
+        "文件树是唯一导航，面包屑跟随选中项：选中文件时显示可导航的父目录链和文件名，选中目录时显示目录自身路径",
+        "内容区常驻且与文件树合成同一张卡片：宽屏并排等高（卡片高度为窗口的 70%，最小 360px），窄屏树在上、内容在下；超出部分在各自栏内滚动；选中文件显示预览与属性，选中目录显示路径、类型、已加载子项数与目录标记",
+        "节点身份是完整逻辑路径，零字节 .dir 折叠为目录且选中目录时可在内容区追踪目录标记，同名文件与同名目录都可见",
+        "每个目录维护独立游标；是否扫完只看游标，一页折叠后没有新增子项时树里的继续加载入口仍保留",
         "选中文件以列表记录的版本作条件读取，版本冲突不静默展示另一版本",
-        "对象身份是种类加完整路径，与大小、时间、版本无关；刷新保留当前路径、展开状态与仍存在的选中项，同路径被改写后按新元数据重新预览",
+        "对象身份是种类加完整路径，与大小、时间、版本无关；刷新保留展开状态与仍存在的选中项，同路径被改写后按新元数据重新预览",
         "分页未完成时不以某一页未列出断言删除，改为直接核验该路径是否仍可读",
         "声明为 JSON 的文件按完整 JSON 语法解析，顶层标量同样可预览；解析失败时显示原文与失败提示",
         "JSON 树只预生成前两层，更深层与超宽成员在点击展开时逐层生成；原文切换始终可用，建树异常回退原文",
-        "目录列表与文件树按固定 200 行的展示分页渲染，翻页只换下标窗口，渲染量与目录规模无关且已加载项全部可达",
+        "文件树按固定 200 行的展示分页渲染，翻页只换下标窗口，渲染量与目录规模无关且已加载项全部可达；未扫完目录的继续加载仍在树里",
         "刷新核验只有对象不存在才提示已删除，其它读取失败保留选中项并给出可重试状态",
         "Markdown 不执行 HTML、脚本与 iframe，图片只占位且不自动加载远程资源；外链只在用户点击时以 noopener 打开",
         "非法 UTF-8 不做静默替换，截断的 JSON/Markdown/K-V 不做结构化解析，预览受 1 MiB 上限约束",
@@ -969,7 +973,7 @@
     {
       "business_domain": "论坛浏览与阅读",
       "cleanup_policy": "关闭 BrowserContext 丢弃本地配置与投影；不删除 MSFile 内容",
-      "evidence": "2026-10-05：协议互操作由 TS↔Go 黄金向量单元测试证明（CBOR hex 与 RFC 6979 DER 与服务端 internal/protocol 测试向量逐字节一致）；分页纪律、根信任、Markdown 安全、报价验证与最终 raw 自检均有单元测试。真实论坛服务、真实浏览器与真实广播均未执行，保持未验证",
+      "evidence": "2026-10-08：协议互操作由 TS↔Go 黄金向量单元测试证明（CBOR hex 与 RFC 6979 DER 与服务端 internal/protocol 测试向量逐字节一致）；分页纪律、根信任、Markdown 安全、报价验证与最终 raw 自检均有单元测试。真实论坛服务与真实广播未执行，保持未验证；2026-10-09：Forum Worker RPC 与 MSFile 附件 stream 已接线；真实 MessagePort 框架双窗口配置/取消、撤销拒绝与 32 MiB 附件分块传输已有本地测试。J-LOCAL-FORUM-WORKER 已在真实 Chromium 通过：两页配置共享、同 Worker instanceId、锁定撤权、同 Key 解锁后配置恢复及完整清理；证据 e2e/runs/local-integration/local-integration-mv0dul8y-1209a7a14c6e；外部论坛与内容获取不由此替代。 2026-10-09 A/B 对齐：有效未确认交易立即展示、超过 10 区块移除、真实区块发现及补回 B、B 终态、统一高度事件和未确认根启动已实现；真实 PostgreSQL Go 回归与客户端本地回归通过。J-REAL-FORUM-SMOKE 已通过（2026-10-09，证据 e2e/runs/forum/forum-mv0of670-55fbfb30ce12/state/smoke.json，1 passed）：恢复真实写前记录，复用原 4 sat 输出，Worker 重新报价/签名/广播交易 55b570d49823daf86b0f61c651b1b7088a4b6d8a7ac778762330364716b99138，真实 Go + PostgreSQL 自主索引为 mempool（A），公开页面读取本机 MSFile 正文成功，不等区块确认。事件流阻断源于连续存储活动快照挤满有界队列，已按同一权威的相邻活动快照合并修复，157 项回归通过。该最小 HTTPS 冒烟不覆盖远端 BitFS 用户取用、WSS/Direct、所有分页/金额边界及真实 B/超时补回，要求整体仍为部分覆盖。 2026-10-09：J-REAL-FORUM-PURCHASE 真实运行 1 passed（3.5 分钟），证据 e2e/runs/forum/forum-mv0t0fwj-8c2c3c7835dc/state/purchase.json 与双方公开协议档案。两个独立 Chromium/Worker/钱包：Go Forum 将帖子自主索引为 mempool（A）；买方从论坛取得 Seed Hash，经现有 MSFile Hash 需求发现唯一持有者、真实 BitFS WebRTC 购买，双方 completed/closed、费用池关闭，关池原交易核验卖方收款 2 sat，下载正文逐字节一致，卖方离线后本地阅读且付款计划不变。修复 lane 身份冲突、Worker BitFS 接线、签名长度费用震荡和关池账本并发条件写。使用正式 Go 生成并真实广播的本轮论坛根，不伪造索引或跳过区块校验。Forum WSS/Direct、正式 TLS、浏览器重启、真实 B/超时补回、资金竞态及完整验收矩阵保持未验证，需求整体仍为部分覆盖。",
       "expected_result": "按服务端顺序逐页浏览并展开回复树；正文经 MSFile 获取后出现在 MSFile 存储，Forum 不留正文副本",
       "failure_paths": [
         "SNAPSHOT_INVALIDATED 连续发生：停止自动循环并提供刷新入口",
@@ -980,7 +984,11 @@
       "gate_level": "local-integration",
       "requirement_id": "KM-FORUM-001",
       "resource_profile": "local-browser + 外部论坛服务",
-      "scenario_ids": [],
+      "scenario_ids": [
+        "J-LOCAL-FORUM-WORKER",
+        "J-REAL-FORUM-SMOKE",
+        "J-REAL-FORUM-PURCHASE"
+      ],
       "source_refs": {
         "packages": [
           "@keymaster/plugin-forum",
@@ -1011,7 +1019,7 @@
     {
       "business_domain": "论坛签名发布",
       "cleanup_policy": "专用资金按记录显式回收；发布任务证据保留在本地仓储",
-      "evidence": "2026-10-05：输出布局、零/非零父价格、零索引费、indexSig 覆盖校验、费用明细与矿工费复核均有单元测试；P2PKH 专用资金准备与真实广播、真实 Go 索引器观测均未执行，保持未验证",
+      "evidence": "2026-10-08：追加实际保护注册表、插件归属恢复、读取后交错的原子快照、后继资金幂等与未知结果不重付、实际资金编号传递的组合回归；FT05 自有输出识别/保护/归集与专用资金显式回收为部分实现：代码阻断已修（保护集合按 owner 会话复用并经 onChange 刷新注册表、归集前按 (txid,vout) 重新取原交易核验归属/金额/锁定脚本、回收按 accepted/not-broadcast/uncertain 三分广播结果且只删 accepted 的记录、Forum 侧回收传 Forum 记录里的 fundingId 并在钱包确认后才清记录、取消与回收共用派发租约且租约内复查完整资金坐标、已取消任务可回收且保持取消状态、受保护输出 claim 按 provider 维度隔离、取消按持久提交的实际派发状态判断且释放能力缺失即失败），真实资源仍未验收。输出布局、零/非零父价格、零索引费、indexSig 覆盖校验、费用明细与矿工费复核均有单元测试；新增受控无找零（`noChangeRule`）与零值输出 8 项、专用资金写前日志与恢复 11 项、完整发布流程 9 项（进程内真实 roundtrip + 受控无找零资金替身）；P2PKH 真实资金准备、真实广播与真实 Go 索引器观测均未执行，保持未验证；2026-10-09：P2PKH Worker 复用同一 transfer/broadcast runtime 与既有资金文件；协议提交/claim 补齐写前证据，广播前持久 unknown。测试覆盖重启恢复、未知不可释放、伪造提交不可花专用资金、专款准备与显式回收；Forum 发布权威已迁入 Worker，Window 无本地回退。真实资金、广播与索引仍未验收。 2026-10-09 A/B 对齐：有效未确认交易立即展示、超过 10 区块移除、真实区块发现及补回 B、B 终态、统一高度事件和未确认根启动已实现；真实 PostgreSQL Go 回归与客户端本地回归通过。J-REAL-FORUM-SMOKE 已通过（2026-10-09，证据 e2e/runs/forum/forum-mv0of670-55fbfb30ce12/state/smoke.json，1 passed）：恢复真实写前记录，复用原 4 sat 输出，Worker 重新报价/签名/广播交易 55b570d49823daf86b0f61c651b1b7088a4b6d8a7ac778762330364716b99138，真实 Go + PostgreSQL 自主索引为 mempool（A），公开页面读取本机 MSFile 正文成功，不等区块确认。事件流阻断源于连续存储活动快照挤满有界队列，已按同一权威的相邻活动快照合并修复，157 项回归通过。该最小 HTTPS 冒烟不覆盖远端 BitFS 用户取用、WSS/Direct、所有分页/金额边界及真实 B/超时补回，要求整体仍为部分覆盖。",
       "expected_result": "在确认费用后广播符合协议的交易；广播、链上观测与 Forum 索引三套状态分别展示",
       "failure_paths": [
         "资金不足：要求重新准备专用资金，剩余资金可显式回收",
@@ -1022,7 +1030,9 @@
       "gate_level": "p2pkh",
       "requirement_id": "KM-FORUM-002",
       "resource_profile": "真实资金与真实广播",
-      "scenario_ids": [],
+      "scenario_ids": [
+        "J-REAL-FORUM-SMOKE"
+      ],
       "source_refs": {
         "packages": [
           "@keymaster/plugin-forum",
@@ -1040,7 +1050,17 @@
         "changetip 恰好 2 个输出；它是价格事件，不创建回复树节点",
         "广播前用将要上链的输出重建并验证 indexSig，而不是用请求参数",
         "专用资金 UTXO 由普通 P2PKH 资金准备交易产生；矿工费预算按 DER 输入长度上界估算，完成签名后复核",
-        "广播结果未知时只对账原交易，不自动构建重复付款；已派发或未知的输入不提前释放"
+        "广播结果未知时只对账原交易，不自动构建重复付款；已派发或未知的输入不提前释放",
+        "专用资金额度等于本次报价的固定输出加确认的矿工费预算，不是固定上界；两笔交易的矿工费都进入费用确认",
+        "无找零模式下余额差必须精确成为矿工费且不超过确认预算；零值索引输出需显式开启",
+        "资金准备记录在派发前落盘 fundingId/submissionId/raw/outpoint；拒绝或状态未知不得当作可用资金",
+        "派发前三个阶段（资金准备、报价复核、raw 准备）逐步持久化；费用变化回到费用确认",
+        "跨标签页派发租约用 owner 文件存储的条件写取得，第二个标签页落到对账而不是各自准备资金",
+        "取得租约后重读任务；租约持续续租并带栅栏令牌；资金准备、阶段写入与派发前核对持有权；释放按 revision 条件删除",
+        "专用资金记录每条一个文件并支持条件写，两个标签页写不同 fundingId 不互相覆盖；读不出来的记录使资金准备 fail closed",
+        "专用资金的保护登记在启动时重建，且复用路径必须先经过钱包侧核对与保护恢复",
+        "发布可达性作为第四套状态展示：正文已上链但读者取不到时不显示成「已发布」",
+        "附件完整性检查与 Markdown 正文上限分离；用户点开附件才允许触发远程付费获取"
       ],
       "user_goal": "回复板块/帖子、修改自己节点的未来回复价，并跟踪索引结果",
       "user_role": "论坛节点的作者"

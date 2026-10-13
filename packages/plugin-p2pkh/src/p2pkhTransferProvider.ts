@@ -11,9 +11,9 @@
 // 一旦用户点进去，Widget 校验时 walletState 仍可能未就绪导致未定义行为。
 // 业务上 walletState 没就绪等同于"今天不能转账"，所以 listOffers 返回空。
 //
-// 硬切换 001：listOffers 受 `includeTestnet` 控制。includeTestnet=false
+// 硬切换 001：listOffers 受 `bsvNetwork` 控制。bsvNetwork=false
 // 时不暴露 bsvtest offer。balance 显示改为 `{ total }`，不再用 confirmed。
-// includeTestnet 通过 service.onGlobalSettingsChange 订阅——同 tab 写入
+// bsvNetwork 通过 service.onGlobalSettingsChange 订阅——同 tab 写入
 // 由 settings 页调用 service.applyGlobalSettings 主动通知；跨 tab 由
 // service 内部 storage 监听回灌。
 
@@ -76,11 +76,11 @@ export function createP2pkhTransferProvider(deps: P2pkhTransferProviderDeps): P2
   }
 
   /**
-   * 硬切换 001：根据 includeTestnet 决定哪些 asset 进入 offer 列表。
+   * 硬切换 001：根据 bsvNetwork 决定哪些 asset 进入 offer 列表。
    */
   function visibleAssetIds(): P2pkhAssetId[] {
     const settings = deps.service.getGlobalSettings();
-    if (settings.includeTestnet) return ASSET_IDS;
+    if (settings.bsvNetwork === "test") return ["bsvtest"];
     return ASSET_IDS.filter((id) => id !== "bsvtest");
   }
 

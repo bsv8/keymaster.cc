@@ -18,7 +18,7 @@ function fakeP2pkh(): P2pkhServiceFor1Sat {
     listUtxos: async () => [
       { txid: "fund1", vout: 0, value: 5000, address: SOURCE_ADDRESS }
     ],
-    getGlobalSettings: () => ({ includeTestnet: false })
+    getGlobalSettings: () => ({ bsvNetwork: "main" })
   };
 }
 
@@ -73,6 +73,7 @@ function fakeOrdinals(options?: {
 
 function fakeProtocolSpend(): ProtocolSpendService & { prepare: ReturnType<typeof vi.fn> } {
   return {
+    async presign(){throw Error("Ordinary preview must remain unsigned");},
     prepare: vi.fn(async (input) => {
       const totalInput = input.inputs.reduce((sum: number, u: { value: number }) => sum + u.value, 0);
       const totalOutput = input.outputs.reduce((sum: number, o: { value: number }) => sum + o.value, 0);

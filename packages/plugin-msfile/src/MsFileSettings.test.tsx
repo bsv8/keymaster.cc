@@ -148,7 +148,7 @@ describe("MsFileSettings", () => {
     );
     expect(screen.getByRole("heading", { name: "Local files" })).toBeTruthy();
     expect(screen.queryByRole("navigation")).toBeNull();
-    expect(screen.getAllByRole("heading", { level: 2 })).toHaveLength(5);
+    expect(screen.getAllByRole("heading", { level: 2 })).toHaveLength(6);
     expect(document.querySelectorAll(".msfile-settings label label")).toHaveLength(0);
     await waitFor(() => expect(screen.getByDisplayValue("5000")).toBeTruthy());
     const seedInput = screen.getByDisplayValue("5000") as HTMLInputElement;

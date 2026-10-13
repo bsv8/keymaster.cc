@@ -10,6 +10,7 @@ import {
 } from "@keymaster/contracts";
 
 export interface SessionStateSnapshot {
+  lockCleanup?: import("@keymaster/contracts").WalletLockCleanup;
   activeKeyIdentity?: import("@keymaster/contracts").KeyIdentity;
   sessionEpoch: string;
   vaultStatus: CoordinatorBootstrapSnapshot["vaultStatus"];
@@ -63,6 +64,7 @@ export class SessionStateMirror {
         ...(event.vaultStatus === "unlocked" && event.activeKeyIdentity ? { activeKeyIdentity: Object.freeze({ ...event.activeKeyIdentity, capabilities: Object.freeze([...event.activeKeyIdentity.capabilities]) as unknown as string[] }) } : {}),
         sessionEpoch: event.sessionEpoch,
         vaultStatus: event.vaultStatus,
+        lockCleanup: event.lockCleanup,
         activePublicKeyHex: event.vaultStatus === "unlocked" ? event.activePublicKeyHex ?? undefined : undefined,
         runGeneration: event.runGeneration,
         ...(event.walletGeneration === undefined ? {} : { walletGeneration: event.walletGeneration }),
@@ -88,6 +90,7 @@ export class SessionStateMirror {
     return Object.freeze({
       sessionEpoch: snapshot.sessionEpoch,
       vaultStatus: snapshot.vaultStatus,
+      lockCleanup: snapshot.lockCleanup,
       activePublicKeyHex: snapshot.vaultStatus === "unlocked" ? snapshot.activePublicKeyHex : undefined,
       ...(snapshot.vaultStatus === "unlocked" && snapshot.activeKeyIdentity ? { activeKeyIdentity: Object.freeze({ ...snapshot.activeKeyIdentity, capabilities: Object.freeze([...snapshot.activeKeyIdentity.capabilities]) as unknown as string[] }) } : {}),
       runGeneration: snapshot.runGeneration,

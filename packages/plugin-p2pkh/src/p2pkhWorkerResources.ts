@@ -2,10 +2,10 @@ import type { BorrowedModuleFileStore, P2pkhUtxoSnapshotResult } from "@keymaste
 import { publicKeyHexToP2pkhAddress } from "./p2pkhSigner.js";
 import { createP2pkhStateRepository, openP2pkhStateRepository } from "./storage/p2pkhStateRepository.js";
 import type { P2pkhUtxoSnapshotStore, P2pkhUtxoSnapshotResource } from "./p2pkhUtxoSnapshot.js";
-export async function ensureWorkerP2pkhResources(storage: BorrowedModuleFileStore, ownerPublicKeyHex: string, includeTestnet: boolean): Promise<P2pkhUtxoSnapshotResource[]> {
+export async function ensureWorkerP2pkhResources(storage: BorrowedModuleFileStore, ownerPublicKeyHex: string, bsvNetwork: "main" | "test"): Promise<P2pkhUtxoSnapshotResource[]> {
   const repository = createP2pkhStateRepository(await openP2pkhStateRepository(storage));
   const existing = await repository.listResourcesByKey();
-  const networks: Array<"main" | "test"> = includeTestnet ? ["main", "test"] : ["main"];
+  const networks: Array<"main" | "test"> = bsvNetwork === "test" ? ["test"] : ["main"];
   const createdAt = new Date().toISOString();
   for (const network of networks) {
     const resourceId = `p2pkh:${network}`;
@@ -30,7 +30,7 @@ export async function ensureWorkerP2pkhResources(storage: BorrowedModuleFileStor
 export interface P2pkhWorkerRefreshDependencies {
   storage: BorrowedModuleFileStore;
   ownerPublicKeyHex: string;
-  includeTestnet: boolean;
+  bsvNetwork: "main" | "test";
   snapshots: P2pkhUtxoSnapshotStore;
   assertFresh(): void;
   afterRefresh?(network: "main" | "test", result: P2pkhUtxoSnapshotResult): Promise<void>;
@@ -38,12 +38,12 @@ export interface P2pkhWorkerRefreshDependencies {
 /** Refresh a captured domain store, never a replacement introduced during awaited I/O. */
 export async function refreshWorkerP2pkhResources(deps: P2pkhWorkerRefreshDependencies, signal?: AbortSignal): Promise<{ main?: number; test?: number }> {
   deps.assertFresh();
-  const includeTestnet = deps.includeTestnet;
-  const resources = await ensureWorkerP2pkhResources(deps.storage, deps.ownerPublicKeyHex, includeTestnet);
+  const bsvNetwork = deps.bsvNetwork;
+  const resources = await ensureWorkerP2pkhResources(deps.storage, deps.ownerPublicKeyHex, bsvNetwork);
   deps.assertFresh();
   const utxoSeqs: { main?: number; test?: number } = {};
   for (const resource of resources) {
-    if (resource.network === "test" && !includeTestnet) continue;
+    if (resource.network === "test" && !bsvNetwork) continue;
     if (signal?.aborted) return utxoSeqs;
     // consumed 快照不能仅凭“下一次 unspent 内容暂时没变”解封。
     // 先做一次交易级只读观察：只有消费交易超过阈值且 confirmed /

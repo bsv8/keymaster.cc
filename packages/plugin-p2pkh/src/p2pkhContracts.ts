@@ -178,7 +178,7 @@ export const P2PKH_DEFAULT_FEE_RATE_SATOSHIS_PER_KB: Record<P2pkhFeeRateTier, nu
 };
 
 export interface P2pkhGlobalSettings {
-  includeTestnet: boolean;
+  bsvNetwork: "main" | "test";
   /** 省略时回退到 `P2PKH_DEFAULT_FEE_RATE_SATOSHIS_PER_KB`。 */
   feeRateSatoshisPerKb?: Partial<Record<P2pkhFeeRateTier, number>>;
 }
@@ -334,6 +334,8 @@ export interface P2pkhProtocolSubmission {
  * `ownerPublicKeyHex` 是 session / caller 视角的 owner 真值，本参数
  */
 export interface P2pkhTransferInput {
+  /** 调用方注册的支付渠道；App 必须携带同一连接的会话，重试不得丢失。 */
+  paymentContext?: { channelId: string; sessionId: string | null };
   assetId: P2pkhAssetId;
   /** session / caller 视角的 owner public key hex；UTXO 选币 / 签名 key / resourceId 全按该 owner 走。 */
   ownerPublicKeyHex: string;
@@ -351,6 +353,7 @@ export interface P2pkhTransferInput {
  * 签名 key 与该 owner 一致——owner 变了就拒绝广播。
  */
 export interface P2pkhTransferPreview {
+  paymentContext?: { channelId: string; sessionId: string | null };
   assetId: P2pkhAssetId;
   network: BsvNetwork;
   ownerPublicKeyHex: string;
@@ -361,8 +364,11 @@ export interface P2pkhTransferPreview {
   changeAddress: string;
   outputs: Array<{ address: string; value: number }>;
   estimatedFeeSatoshis: number;
+  /** 签名后序列化大小上限；预览不会为了估费调用私钥。 */
   serializedSizeBytes: number;
+  /** 预览尚未签名，无最终链上 txid，固定为空；提交结果返回真实 txid。 */
   txid: string;
+  /** 未签名交易；不能用于广播，不含私钥签名。 */
   rawTxHex: string;
   /** 本次准备的内存标识；重试时用于区分每一轮提交。 */
   previewId: string;
@@ -407,6 +413,8 @@ export interface P2pkhTransactionDetail {
 
 /** P2PKH 服务契约：plugin-p2pkh 内部使用，对应 capability "p2pkh.service"。 */
 export interface P2pkhService {
+  /** 完整前序证据的链上读接口；缺失时费用池不能退回盲签摘要。 */
+  getRawTransaction?(network: "main" | "test", txid: string): Promise<string>;
   /** 全局余额只读广播；所有余额展示/offer 都从此快照取值。 */
   readonly balanceBroadcaster: BalanceBroadcaster;
   syncStatus(): P2pkhSyncStatus;
@@ -425,7 +433,7 @@ export interface P2pkhService {
    * - 跨标签页变更通过 storage 事件被 service 接收并刷新缓存。
    * 设计缘由：所有 read 路径（listResources / listUtxos / listHistory /
    * getAssetBalance / getResourceBalance / allocateUtxos / transfer）
-   * 在做 testnet 过滤时都必须拿到与上一次写一致的 `includeTestnet`，
+   * 在做 testnet 过滤时都必须拿到与上一次写一致的 `bsvNetwork`，
    * 否则会出现"切换设置后同一次渲染仍按旧值过滤"的不一致。
    */
   getGlobalSettings(): P2pkhGlobalSettings;
@@ -438,7 +446,7 @@ export interface P2pkhService {
   onGlobalSettingsChange(handler: (settings: P2pkhGlobalSettings) => void): () => void;
   /**
    * 应用新的全局设置：写 Coordinator 平台 K-V、更新进程内缓存、通知订阅者、
-   * 并在 includeTestnet 由 false → true 时立即补齐 testnet 资源。
+   * 并在 bsvNetwork 由 false → true 时立即补齐 testnet 资源。
    * 设计缘由：硬切换 001 要求"再次开启 testnet 时立即把 testnet
    * 纳入运行范围"，但 storage 事件不会在本标签页触发，必须由写入
    * 路径主动通知 service。
@@ -452,7 +460,7 @@ export interface P2pkhService {
   listUtxos(filter?: P2pkhUtxoFilter): Promise<P2pkhUtxo[]>;
   /**
    * 施工单 2026-09-18 001：资产是否已在设置里开启。
-   * `bsv` 恒为 true；`bsvtest` 取决于 includeTestnet 开关。
+   * `bsv` 恒为 true；`bsvtest` 取决于 bsvNetwork 开关。
    */
   isAssetEnabled(assetId: P2pkhAssetId): boolean;
   /** 与 listUtxos 相同的兼容读口；普通 P2PKH 不使用 protected outpoint 过滤。 */
@@ -530,7 +538,7 @@ export function assetIdToNetwork(assetId: P2pkhAssetId): BsvNetwork {
  * 派生出了 identity。`ReadyKeyIdentity` 保留只是为了在 service 层里做
  * 窄类型投影，让"必须带 publicKeyHex"在静态检查层面成立。
  */
-export interface ReadyKeyIdentity {
+export interface ReadyKeyIdentity extends KeyIdentity {
   publicKeyHex: string;
   label: string;
   capabilities: string[];
@@ -549,6 +557,7 @@ export function requireReadyKey(key: KeyIdentity | undefined | null): ReadyKeyId
   if (!key) throw new Error("Active key is not ready");
   if (!key.publicKeyHex) throw new Error("Active key is not ready");
   return {
+    bsvNetwork: key.bsvNetwork,
     publicKeyHex: key.publicKeyHex,
     label: key.label,
     capabilities: key.capabilities,

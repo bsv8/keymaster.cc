@@ -57,6 +57,8 @@ export type {
   P2pkhTransferAssetId,
   P2pkhTransferParams,
   P2pkhTransferResult,
+  PaymentChannelRegisterParams,
+  PaymentChannelRegisterResult,
   ProtocolError,
   ProtocolErrorCode,
   ProtocolEventMessage,
@@ -135,3 +137,6 @@ export type {
   MsFileStatResult,
   MsFileSupplierStat
 } from "./msfile.js";
+
+export { validateNetworkIdentity, sameNetworkIdentity } from "./networkIdentity.js";
+export type { NetworkIdentity, BsvNetwork } from "./networkIdentity.js";

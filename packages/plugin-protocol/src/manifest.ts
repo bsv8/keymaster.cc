@@ -180,9 +180,7 @@ const protocolResources: I18nPluginResources = {
       "protocol.confirm.originSettingsBadge.off": "Auto-approve is off for this site",
       "protocol.confirm.originSettingsBadge.on": "Auto-approve is on up to {{max}} sats",
       "protocol.originSettings.title": "Per-origin settings",
-      "protocol.originSettings.p2pkhAutoApprove.label": "Auto-approve p2pkh.transfer when amount ≤ max",
-      "protocol.originSettings.p2pkhAutoApproveMax.label": "Max satoshis for auto-approve (0 = off)",
-      "protocol.originSettings.feepoolAutoSignMax.label": "Max satoshis for fee-pool auto-sign (0 = off)",
+      "protocol.originSettings.paymentPolicyHint": "Set payment limits in the wallet top bar's payment channels. The wallet confirms payments exceeding a single or App session limit.",
       "protocol.originSettings.saving": "Saving…",
       "protocol.originSettings.err.saveFailed": "Failed to save this change",
       "protocol.feed.asset": "Asset",
@@ -234,6 +232,7 @@ const protocolResources: I18nPluginResources = {
         "After unlock, {{total}} pending request(s) will automatically enter the confirmation / execution flow.",
       /* ============== 施工单 2026-06-28 001：connect 视图文案 ============== */
       "protocol.connect.login.title": "Re-authenticate and create a new session",
+      "protocol.connect.hardware.desc": "Use the currently connected RocKey, unlocked on the device. Enter the PIN only on the device; payments exceeding limits require device approval.",
       "protocol.connect.login.desc":
         "This site is asking for re-authentication. Pick a key and enter your password again. A successful login will create a new connect session and revoke the old one for the same origin.",
       "protocol.connect.login.empty":
@@ -368,9 +367,7 @@ const protocolResources: I18nPluginResources = {
       "protocol.confirm.originSettingsBadge.off": "该站点自动确认未开启",
       "protocol.confirm.originSettingsBadge.on": "自动确认已开启，上限 {{max}} sat",
       "protocol.originSettings.title": "站点级配置",
-      "protocol.originSettings.p2pkhAutoApprove.label": "p2pkh.transfer 自动确认（金额 ≤ 上限）",
-      "protocol.originSettings.p2pkhAutoApproveMax.label": "自动确认上限（0 = 关闭）",
-      "protocol.originSettings.feepoolAutoSignMax.label": "费用池自动签名上限（0 = 关闭）",
+      "protocol.originSettings.paymentPolicyHint": "付款额度统一在钱包顶栏的支付渠道设置；超过单笔或 App 会话累计额度时由钱包确认。",
       "protocol.originSettings.saving": "保存中…",
       "protocol.originSettings.err.saveFailed": "本次修改未生效",
       "protocol.feed.asset": "资产",
@@ -422,6 +419,7 @@ const protocolResources: I18nPluginResources = {
         "解锁后，{{total}} 条待处理请求会自动进入确认 / 执行流程。",
       /* ============== 施工单 2026-06-28 001：connect 视图文案 ============== */
       "protocol.connect.login.title": "重新认证并建立新会话",
+      "protocol.connect.hardware.desc": "使用当前已连接并在设备上解锁的 RocKey。PIN 只在设备上输入；后续超额度支付由设备确认。",
       "protocol.connect.login.desc":
         "该站点请求重新认证。请选择一把 key，并再次输入密码。成功后会创建新的 connect session，并吊销同 origin 的旧 session。",
       "protocol.connect.login.empty":

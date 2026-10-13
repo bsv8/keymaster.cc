@@ -8,6 +8,7 @@ pnpm add @keymaster/connect
 import { KeymasterConnectClient } from "@keymaster/connect";
 
 const keymaster = new KeymasterConnectClient({
+  networkIdentity: { bsvNetwork: "main", publicKeyHex: selectedPublicKeyHex },
   targetOrigin: getRequiredConfig("KEYMASTER_ORIGIN") // 受信任钱包来源
 });
 

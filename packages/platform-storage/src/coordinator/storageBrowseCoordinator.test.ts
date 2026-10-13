@@ -12,7 +12,7 @@ describe("Storage browse Worker ownership", () => {
     const store = createIndexedDbWalletStore({ databaseName: `browse-coordinator-${crypto.randomUUID()}` });
     try {
       await store.put("contacts/doc.json", new TextEncoder().encode('{"existing":true}'));
-      const root = createPlatformRootStore({ store, generations: () => generations, isCurrent: () => true });
+      const root = createPlatformRootStore({ identity: { bsvNetwork: "main", publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" }, store, generations: () => generations, isCurrent: () => true });
       const opening = vi.spyOn(root, "openBrowseStore");
       const coordinator = new StorageBrowseCoordinator({ root: () => ({ store: root, token: root }), generations: () => generations,
         isUnlocked: () => true, isPeerOpen: () => true, isPeerRevoked: () => false, withReadLease: task => task(),

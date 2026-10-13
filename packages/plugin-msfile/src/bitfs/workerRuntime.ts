@@ -1,9 +1,10 @@
+import {createBitfsBuyerPaymentSigner,createBitfsPaymentSigner} from '@keymaster/vaultlink-integration';
 import type { CoordinatorClientRequest, CoordinatorMsFileControl, CoordinatorResponse, MsFileErrorCode, ActiveKeyCrypto, BorrowedModuleFileStore, MsFileSellerSettings, SessionEpoch, ProtocolSpendService, P2pkhUtxoSnapshotResult, WocServiceHandle } from "@keymaster/contracts";
 import { normalizeMsFileSatoshiAmount, isValidMsFileHashHex, MSFILE_BITFS_BUYER_SETTINGS_DEFAULT } from "@keymaster/contracts";
 import type { WindowP2pExecutorOperation } from "@keymaster/contracts/window-p2p";
 import { BitfsSeedIndex, BitfsSellerRuntime, BitfsSellerSessionManager, createBitfsBuyerTask, createBitfsBuyerDownloadPlan, BitfsBuyerProtocol, createBitfsLocalSellerContentResolver, BitfsTransactionBroadcaster, createBitfsJournal, createBitfsSessionJournal, createBitfsTransactionJournal, createBitfsVaultSigner, createBitfsWocChainPort, createMsFileLocalContentSource, recoverBitfsBuyerContentCommit, readBitfsBuyerLocalPaymentState, assertBitfsBuyerCloseBinding, parseBitfsBuyerCloseBinding, createUnavailableBitfsSellerContentResolver, reconcileBitfsTransactions, reconcileBitfsSessionTransactions, readBitfsPoolSpendChain, prepareBitfsFunding, recoverBitfsFundingSplits, BitfsSellerProtocol, type BitfsSellerMatch, type BitfsBuyerQuoteView, type BitfsBuyerTask, type BitfsSellerProtocolPort, type BitfsSellerStreamTransport, type BitfsFundingPrepareDeps, type BitfsTransactionJournal, type BitfsFundingLedger, type MsFileServiceImpl } from "../coordinator.js";
 import type { WorkerFundingDependencies, createWorkerFundingRuntime } from "./workerFundingRuntime.js";
-import { completeBuyerOpening, parsePaymentState, verifyBuyerCompletedClose } from "go-bitfs";
+import { completeBuyerOpening, parsePaymentState, verifyBuyerCompletedClose, transactionID } from "go-bitfs";
 import { peerIdFromPublicKeyBytes } from "bitcoin-libp2p/identity";
 import { newSessionID, parseMessageID, parseSessionID } from "bsv8-channel-protocol";
 import { WEBRTC_SIGNAL_PROTOCOL, newOffer, newAnswer, newEndOfCandidates as newEndOfCandidatesSignal, newICECandidate as newIceSignal } from "bsv8-channel-protocol/webrtc-signal";
@@ -20,6 +21,7 @@ export interface BitfsWorkerDependencies {
   woc(): WocServiceHandle | undefined;
   p2pkhSettings(): ReturnType<WorkerFundingDependencies["readP2pkhSettings"]>;
   crypto(owner: string): Promise<ActiveKeyCrypto>;
+  requestPayment(command: import("@keymaster/contracts").CoordinatorWalletPaymentCommand): Promise<unknown>;
   blockHeight(network: "main" | "test"): Promise<number>;
   executor(operation: WindowP2pExecutorOperation, signal?: AbortSignal): Promise<unknown>;
   network(): "main" | "test";
@@ -1076,7 +1078,16 @@ async function ensureMsfileBitfsBuyerProtocol(
     recommendedFilename: canonicalQuote.recommendedFilename,
     store: journalStore,
   });
-  const vaultSigner = createBitfsVaultSigner(cryptoPort);
+  const paymentNetwork=deps.network();
+  const vaultSigner = createBitfsBuyerPaymentSigner(createBitfsVaultSigner(cryptoPort),{
+    network: paymentNetwork,assertActive(){assertCurrentContext();if(deps.network()!==paymentNetwork)throw new Error("BitFS payment network changed");},requestPayment:deps.requestPayment,
+    async previousTransaction(txid){
+      const saved=await createBitfsTransactionJournal(journalStore).getTransaction(txid);
+      if(saved)return saved;
+      if(!woc.getRawTransaction)throw new Error('BitFS previous transaction evidence unavailable');
+      return deps.hexToBytes(await woc.getRawTransaction(paymentNetwork,txid));
+    },
+  });
   const signer = {
     publicKey: () => vaultSigner.publicKey(),
     async sign(request: Parameters<typeof vaultSigner.sign>[0], signal?: AbortSignal): Promise<Uint8Array> {
@@ -1891,7 +1902,7 @@ async function createMsfileBitfsBuyerTask(input: {
   }
   assertCurrentContext();
 
-  const protocolSpend = createMsfileBitfsProtocolSpend();
+  const protocolSpend = createMsfileBitfsProtocolSpend(transactions);
   let fundingSnapshotResource: P2pkhUtxoSnapshotResource | undefined;
   const fundingDeps: BitfsFundingPrepareDeps = {
     protocolSpend,
@@ -1961,7 +1972,14 @@ async function createMsfileBitfsBuyerTask(input: {
   const broadcaster = new BitfsTransactionBroadcaster({ journal: transactions, chain, nowMs: () => Date.now() });
   const cryptoPort = await deps.crypto(owner);
   assertCurrentContext();
-  const signer = createBitfsVaultSigner(cryptoPort);
+  const signer = createBitfsBuyerPaymentSigner(createBitfsVaultSigner(cryptoPort),{
+    network:input.network,assertActive:assertCurrentContext,requestPayment:deps.requestPayment,
+    async previousTransaction(txid){
+      const saved=await transactions.getTransaction(txid);if(saved)return saved;
+      if(!woc?.getRawTransaction)throw new Error('BitFS previous transaction evidence unavailable');
+      return deps.hexToBytes(await woc.getRawTransaction(input.network,txid));
+    },
+  });
 
   const ensureDedicatedFunding = async (openingAmountSatoshis: string): Promise<void> => {
     let account = await ledger.getAccount({ ownerPublicKeyHex: owner, seedHashHex: seed, network: input.network, nowMs: Date.now() });
@@ -2095,10 +2113,10 @@ async function createMsfileBitfsBuyerTask(input: {
       await ensureDedicatedFunding(fundingInput.openingOutput.valueSatoshis);
       assertCurrentContext();
       const settings = await deps.p2pkhSettings();
-      if (input.network === "test" && !settings.includeTestnet) {
+      if (input.network === "test" && !settings.bsvNetwork) {
         throw new Error("请先在 P2PKH 设置中启用测试网余额");
       }
-      const resources = await deps.ensureResources(owner, settings.includeTestnet);
+      const resources = await deps.ensureResources(owner, settings.bsvNetwork);
       fundingSnapshotResource = resources.find((resource) => resource.network === input.network);
       if (!fundingSnapshotResource || !snapshots) throw new Error("BitFS FundingTx 的 P2PKH 余额快照尚未就绪");
       for (let attempt = 0; ; attempt += 1) {
@@ -2246,11 +2264,34 @@ async function configureMsfileSellerRuntime(
       return "waiting-unlock";
     }
     const cryptoPort = await deps.crypto(ownerPublicKeyHex);
-    const signer = createBitfsVaultSigner(cryptoPort);
     const journalStore = deps.files( "bitfs-journal");
     const journal = createBitfsJournal(journalStore);
     const transactionJournal = createBitfsTransactionJournal(journalStore);
     const woc = deps.woc();
+    const sessions = createBitfsSessionJournal(journalStore);
+    const sellerNetwork=deps.network(),{sessionEpoch:sellerSessionEpoch,runGeneration:sellerRunGeneration}=deps.session();
+    const assertSellerContext=()=>{
+      const current=deps.session();
+      if(controller.signal.aborted||msfileSellerIndexController!==controller||current.vaultStatus!=="unlocked"
+        ||current.activePublicKeyHex!==ownerPublicKeyHex||current.sessionEpoch!==sellerSessionEpoch
+        ||current.runGeneration!==sellerRunGeneration||deps.network()!==sellerNetwork||deps.service()!==service)
+        throw new Error("BitFS seller identity is stale");
+    };
+    // Kind 2 uses its exact refund/opening proof. Later state signatures use
+    // the actual funding retained after Kind 4, never a manufactured prevout.
+    const signer=createBitfsPaymentSigner(createBitfsVaultSigner(cryptoPort),{
+      network:sellerNetwork,role:"seller",assertActive:assertSellerContext,requestPayment:deps.requestPayment,
+      async previousTransaction(txid){
+        assertSellerContext();const retained=await transactionJournal.getTransaction(txid);if(retained)return retained;
+        for(const record of await sessions.list()){
+          if(record.role!=="seller"||record.ownerPublicKeyHex!==ownerPublicKeyHex)continue;
+          const raw=await sessions.getEvidence(record.sessionId,"funding-transaction");assertSellerContext();
+          if(raw&&deps.bytesToHex(new Uint8Array(transactionID(raw)).reverse())===txid)return raw;
+        }
+        if(!woc?.getRawTransaction)throw new Error("BitFS seller funding evidence unavailable");
+        const raw=deps.hexToBytes(await woc.getRawTransaction(sellerNetwork,txid));assertSellerContext();return raw;
+      },
+    });
     // WoC 未装配时仍允许派生索引和 fail-closed 协议端口启动；
     // 任何真实交易广播/高度查询都会明确失败，不会伪造链上事实。
     const chain = woc ? createBitfsWocChainPort(woc, deps.network()) : {
@@ -2262,7 +2303,6 @@ async function configureMsfileSellerRuntime(
       chain,
       nowMs: () => Date.now(),
     });
-    const sessions = createBitfsSessionJournal(journalStore);
     const persistedSellerGenerations = (await sessions.list())
       .filter((record) => record.role === "seller" && record.ownerPublicKeyHex === ownerPublicKeyHex)
       .map((record) => record.generation);

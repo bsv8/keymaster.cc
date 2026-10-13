@@ -1,3 +1,4 @@
+import type { NetworkIdentity } from "./networkIdentity.js";
 // packages/contracts/src/sessionCoordinator.ts
 // Session Coordinator 契约：SharedWorker 作为唯一会话协调器的 RPC 协议定义。
 //
@@ -384,16 +385,16 @@ export type CoordinatorClientRequest =
   | ({ kind: "hello"; clientId: string; requestId: string; /** Coordinator 服务桥的专用双工端口。 */ servicePort?: MessagePort }
     | { kind: "subscribe"; clientId: string; requestId: string; topics: CoordinatorTopic[] }
     | { kind: "unlock"; clientId: string; requestId: string; password: string; expectedSessionEpoch: SessionEpoch }
-    | { kind: "lock"; clientId: string; requestId: string; expectedSessionEpoch: SessionEpoch }
+    | { kind: "lock"; clientId: string; requestId: string; expectedSessionEpoch: SessionEpoch; cleanup?: { action: "register" } | { action: "settled"; attempt: number; error?: string } }
     | { kind: "vault.operation"; clientId: string; requestId: string; operation: CoordinatorVaultOperation; expectedSessionEpoch: SessionEpoch }
     | { kind: "crypto"; clientId: string; requestId: string; operation: CoordinatorCryptoOperation; expectedSessionEpoch: SessionEpoch }
     | { kind: "background.run-now"; clientId: string; requestId: string; taskId: string; expectedSessionEpoch: SessionEpoch }
     | { kind: "background.trigger"; clientId: string; requestId: string; taskId: string; reason: string; expectedSessionEpoch: SessionEpoch }
     | { kind: "background.cancel"; clientId: string; requestId: string; taskId: string; expectedSessionEpoch: SessionEpoch }
-    | { kind: "background.cancel-by-key"; clientId: string; requestId: string; publicKeyHex: string; expectedSessionEpoch: SessionEpoch }
+    | { kind: "background.cancel-by-key"; clientId: string; requestId: string; networkIdentity: NetworkIdentity; expectedSessionEpoch: SessionEpoch }
     | { kind: "background.settings.update"; clientId: string; requestId: string; settings: CoordinatorBackgroundSyncSettings; expectedSessionEpoch: SessionEpoch }
     | { kind: "autolock.settings.update"; clientId: string; requestId: string; settings: AutoLockSettings; expectedSessionEpoch: SessionEpoch }
-    | { kind: "p2pkh.settings.update"; clientId: string; requestId: string; settings: { includeTestnet: boolean; feeRateSatoshisPerKb?: Partial<Record<"low" | "medium" | "high", number>> }; expectedSessionEpoch: SessionEpoch }
+    | { kind: "p2pkh.settings.update"; clientId: string; requestId: string; settings: { bsvNetwork: "main" | "test"; feeRateSatoshisPerKb?: Partial<Record<"low" | "medium" | "high", number>> }; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.provider-config.get"; clientId: string; requestId: string; providerId: string; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.provider-config.update"; clientId: string; requestId: string; providerId: string; config: P2pkhProviderConfig; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.utxos.get"; clientId: string; requestId: string; ownerPublicKeyHex: string; network: "main" | "test"; expectedSessionEpoch: SessionEpoch }
@@ -430,6 +431,7 @@ export interface CoordinatorMsFileStateEvent {
 
 /** 受控 crypto 操作白名单。 */
 export type CoordinatorCryptoOperation =
+  | { type: "signConnectEnvelope"; kind: "identity" | "intent"; envelope: Uint8Array; content?: Uint8Array; appSessionId: string }
   | { type: "signDigest"; digestHex: string; format: EcdsaSignatureFormat }
   | { type: "deriveP2pkhAddress"; network: "main" | "test" };
 
@@ -450,7 +452,43 @@ export type CoordinatorChannelOperation =
  */
 export type CoordinatorBackgroundSyncSettings = BackgroundSyncSettings;
 
+export interface WalletPaymentChannel {
+  id: string; owner: string; kind: "app" | "plugin"; network: string; paymentType: string;
+  enabled: boolean; singleLimit: string; defaultSessionLimit: string; revision: number;
+}
+/** 金额 wire 为十进制整数字符串，避免浮点与 BigInt JSON 精度问题。 */
+export type CoordinatorWalletPaymentCommand =
+  | {action:"signature-history"}
+  | {action:"backend"|"signing-list"}
+  | {action:"signing-configure";id:string;mode:"automatic"|"manual";revision:number}
+  | { action: "list" | "pending" }
+  | { action: "register"; id: string; owner: string; kind: "app" | "plugin"; network: string; paymentType: string }
+  | { action: "configure"; channel: WalletPaymentChannel }
+  | { action: "session-open"; id: string; owner: string }
+  | { action: "session-close" | "session-cancel"; id: string }
+  | { action: "answer"; id: string; allow: boolean; raiseSessionLimit?: string }
+  | { action: "sign-p2pkh" | "sign-standard"; rawTxHex: string; prevTransactionHexes: string[]; channelId: string; paymentId: string; sessionId: string | null }
+  | { action: "sign-feepool"; family: "connect" | "bitfs"; role?: "payer" | "cosigner"; stage: "fund" | "state"; authorization?: {documentHex:string;refundTemplateHex:string}; openingRequestHex?:string; rawTxHex: string; prevTransactionHexes: string[]; channelId: string; paymentId: string; sessionId: string | null };
+
+/** 钱包内部 UI 的 USB 控制面；没有 PIN、私钥或任意设备命令。 */
+export type CoordinatorHardwareCommand =
+  | { action: "state" }
+  | { action: "attach" | "recover" | "recover-erased" | "provision" | "recover-import"; leaseId: string; port: MessagePort }
+  | { action: "enroll"; leaseId: string; port: MessagePort; label: string }
+  | { action: "disconnect"; leaseId: string };
+export interface CoordinatorHardwareState {
+  status: "disconnected" | "connecting" | "pairing" | "connected";
+  leaseId?: string;
+  pairingCode?: string;
+  activity?: {operation: string; state: "awaiting-user" | "executing" | "completed" | "denied" | "cancelled" | "unknown" | "failed"};
+}
 export type CoordinatorVaultOperation =
+  | { type: "hardware"; command: CoordinatorHardwareCommand }
+  /** Private Vault UI only; no private-key bytes in request or response. */
+  | { type: "migrateToHardware" }
+  | { type: "migrateToSoftware"; newPassword: string }
+  | { type: "migrationState" }
+  | { type: "payment"; command: CoordinatorWalletPaymentCommand }
   /** 读取唯一钱包 Key 的公开摘要；没有列表、没有选择、没有切换。 */
   | { type: "getCurrentKey" }
   | { type: "verifyPassword"; password: string }
@@ -505,6 +543,7 @@ export type CoordinatorValueResult<T> =
 
 /** Crypto 操作结果。 */
 export type CoordinatorCryptoResult =
+  | { type: "signConnectEnvelope"; signatureHex: string; format: "compact" }
   | { type: "signDigest"; signatureHex: string; format: EcdsaSignatureFormat }
   | { type: "deriveP2pkhAddress"; address: string };
 
@@ -513,7 +552,7 @@ export type CoordinatorCryptoResult =
 // ============================================================
 
 /** Coordinator 推送事件联合类型。 */
-export type CoordinatorTopicEvent =
+export type CoordinatorTopicEvent = { networkIdentity?: import("./networkIdentity.js").NetworkIdentity } & (
   | SessionStateEvent
   | BackgroundSnapshotEvent
   | CoordinatorChainHeightEvent
@@ -523,7 +562,7 @@ export type CoordinatorTopicEvent =
   | CoordinatorSatStateEvent
   | CoordinatorChannelStateEvent
   | CoordinatorContactsPresenceEvent
-  | CoordinatorWorkerUnitStateEvent;
+  | CoordinatorWorkerUnitStateEvent);
 
 /** Coordinator 已验签并完成固定 inbox 分派的 Channel 事件。 */
 export interface CoordinatorChannelStateEvent {
@@ -589,6 +628,7 @@ export interface CoordinatorStorageStateEvent {
 
 /** The complete public session snapshot. This is the sole cross-tab session event. */
 export interface SessionStateEvent {
+  lockCleanup?: import("./vault.js").WalletLockCleanup;
   activeKeyIdentity?: import("./vault.js").KeyIdentity;
   topic: "session.state";
   type: "session.state.changed";
@@ -630,7 +670,7 @@ export interface BackgroundSnapshotEvent {
   /** 同步管理设置；快照事件携带它以便页面无需额外 RPC 即可读取。 */
   scheduleSettings?: CoordinatorBackgroundSyncSettings;
   /** P2PKH 网络范围设置；余额/资产页面据此决定是否显示 testnet。 */
-  p2pkhSettings?: { includeTestnet: boolean };
+  p2pkhSettings?: { bsvNetwork: "main" | "test" };
 }
 
 /** Coordinator Worker 实际运行单元快照；这是 Window 汇总后台状态的唯一入口。 */
@@ -676,6 +716,7 @@ export interface CoordinatorSubscribeTopicsResult {
 
 /** Coordinator 公开状态快照。 */
 export interface CoordinatorBootstrapSnapshot {
+  lockCleanup?: import("./vault.js").WalletLockCleanup;
   activeKeyIdentity?: import("./vault.js").KeyIdentity;
   /** SharedWorker 启动身份；意图命令必须绑定此值。 */
   authorityInstanceId: string;
@@ -704,7 +745,7 @@ export interface CoordinatorBootstrapSnapshot {
   /** 自动锁定超时毫秒；0 = 永不。缺省 5 分钟。 */
   autoLockTimeoutMs?: number;
   /** P2PKH 网络范围配置，保存在 Coordinator 平台 K-V。 */
-  p2pkhSettings?: { includeTestnet: boolean };
+  p2pkhSettings?: { bsvNetwork: "main" | "test" };
   /** 当前钱包身份世代；重置后变化，各 Tab 据此使旧授权失效。 */
   walletGeneration?: string;
   /** 插件产品启用意图；不代表运行单元已经启动。 */
@@ -758,7 +799,7 @@ export interface CoordinatorTaskSnapshot {
   nextRunAt?: string;
   error?: string;
   blockedReason?: I18nText;
-  keyScope?: { publicKeyHex: string; label?: string };
+  keyScope?: NetworkIdentity & { label?: string };
 }
 
 /**
@@ -786,7 +827,7 @@ export interface SessionCoordinatorClient {
   backgroundRunNow(taskId: string): Promise<CoordinatorCommandResult>;
   backgroundTrigger(taskId: string, reason: string): Promise<CoordinatorCommandResult>;
   backgroundCancel(taskId: string): Promise<CoordinatorCommandResult>;
-  backgroundCancelByKey(publicKeyHex: string): Promise<CoordinatorCommandResult>;
+  backgroundCancelByKey(identity: NetworkIdentity): Promise<CoordinatorCommandResult>;
   /** 更新同步管理设置（任务 id -> 间隔毫秒；0 = 关闭）。 */
   backgroundSettingsUpdate(settings: CoordinatorBackgroundSyncSettings): Promise<CoordinatorCommandResult>;
   /** 更新自动锁定设置（超时毫秒；0 = 永不）。 */
@@ -814,7 +855,7 @@ export interface SessionCoordinatorClient {
   contactsPresenceSnapshot(): Promise<CoordinatorValueResult<ContactPresenceMap>>;
   /** 读取 SharedWorker 唯一插件意图快照。 */
   /** 提交绝对启停意图；accepted 只表示 Worker 已持久化。 */
-  p2pkhSettingsUpdate(settings: { includeTestnet: boolean; feeRateSatoshisPerKb?: Partial<Record<"low" | "medium" | "high", number>> }): Promise<CoordinatorCommandResult>;
+  p2pkhSettingsUpdate(settings: { bsvNetwork: "main" | "test"; feeRateSatoshisPerKb?: Partial<Record<"low" | "medium" | "high", number>> }): Promise<CoordinatorCommandResult>;
   p2pkhProviderConfigGet(providerId: string): Promise<CoordinatorValueResult<P2pkhProviderConfig>>;
   p2pkhProviderConfigUpdate(providerId: string, config: P2pkhProviderConfig): Promise<CoordinatorCommandResult>;
   /** 读取 Coordinator Worker 内存中的 UTXO 快照；`available=false` 表示尚无可信快照。 */

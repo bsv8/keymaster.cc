@@ -23,6 +23,13 @@ describe("Vault Worker key owner", () => {
     session.clear(); expect(next.every(value => value === 0)).toBe(true);
     await expect(session.execute({ type: "deriveP2pkhAddress", network: "main" })).rejects.toThrow(/locked/);
   });
+  it("migration uses the unlocked key, wipes its copy and rejects revoked sessions", async()=>{
+    const {session,bytes}=fixture();let copy:Uint8Array|undefined;
+    expect(await session.useForMigration(async key=>{copy=key;expect(key).toEqual(bytes);return 'saved';})).toBe('saved');
+    expect(copy?.every(v=>v===0)).toBe(true);expect(bytes[31]).toBe(1);
+    await expect(session.useForMigration(async key=>{copy=key;session.clear();return 'stale';})).rejects.toThrow(/locked/);
+    expect(copy?.every(v=>v===0)).toBe(true);
+  });
   it("rejects a digest result when the session changes during signing", async () => {
     const { session, update } = fixture();
     const pending = session.signDigest(new Uint8Array(32).fill(7), "compact", publicKeyHex);

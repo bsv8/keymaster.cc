@@ -17,6 +17,7 @@ pageClass: capability-map-page
 | `intent.sign` | 在明确用户意图下签署 App 提供的字节 |
 | `cipher.encrypt` / `cipher.decrypt` | 在当前 Owner 和精确 origin 下加解密二进制内容 |
 | `p2pkh.transfer` | 请求受控 P2PKH 转账；`assetId` 缺省 `bsv-mainnet`，`bsv-testnet` 需用户在 Keymaster 设置里开启 |
+| `payment.channel.register` | 注册 App 支付用途，取得付款必填的 channelId；不授予免确认额度 |
 | `channel.publish` | 向精确频道发布已签名 JSON |
 | `channel.subscription_set` | 替换当前会话贡献的精确订阅集合 |
 | `price.get` | 一次读取当前 BSV 展示价（金额 + 单位） |
@@ -29,6 +30,11 @@ pageClass: capability-map-page
 | `msfile.seed.read` / `msfile.block.read` | 读取并校验 Seed 或 Block |
 
 ## 公共调用选项
+
+付款前调用 `registerPaymentChannel({ connectSessionId, channelName: "checkout", paymentType: "p2pkh" })`，
+把返回的 `channelId` 传给每次 `p2pkhTransfer`。相同 App、名称、用途及网络重复注册得到同一编号。
+用户在钱包设置单笔额度和一次 App 连接的累计额度；超额由软件弹窗或设备确认。
+缺 channelId 会明确拒绝，不由 Keymaster 补默认值。恢复同一连接不重置已支出。
 
 ```ts
 const result = await keymaster.identityGet(params, {

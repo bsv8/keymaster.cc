@@ -1,6 +1,8 @@
+import { STORAGE_FILE_CLIENTS_CAPABILITY, MSFILE_CONTENT_CAPABILITY, MSFILE_SERVICE_CAPABILITY, P2PKH_WORKER_PROTOCOL_CAPABILITY, WOC_CAPABILITY } from "@keymaster/contracts";
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { bytesToHex } from "@keymaster/plugin-vault/coordinator";
+import { bytesToHex, deriveP2pkhAddress } from "@keymaster/plugin-vault/coordinator";
+import { openTransactionEvidenceServer } from "../../../Coding/keymaster/vaultlink-integration/test/transaction-evidence-server.mjs";
 import type { CoordinatorClientRequest, CoordinatorResponse, CoordinatorSatEvent, CoordinatorSessionBinding, CoordinatorSessionCloseRequest, CoordinatorSessionOpenRequest, CoordinatorStorageControl, JSONValue } from "@keymaster/contracts";
 import { CHAIN_HEIGHT_SYNC_TASK_ID, COORDINATOR_RPC_CAPABILITY, backgroundSyncDefaultIntervalMs, parseCoordinatorResponseFor } from "@keymaster/contracts";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
@@ -9,6 +11,7 @@ import {
   __testPublishSatState,
   __testWindowP2pInboundBridgePressure,
   __testWindowP2pResponseBridgePressure,
+  __testForumRoundtripBridgePressure,
   __testStartSatInboundHandler,
   __testCancelSatInboundHandler,
   __testRevokeWindowP2pExecutorLease,
@@ -31,11 +34,11 @@ import {
   __testSetMsfileRuntimeOverride,
   __testBuildChannelPublicMessageTimes,
   __testBuildChannelSeenMessageKey,
-} from "./keymasterSessionCoordinator.worker.js";
+} from "./assembly/coordinatorWorkerTesting.js";
 import { COORDINATOR_WORKER_UNIT_CATALOG } from "./coordinator/workerUnitCatalog.js";
 import { CoordinatorUnitUnavailableError, isCoordinatorUnitUnavailableError } from "./coordinator/workerUnitAvailability.js";
 import { peerIdFromPublicKeyBytes } from "bitcoin-libp2p/identity";
-import { calcTxidFromRawTxHex } from "@keymaster/plugin-p2pkh/coordinator";
+import { calcTxidFromRawTxHex, p2pkhAddressToScriptHex } from "@keymaster/plugin-p2pkh/coordinator";
 import { HASH_REQUEST_CHANNEL, messageIDFromBytes, newMessageID, newSessionID, parsePrivateKey, parsePublicKey, parseSHA256Hash } from "bsv8-channel-protocol";
 import { marshal, newMultiaddrLocator, parseAndVerify, sign } from "bsv8-channel-protocol/hash-request";
 import { parseBodyValue as parseWebrtcBodyValue } from "bsv8-channel-protocol/webrtc-signal";
@@ -47,6 +50,8 @@ function makeTestP2pkhRawTx(inputTxid: string): string {
   return `0100000001${inputTxid}0000000000ffffffff01e8030000000000001976a914${"11".repeat(20)}88ac00000000`;
 }
 import {
+  __testP2pkhProviderConfigGet,
+  __testP2pkhProviderConfigUpdate,
   __testBackgroundRunNow,
   __testCancelByKey,
   __testChangePassword,
@@ -97,6 +102,7 @@ import {
   __testGetVaultStatus,
   __testInvalidateSession,
   __testLock,
+  __testUnlockAtLifecycle,
   __testRegisterTask,
   __testReadyWorkerUnit,
   __testResetState,
@@ -135,7 +141,7 @@ import {
   __testSeedCoordinatorSettingsSnapshot,
   __testSeedCoordinatorKeyValueGarbage,
   __testListWalletObjectPaths,
-} from "./keymasterSessionCoordinator.worker.js";
+} from "./assembly/coordinatorWorkerTesting.js";
 import type { PeerController } from "webloom-framework";
 import type {
   WalletColdStartSnapshot,
@@ -298,6 +304,7 @@ interface TestWallet {
  * 事务提交后安装 Root、runtime 与任务。
  */
 async function initializeTestWallet(input?: {
+  bsvNetwork?: "main" | "test";
   label?: string;
   password?: string;
   /** 私钥 hex；缺省时导入 TEST_PRIV_2。 */
@@ -315,7 +322,7 @@ async function initializeTestWallet(input?: {
     type: "initialize",
     plan: {
       transactionId: input?.transactionId ?? `init-${label}`,
-      firstKey: {
+      firstKey: {bsvNetwork: input?.bsvNetwork ?? "main",
         kind: "import",
         label,
         material: { hex: input?.privateKeyHex ?? TEST_PRIV_2 },
@@ -585,6 +592,41 @@ describe("Session Coordinator worker", () => {
     await __testResetWalletStore();
   });
 
+  it("rejects a real password decrypt that overlaps a later lock", async () => {
+    await initializeTestWallet({ label: "unlock-lock-race", password: "race-pw" });
+    await __testLock();
+    const unlocking = __testUnlockAtLifecycle("race-pw");
+    const revoked = expect(unlocking).rejects.toThrow("Wallet unlock was revoked");
+    await __testLock();
+    await revoked;
+    expect(__testGetVaultStatus()).toBe("locked");
+    expect(__testGetSnapshot().activePublicKeyHex).toBeUndefined();
+  });
+
+  it("keeps every unlock path blocked until all pages report cleanup, with failed-page retry", async () => {
+    await initializeTestWallet({ label: "lock-barrier", password: "lock-pw" });
+    await __testLock({ action: "register" }, "page-a");
+    await __testLock({ action: "register" }, "page-b");
+    await __testLock();
+    expect(__testGetVaultStatus()).toBe("locked");
+    expect(__testGetSnapshot().lockCleanup).toMatchObject({ phase: "pending" });
+    expect((await __testUnlock("lock-pw")).ack.status).toBe("blocked");
+    expect((await __testDispatchStorageControl({ type: "unlock", password: "lock-pw" })).ack.status).toBe("blocked");
+    const first = __testGetSnapshot().lockCleanup!.attempt;
+    await __testLock({ action: "settled", attempt: first }, "page-a");
+    await __testLock({ action: "settled", attempt: first, error: "Page plugin failed to exit" }, "page-b");
+    expect(__testGetSnapshot().lockCleanup).toMatchObject({ phase: "failed", error: "Page plugin failed to exit" });
+    await __testLock();
+    const second = __testGetSnapshot().lockCleanup!.attempt;
+    expect(second).toBeGreaterThan(first);
+    await __testLock({ action: "settled", attempt: first }, "page-b");
+    expect(__testGetSnapshot().lockCleanup?.phase).toBe("pending");
+    await __testLock({ action: "settled", attempt: second }, "page-a");
+    await __testLock({ action: "settled", attempt: second }, "page-b");
+    expect(__testGetSnapshot().lockCleanup).toBeUndefined();
+    expect((await __testUnlock("lock-pw")).ack.status).toBe("accepted");
+  });
+
   it("reads the committed Vault identity while an unrelated FIFO request is pending", async () => {
     const wallet = await initializeTestWallet({ label: "identity-read" });
     const messages: CoordinatorResponse[] = [];
@@ -604,12 +646,11 @@ describe("Session Coordinator worker", () => {
 
   it("rejects forged client ownership and revoked/changed Storage grants", async () => {
     await __testBootstrapWalletStorage();
-    await initializeTestWallet({ label: "grant-forgery" });
     const ownerPublicKeyHex = VALID_PUBLISHER_KEYS[2]!;
-    __testSetVaultStatus("unlocked", ownerPublicKeyHex);
+    await bootstrapWalletOwnedBy(ownerPublicKeyHex, 3, "grant-owner");
     const identity = { version: 1 as const, publisherPublicKeyHex: VALID_PUBLISHER_KEYS[0]!, appId: "app", appName: "App", identityDigestHex: "aa".repeat(32) };
     let revoked = false;
-    __testSetStorageSessionResolver(async (id) => revoked ? null : { sessionId: id, origin: "https://app.example", ownerPublicKeyHex, appIdentity: identity, revokedAt: null });
+    __testSetStorageSessionResolver(async (id) => revoked ? null : { networkIdentity: {bsvNetwork: "main", publicKeyHex: ownerPublicKeyHex}, sessionId: id, origin: "https://app.example", ownerPublicKeyHex, appIdentity: identity, revokedAt: null });
     const granted = await __testDispatchStorageGrant("session-a", "port-a", "forged-client");
     expect(granted.ack.status).toBe("ok");
     const grantId = granted.operationResult as string;
@@ -629,7 +670,7 @@ describe("Session Coordinator worker", () => {
     expect((await __testDispatchStorageGrant("missing", "port-a")).ack.status).toBe("error");
     const identity = { version: 1 as const, publisherPublicKeyHex: VALID_PUBLISHER_KEYS[1]!, appId: "app", appName: "App", identityDigestHex: "bb".repeat(32) };
     let origin = "https://one.example";
-    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin, ownerPublicKeyHex, appIdentity: identity, revokedAt: null }));
+    __testSetStorageSessionResolver(async (id) => ({ networkIdentity: {bsvNetwork: "main", publicKeyHex: ownerPublicKeyHex}, sessionId: id, origin, ownerPublicKeyHex, appIdentity: identity, revokedAt: null }));
     const granted = await __testDispatchStorageGrant("session-b", "port-a");
     expect(granted.ack.status).toBe("ok");
     origin = "https://two.example";
@@ -670,7 +711,7 @@ describe("Session Coordinator worker", () => {
   it("aborts a slow Storage data lane when the global lock preempts it", async () => {
     __testSetVaultStatus("unlocked", VALID_PUBLISHER_KEYS[2]!);
     const identity = { version: 1 as const, publisherPublicKeyHex: VALID_PUBLISHER_KEYS[2]!, appId: "app", appName: "App", identityDigestHex: "cc".repeat(32) };
-    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://slow.example", ownerPublicKeyHex: VALID_PUBLISHER_KEYS[2]!, appIdentity: identity, revokedAt: null }));
+    __testSetStorageSessionResolver(async (id) => ({ networkIdentity: {bsvNetwork: "main", publicKeyHex: VALID_PUBLISHER_KEYS[2]!}, sessionId: id, origin: "https://slow.example", ownerPublicKeyHex: VALID_PUBLISHER_KEYS[2]!, appIdentity: identity, revokedAt: null }));
     __testSetStorageRuntime({ list: async (_ctx, input) => await new Promise((_, reject) => { input.signal?.addEventListener("abort", () => { reject(new Error("storage_unavailable")); }); }), abortSession: async () => undefined });
     const grant = await __testDispatchStorageGrant("slow-session", "port-a");
     const pending = __testDispatchStorageData({ grantId: grant.operationResult as string, actualPortId: "port-a" });
@@ -684,7 +725,7 @@ describe("Session Coordinator worker", () => {
   it("keeps physical slots occupied until ignored-AbortSignal Providers settle", async () => {
     await bootstrapWalletOwnedBy(VALID_PUBLISHER_KEYS[3]!, 4, "physical-slots");
     const identity = { version: 1 as const, publisherPublicKeyHex: VALID_PUBLISHER_KEYS[3]!, appId: "app", appName: "App", identityDigestHex: "ff".repeat(32) };
-    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://slots.example", ownerPublicKeyHex: VALID_PUBLISHER_KEYS[3]!, appIdentity: identity, revokedAt: null }));
+    __testSetStorageSessionResolver(async (id) => ({ networkIdentity: {bsvNetwork: "main", publicKeyHex: VALID_PUBLISHER_KEYS[3]!}, sessionId: id, origin: "https://slots.example", ownerPublicKeyHex: VALID_PUBLISHER_KEYS[3]!, appIdentity: identity, revokedAt: null }));
     const releases: Array<() => void> = [];
     __testSetStorageRuntime({ list: async () => await new Promise<never>((resolve) => { releases.push(() => resolve(undefined as never)); }), abortSession: async () => undefined });
     const ports = ["port-a", "port-b", "port-c", "port-d"];
@@ -715,7 +756,7 @@ describe("Session Coordinator worker", () => {
   it("rejects a late provider success after session epoch or generation changes", async () => {
     await bootstrapWalletOwnedBy(VALID_PUBLISHER_KEYS[4]!, 5, "late-provider");
     const identity = { version: 1 as const, publisherPublicKeyHex: VALID_PUBLISHER_KEYS[4]!, appId: "app", appName: "App", identityDigestHex: "dd".repeat(32) };
-    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://late.example", ownerPublicKeyHex: VALID_PUBLISHER_KEYS[4]!, appIdentity: identity, revokedAt: null }));
+    __testSetStorageSessionResolver(async (id) => ({ networkIdentity: {bsvNetwork: "main", publicKeyHex: VALID_PUBLISHER_KEYS[4]!}, sessionId: id, origin: "https://late.example", ownerPublicKeyHex: VALID_PUBLISHER_KEYS[4]!, appIdentity: identity, revokedAt: null }));
     let release!: () => void;
     const delayed = new Promise<void>((resolve) => { release = resolve; });
     // 单 Key 本地存储没有 Provider 世代；迟到结果由「钱包身份世代 + 平台 Root
@@ -731,7 +772,7 @@ describe("Session Coordinator worker", () => {
     __testAdvanceWalletGeneration();
     release();
     expect((await pending).ack).toMatchObject({ status: "error", code: "storage_unavailable" });
-    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://late.example", ownerPublicKeyHex: VALID_PUBLISHER_KEYS[4]!, appIdentity: identity, revokedAt: null }));
+    __testSetStorageSessionResolver(async (id) => ({ networkIdentity: {bsvNetwork: "main", publicKeyHex: VALID_PUBLISHER_KEYS[4]!}, sessionId: id, origin: "https://late.example", ownerPublicKeyHex: VALID_PUBLISHER_KEYS[4]!, appIdentity: identity, revokedAt: null }));
     let releaseEpoch!: () => void;
     const delayedEpoch = new Promise<void>((resolve) => { releaseEpoch = resolve; });
     __testSetStorageRuntime({
@@ -890,11 +931,11 @@ describe("Session Coordinator worker", () => {
     let release!: () => void;
     const released = new Promise<void>((resolve) => { release = resolve; });
     let aborted = false;
-    __testRegisterTask({ id: "test-a", publicKeyHex: "a".repeat(64), run: async ({ signal }) => { await released; aborted = signal.aborted; } });
-    __testRegisterTask({ id: "test-b", publicKeyHex: "b".repeat(64), run: async () => undefined });
+    __testRegisterTask({ bsvNetwork: "main", id: "test-a", publicKeyHex: "a".repeat(64), run: async ({ signal }) => { await released; aborted = signal.aborted; } });
+    __testRegisterTask({ bsvNetwork: "main", id: "test-b", publicKeyHex: "b".repeat(64), run: async () => undefined });
     const running = __testRunTask("test-a");
     await Promise.resolve();
-    const cancelling = __testCancelByKey("a".repeat(64));
+    const cancelling = __testCancelByKey({ bsvNetwork: "main", publicKeyHex: "a".repeat(64) });
     release();
     await cancelling;
     await running;
@@ -908,10 +949,10 @@ describe("Session Coordinator worker", () => {
     let release!: () => void;
     const released = new Promise<void>((resolve) => { release = resolve; });
     let aborted = false;
-    __testRegisterTask({
+    __testRegisterTask({ bsvNetwork: "main",
       id: "dynamic-owner-task",
       publicKeyHex: activeOwner,
-      keyScope: () => ({ publicKeyHex: activeOwner }),
+      keyScope: () => ({ bsvNetwork: "main", publicKeyHex: activeOwner }),
       run: async ({ signal }) => {
         await released;
         aborted = signal.aborted;
@@ -920,7 +961,7 @@ describe("Session Coordinator worker", () => {
     const running = __testRunTask("dynamic-owner-task");
     await Promise.resolve();
     activeOwner = "b".repeat(64);
-    const cancelling = __testCancelByKey("a".repeat(64));
+    const cancelling = __testCancelByKey({ bsvNetwork: "main", publicKeyHex: "a".repeat(64) });
     release();
     await cancelling;
     await running;
@@ -930,7 +971,7 @@ describe("Session Coordinator worker", () => {
   it("rejects a late handler freshness check after session invalidation", async () => {
     __testSetVaultStatus("unlocked", "a".repeat(64));
     let committed = false;
-    __testRegisterTask({ id: "late", publicKeyHex: "a".repeat(64), run: async ({ assertSessionFresh }) => { await Promise.resolve(); assertSessionFresh(); committed = true; } });
+    __testRegisterTask({ bsvNetwork: "main", id: "late", publicKeyHex: "a".repeat(64), run: async ({ assertSessionFresh }) => { await Promise.resolve(); assertSessionFresh(); committed = true; } });
     const running = __testRunTask("late");
     __testInvalidateSession();
     await running;
@@ -961,7 +1002,7 @@ describe("Session Coordinator worker", () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     let runs = 0;
-    __testRegisterTask({ id: "once", publicKeyHex: "a".repeat(64), run: async () => { runs++; await gate; } });
+    __testRegisterTask({ bsvNetwork: "main", id: "once", publicKeyHex: "a".repeat(64), run: async () => { runs++; await gate; } });
     const first = await __testBackgroundRunNow("once");
     const second = await __testBackgroundRunNow("once");
     expect(first.ack.status).toBe("accepted");
@@ -1079,14 +1120,14 @@ describe("Session Coordinator worker", () => {
 
   it("marks tasks as blocked when vault is locked", async () => {
     __testSetVaultStatus("locked");
-    __testRegisterTask({ id: "task-1", publicKeyHex: "a".repeat(64), run: async () => undefined });
+    __testRegisterTask({ bsvNetwork: "main", id: "task-1", publicKeyHex: "a".repeat(64), run: async () => undefined });
     // 模拟 performGlobalLock 的行为
     const snapshot = __testGetSnapshot();
     const task = snapshot.taskSnapshots.find((t) => t.id === "task-1");
     expect(task?.state).toBe("idle"); // 初始状态是 idle
     // 锁定时任务应该变为 blocked
     __testSetVaultStatus("unlocked", "a".repeat(64));
-    __testRegisterTask({ id: "task-2", publicKeyHex: "a".repeat(64), run: async () => undefined });
+    __testRegisterTask({ bsvNetwork: "main", id: "task-2", publicKeyHex: "a".repeat(64), run: async () => undefined });
     // 验证解锁状态下的任务是 idle
     expect(__testGetSnapshot().taskSnapshots.find((t) => t.id === "task-2")?.state).toBe("idle");
   });
@@ -1095,7 +1136,7 @@ describe("Session Coordinator worker", () => {
     __testSetVaultStatus("unlocked", "a".repeat(64));
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
-    __testRegisterTask({ id: "running-task", publicKeyHex: "a".repeat(64), run: async () => { await gate; } });
+    __testRegisterTask({ bsvNetwork: "main", id: "running-task", publicKeyHex: "a".repeat(64), run: async () => { await gate; } });
     void __testRunTask("running-task");
     await Promise.resolve();
     // 锁定
@@ -1126,7 +1167,7 @@ describe("Session Coordinator worker", () => {
 
   it("restores tasks to idle and reschedules after unlock", async () => {
     __testSetVaultStatus("unlocked", "a".repeat(64));
-    __testRegisterTask({ id: "blocked-task", publicKeyHex: "a".repeat(64), run: async () => undefined });
+    __testRegisterTask({ bsvNetwork: "main", id: "blocked-task", publicKeyHex: "a".repeat(64), run: async () => undefined });
     // 模拟锁定
     const snapshot1 = __testGetSnapshot();
     expect(snapshot1.taskSnapshots.find((t) => t.id === "blocked-task")?.state).toBe("idle");
@@ -1139,7 +1180,7 @@ describe("Session Coordinator worker", () => {
 
   it("managed 任务的 nextRunAt 来自同步管理设置，关闭后没有 nextRunAt", async () => {
     await bootstrapReadyWallet("managed-next-run");
-    __testRegisterTask({
+    __testRegisterTask({ bsvNetwork: "main",
       id: "token-bsv21.sync",
       pluginId: "token-bsv21",
       publicKeyHex: "a".repeat(64),
@@ -1162,7 +1203,7 @@ describe("Session Coordinator worker", () => {
   it("任务缺真实提供方单元时阻断，提供方就绪后恢复", async () => {
     __testSetVaultStatus("unlocked", "a".repeat(64));
     let runs = 0;
-    __testRegisterTask({ id: "p2pkh.transactions-sync", publicKeyHex: "a".repeat(64),
+    __testRegisterTask({ bsvNetwork: "main", id: "p2pkh.transactions-sync", publicKeyHex: "a".repeat(64),
       run: async () => { runs++; } });
     await __testRunTask("p2pkh.transactions-sync");
     expect(runs).toBe(0);
@@ -1182,7 +1223,7 @@ describe("Session Coordinator worker", () => {
     __testReadyWorkerUnit("woc.coordinator-worker");
     __testReadyWorkerUnit("p2pkh.coordinator-worker");
     let runs = 0;
-    __testRegisterTask({
+    __testRegisterTask({ bsvNetwork: "main",
       id: "token-stas.sync",
       pluginId: "token-stas",
       publicKeyHex: __testGetActivePublicKeyHex()!,
@@ -1209,7 +1250,7 @@ describe("Session Coordinator worker", () => {
     __testReadyWorkerUnit("p2pkh.coordinator-worker");
     __testSetSmartSyncDebounceMs(5);
     let runs = 0;
-    __testRegisterTask({
+    __testRegisterTask({ bsvNetwork: "main",
       id: "p2pkh.utxo-snapshot",
       pluginId: "p2pkh",
       publicKeyHex: __testGetActivePublicKeyHex()!,
@@ -1246,7 +1287,7 @@ describe("Session Coordinator worker", () => {
     __testReadyWorkerUnit("p2pkh.coordinator-worker");
     __testSetSmartSyncDebounceMs(60);
     let runs = 0;
-    __testRegisterTask({
+    __testRegisterTask({ bsvNetwork: "main",
       id: "p2pkh.utxo-snapshot",
       pluginId: "p2pkh",
       publicKeyHex: __testGetActivePublicKeyHex()!,
@@ -1286,7 +1327,7 @@ describe("Session Coordinator worker", () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     let runs = 0;
-    __testRegisterTask({
+    __testRegisterTask({ bsvNetwork: "main",
       id: "p2pkh.utxo-snapshot",
       pluginId: "p2pkh",
       publicKeyHex: __testGetActivePublicKeyHex()!,
@@ -1317,7 +1358,7 @@ describe("Session Coordinator worker", () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     let runs = 0;
-    __testRegisterTask({
+    __testRegisterTask({ bsvNetwork: "main",
       id: "p2pkh.utxo-snapshot",
       pluginId: "p2pkh",
       publicKeyHex: key.publicKeyHex!,
@@ -1352,7 +1393,7 @@ describe("Session Coordinator worker", () => {
     __testSetSmartSyncDebounceMs(10_000);
     const runs = new Map<string, number>();
     const register = (id: string, pluginId: string, syncPolicy: "smart" | "managed", intervalMs?: number) => {
-      __testRegisterTask({ id, pluginId, publicKeyHex: __testGetActivePublicKeyHex()!, syncPolicy, intervalMs, run: async () => { runs.set(id, (runs.get(id) ?? 0) + 1); } });
+      __testRegisterTask({ bsvNetwork: "main", id, pluginId, publicKeyHex: __testGetActivePublicKeyHex()!, syncPolicy, intervalMs, run: async () => { runs.set(id, (runs.get(id) ?? 0) + 1); } });
     };
     register("p2pkh.utxo-snapshot", "p2pkh", "smart");
     register("p2pkh.transactions-sync", "p2pkh", "managed", 60_000);
@@ -1417,8 +1458,12 @@ describe("Session Coordinator worker", () => {
   });
 
   it("retries a SatSubscription top-up after another submission consumes the same snapshot seq", async () => {
-    const firstCoin = { txid: "aa".repeat(32), vout: 0, value: 100_000, height: 100, status: "confirmed" as const, isSpentInMempoolTx: false };
-    const changeCoin = { txid: "bb".repeat(32), vout: 0, value: 99_000, height: 101, status: "confirmed" as const, isSpentInMempoolTx: false };
+    // 额度核心必须核验完整前序，不能再用虚构 txid 的 UTXO 代替输入证据。
+    const pub = bytesToHex(secp256k1.getPublicKey(Uint8Array.from(TEST_PRIV_2.match(/../gu)!, pair => Number.parseInt(pair, 16)), true));
+    const script = p2pkhAddressToScriptHex(deriveP2pkhAddress(pub, "main"), "main");
+    const firstRaw = `0100000001${"00".repeat(32)}ffffffff020100ffffffff01a08601000000000019${script}00000000`;
+    const firstCoin = { txid: calcTxidFromRawTxHex(firstRaw), vout: 0, value: 100_000, height: 100, status: "confirmed" as const, isSpentInMempoolTx: false };
+    const evidence = new Map([[firstCoin.txid, firstRaw]]);
     // 快照数据源必须在解锁/装配触发后台刷新之前替换，否则在途的真实 WoC
     // 请求会被复用并返回空快照。
     __testSetP2pkhUnspentAllProvider(async () => [firstCoin]);
@@ -1437,7 +1482,11 @@ describe("Session Coordinator worker", () => {
       broadcast,
     });
     __testSetSatBroadcastRetryOverrides({ maxAttempts: 3, deadlineMs: 10_000, initialBackoffMs: 1, maxBackoffMs: 1 });
+    const oldConfig = await __testP2pkhProviderConfigGet("woc");
+    const source = await openTransactionEvidenceServer(evidence);
     try {
+      const configured = await __testP2pkhProviderConfigUpdate("woc", { endpoint: source.endpoint, requestsPerSecond: 100 });
+      expect(configured.ack.status).toBe("accepted");
       const input = {
         assetId: "bsv" as const,
         ownerPublicKeyHex: owner,
@@ -1455,6 +1504,11 @@ describe("Session Coordinator worker", () => {
       expect(broadcast).toHaveBeenCalledTimes(1);
 
       // 模拟 A 的广播已反映到 WoC：B 的旧序号过期，必须重新组合后成功。
+      if (!resultA.txid) throw new Error("Signed broadcast result has no txid");
+      evidence.set(resultA.txid, resultA.rawTxHex);
+      const change = previewA.outputs[1];
+      if (!change) throw new Error("Actual signed transaction has no change output");
+      const changeCoin = { txid: resultA.txid, vout: 1, value: change.value, height: 101, status: "confirmed" as const, isSpentInMempoolTx: false };
       __testSetP2pkhUnspentAllProvider(async () => [changeCoin]);
       const resultB = await service.submitTransfer(previewB);
       expect(resultB).toMatchObject({ status: "local-confirmed", attempts: 2 });
@@ -1464,6 +1518,8 @@ describe("Session Coordinator worker", () => {
       __testSetP2pkhBroadcastProvider(undefined);
       __testSetP2pkhUnspentAllProvider(undefined);
       __testSetSatBroadcastRetryOverrides(undefined);
+      try { await __testP2pkhProviderConfigUpdate("woc", oldConfig); }
+      finally { await source.close(); }
       await __testLock().catch(() => undefined);
       await dispatchStorageControl({ type: "reset-wallet", confirmationLabel: created.label }).catch(() => undefined);
     }
@@ -1556,7 +1612,8 @@ describe("区块链高度同步与 chain.height 广播", () => {
   it("BitFS 仅使用已同步且网络匹配的高度", async () => {
     __testResetState();
     await expect(__testReadBitfsBlockHeight("main")).rejects.toThrow("尚未由统一同步任务提供");
-    __testSetVaultStatus("unlocked", "a".repeat(64));
+    await bootstrapReadyWallet("chain-height-runtime");
+    __testResetChainHeight();
     __testSetChainHeightProvider(async () => 900_123);
     await __testRegisterRealCoordinatorTasks();
     await __testRunTask(CHAIN_HEIGHT_SYNC_TASK_ID);
@@ -1585,7 +1642,8 @@ describe("区块链高度同步与 chain.height 广播", () => {
 
   it("同步成功后写内存高度并广播 chain.height", async () => {
     __testResetState();
-    __testSetVaultStatus("unlocked", "a".repeat(64));
+    await bootstrapReadyWallet("chain-height-runtime");
+    __testResetChainHeight();
     __testSetChainHeightProvider(async () => 900_123);
     await __testRegisterRealCoordinatorTasks();
 
@@ -1625,7 +1683,8 @@ describe("区块链高度同步与 chain.height 广播", () => {
 
   it("读数未变时刷新来源时间但不推进 revision", async () => {
     __testResetState();
-    __testSetVaultStatus("unlocked", "a".repeat(64));
+    await bootstrapReadyWallet("chain-height-runtime");
+    __testResetChainHeight();
     __testSetChainHeightProvider(async () => 900_123);
     await __testRegisterRealCoordinatorTasks();
 
@@ -1646,7 +1705,8 @@ describe("区块链高度同步与 chain.height 广播", () => {
 
   it("读取失败保留旧高度并把错误留在任务快照上", async () => {
     __testResetState();
-    __testSetVaultStatus("unlocked", "a".repeat(64));
+    await bootstrapReadyWallet("chain-height-runtime");
+    __testResetChainHeight();
     let failing = false;
     __testSetChainHeightProvider(async () => {
       if (failing) throw new Error("provider down");
@@ -1670,7 +1730,8 @@ describe("区块链高度同步与 chain.height 广播", () => {
 
   it("节点返回非法高度时拒绝写入", async () => {
     __testResetState();
-    __testSetVaultStatus("unlocked", "a".repeat(64));
+    await bootstrapReadyWallet("chain-height-runtime");
+    __testResetChainHeight();
     __testSetChainHeightProvider(async () => -1);
     await __testRegisterRealCoordinatorTasks();
 
@@ -1711,7 +1772,8 @@ describe("区块链高度同步与 chain.height 广播", () => {
 
   it("拒绝把链高度间隔设成非法值", async () => {
     __testResetState();
-    __testSetVaultStatus("unlocked", "a".repeat(64));
+    await bootstrapReadyWallet("chain-height-runtime");
+    __testResetChainHeight();
     await __testRegisterRealCoordinatorTasks();
     // 9 秒低于自定义下限 10 秒；45 秒是合法自定义值，不再是这个用例的目标。
     const response = await __testUpdateScheduleSettings({ taskIntervals: { [CHAIN_HEIGHT_SYNC_TASK_ID]: 9_000 } });
@@ -1747,13 +1809,14 @@ describe("单 Key 冷启动与初始化门禁", () => {
     expect(__testGetSnapshot().taskSnapshots).toEqual([]);
   });
 
-  it("固定 key.json 的钱包冷启动进入 locked，并在 locked 门禁下安装 runtime 与任务", async () => {
+  it.each(["main", "test"] as const)("%s 身份冷启动保留网络与公钥，并在 locked 门禁下安装 runtime 与任务", async (bsvNetwork) => {
     await coldStartFreshWorker();
-    await initializeTestWallet({ label: "locked-cold-start" });
+    const wallet = await initializeTestWallet({ label: "locked-cold-start", bsvNetwork });
 
     const coldStart = await coldStartFreshWorker();
     expect(coldStart.state).toBe("ready");
-    expect(coldStart.key?.label).toBe("locked-cold-start");
+    expect(coldStart.key).toMatchObject({ label: "locked-cold-start", bsvNetwork, publicKeyHex: wallet.publicKeyHex });
+    expect(__testGetSnapshot().p2pkhSettings).toEqual({ bsvNetwork });
     expect(__testGetVaultStatus()).toBe("locked");
     expect(__testGetActivePublicKeyHex()).toBeUndefined();
     // locked 仍然装配 runtime 与任务，但全部 blocked：解锁后才恢复。
@@ -1775,7 +1838,7 @@ describe("单 Key 冷启动与初始化门禁", () => {
     expect(paths).toContain(".keymaster/meta");
   });
 
-  it("根目录只有唯一 key.json 与模块目录，不含桶或钱包 Owner 前缀", async () => {
+  it("根目录保留 key.json，模块数据带 network 与 Owner 前缀", async () => {
     await coldStartFreshWorker();
     const wallet = await initializeTestWallet({ label: "root-shape" });
     await __testOwnerStoragePut("owner-probe.bin", new Uint8Array([1, 2, 3]));
@@ -1788,7 +1851,7 @@ describe("单 Key 冷启动与初始化门禁", () => {
     expect(paths.filter((path) => path === "key.json")).toHaveLength(1);
     // 模块业务数据归入模块目录，而不是 `.keymaster/modules/` 第二份真值。
     expect(paths.some((path) => path.startsWith(".keymaster/modules/"))).toBe(false);
-    expect(paths).toContain("p2pkh/owner-probe.bin");
+    expect(paths).toContain(`main/${wallet.publicKeyHex}/p2pkh/owner-probe.bin`);
   });
 
   it("已初始化钱包不能被创建/导入入口覆盖", async () => {
@@ -1921,7 +1984,7 @@ describe("单 Key 重置后的授权生命周期", () => {
     expect(__testGetSnapshot().walletGeneration).toBe(second.walletGeneration);
     await expect(__testOwnerStoragePut("late-writer.bin", new Uint8Array([9]))).resolves.toBeUndefined();
     // 新写入只能落在新钱包的模块目录，且必须被当前会话 epoch 约束。
-    expect(await __testListWalletObjectPaths()).toContain("p2pkh/late-writer.bin");
+    expect(await __testListWalletObjectPaths()).toContain(`main/${__testGetActivePublicKeyHex()}/p2pkh/late-writer.bin`);
   });
 
   it("重新导入同一私钥仍是新的授权生命周期", async () => {
@@ -2146,7 +2209,7 @@ describe("Window P2P executor lease 与受限 signer（施工单 001 §3.1–3.2
       type: "initialize",
       plan: {
         transactionId: "b11-second-key",
-        firstKey: {
+        firstKey: {bsvNetwork: "main" as const,
           kind: "import",
           label: "switched-owner",
           material: { hex: TEST_PRIV_2 },
@@ -2354,6 +2417,21 @@ describe("Session Coordinator MSFile RPC lane", () => {
     expect(["ok", "accepted", "already-unlocked"]).toContain(unlockedResponse.ack.status);
     return __testGetSnapshot().sessionEpoch;
   }
+
+  it("reads and writes platform-managed App settings through the MSFile RPC lane", async () => {
+    await unlockVault();
+    const listed = await __testDispatchMsfileControl({ type: "app-authorizations.list" });
+    expect(listed.ack.status).toBe("ok");
+    expect(listed.operationResult).toEqual([]);
+    const saved = await __testDispatchMsfileControl({
+      type: "app-policy.update",
+      input: { key: { ownerPublicKeyHex: __testGetActivePublicKeyHex()!, publisherPublicKeyHex: identity.publisherPublicKeyHex, appId: identity.appId }, override: { seedMaxPriceSatoshis: "100" } },
+    });
+    expect(saved.ack.status).toBe("ok");
+    expect(await __testListWalletObjectPaths()).toEqual(expect.arrayContaining([
+      expect.stringMatching(/\.keymaster\/system\/app\/app-settings\/app-settings\.json$/),
+    ]));
+  });
 
   it("rejects all data/control/grant traffic while the Vault is locked（审查修复）", async () => {
     // 全新状态：未创建 / 未解锁。
@@ -2735,8 +2813,8 @@ describe("Session Coordinator MSFile RPC lane", () => {
   it("rejects grants whose session lookup spans a lock/unlock cycle（审查修复）", async () => {
     await unlockVault();
     const epochAtEnqueue = __testGetSnapshot().sessionEpoch;
-    let releaseResolver!: (value: { sessionId: string; origin: string; ownerPublicKeyHex: string; appIdentity: typeof identity; revokedAt: number | null } | null) => void;
-    const gated = new Promise<{ sessionId: string; origin: string; ownerPublicKeyHex: string; appIdentity: typeof identity; revokedAt: number | null } | null>((resolve) => { releaseResolver = resolve; });
+    let releaseResolver!: (value: { sessionId: string; origin: string; networkIdentity: import("@keymaster/contracts").NetworkIdentity; ownerPublicKeyHex: string; appIdentity: typeof identity; revokedAt: number | null } | null) => void;
+    const gated = new Promise<{ sessionId: string; origin: string; networkIdentity: import("@keymaster/contracts").NetworkIdentity; ownerPublicKeyHex: string; appIdentity: typeof identity; revokedAt: number | null } | null>((resolve) => { releaseResolver = resolve; });
     __testSetStorageSessionResolver(() => gated);
 
     const pendingGrant = __testDispatchMsfileGrant({
@@ -2751,7 +2829,7 @@ describe("Session Coordinator MSFile RPC lane", () => {
     await __testLock();
     await __testUnlock("vault-pw");
 
-    releaseResolver({ sessionId: "session-gated", origin: "https://app.example", ownerPublicKeyHex, appIdentity: identity, revokedAt: null });
+    releaseResolver({ networkIdentity: {bsvNetwork: "main", publicKeyHex: ownerPublicKeyHex}, sessionId: "session-gated", origin: "https://app.example", ownerPublicKeyHex, appIdentity: identity, revokedAt: null });
     const result = await pendingGrant;
     expect(result.ack).toMatchObject({ status: "stale-epoch" });
   });
@@ -2759,7 +2837,7 @@ describe("Session Coordinator MSFile RPC lane", () => {
   it("never reaches the service when an existing grant spans a lock/unlock during session lookup（第五轮审查修复）", async () => {
     const epoch = await unlockVault();
     __testSetStorageSessionResolver(async (id) => id === "session-msfile"
-      ? { sessionId: id, origin: "https://app.example", ownerPublicKeyHex: __testGetSnapshot().activePublicKeyHex!, appIdentity: identity, revokedAt: null }
+      ? { networkIdentity: {bsvNetwork: "main", publicKeyHex: __testGetSnapshot().activePublicKeyHex!}, sessionId: id, origin: "https://app.example", ownerPublicKeyHex: __testGetSnapshot().activePublicKeyHex!, appIdentity: identity, revokedAt: null }
       : null);
     const granted = await __testDispatchMsfileGrant({
       connectSessionId: "session-msfile",
@@ -2778,8 +2856,8 @@ describe("Session Coordinator MSFile RPC lane", () => {
     } as never);
 
     // 让 authoritative session 查询悬挂，期间 lock → unlock。
-    let releaseResolver!: (value: { sessionId: string; origin: string; ownerPublicKeyHex: string; appIdentity: typeof identity; revokedAt: number | null } | null) => void;
-    const gated = new Promise<{ sessionId: string; origin: string; ownerPublicKeyHex: string; appIdentity: typeof identity; revokedAt: number | null } | null>((resolve) => { releaseResolver = resolve; });
+    let releaseResolver!: (value: { sessionId: string; origin: string; networkIdentity: import("@keymaster/contracts").NetworkIdentity; ownerPublicKeyHex: string; appIdentity: typeof identity; revokedAt: number | null } | null) => void;
+    const gated = new Promise<{ sessionId: string; origin: string; networkIdentity: import("@keymaster/contracts").NetworkIdentity; ownerPublicKeyHex: string; appIdentity: typeof identity; revokedAt: number | null } | null>((resolve) => { releaseResolver = resolve; });
     __testSetStorageSessionResolver(() => gated);
     const pendingRead = __testDispatchMsfileData({ type: "read-seed", grantId, sourceId: `remote-proxy:${identity.publisherPublicKeyHex}`, seedHashHex: "ab".repeat(32) }, "port-a");
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -2787,7 +2865,7 @@ describe("Session Coordinator MSFile RPC lane", () => {
     await __testUnlock("vault-pw");
 
     // 释放后：grant 已随 lock 清空 → 拒绝且 service 从未被调用。
-    releaseResolver({ sessionId: "session-msfile", origin: "https://app.example", ownerPublicKeyHex, appIdentity: identity, revokedAt: null });
+    releaseResolver({ networkIdentity: {bsvNetwork: "main", publicKeyHex: ownerPublicKeyHex}, sessionId: "session-msfile", origin: "https://app.example", ownerPublicKeyHex, appIdentity: identity, revokedAt: null });
     const result = await pendingRead;
     expect(result.ack).toMatchObject({ status: "error", code: "msfile_identity_required" });
     expect(readSeedSpy).not.toHaveBeenCalled();
@@ -2797,7 +2875,7 @@ describe("Session Coordinator MSFile RPC lane", () => {
   it("refuses to bind a grant when the session owner is not the active runtime owner（审查修复）", async () => {
     await unlockVault();
     const otherOwner = validPublisherKey(31);
-    __testSetStorageSessionResolver(async () => ({
+    __testSetStorageSessionResolver(async () => ({ networkIdentity: {bsvNetwork: "main", publicKeyHex: otherOwner},
       sessionId: "session-owner-mismatch",
       origin: "https://app.example",
       ownerPublicKeyHex: otherOwner,
@@ -2818,7 +2896,7 @@ describe("Session Coordinator MSFile RPC lane", () => {
     // 审查修复后 grant 要求 session owner === active runtime owner。
     const activeOwner = __testGetSnapshot().activePublicKeyHex!;
     __testSetStorageSessionResolver(async (id) => id === "session-msfile"
-      ? { sessionId: id, origin: "https://app.example", ownerPublicKeyHex: activeOwner, appIdentity: identity, revokedAt: null }
+      ? { networkIdentity: {bsvNetwork: "main", publicKeyHex: activeOwner}, sessionId: id, origin: "https://app.example", ownerPublicKeyHex: activeOwner, appIdentity: identity, revokedAt: null }
       : null);
     const granted = await __testDispatchMsfileGrant({
       connectSessionId: "session-msfile",
@@ -2897,7 +2975,7 @@ describe("单元可用性：ensure* 的结构化不可用契约", () => {
     // 被禁的形态是「await reconcile 之后如果还没起来就抛 not ready」。因此只禁
     // `await` 形式；通知式的 `reconcileCoordinatorRuntime()`（不等、只通知框架
     // 重判）是合法机制，`ensureStorageRuntime` 仍在用。
-    const source = readFileSync(new URL("./keymasterSessionCoordinator.worker.ts", import.meta.url), "utf8");
+    const source = readFileSync(new URL("./assembly/coordinatorWorker.ts", import.meta.url), "utf8");
     for (const name of ["ensureMsfileRuntime", "ensureSatRuntime", "ensureStorageRuntime"]) {
       const body = extractFunctionBody(source, name);
       expect(body, `${name} 不得再 await reconcile 后祈祷就绪`).not.toContain("await reconcileCoordinatorRuntime()");
@@ -2909,12 +2987,12 @@ describe("单元可用性：ensure* 的结构化不可用契约", () => {
     // 构造及异步恢复后调用该判定。检查装配与插件两端，防止搬迁后丢掉门禁。
     const p2pkh = readFileSync(new URL("../../../packages/plugin-p2pkh/src/workerTransferRuntime.ts", import.meta.url), "utf8");
     expect(p2pkh).toContain("deps.assertActive();");
-    const assembly = readFileSync(new URL("./keymasterSessionCoordinator.worker.ts", import.meta.url), "utf8");
-    expect(assembly).toMatch(/createWorkerTransferRuntime\([\s\S]*?assertActive:[\s\S]*?assertCoordinatorUnitConstructible/);
+    const assembly = readFileSync(new URL("./assembly/coordinatorWorker.ts", import.meta.url), "utf8");
+    expect(assembly).toMatch(/createP2pkhWorkerRuntime\([\s\S]*?assertActive:[\s\S]*?assertCoordinatorUnitConstructible/);
     // storage 单元是例外且必须如此：构造前置条件里含「中央存储根已就绪」，而
     // ensureStorageRuntime 正是建立存储根的那一方，对它断言会自锁。因此这里
     // 只覆盖另外三个。
-    const source = readFileSync(new URL("./keymasterSessionCoordinator.worker.ts", import.meta.url), "utf8");
+    const source = readFileSync(new URL("./assembly/coordinatorWorker.ts", import.meta.url), "utf8");
     for (const name of ["ensureMsfileRuntime", "ensureSatRuntime"]) {
       expect(extractFunctionBody(source, name), `${name} 必须走统一可用性判定`)
         .toContain("assertCoordinatorUnitConstructible");
@@ -2954,8 +3032,45 @@ describe("单元可用性：对外单元名单的可见性", () => {
 // These tests run the production Worker setup, not the Window adapter's issuer.
 import { createPluginHost as createNativeWorkerHost } from "webloom-framework/advanced";
 import { type PluginContext as NativePluginContext } from "webloom-framework";
-import { VAULT_WALLET_STATE_CAPABILITY, type VaultWalletState } from "@keymaster/contracts";
-import { __testCoordinatorRuntimePlugin } from "./keymasterSessionCoordinator.worker.js";
+import {
+  FORUM_WORKER_NETWORK_CAPABILITY,
+  VAULT_WALLET_STATE_CAPABILITY,
+  type ForumWorkerNetwork,
+  type VaultWalletState,
+} from "@keymaster/contracts";
+import { __testCoordinatorRuntimePlugin } from "./assembly/coordinatorWorkerTesting.js";
+
+describe("插件自有 WOC Worker 生命周期", () => {
+  it("真实钱包装配后，撤销旧查询句柄并在重启时创建新实例", async () => {
+    await __testResetWalletStore();
+    await bootstrapReadyWallet("woc-worker-ownership");
+    const definitions = ["vault", "storage", "woc"].map(__testCoordinatorRuntimePlugin);
+    const instances: Array<{ id: string; query: import("@keymaster/contracts").WocService }> = [];
+    const { WOC_CAPABILITY } = await import("@keymaster/contracts");
+    const host = createNativeWorkerHost({ runtime: "shared-worker", runtimeUnitImplementationRegistry: {
+      get: id => async context => {
+        const definition = definitions.find(candidate => candidate.manifest.id === id);
+        if (!definition) throw new Error(`Missing production Worker: ${id}`);
+        const teardown = await definition.setup(context);
+        if (id === "woc") instances.push({ id: context.instanceId, query: context.capability(WOC_CAPABILITY) });
+        return async () => { await teardown?.(); };
+      },
+    } });
+    try {
+      await host.registerAll(definitions.map(definition => definition.manifest));
+      expect(host.state("woc").kind).toBe("enabled");
+      const previous = instances[0]!;
+      expect(previous.query.getConfig().baseUrl).toBeTruthy();
+      await host.revoke("woc", "ownership test");
+      expect(() => previous.query.getConfig()).toThrow();
+      await host.retry("woc");
+      expect(host.state("woc").kind).toBe("enabled");
+      expect(instances[1]!.id).not.toBe(previous.id);
+      expect(instances[1]!.query.getConfig().baseUrl).toBeTruthy();
+      expect(() => previous.query.getQueueSnapshot()).toThrow();
+    } finally { await host.dispose(); await __testResetWalletStore(); }
+  });
+});
 
 describe("正式 Worker setup 的钱包状态绑定", () => {
   it("accepts its issued Worker consumer, rejects forged identities and cleans both instance boundaries", async () => {
@@ -2981,7 +3096,7 @@ describe("正式 Worker setup 的钱包状态绑定", () => {
       // A pending task outlives its revoked owner Scope until its Promise settles.
       // Snapshot generation must clear its identity without bypassing the view's guard.
       const taskView = view;
-      __testRegisterTask({ id: "revoked-owner-projection", publicKeyHex: "02" + "ab".repeat(32), keyScope: () => ({ publicKeyHex: taskView.snapshot().activePublicKeyHex! }), run: async () => {} });
+      __testRegisterTask({ bsvNetwork: "main", id: "revoked-owner-projection", publicKeyHex: "02" + "ab".repeat(32), keyScope: () => taskView.snapshot().activeKeyIdentity, run: async () => {} });
       await host.revoke("window-p2p", "consumer removed");
       expect(__testGetSnapshot().taskSnapshots.find(task => task.id === "revoked-owner-projection")?.keyScope).toBeUndefined();
       expect((await __testLock()).ack.status).toBe("accepted");
@@ -3007,5 +3122,201 @@ describe("正式 Worker setup 的钱包状态绑定", () => {
       await host.registerAll([provider.manifest, { ...consumer.manifest, units: consumer.manifest.units!.map(unit => ({ ...unit, dependencies: [] })) }]);
       expect(host.state("window-p2p").kind).toBe("failed");
     } finally { await host.dispose(); __testResetState(); }
+  });
+});
+
+// Forum owner-session Worker 单元（第 1 阶段：受限网络能力）的装配与生命周期。
+describe("Forum Worker 单元的受限网络装配", () => {
+  const VALID_REQUEST = {
+    kind: "forum.roundtrip" as const,
+    address: "/ip4/127.0.0.1/tcp/8080/p2p/12D3KooW",
+    forumPublicKeyHex: `02${"11".repeat(32)}`,
+    requestBytesHex: "0102ff",
+  };
+
+  beforeEach(async () => { await bootstrapReadyWallet("forum-host"); });
+  afterEach(async () => { await __testResetWalletStore(); });
+
+  // 所有提供方使用真实生产定义；生命周期验收不以空对象冒充领域 capability。
+  function runtimeDefinitions() {
+    return ["vault", "storage", "window-p2p", "woc", "p2pkh", "sat-subscription", "msfile", "forum"].map(__testCoordinatorRuntimePlugin);
+  }
+
+  it("loads local-file settings and App authorizations through production scoped storage", async () => {
+    const definitions = runtimeDefinitions();
+    let service: import("@keymaster/contracts").MsFileService | undefined;
+    const consumer = {
+      id: "msfile-settings-consumer", name: "MSFile settings consumer",
+      units: [{ id: "msfile-settings-consumer.worker", runtime: "shared-worker" as const, scopeKind: "owner-session" as const,
+        dependencies: [{ capability: MSFILE_SERVICE_CAPABILITY, sourceRuntime: "shared-worker" as const }] }],
+      setup: async (ctx: NativePluginContext) => { service = ctx.capability(MSFILE_SERVICE_CAPABILITY); },
+    };
+    const host = createNativeWorkerHost({ runtime: "shared-worker",
+      runtimeUnitImplementationRegistry: { get: id => definitions.find(plugin => plugin.manifest.id === id)?.setup ?? consumer.setup },
+    });
+    try {
+      await host.registerAll([...definitions.map(plugin => plugin.manifest), consumer]);
+      expect(host.state(consumer.id).kind).toBe("enabled");
+      expect(service).toBeDefined();
+      await expect(service!.getSettingsSnapshot()).resolves.toHaveProperty("globalSettings");
+      await expect(service!.listAppAuthorizations()).resolves.toEqual([]);
+      await service!.updateAppPriceOverride({
+        key: { ownerPublicKeyHex: __testGetActivePublicKeyHex()!, publisherPublicKeyHex: validPublisherKey(9), appId: "player.example" },
+        override: { seedMaxPriceSatoshis: "100" },
+      });
+      expect(await __testListWalletObjectPaths()).toEqual(expect.arrayContaining([
+        expect.stringMatching(/\.keymaster\/system\/app\/app-settings\/app-settings\.json$/),
+      ]));
+    } finally { await host.dispose(); }
+  });
+
+  /** 造一个只消费 Forum 受限网络能力的最小 Worker 插件，用来验证能力真的被发布。 */
+  function consumerOfForumNetwork(capture: (network: ForumWorkerNetwork) => void) {
+    return {
+      id: "forum-network-consumer",
+      name: "Forum network consumer",
+      units: [{
+        id: "forum-network-consumer.worker",
+        runtime: "shared-worker" as const,
+        scopeKind: "owner-session" as const,
+        dependencies: [{ capability: FORUM_WORKER_NETWORK_CAPABILITY, sourceRuntime: "shared-worker" as const }],
+      }],
+      setup: async (ctx: NativePluginContext) => {
+        capture(ctx.capability(FORUM_WORKER_NETWORK_CAPABILITY) as ForumWorkerNetwork);
+      },
+    };
+  }
+
+  it("发布受限网络能力；没有 Window executor 租约时明确失败而不是退回 Window 本地权威", async () => {
+    const definitions = runtimeDefinitions();
+    let network: ForumWorkerNetwork | undefined;
+    const consumer = consumerOfForumNetwork((value) => { network = value; });
+    const host = createNativeWorkerHost({
+      runtime: "shared-worker",
+      runtimeUnitImplementationRegistry: { get: id => definitions.find(plugin => plugin.manifest.id === id)?.setup ?? consumer.setup },
+    });
+    try {
+      await host.registerAll([...definitions.map(plugin => plugin.manifest), consumer]);
+      if (host.state("forum").kind !== "enabled") throw new Error(`forum unit failed: ${JSON.stringify(host.state("forum"))}`);
+      expect(host.state("forum").kind).toBe("enabled");
+      expect(host.state(consumer.id).kind).toBe("enabled");
+      expect(__testGetSnapshot().coordinatorWorkerUnits?.find(unit => unit.unitId === "forum.coordinator-worker"))
+        .toMatchObject({ productId: "forum", serviceIds: ["forum.network", "forum.service"] });
+
+      // 能力确实可用（对象已发布），但此刻没有 Window executor 租约：
+      // 必须以 ok:false 明确失败，而不是悄悄走别的网络路径。
+      expect(network).toBeDefined();
+      const outcome = await network!.roundtrip({ ...VALID_REQUEST });
+      expect(outcome).toMatchObject({ ok: false, code: "forum-worker-network" });
+      // 形状不合法的请求连 bridge 都不碰。
+      expect(await network!.roundtrip({ ...VALID_REQUEST, forumPublicKeyHex: "11" }))
+        .toMatchObject({ ok: false, code: "forum-worker-request" });
+    } finally {
+      await host.dispose();
+    }
+  });
+
+  it("撤销后被保留的旧能力引用不能再借 bridge 发请求；重建实例后可正常发送", async () => {
+    const definitions = runtimeDefinitions();
+    const generations: ForumWorkerNetwork[] = [];
+    const host = createNativeWorkerHost({
+      runtime: "shared-worker",
+      runtimeUnitImplementationRegistry: {
+        get: id => {
+          const definition = definitions.find(plugin => plugin.manifest.id === id);
+          if (definition) return definition.setup;
+          return async (ctx: NativePluginContext) => {
+            generations.push(ctx.capability(FORUM_WORKER_NETWORK_CAPABILITY) as ForumWorkerNetwork);
+          };
+        },
+      },
+    });
+    try {
+      await host.registerAll(definitions.map(plugin => plugin.manifest));
+      expect(host.state("forum").kind).toBe("enabled");
+      expect(generations).toHaveLength(0); // 还没有消费方；先装一个。
+
+      const consumer = consumerOfForumNetwork(() => undefined);
+      await host.registerAll([consumer]);
+      expect(host.state(consumer.id).kind).toBe("enabled");
+      const [retained] = generations;
+      expect(retained).toBeDefined();
+
+      // 撤销提供方单元：单元状态必须离开 enabled。
+      await host.revoke("forum", "unit removed");
+      expect(host.state("forum").kind).not.toBe("enabled");
+
+      // 关键：被保留下来的旧引用仍不能借到新租约发请求——它绑定的是已失效的那次 scope。
+      expect(await retained!.roundtrip({ ...VALID_REQUEST }))
+        .toMatchObject({ ok: false, code: "forum-worker-revoked" });
+    } finally {
+      await host.dispose();
+    }
+  });
+});
+
+// Forum roundtrip 必须真正进入 Worker bridge 的总预算（阶段 1 的预算边界）。
+describe("Forum roundtrip 的 bridge 预算", () => {
+  beforeEach(() => {
+    __testResetState();
+  });
+
+  afterEach(() => {
+    __testResetState();
+  });
+
+  it("按 hex 的实际 bridge 表示计量请求，并为最大响应一次性预留", async () => {
+    const result = await __testForumRoundtripBridgePressure({ attempts: 1, requestBytes: 1024 });
+    // 请求 1024 字节以 hex 字符串过桥：UTF-16 下是 2048 个 code unit。
+    const requestPortion = 1024 * 4;
+    expect(result.reservedBytesPerOperation).toBe(requestPortion + (1024 * 1024 + 16) * 4);
+    // 响应侧必须按最大帧预留：只算请求就等于让响应把预算撑破。
+    expect(result.reservedBytesPerOperation).toBeGreaterThan(requestPortion + 1024 * 1024);
+    expect(result.accepted).toBe(1);
+  });
+
+  it("1 MiB 请求不再是 0 字节（旧实现只认 wire/frame 字段）", async () => {
+    const result = await __testForumRoundtripBridgePressure({ attempts: 1, requestBytes: 1024 * 1024 });
+    expect(result.reservedBytesPerOperation).toBeGreaterThan(0);
+    expect(result.reservedBytesPerOperation).toBeGreaterThanOrEqual(1024 * 1024 * 2);
+  });
+
+  it("并发大帧请求会被总预算挡住一部分，其余排队而不是全部准入", async () => {
+    const result = await __testForumRoundtripBridgePressure({ attempts: 64, requestBytes: 1024 * 1024 });
+    // 单帧上限挡不住「很多个合法请求同时在途」：总预算必须真的起作用。
+    expect(result.peakItems).toBe(64);
+    expect(result.accepted).toBeGreaterThan(0);
+    expect(result.accepted).toBeLessThan(64);
+    expect(result.queued).toBe(64 - result.accepted);
+    expect(result.peakBytes).toBeLessThanOrEqual(32 * 1024 * 1024);
+    // 预算满之后不能出现负占用或超发。
+    expect(result.peakBytes).toBe(result.accepted * result.reservedBytesPerOperation);
+  });
+
+  it("取消并释放后预算归零，不留下泄漏", async () => {
+    const result = await __testForumRoundtripBridgePressure({ attempts: 8, requestBytes: 64 * 1024 });
+    expect(result.releasedBytes).toBe(0);
+    expect(result.releasedItems).toBe(0);
+  });
+
+  it("预算满时新的请求排队而不是被直接丢弃", async () => {
+    const first = await __testForumRoundtripBridgePressure({ attempts: 64, requestBytes: 1024 * 1024 });
+    expect(first.queued).toBeGreaterThan(0);
+    // 排队项仍在 items+queued 里被记账：丢失排队项等于「请求凭空消失」。
+    expect(first.peakItems).toBe(first.attempts);
+  });
+
+  it("畸形或缺失 hex 也按最大可能计费（计量不能因为形状不合法而归零）", async () => {
+    const valid = await __testForumRoundtripBridgePressure({ attempts: 1, requestBytes: 1 });
+    // 畸形帧仍然会被 postMessage 过去，因此不能比合法小帧更便宜。
+    // 空 hex 只按响应侧上限计；1 字节请求是它的上界减去 2 个 code unit。
+    const responseReservation = (1024 * 1024 + 16) * 4;
+    expect(valid.reservedBytesPerOperation).toBeGreaterThan(responseReservation);
+    expect(valid.reservedBytesPerOperation).toBeLessThanOrEqual(responseReservation + 4);
+  });
+
+  it("超过单帧上限的输入直接拒绝，不进入预算", async () => {
+    await expect(__testForumRoundtripBridgePressure({ attempts: 1, requestBytes: 2 * 1024 * 1024 }))
+      .rejects.toThrow(RangeError);
   });
 });

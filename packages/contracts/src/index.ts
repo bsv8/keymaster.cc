@@ -9,6 +9,7 @@
 export * from "./plugin.js";
 export { capabilityDescriptor } from "webloom-framework";
 export * from "./vault.js";
+export * from "./networkIdentity.js";
 export * from "./keyImport.js";
 export * from "./transfer.js";
 export * from "./p2pkhAddress.js";
@@ -74,6 +75,8 @@ export { BUILTIN_PLUGIN_DEFINITIONS } from "./generated/pluginDefinitions.js";
 export * from "./appStorageBinding.js";
 
 export * from "./p2pkhAssetReader.js";
+export * from "./forumWorker.js";
 export * from "./workerTransfer.js";
+export * from "./workerPlugin.js";
 export * from "./uriAction.js";
 export * from "./publicKeyUri.js";

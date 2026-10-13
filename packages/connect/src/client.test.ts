@@ -22,7 +22,7 @@ function createHarness(mode: KeymasterConnectMode = "popup", hasOpener = true): 
   const popup = {
     closed: false,
     close,
-    postMessage: (message: unknown, targetOrigin: string) => posted.push({ message, targetOrigin })
+    postMessage: (message: unknown, targetOrigin: string) => posted.push({  message, targetOrigin })
   } as unknown as Window;
   const open = vi.fn(() => popup);
   const environment: KeymasterBrowserEnvironment = {
@@ -36,7 +36,7 @@ function createHarness(mode: KeymasterConnectMode = "popup", hasOpener = true): 
     clearInterval: (timer) => globalThis.clearInterval(timer),
     randomUUID: () => "generated-request"
   };
-  const client = new KeymasterConnectClient({
+  const client = new KeymasterConnectClient({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
     targetOrigin: "https://keymaster.example/a-path-is-not-an-origin",
     mode,
     readyTimeoutMs: 1_000,
@@ -57,6 +57,22 @@ function createHarness(mode: KeymasterConnectMode = "popup", hasOpener = true): 
 }
 
 describe("KeymasterConnectClient", () => {
+  it.each(["outer", "session"])("rejects a same-key test identity in the %s response", async (field) => {
+    const ctx = createHarness();
+    const pending = ctx.client.login({ text: "Sign in" }, { requestId: "cross-network" });
+    const rejection = expect(pending).rejects.toThrow("network identity mismatch");
+    ctx.emit({ v: 1, type: "ready" });
+    await vi.waitFor(() => expect(ctx.posted).toHaveLength(1));
+    const main = { bsvNetwork: "main", publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" };
+    const test = { ...main, bsvNetwork: "test" };
+    ctx.emit({ v: 1, type: "result", id: "cross-network", ok: true,
+      networkIdentity: field === "outer" ? test : main,
+      result: { networkIdentity: field === "session" ? test : main, ownerPublicKeyHex: main.publicKeyHex, connectSessionId: "session" },
+    });
+    await rejection;
+    ctx.client.close();
+  });
+
   it("opens once, waits for ready, and resolves a typed request", async () => {
     const ctx = createHarness();
     const pending = ctx.client.login({ text: "Sign in" }, { requestId: "login-1" });
@@ -66,7 +82,7 @@ describe("KeymasterConnectClient", () => {
     await vi.waitFor(() => expect(ctx.posted).toHaveLength(1));
     expect(ctx.posted[0]).toEqual({
       targetOrigin: "https://keymaster.example",
-      message: {
+      message: {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
         v: 1,
         type: "request",
         id: "login-1",
@@ -75,14 +91,14 @@ describe("KeymasterConnectClient", () => {
       }
     });
 
-    ctx.emit({
+    ctx.emit({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
       v: 1,
       type: "result",
       id: "login-1",
       ok: true,
-      result: {
+      result: {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
         connectSessionId: "session-1",
-        ownerPublicKeyHex: `02${"11".repeat(32)}`,
+        ownerPublicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
         resolvedClaims: {},
         resolvedAt: 1
       }
@@ -109,7 +125,7 @@ describe("KeymasterConnectClient", () => {
     const pending = ctx.client.resume("session-1");
     ctx.emit({ v: 1, type: "ready" });
     await vi.waitFor(() => expect(ctx.posted).toHaveLength(1));
-    ctx.emit({
+    ctx.emit({networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" },
       v: 1,
       type: "result",
       id: "generated-request",
@@ -184,6 +200,7 @@ describe("KeymasterConnectClient", () => {
     ["cipherEncrypt", "cipher.encrypt"],
     ["cipherDecrypt", "cipher.decrypt"],
     ["p2pkhTransfer", "p2pkh.transfer"],
+    ["registerPaymentChannel", "payment.channel.register"],
     ["channelPublish", "channel.publish"],
     ["channelSubscriptionSet", "channel.subscription_set"],
     ["priceGet", "price.get"],

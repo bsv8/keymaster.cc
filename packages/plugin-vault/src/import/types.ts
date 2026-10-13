@@ -26,7 +26,7 @@ export interface KeyImportResult {
   material: KeyImportMaterial;
   /** 派生的 BSV 地址。 */
   address: string;
-  /** 推断的网络；未指定时由调用方决定。 */
+  /** 导入编码携带的网络（WIF 前缀）；无此字段的格式由用户选择网络。 */
   network?: BsvNetwork;
   /**
    * 解析时观察到的格式，例如 "wif-mainnet"、"bsv8-key-envelope"。
@@ -108,6 +108,7 @@ export interface KeyImportWizardProps {
 
 /** importer 解析后的 Key 草稿；不包含桶密码或导入源密码。 */
 export interface InitialSetupImportedKeyDraft {
+  bsvNetwork: BsvNetwork;
   /** 页面显示标签。 */
   label: string;
   /** 临时私钥材料，只在最终提交前留在内存。 */

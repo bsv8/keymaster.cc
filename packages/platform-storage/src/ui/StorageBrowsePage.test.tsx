@@ -34,6 +34,7 @@ interface ListCall {
 interface PendingList {
   call: ListCall;
   resolve: (page: StorageBrowsePage) => void;
+  reject: (error: unknown) => void;
 }
 
 interface PendingPreview {
@@ -58,7 +59,7 @@ function createFakeService() {
       };
       listCalls.push(call);
       return new Promise<StorageBrowsePage>((resolve, reject) => {
-        pendingLists.push({ call, resolve });
+        pendingLists.push({ call, resolve, reject });
         options?.signal?.addEventListener("abort", () => reject(abortError()));
       });
     },
@@ -90,6 +91,15 @@ function createFakeService() {
       const pending = pendingLists[pendingLists.length - 1];
       if (!pending) throw new Error("no pending list request");
       pending.resolve({ entries, ...(nextCursor === undefined ? {} : { nextCursor }) });
+      await flush();
+    },
+    /** 让最后一次列表请求失败（例如存储暂时不可用）。 */
+    async failList(code = "storage_provider_error") {
+      const pending = pendingLists[pendingLists.length - 1];
+      if (!pending) throw new Error("no pending list request");
+      const error = new Error("Listing failed") as Error & { code?: string };
+      error.code = code;
+      pending.reject(error);
       await flush();
     },
     /** 结算某一次预览请求（按 path 定位，便于乱序兑现）。 */
@@ -342,7 +352,7 @@ describe("StorageBrowsePage races (L01)", () => {
 });
 
 describe("StorageBrowsePage directory marker (F04)", () => {
-  it("shows the selected directory's own marker object in properties", async () => {
+  it("shows the selected directory's own marker object, and the containing marker for files", async () => {
     const fake = createFakeService();
     await renderPage(fake.service);
     await waitFor(() => expect(fake.pendingListCount()).toBe(1));
@@ -351,13 +361,60 @@ describe("StorageBrowsePage directory marker (F04)", () => {
       entry("apps/notes.txt"),
     ]);
 
+    // 进入 apps 目录：目录信息里直接看到它自己的 .dir 标记。
     fireEvent.click(await screen.findByRole("button", { name: "apps" }));
     await waitFor(() => expect(fake.listCalls.at(-1)?.prefix).toBe("apps"));
-    await fake.settleList([entry("apps/.dir", { size: 0, contentType: "application/x-directory", revision: "rev-marker" })]);
+    await fake.settleList([
+      entry("apps/.dir", { size: 0, contentType: "application/x-directory", revision: "rev-marker" }),
+      entry("apps/notes.txt"),
+    ]);
+    expect(await screen.findByText("apps/.dir")).toBeTruthy();
+
+    // 选中目录里的文件后，属性面板仍能追踪它所在目录的 .dir 标记。
+    fireEvent.click(await screen.findByRole("button", { name: "notes.txt" }));
+    await waitFor(() => expect(fake.previewCalls.length).toBe(1));
+    await fake.settlePreview("apps/notes.txt", "body");
 
     fireEvent.click(screen.getByRole("tab", { name: "Properties" }));
-    // 空目录也有标记可追踪：属性里能看到 .dir 的完整路径。
     expect(await screen.findByText("apps/.dir")).toBeTruthy();
+  });
+});
+
+describe("StorageBrowsePage navigation (layout)", () => {
+  it("keeps the detail pane visible: directories show their own info, files show the preview", async () => {
+    const fake = createFakeService();
+    await renderPage(fake.service);
+    await waitFor(() => expect(fake.pendingListCount()).toBe(1));
+    await fake.settleList([entry("apps/notes.txt")]);
+
+    // 未选中时内容区仍在，给出引导而不是消失。
+    const detail = document.querySelector(".storage-browse__detail") as HTMLElement;
+    expect(detail).not.toBeNull();
+    expect(within(detail).getByText("Select a file or directory in the file tree.")).toBeTruthy();
+
+    // 进入目录：内容区显示目录信息，面包屑显示目录路径。
+    fireEvent.click(await screen.findByRole("button", { name: "apps" }));
+    const crumbs = document.querySelector(".storage-browse__crumbs") as HTMLElement;
+    expect(within(crumbs).getByText("apps")).toBeTruthy();
+    await waitFor(() => expect(fake.listCalls.at(-1)?.prefix).toBe("apps"));
+    await fake.settleList([entry("apps/notes.txt")]);
+    expect(within(detail).getByText("Directory")).toBeTruthy();
+    expect(within(detail).getByText("Loaded direct children")).toBeTruthy();
+    expect(within(detail).queryByRole("tab")).toBeNull();
+
+    // 选中文件：内容区出现预览标签与内容；面包屑带出文件名，父目录仍是可导航按钮。
+    fireEvent.click(await screen.findByRole("button", { name: "notes.txt" }));
+    expect(within(detail).getByRole("tab", { name: "Preview" })).toBeTruthy();
+    expect(within(crumbs).getByRole("button", { name: "apps" })).toBeTruthy();
+    expect(within(crumbs).getByText("notes.txt")).toBeTruthy();
+    await waitFor(() => expect(fake.previewCalls.length).toBe(1));
+    await fake.settlePreview("apps/notes.txt", "hello");
+    expect(await screen.findByText("hello")).toBeTruthy();
+
+    // 点面包屑里的父目录：回到目录信息，预览内容离开屏幕。
+    fireEvent.click(within(crumbs).getByRole("button", { name: "apps" }));
+    expect(within(detail).getByText("Directory")).toBeTruthy();
+    expect(screen.queryByText("hello")).toBeNull();
   });
 });
 
@@ -395,27 +452,61 @@ describe("StorageBrowsePage bounded rendering (F03/U01)", () => {
     const entries = Array.from({ length: total }, (_, index) => entry(name(index)));
     await fake.settleList(entries);
 
-    const listing = within(document.querySelector(".storage-browse__listing") as HTMLElement);
-    const listNames = () => Array.from(document.querySelectorAll(".storage-browse__row-name")).map((node) => node.textContent);
+    const tree = within(document.querySelector(".storage-browse__tree") as HTMLElement);
     const treeNames = () => Array.from(document.querySelectorAll(".storage-browse__tree-label")).map((node) => node.textContent);
 
-    await waitFor(() => expect(listNames()).toHaveLength(BROWSE_DISPLAY_PAGE_SIZE));
-    // 渲染量等于一页：列表与文件树都是，目录再大也不会全量进 DOM。
-    expect(treeNames()).toHaveLength(BROWSE_DISPLAY_PAGE_SIZE);
-    expect(listNames()).not.toContain(name(total - 1));
-    expect(listing.getByText("Showing 1–200 of 205 loaded items.")).toBeTruthy();
+    await waitFor(() => expect(treeNames()).toHaveLength(BROWSE_DISPLAY_PAGE_SIZE));
+    // 渲染量等于一页：目录再大也不会全量进 DOM。
+    expect(treeNames()).not.toContain(name(total - 1));
+    expect(tree.getByText("Showing 1–200 of 205 loaded items.")).toBeTruthy();
 
     // 翻页换的是下标窗口，不是不断加长同一个切片。
-    fireEvent.click(listing.getByRole("button", { name: "Next items" }));
-    await waitFor(() => expect(listNames()).toHaveLength(5));
-    expect(listNames().at(-1)).toBe(name(total - 1));
-    expect(listNames().at(0)).toBe(name(BROWSE_DISPLAY_PAGE_SIZE));
-    expect(listing.getByText("Showing 201–205 of 205 loaded items.")).toBeTruthy();
-    expect(listing.getByRole("button", { name: "Next items" })).toHaveProperty("disabled", true);
+    fireEvent.click(tree.getByRole("button", { name: "Next items" }));
+    await waitFor(() => expect(treeNames()).toHaveLength(5));
+    expect(treeNames().at(-1)).toBe(name(total - 1));
+    expect(treeNames().at(0)).toBe(name(BROWSE_DISPLAY_PAGE_SIZE));
+    expect(tree.getByText("Showing 201–205 of 205 loaded items.")).toBeTruthy();
+    expect(tree.getByRole("button", { name: "Next items" })).toHaveProperty("disabled", true);
 
     // 翻回第一页：每一项都仍然可达。
-    fireEvent.click(listing.getByRole("button", { name: "Previous items" }));
-    await waitFor(() => expect(listNames()).toHaveLength(BROWSE_DISPLAY_PAGE_SIZE));
-    expect(listNames().at(0)).toBe(name(0));
+    fireEvent.click(tree.getByRole("button", { name: "Previous items" }));
+    await waitFor(() => expect(treeNames()).toHaveLength(BROWSE_DISPLAY_PAGE_SIZE));
+    expect(treeNames().at(0)).toBe(name(0));
+  });
+
+  it("keeps the load-more entry in the tree while a directory still has a cursor (F03)", async () => {
+    const fake = createFakeService();
+    await renderPage(fake.service);
+    await waitFor(() => expect(fake.pendingListCount()).toBe(1));
+    // 第一页结算后仍有游标：没有扫完，「继续加载」必须留在树里。
+    await fake.settleList([entry("a.txt")], "cursor-1");
+    const tree = within(document.querySelector(".storage-browse__tree") as HTMLElement);
+    fireEvent.click(tree.getByRole("button", { name: "Load more" }));
+
+    // 继续加载沿用游标，而不是从头重扫。
+    await waitFor(() => expect(fake.listCalls.length).toBe(2));
+    expect(fake.listCalls.at(-1)).toMatchObject({ prefix: "", cursor: "cursor-1" });
+    await fake.settleList([entry("b.txt")]);
+
+    // 游标消失后入口也消失：不再声称还有更多对象。
+    await waitFor(() => expect(tree.queryByRole("button", { name: "Load more" })).toBeNull());
+    expect(tree.getByRole("button", { name: "a.txt" })).toBeTruthy();
+    expect(tree.getByRole("button", { name: "b.txt" })).toBeTruthy();
+  });
+
+  it("offers a retry in the tree when a directory listing fails (U01)", async () => {
+    const fake = createFakeService();
+    await renderPage(fake.service);
+    await waitFor(() => expect(fake.pendingListCount()).toBe(1));
+    await fake.failList();
+
+    // 失败与空目录必须可区分，并给出可重试入口。
+    const tree = within(document.querySelector(".storage-browse__tree-status") as HTMLElement);
+    expect(await tree.findByText("This directory could not be listed.")).toBeTruthy();
+    fireEvent.click(tree.getByRole("button", { name: "Retry" }));
+
+    await waitFor(() => expect(fake.listCalls.length).toBe(2));
+    await fake.settleList([entry("notes.txt")]);
+    expect(await screen.findByRole("button", { name: "notes.txt" })).toBeTruthy();
   });
 });

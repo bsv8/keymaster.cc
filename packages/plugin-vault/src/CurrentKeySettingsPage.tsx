@@ -5,13 +5,14 @@ import { useInternalVault } from "./VaultInternalContext.js";
 //
 // 单 Key 本地存储（docs/存储.md）之后，这一页就是"Key 管理"的全部：
 //   - 展示当前 Key 的公开信息与钱包身份世代；
-//   - 改名、改密、导出加密 KeyHold、锁定、重置钱包。
+//   - 改名、改密、导出加密 KeyHold、重置钱包。
 //
 // 它刻意**没有**：Key 列表、新建第二把 Key、切换 Key、删除 Key、导入备份。
 // 替换身份的唯一路径是"重置钱包后重新创建或导入"，而重置会删掉全部本地
 // 钱包数据，所以必须由一个明确的破坏性确认框把关，不能混在普通操作里。
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { PaymentChannelSettings, SignatureHistoryPanel } from "@keymaster/vaultlink-integration/ui";
 import { Button, Modal, PageHeader, TextInput } from "@keymaster/ui";
 import { usePluginI18n } from "@keymaster/runtime";
 import { usePluginCapability } from "webloom-framework/react";
@@ -20,12 +21,15 @@ import {
   formatShortPublicKey,
   type VaultLifecycleSnapshot,
 } from "@keymaster/contracts";
+import { VaultSoftwareMigrationModal } from "./VaultSoftwareMigrationModal.js";
+import { VaultHardwareMigrationModal } from "./VaultHardwareMigrationModal.js";
 import { VaultChangePasswordModal } from "./VaultChangePasswordModal.js";
 import { VaultKeyHoldExportModal } from "./VaultKeyHoldExportModal.js";
 import { VaultResetWalletModal } from "./VaultResetWalletModal.js";
 
 export function CurrentKeySettingsPage() {
   const vault = useInternalVault();
+  const payment = useCallback((command: import("@keymaster/contracts").CoordinatorWalletPaymentCommand) => vault.payment(command), [vault]);
   const { t } = usePluginI18n();
   const [snapshot, setSnapshot] = useState<VaultLifecycleSnapshot>(() => vault.walletSnapshot());
   const [label, setLabel] = useState<string | null>(null);
@@ -35,21 +39,26 @@ export function CurrentKeySettingsPage() {
   const [exporting, setExporting] = useState(false);
   const [changingPassword, setChangingPassword] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const [migrating,setMigrating]=useState(false);
+  const [importing,setImporting]=useState(false);
 
   useEffect(() => vault.subscribeWalletState(setSnapshot), [vault]);
 
   const publicKeyHex = snapshot.activePublicKeyHex;
+  const history=useCallback(()=>vault.payment({action:"signature-history"}),[vault,snapshot.walletGeneration,snapshot.sessionEpoch]);
   // 显示名由 vault 单独读取：lifecycle 事件只带公钥，避免每个会话事件都
   // 附带一份 Key 元数据。
   const [currentLabel, setCurrentLabel] = useState<string | null>(null);
+  const [hardware, setHardware] = useState<boolean>();
   useEffect(() => {
     let cancelled = false;
-    if (!publicKeyHex) { setCurrentLabel(null); return; }
+    if (!publicKeyHex) { setCurrentLabel(null); setHardware(undefined); return; }
+    setHardware(undefined);
     void vault.getCurrentKey()
-      .then((key) => { if (!cancelled) setCurrentLabel(key?.label ?? null); })
-      .catch(() => { if (!cancelled) setCurrentLabel(null); });
+      .then((key) => { if (!cancelled) {setCurrentLabel(key?.label ?? null);setHardware(key ? key.format === "keymaster.hardware-key" : undefined);} })
+      .catch(() => { if (!cancelled) {setCurrentLabel(null);setHardware(undefined);} });
     return () => { cancelled = true; };
-  }, [vault, publicKeyHex, snapshot.runGeneration, snapshot.walletGeneration]);
+  }, [vault, publicKeyHex, snapshot.runGeneration, snapshot.walletGeneration, snapshot.sessionEpoch]);
 
   async function submitRename() {
     const next = (label ?? currentLabel ?? "").trim();
@@ -68,14 +77,6 @@ export function CurrentKeySettingsPage() {
       setError(err instanceof Error ? err.message : t("vault.settings.err.rename", { defaultValue: "重命名失败" }));
     } finally {
       setRenamingBusy(false);
-    }
-  }
-
-  async function lockNow() {
-    setError(null);
-    const result = await vault.lock();
-    if (result.status !== "accepted" && result.status !== "ok" && result.status !== "stale-epoch") {
-      setError("message" in result ? result.message : `${t("vault.settings.err.lock", { defaultValue: "锁定失败" })}: ${result.status}`);
     }
   }
 
@@ -106,7 +107,8 @@ export function CurrentKeySettingsPage() {
         })}
       />
 
-      <section className="current-key-export-card" aria-labelledby="current-key-export-title">
+      {hardware === true ? <p role="note">{t("vault.currentKey.hardwareSecurity", {defaultValue:"PIN 和设备备份请在 RocKey 上管理。"})}</p> : null}
+      {hardware === false ? <section className="current-key-export-card" aria-labelledby="current-key-export-title">
         <div className="current-key-export-card__identity">
           <span>{t("vault.currentKey.identity.label", { defaultValue: "当前 Key" })}</span>
           <strong>{currentLabel || t("vault.settings.empty.label", { defaultValue: "未命名" })}</strong>
@@ -131,7 +133,7 @@ export function CurrentKeySettingsPage() {
             {t("vault.currentKey.export.action", { defaultValue: "导出 KeyHold" })}
           </Button>
         </div>
-      </section>
+      </section> : null}
 
       <section className="vault-key-actions" aria-label={t("vault.settings.actions.title", { defaultValue: "Key 操作" })}>
         <h2>{t("vault.settings.actions.title", { defaultValue: "Key 操作" })}</h2>
@@ -143,18 +145,23 @@ export function CurrentKeySettingsPage() {
           >
             {t("vault.settings.action.rename", { defaultValue: "重命名" })}
           </Button>
-          <Button variant="ghost" onClick={() => setChangingPassword(true)}>
+          {hardware === false ? <Button variant="ghost" onClick={()=>setImporting(true)}>{t("vault.import.title",{defaultValue:"迁入 RocKey"})}</Button> : null}
+          {hardware === true ? <Button variant="ghost" onClick={()=>setMigrating(true)}>{t("vault.migration.action",{defaultValue:"迁回软件钱包"})}</Button> : null}
+          {hardware === false ? <Button variant="ghost" onClick={() => setChangingPassword(true)}>
             {t("vault.settings.action.changePassword", { defaultValue: "修改密码" })}
-          </Button>
-          <Button variant="ghost" onClick={() => void lockNow()}>
-            {t("vault.settings.action.lock", { defaultValue: "锁定钱包" })}
-          </Button>
+          </Button> : null}
           <Button variant="danger" onClick={() => setResetting(true)}>
             {t("vault.settings.action.resetWallet", { defaultValue: "重置钱包" })}
           </Button>
         </div>
       </section>
 
+      <PaymentChannelSettings execute={payment} text={(key, fallback) => t(`vault.${key}`, {defaultValue: fallback})} />
+
+      <SignatureHistoryPanel load={history} text={(key,fallback)=>t(`vault.signatureHistory.${key}`,{defaultValue:fallback})}/>
+
+      {importing ? <VaultSoftwareMigrationModal vault={vault} onClose={()=>setImporting(false)}/> : null}
+      {migrating ? <VaultHardwareMigrationModal vault={vault} onClose={()=>setMigrating(false)}/> : null}
       {renaming ? (
         <Modal
           open

@@ -34,7 +34,9 @@ export function createProtectedOutpointRegistry(): IProtectedOutpointRegistry {
     // 已撤销插件的 outpoint 写回 registry，否则会越过生命周期边界。
     if (providers.get(provider.id) !== provider) return;
     cache.set(provider.id, list.slice());
-    pruneClaims(provider, list);
+    pruneClaimsForOwner(provider.ownerPluginId ?? provider.id);
+    // 缓存变了就要通知一次：claim 是否被回收只是这次通知的内容之一，
+    // 分两次发会让订阅者看到中间状态。
     emitChange();
   }
 
@@ -46,35 +48,36 @@ export function createProtectedOutpointRegistry(): IProtectedOutpointRegistry {
     });
   }
 
-  function pruneClaims(provider: ProtectedOutpointProvider, nextList: ProtectedOutpoint[]): boolean {
-    const ownerPluginId = provider.ownerPluginId ?? provider.id;
+  /**
+   * 只回收「已经没有任何 provider 保护」的 claim。
+   *
+   * 同一个插件可以登记多个 provider（Forum 的专用资金与自有 Forum 输出都属于
+   * `forum`）。按插件粒度清理会让其中一个 provider 刷新或注销时把另一个的
+   * 在途占用一并删掉，于是第二次 claim 意外成功——占用保护就形同虚设。
+   * 因此判据是**所有仍存活的 provider 的输出并集**，而不是某一个 provider 的集合。
+   */
+  function pruneClaimsForOwner(ownerPluginId: string): boolean {
     let changed = false;
     for (const [key, claim] of claims.entries()) {
       if (claim.claimedByPluginId !== ownerPluginId) continue;
-      if (nextList.some((item) => item.ownerPluginId === ownerPluginId && sameOutpoint(item, claim))) continue;
+      if (stillProtected(claim)) continue;
       claims.delete(key);
       changed = true;
     }
     return changed;
   }
 
-  function clearClaimsForOwner(ownerPluginId: string): boolean {
-    let changed = false;
-    for (const [key, claim] of claims.entries()) {
-      if (claim.claimedByPluginId === ownerPluginId) {
-        claims.delete(key);
-        changed = true;
-      }
+  /** 该 outpoint 是否还被任意一个已注册 provider 保护。 */
+  function stillProtected(claim: ProtectedOutpoint & { claimedByPluginId: string }): boolean {
+    for (const list of cache.values()) {
+      if (list.some((item) => item.ownerPluginId === claim.claimedByPluginId && sameOutpoint(item, claim))) return true;
     }
-    return changed;
+    return false;
   }
 
   function disposeProvider(provider: ProtectedOutpointProvider): void {
     offChange.get(provider.id)?.();
     offChange.delete(provider.id);
-    if (clearClaimsForOwner(provider.ownerPluginId ?? provider.id)) {
-      emitChange();
-    }
     provider.dispose?.();
   }
 
@@ -95,11 +98,16 @@ export function createProtectedOutpointRegistry(): IProtectedOutpointRegistry {
         throw new Error(`Protected outpoint provider id "${id}" is not registered`);
       }
       const provider = providers.get(id);
-      if (provider) {
-        disposeProvider(provider);
-      }
+      // 先把 provider 从存活集合里拿掉，再按「并集」回收 claim：
+      // 反过来做的话它自己的缓存还在，claim 会因为「仍被自己保护」而被留下。
       providers.delete(id);
       cache.delete(id);
+      if (provider) {
+        disposeProvider(provider);
+        // 同插件的其它 provider 仍可能保护着这些 outpoint，因此只回收不再被保护的。
+        pruneClaimsForOwner(provider.ownerPluginId ?? provider.id);
+      }
+      emitChange();
     },
     list(filter) {
       const all: ProtectedOutpoint[] = [];

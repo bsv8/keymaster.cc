@@ -12,6 +12,8 @@ import type {
 
 /** 测试夹具用的固定世代；生产绑定由 Coordinator 逐次发放。 */
 export const IN_MEMORY_TEST_BINDING = Object.freeze({
+  bsvNetwork: "main" as const,
+  publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
   walletGeneration: "in-memory-wallet-generation",
   sessionEpoch: "in-memory-session-epoch",
   runGeneration: "in-memory-run-generation",

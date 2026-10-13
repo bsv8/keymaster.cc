@@ -26,7 +26,7 @@ describe("Coordinator runtime contract parsers", () => {
       declaration: CENTRAL_STORAGE_DECLARATIONS.protocolSessions,
       expectedSessionEpoch: "epoch-1",
     } as const satisfies CoordinatorRpcRequest;
-    const grant = {
+    const grant = {bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
       platformGrantId: "platform-1",
       walletGeneration: "11111111-1111-4111-8111-111111111111",
       runGeneration: "run-1",
@@ -383,7 +383,7 @@ describe("Coordinator runtime contract parsers", () => {
     const grant = parseCoordinatorResponseFor(rpcRequest("storage.owner.bind"), {
       sessionEpoch: "epoch-1",
       ack: { status: "ok" },
-      operationResult: {
+      operationResult: {bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
         storageGrantId: "grant-1",
         walletGeneration: "11111111-1111-4111-8111-111111111111",
         runGeneration: "run-1",
@@ -396,7 +396,7 @@ describe("Coordinator runtime contract parsers", () => {
         private: "discard",
       },
     });
-    expect(grant.operationResult).toEqual({
+    expect(grant.operationResult).toEqual({bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
       storageGrantId: "grant-1",
       walletGeneration: "11111111-1111-4111-8111-111111111111",
       runGeneration: "run-1",
@@ -413,7 +413,7 @@ describe("Coordinator runtime contract parsers", () => {
     const grant = parseCoordinatorResponseFor(rpcRequest("storage.owner.bind"), {
       sessionEpoch: "epoch-1",
       ack: { status: "ok" },
-      operationResult: {
+      operationResult: {bsvNetwork: "main" as const, publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
         storageGrantId: "grant-1",
         walletGeneration: "11111111-1111-4111-8111-111111111111",
         runGeneration: "run-1",
@@ -505,7 +505,7 @@ describe("Coordinator runtime contract parsers", () => {
   });
 
   it("dispatches nested Vault and crypto results by the complete request", () => {
-    const key = {
+    const key = {bsvNetwork: "main" as const,
       publicKeyHex: "02" + "11".repeat(32),
       label: "Primary",
       capabilities: ["p2pkh"],
@@ -673,7 +673,7 @@ describe("Coordinator runtime contract parsers", () => {
     expect(response(rpcRequest("sat.operation", { operation: { type: "ensure" } }), null).operationResult).toBeNull();
     expect(response(rpcRequest("channel.operation", { operation: { type: "release" } }), null).operationResult).toBeNull();
 
-    const key = {
+    const key = {bsvNetwork: "main" as const,
       publicKeyHex: "02" + "11".repeat(32),
       label: "Primary",
       capabilities: ["p2pkh"],
@@ -827,5 +827,56 @@ describe("Coordinator runtime contract parsers", () => {
     expect(() => parse(COORDINATOR_RPC_CAPABILITY.response, {
       sessionEpoch: "epoch-1", ack: { status: "ok" }, callId: "forged",
     })).toThrow();
+  });
+});
+
+// Migration is a private Vault DTO: no key bytes, host PIN or generic device commands.
+it("migration request/result boundaries reject private material and forged recovery phases",()=>{
+ const operation={type:"migrateToSoftware",newPassword:"new-password"};
+ expect(parse(COORDINATOR_RPC_CAPABILITY.request,{kind:"vault.operation",operation,expectedSessionEpoch:"epoch-1"})).toMatchObject({operation});
+ expect(()=>parse(COORDINATOR_RPC_CAPABILITY.request,{kind:"vault.operation",operation:{...operation,privateKey:new Uint8Array(32)},expectedSessionEpoch:"epoch-1"})).toThrow();
+ const request=rpcRequest("vault.operation",{operation});
+ const result={migrationId:"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",phase:"complete",target:"software"};
+ const envelope={ack:{status:"ok"},sessionEpoch:"epoch-2",operationResult:result};
+ expect(parseCoordinatorResponseFor(request,envelope)).toMatchObject({operationResult:result});
+ expect(()=>parseCoordinatorResponseFor(request,{...envelope,operationResult:{...result,privateKey:new Uint8Array(32)}})).toThrow();
+ const recovery=rpcRequest("vault.operation",{operation:{type:"migrationState"}});
+ expect(()=>parseCoordinatorResponseFor(recovery,{...envelope,operationResult:{migrationId:result.migrationId,phase:"local-committed",publicKeyHex:"02"+"00".repeat(32),passwordRequired:true}})).toThrow();
+});
+
+it('software migration and provisioning remain strict private DTOs and target-bound results',()=>{
+ const operation={type:'migrateToHardware'};
+ expect(parse(COORDINATOR_RPC_CAPABILITY.request,{kind:'vault.operation',operation,expectedSessionEpoch:'epoch-1'})).toMatchObject({operation});
+
+ for(const sourcePassword of [undefined,null,123,'x'.repeat(4097)])expect(()=>parse(COORDINATOR_RPC_CAPABILITY.request,{kind:'vault.operation',operation:{...operation,sourcePassword},expectedSessionEpoch:'epoch-1'})).toThrow();
+ expect(()=>parse(COORDINATOR_RPC_CAPABILITY.request,{kind:'vault.operation',operation:{type:'migrateToSoftware',newPassword:''},expectedSessionEpoch:'epoch-1'})).toThrow();
+ for(const extra of [{pin:'12345678'},{privateKey:new Uint8Array(32)},{approved:true}])expect(()=>parse(COORDINATOR_RPC_CAPABILITY.request,{kind:'vault.operation',operation:{...operation,...extra},expectedSessionEpoch:'epoch-1'})).toThrow();
+ const request=rpcRequest('vault.operation',{operation}),migrationId='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+ expect(parseCoordinatorResponseFor(request,{ack:{status:'ok'},sessionEpoch:'epoch-2',operationResult:{migrationId,phase:'complete',target:'hardware'}})).toMatchObject({operationResult:{target:'hardware'}});
+ expect(()=>parseCoordinatorResponseFor(request,{ack:{status:'ok'},sessionEpoch:'epoch-2',operationResult:{migrationId,phase:'complete',target:'software'}})).toThrow();
+ const recovery=rpcRequest('vault.operation',{operation:{type:'migrationState'}}),state={migrationId,phase:'local-committed',publicKeyHex:'02'+'00'.repeat(32),passwordRequired:false,target:'hardware'};
+ expect(parseCoordinatorResponseFor(recovery,{ack:{status:'ok'},sessionEpoch:'epoch-2',operationResult:state})).toMatchObject({operationResult:state});
+ const failed={...state,failure:'denied'};
+ expect(parseCoordinatorResponseFor(recovery,{ack:{status:'ok'},sessionEpoch:'epoch-2',operationResult:failed})).toMatchObject({operationResult:failed});
+ expect(()=>parseCoordinatorResponseFor(recovery,{ack:{status:'ok'},sessionEpoch:'epoch-2',operationResult:{...state,failure:'x'.repeat(513)}})).toThrow();
+ expect(()=>parseCoordinatorResponseFor(recovery,{ack:{status:'ok'},sessionEpoch:'epoch-2',operationResult:{...state,pin:'12345678'}})).toThrow();
+});
+
+describe("lock cleanup wire protocol", () => {
+  it("preserves first-failure diagnostics in failed and pending retry events", () => {
+    const diagnostics = "[attempt=1] price: exit failed\nresource=channel-runtime\nError: first failure";
+    const event = { topic: "session.state", type: "session.state.changed", cause: "lock", vaultStatus: "locked", activePublicKeyHex: null, sessionEpoch: "locked", runGeneration: "run", sessionRevision: 2 };
+    const failed = { phase: "failed", attempt: 1, error: "exit failed", diagnostics };
+    expect(parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, { ...event, lockCleanup: failed })).toMatchObject({ lockCleanup: failed });
+    const pending = { phase: "pending", attempt: 2, diagnostics };
+    expect(parse(COORDINATOR_TOPIC_STREAM_CAPABILITY.item, { ...event, sessionRevision: 3, lockCleanup: pending })).toMatchObject({ lockCleanup: pending });
+  });
+
+  it("preserves registration and attempt-bound page cleanup reports", () => {
+    const base = { kind: "lock", expectedSessionEpoch: "locked-epoch" };
+    expect(COORDINATOR_RPC_CAPABILITY.request.parse({ ...base, cleanup: { action: "register" } })).toMatchObject({ cleanup: { action: "register" } });
+    expect(COORDINATOR_RPC_CAPABILITY.request.parse({ ...base, cleanup: { action: "settled", attempt: 2, error: "Plugin cleanup failed\nresource=teardown\nstack: exit" } })).toMatchObject({ cleanup: { action: "settled", attempt: 2, error: "Plugin cleanup failed\nresource=teardown\nstack: exit" } });
+    expect(() => COORDINATOR_RPC_CAPABILITY.request.parse({ ...base, cleanup: { action: "settled", attempt: -1 } })).toThrow();
+    expect(() => COORDINATOR_RPC_CAPABILITY.request.parse({ ...base, cleanup: { action: "unknown" } })).toThrow();
   });
 });

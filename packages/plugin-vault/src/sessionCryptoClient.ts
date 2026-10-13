@@ -154,7 +154,8 @@ async function createWorkerBackedEngine(
     // structured-clone 副本；初始化失败也必须立即终止这个 Worker。
     identity = await request<ActiveKeyCryptoIdentity>("init", {
       sessionId: input.sessionId,
-      publicKeyHex: input.publicKeyHex,
+      bsvNetwork: input.bsvNetwork,
+    publicKeyHex: input.publicKeyHex,
       privateKeyBytes: input.privateKeyBytes,
       label: input.label,
       capabilities: input.capabilities,
@@ -202,6 +203,7 @@ async function createCoordinatorBackedEngine(
   let disposed = false;
   const identity: ActiveKeyCryptoIdentity = {
     sessionId: input.sessionId,
+    bsvNetwork: input.bsvNetwork,
     publicKeyHex: input.publicKeyHex,
     label: input.label,
     capabilities: input.capabilities,
@@ -238,6 +240,7 @@ async function createLocalEngine(input: SessionCryptoBootstrapInput): Promise<Se
   let disposed = false;
   const identity: ActiveKeyCryptoIdentity = {
     sessionId: input.sessionId,
+    bsvNetwork: input.bsvNetwork,
     publicKeyHex: input.publicKeyHex,
     label: input.label,
     capabilities: input.capabilities,

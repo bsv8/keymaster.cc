@@ -57,7 +57,7 @@ export function createOrdinalTransferService(input: {
     for (const u of sorted) {
       selected.push(u);
       try {
-        await input.protocolSpend.prepare({
+        const quote=await input.protocolSpend.prepare({
           ownerPublicKeyHex,
           requestingPluginId: "collectible-1satordinals",
           network,
@@ -66,6 +66,7 @@ export function createOrdinalTransferService(input: {
           feeRateSatoshisPerKb,
           changeAddress: selected[0]?.address
         });
+        await input.protocolSpend.releasePrepared?.(quote);
         return selected;
       } catch {
         // add more inputs

@@ -251,7 +251,9 @@ export async function startSatSubscriptionLocalServer(
   const postgresBinDir = requirePostgresBinDir(input);
   const whitelist = assertWhitelist(input.whitelistPublicKeys);
 
-  const runDir = await fs.mkdtemp(join(tmpdir(), "keymaster-satsubscription-e2e-"));
+  // macOS TMPDIR is already long; leave room for pgSock/.s.PGSQL.<port>
+  // under the Unix-domain socket path limit. This is still an isolated temp DB.
+  const runDir = await fs.mkdtemp(join(tmpdir(), "km-ssp-e2e-"));
   const dataDir = join(runDir, "pgdata");
   const socketDir = join(runDir, "pgsock");
   await fs.mkdir(socketDir, { recursive: true });

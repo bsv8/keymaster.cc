@@ -20,7 +20,7 @@ try {
     "",
     "由 `node scripts/generate-webloom-migration-inventory.mjs` 从真实 Web 发行版 manifest 生成。",
     "Poker 按用户要求整包移除，不再装配或提供 API；既有钱包数据保持原样。此表仅记录当前声明，不代表声明已完整、Worker 已实现或迁移已验收。实际调用、三个访问面、槽位、动态 UI、私有授权与旧数据基线仍需逐项核对。",
-    "Storage 的 `/settings/storage` 使用真实实例 consumer 与包内私有 Context。浏览契约、解析器和执行服务均归 Storage；Window → Worker 使用框架私有 RPC，公共 Coordinator 契约拒绝浏览消息。可信装配仅登记 storage.window → 默认槽位的授权，不输出授权凭据。Storage 浏览页、同路径状态块和既有持久存储授权条已通过 page 的三类注册入口挂载；读写指示灯使用私有 Context 的有界在途计数，并经 Page header 注册。物理 I/O 队列、数据执行器、授权复核、Worker 借用句柄与 K-V 维护已归 Storage 的 Worker 入口。Window/Worker 客户端均核验实际 consumer、Scope 与单元声明的 purpose。",
+    "Storage 的 `/settings/storage` 使用真实实例 consumer 与包内私有 Context。浏览契约、解析器和执行服务均归 Storage；Window → Worker 使用框架私有 RPC，公共 Coordinator 契约拒绝浏览消息。可信装配仅登记 storage.window → 默认槽位的授权，不输出授权凭据。Storage 浏览页与既有持久存储授权条已通过 page 的注册入口挂载；读写指示灯使用私有 Context 的有界在途计数，并经 Page header 注册。物理 I/O 队列、数据执行器、授权复核、Worker 借用句柄与 K-V 维护已归 Storage 的 Worker 入口。Window/Worker 客户端均核验实际 consumer、Scope 与单元声明的 purpose。",
     "bsv-price 的业务页和设置页已迁入 page，首页卡片绑定真实 consumer；价格 UI 使用实例语言/服务及仅本实例资源的 typed resource.owned-access 视图，包内私有 Context 持有视图。首页卡片也由 Page 登记与渲染，不公开可执行卡片列表。",
     "Settings 和 Home 独立插件已删除。Page 自己注册首页、插件依赖图和广播网关容器；诊断 UI 经 Page consumer 与私有 Context 使用 typed runtime.diagnostics，仅取得诊断元数据与恢复操作。Scan 提供统一摄像头、图片与粘贴入口，P2PKH 提供首页身份/地址信息。URI 处理器用自己的 consumer 和 Scope 注册并进入所属业务 UI。Sat/WebRTC 设置块仍各用贡献实例 consumer；旧 system-status/system-settings 注册表已删除。",
     "Apps 列表通过 page 注册，首页应用卡片绑定 Apps consumer；授权弹窗声明 WalletState 依赖。Home 首页通过 page 注册，身份和动作由本实例资源供给，首页卡片统一由 Page 渲染，P2PKH 测试网开关经可选只读设置能力读取；余额、联系人和文件卡片分别绑定贡献方 consumer 与本包资源 Context；卡片/业务投影已归入 Page，业务导航只登记入口信息。MSFile 的三个正式页面已经由 page 注册，其媒体子组件也使用实例资源视图。",

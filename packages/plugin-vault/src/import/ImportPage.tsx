@@ -1,3 +1,6 @@
+import { useState } from "react";
+import { NetworkIdentitySelect } from "../NetworkIdentitySelect.js";
+import type { BsvNetwork } from "@keymaster/contracts";
 import { useInternalVault, useVaultImporters } from "../VaultInternalContext.js";
 // packages/plugin-vault/src/import/ImportPage.tsx
 // 导入页面：选择 importer -> 输入 -> 解析 -> 通过 vault 保存 -> 触发 key.imported。
@@ -33,7 +36,7 @@ import { usePluginI18n } from "@keymaster/runtime";
 import type { VaultService } from "@keymaster/contracts";
 import type { KeyImporter, KeyImportResult } from "./types.js";
 import {
-  
+
   VAULT_WALLET_STATE_CAPABILITY,
   RUNTIME_MESSAGE_BUS,
   VAULT_SERVICE_CAPABILITY,
@@ -58,6 +61,7 @@ export function ImportPage({ embedded = false }: { embedded?: boolean }) {
   const vault = useInternalVault();
   const messageBus = usePluginCapability(RUNTIME_MESSAGE_BUS);
   const { t, text } = usePluginI18n();
+  const [bsvNetwork, setBsvNetwork] = useState<BsvNetwork>("main");
 
   // 硬切换 010：本页面只服务已解锁态导入更多 key。
   // - uninitialized：本应走 LockedShell 里的首启导入向导；如果意外
@@ -141,6 +145,7 @@ export function ImportPage({ embedded = false }: { embedded?: boolean }) {
         });
         return;
       }
+      if (importer.id === "wif" && r[0]?.network === undefined) throw new Error("WIF network is required");
       dispatch({ type: "parse-success", result: r[0] ?? null });
     } catch (err) {
       const msg =
@@ -156,6 +161,7 @@ export function ImportPage({ embedded = false }: { embedded?: boolean }) {
     dispatch({ type: "parse-start" });
     try {
       await persistImport(vault, state.result, {
+        bsvNetwork,
         label: state.label || `key-${Date.now()}`,
         password: state.password,
         capabilities: ["p2pkh"],
@@ -214,10 +220,11 @@ export function ImportPage({ embedded = false }: { embedded?: boolean }) {
       /> : null}
       <section className="import-page__pickers">
         <h3>{t("vault.import.page.step.picker", { defaultValue: "1. 选择导入方式" })}</h3>
-        <ImporterPicker
+          <ImporterPicker
           selected={importer?.id}
           onSelect={(imp) => dispatch({ type: "pick-importer", importer: imp })}
         />
+        {importer?.id === "wif" ? <p>{t("vault.import.page.wifNetwork", {defaultValue: "WIF 自带网络标记，解析后自动识别主网或测试网。"})}</p> : importer ? <NetworkIdentitySelect value={bsvNetwork} onChange={setBsvNetwork} /> : null}
       </section>
       <section className="import-page__input">
         <h3>{t("vault.import.page.step.input", { defaultValue: "2. 输入" })}</h3>
@@ -267,6 +274,7 @@ export function ImportPage({ embedded = false }: { embedded?: boolean }) {
       </section>
       {state.result ? (
         <section className="import-page__confirm">
+          <p>{t("vault.import.page.network", {defaultValue: "钱包网络："})}{(importer?.id === "wif" ? state.result.network : bsvNetwork) === "test" ? t("vault.import.page.testnet", {defaultValue: "测试网"}) : t("vault.import.page.mainnet", {defaultValue: "主网"})}</p>
           <h3>{t("vault.import.page.step.confirm", { defaultValue: "3. 确认导入" })}</h3>
           <p>
             {t("vault.import.page.detected", { defaultValue: "检测到：" })}

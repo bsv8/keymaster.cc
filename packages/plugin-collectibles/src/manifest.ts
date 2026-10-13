@@ -47,7 +47,7 @@ export const collectiblesSetup: PluginSetup = ctx => {
     entry: { path: "/collectibles", routeId: "collectibles.page", visibleWhen: ({ unlocked }) => unlocked, activeWhen: (path) => path.startsWith("/collectibles/") }
   });
   resources.register({ id: "collectibles.testnet", scope: "global", key: () => ["collectibles.testnet"],
-    load: async () => ({ includeTestnet: ctx.consumer.optionalCapability(P2PKH_SETTINGS_READER_CAPABILITY)?.includeTestnet() ?? false }),
+    load: async () => ({ bsvNetwork: ctx.consumer.optionalCapability(P2PKH_SETTINGS_READER_CAPABILITY)?.bsvNetwork() ?? "main" }),
     subscribe: (_args, _context, invalidate) => {
       let offSettings = () => {};
       const bind = () => { offSettings(); offSettings = ctx.consumer.optionalCapability(P2PKH_SETTINGS_READER_CAPABILITY)?.onChange(invalidate) ?? (() => {}); };

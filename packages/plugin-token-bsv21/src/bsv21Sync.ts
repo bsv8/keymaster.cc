@@ -57,7 +57,7 @@ export function createBsv21SyncTask(options: CreateBsv21SyncTaskOptions): Backgr
     // 施工单 001：删除 defaultEnabled，所有任务默认持续启用
     keyScope: () => {
       const state = walletState.snapshot();
-      return state.activePublicKeyHex ? { publicKeyHex: state.activePublicKeyHex } : undefined;
+      return state.activeKeyIdentity;
     },
     // 施工单 001：canRun 返回结构化 BackgroundRunEligibility
     canRun: (): BackgroundRunEligibility => {
@@ -131,13 +131,13 @@ export function createBsv21SyncTask(options: CreateBsv21SyncTaskOptions): Backgr
       // 关键修复：replaceAll 完成后、发送通知前再检查一次取消信号；
       // 同时确认 active key 未变化——旧 key 的任务不应向新 key 发通知。
       if (ctx.signal.aborted) return;
-      const currentKeyHex = walletState.snapshot().activePublicKeyHex;
-      if (currentKeyHex !== startedKeyHex) return;
+      if (!sameWalletSession(state, walletState.snapshot())) return;
 
       // 发布 data-changed
       assetDataNotifier?.emit({
         providerId: "bsv21",
         publicKeyHex: startedKeyHex,
+        networkIdentity: state.activeKeyIdentity,
         revision: Date.now(),
         kinds: ["holding"],
       });

@@ -1,3 +1,4 @@
+import { WINDOW_P2P_WORKER_BRIDGE_CAPABILITY } from "@keymaster/contracts/window-p2p";
 import { VAULT_WALLET_STATE_CAPABILITY, defineRuntimeUnitDependencies } from "@keymaster/contracts";
 import { createInstanceRegistryService } from "@keymaster/runtime";
 import { WINDOW_P2P_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
@@ -25,6 +26,7 @@ const windowP2pPluginDefinition = {
     id: "window-p2p.coordinator-worker",
     runtime: "shared-worker",
     scopeKind: "owner-session",
+    provides: [WINDOW_P2P_WORKER_BRIDGE_CAPABILITY],
     dependencies: defineRuntimeUnitDependencies([
       { capability: VAULT_WALLET_STATE_CAPABILITY, sourceRuntime: "shared-worker", reason: "executor 租约所属钱包身份" },
       ]),

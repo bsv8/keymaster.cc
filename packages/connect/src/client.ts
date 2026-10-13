@@ -1,5 +1,6 @@
 import {
   PROTOCOL_VERSION,
+  validateNetworkIdentity, sameNetworkIdentity, type NetworkIdentity,
   type ChannelPublishParams,
   type ChannelPublishResult,
   type ChannelSubscriptionSetParams,
@@ -27,6 +28,8 @@ import {
   type MsFileStatResult,
   type P2pkhTransferParams,
   type P2pkhTransferResult,
+  type PaymentChannelRegisterParams,
+  type PaymentChannelRegisterResult,
   type PriceGetParams,
   type PriceGetResult,
   type PriceSubscribeParams,
@@ -111,6 +114,8 @@ export interface KeymasterBrowserEnvironment {
 
 /** Configuration for {@link KeymasterConnectClient}. */
 export interface KeymasterConnectOptions {
+  /** 完整身份约束；网络和公钥都不可在会话内漂移。 */
+  networkIdentity: NetworkIdentity;
   /** Exact Keymaster deployment origin supplied by the host application. */
   targetOrigin: string;
   /** `popup` for direct integrations; `appView` for apps launched by Keymaster. */
@@ -136,6 +141,7 @@ export interface KeymasterConnectOptions {
 }
 
 interface PendingRequest {
+  method: ProtocolMethod;
   resolve(value: unknown): void;
   reject(reason: unknown): void;
   timer: number;
@@ -207,6 +213,7 @@ const DEFAULT_CLOSE_POLL_MS = 500;
  * Manage the Session Window and send lower-level protocol requests.
  */
 export class KeymasterConnectClient {
+  readonly networkIdentity: NetworkIdentity;
   private readonly targetOrigin: string;
   private readonly mode: KeymasterConnectMode;
   private readonly environment: KeymasterBrowserEnvironment;
@@ -225,6 +232,7 @@ export class KeymasterConnectClient {
   private closePoller: number | null = null;
 
   constructor(options: KeymasterConnectOptions) {
+    this.networkIdentity = validateNetworkIdentity(options.networkIdentity);
     this.targetOrigin = normalizeHttpOrigin(options.targetOrigin);
     this.mode = options.mode ?? "popup";
     this.options = {
@@ -301,6 +309,7 @@ export class KeymasterConnectClient {
         : undefined;
       if (abortListener) options.signal!.addEventListener("abort", abortListener, { once: true });
       this.pending.set(requestId, {
+        method,
         resolve: (value) => resolve(value as MethodResult<M>),
         reject,
         timer,
@@ -312,6 +321,7 @@ export class KeymasterConnectClient {
         target.postMessage({
           v: PROTOCOL_VERSION,
           type: "request",
+          networkIdentity: this.networkIdentity,
           id: requestId,
           method,
           params
@@ -410,6 +420,11 @@ export class KeymasterConnectClient {
    */
   p2pkhTransfer(params: P2pkhTransferParams, options?: KeymasterRequestOptions): Promise<P2pkhTransferResult> {
     return this.request("p2pkh.transfer", params, options);
+  }
+
+  /** 注册零额度渠道；用户在钱包设置额度后，付款携带返回的 channelId。 */
+  registerPaymentChannel(params: PaymentChannelRegisterParams, options?: KeymasterRequestOptions): Promise<PaymentChannelRegisterResult> {
+    return this.request("payment.channel.register", params, options);
   }
 
   /**
@@ -677,6 +692,7 @@ export class KeymasterConnectClient {
       return;
     }
     if (value.type === "event") {
+      try { if (!sameNetworkIdentity(this.networkIdentity, validateNetworkIdentity(value.networkIdentity))) return; } catch { return; }
       try {
         this.options.onEvent?.(event.data as ProtocolEventMessage);
       } catch {
@@ -690,7 +706,18 @@ export class KeymasterConnectClient {
     const pending = this.pending.get(result.id);
     if (!pending) return;
     this.deletePending(result.id);
-    if (result.ok) pending.resolve(result.result);
+    let validIdentity = false;
+    try { validIdentity = sameNetworkIdentity(this.networkIdentity, validateNetworkIdentity(value.networkIdentity)); } catch { /* reject missing identity */ }
+    if (validIdentity && result.ok && ["connect.login", "connect.resume", "connect.launch"].includes(pending.method)) {
+      try {
+        const connected = result.result as { networkIdentity: unknown; ownerPublicKeyHex: unknown };
+        const identity = validateNetworkIdentity(connected.networkIdentity);
+        validIdentity = sameNetworkIdentity(this.networkIdentity, identity)
+          && typeof connected.ownerPublicKeyHex === "string" && connected.ownerPublicKeyHex.toLowerCase() === identity.publicKeyHex;
+      } catch { validIdentity = false; }
+    }
+    if (!validIdentity) pending.reject(new KeymasterProtocolError("invalid_request", "Keymaster network identity mismatch"));
+    else if (result.ok) pending.resolve(result.result);
     else pending.reject(new KeymasterProtocolError(result.error.code, result.error.message));
   };
 

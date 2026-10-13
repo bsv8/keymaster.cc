@@ -1,4 +1,4 @@
-import { sameWalletSession } from "@keymaster/contracts";
+import { requireUnlockedWalletIdentity, sameWalletSession } from "@keymaster/contracts";
 // packages/plugin-token-bsv21/src/bsv21Service.ts
 // BSV-21 service：plugin-token-bsv21 内部封装，组合 woc.bsv21.service 与
 // p2pkh.service（取当前 active key 的 BSV 地址）。
@@ -49,7 +49,7 @@ export interface P2pkhKeyResourceForBsv21 {
  * getGlobalSettings。结构化类型，runtime plugin-p2pkh 的实现自动满足。 */
 export interface P2pkhServiceForBsv21 {
   listResources(assetId: P2pkhAssetIdForBsv21): Promise<P2pkhKeyResourceForBsv21[]>;
-  getGlobalSettings(): { includeTestnet: boolean };
+  getGlobalSettings(): { bsvNetwork: "main" | "test" };
   onGlobalSettingsChange?(handler: () => void): () => void;
   listUtxos?(filter?: {
     assetId?: P2pkhAssetIdForBsv21;
@@ -95,8 +95,8 @@ export interface CreateBsv21ServiceOptions {
   walletState: VaultWalletState;
   p2pkh: P2pkhServiceForBsv21;
   wocBsv21: WocBsv21Service;
-  /** 是否纳入 testnet；缺省跟随 p2pkh 全局设置。 */
-  includeTestnet?: () => boolean;
+  /** 装配时的网络约束；必须与当前钱包身份一致。 */
+  bsvNetwork?: () => BsvNetwork;
 }
 
 export function createBsv21Service(options: CreateBsv21ServiceOptions): Bsv21ServiceHandle {
@@ -108,29 +108,19 @@ export function createBsv21Service(options: CreateBsv21ServiceOptions): Bsv21Ser
   const p2pkh = options.p2pkh;
   const wocBsv21 = options.wocBsv21;
 
-  function shouldIncludeTestnet(): boolean {
-    if (options.includeTestnet) return options.includeTestnet();
-    try {
-      return p2pkh.getGlobalSettings().includeTestnet;
-    } catch {
-      return false;
-    }
+  function shouldBsvNetwork(): BsvNetwork {
+    const network = requireUnlockedWalletIdentity(walletState.snapshot()).bsvNetwork;
+    if (options.bsvNetwork && options.bsvNetwork() !== network) throw new Error("Network identity mismatch");
+    return network;
   }
 
-  /** 列出当前 active key 持有的全部 BSV P2PKH 资源（main + 可选 test）。 */
+  /** 列出当前 active key 持有的身份网络的 BSV P2PKH 资源。 */
   async function activeKeyResources(): Promise<P2pkhKeyResourceForBsv21[]> {
     const state = walletState.snapshot();
     if (!state.activePublicKeyHex) return [];
-    const main = await p2pkh.listResources("bsv");
-    const list: P2pkhKeyResourceForBsv21[] = main.filter((r) => r.publicKeyHex === state.activePublicKeyHex);
-    if (!shouldIncludeTestnet()) return list;
-    try {
-      const test = await p2pkh.listResources("bsvtest");
-      list.push(...test.filter((r: P2pkhKeyResourceForBsv21) => r.publicKeyHex === state.activePublicKeyHex));
-    } catch {
-      // testnet 资源不可用时不影响 main。
-    }
-    return list;
+    const network = shouldBsvNetwork();
+    const resources = await p2pkh.listResources(network === "test" ? "bsvtest" : "bsv");
+    return resources.filter(resource => resource.publicKeyHex === state.activePublicKeyHex && resource.network === network);
   }
 
   async function activeKeyUnspentTokens(signal?: AbortSignal): Promise<WocBsv21UnspentToken[]> {

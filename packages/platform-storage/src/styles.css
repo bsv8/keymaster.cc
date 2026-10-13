@@ -2,9 +2,9 @@
  * 存储浏览器（/settings/storage）专属样式。
  *
  * 职责边界：
- *   - 页面壳层：面包屑、三栏布局（树 / 目录列表 / 详情）
- *   - 列表行、树行、预览与 JSON 树、Markdown 安全呈现
- *   - 窄屏下把树收成可开合侧栏
+ *   - 页面壳层：面包屑、一体面板（左树右内容 / 窄屏上下排列）
+ *   - 树行、预览与 JSON 树、Markdown 安全呈现
+ *   - 窄屏下文件树在内容区上方，两个区域都能滚动
  *
  * 只使用 global.css 已有的 token（--surface / --text / --border 等），不新增
  * 全局变量，也不反向写回 global.css：卸载本插件时只需删掉 plugins.css 里的
@@ -64,48 +64,52 @@
 
 .storage-browse__crumb.is-current:hover { background: none; }
 
-/* ---------- 三栏布局 ---------- */
+/* ---------- 布局：文件树 + 文件内容（同一个面板） ----------
+ *
+ * 两个区域合成一张卡片，用内部竖线分隔：同一行拉伸保证两栏永远等高。卡片高度固定
+ * 为窗口的 70%（最小 360px），内容超出时在各自区域内部滚动；窄屏改为上下排列。 */
 .storage-browse__layout {
   display: grid;
-  grid-template-columns: minmax(180px, 260px) minmax(0, 1.1fr) minmax(0, 1.3fr);
-  gap: 12px;
-  align-items: start;
-  min-width: 0;
-}
-
-.storage-browse__tree-panel,
-.storage-browse__listing,
-.storage-browse__detail {
+  grid-template-columns: minmax(200px, 300px) minmax(0, 1fr);
+  align-items: stretch;
+  height: 70vh;
+  min-height: 360px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 12px;
-  min-width: 0;
   overflow: hidden;
+  min-width: 0;
 }
 
-.storage-browse__tree-panel,
-.storage-browse__listing {
-  max-height: 70vh;
+.storage-browse__tree-panel {
+  min-width: 0;
+  padding: 12px;
   overflow: auto;
+  border-right: 1px solid var(--border);
 }
 
 .storage-browse__detail {
+  min-width: 0;
+  padding: 12px;
+  overflow: auto;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  max-height: 70vh;
-  overflow: auto;
 }
 
-/* 窄屏：树收为可开合侧栏，目录列表与详情保持可用。 */
-.storage-browse__tree-open { display: none; }
-
+/* 窄屏：改为上下排列，文件树在上、内容区在下，卡片恢复自然高度。 */
 @media (max-width: 900px) {
-  .storage-browse__layout { grid-template-columns: minmax(0, 1fr); }
-  .storage-browse__tree-open { display: inline-flex; }
-  .storage-browse__tree-panel { display: none; max-height: 45vh; }
-  .storage-browse__layout.is-tree-open .storage-browse__tree-panel { display: block; }
+  .storage-browse__layout {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+    min-height: 0;
+  }
+  .storage-browse__tree-panel {
+    max-height: 45vh;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .storage-browse__detail { min-height: 320px; }
 }
 
 /* ---------- 提示与通知 ---------- */
@@ -161,7 +165,7 @@
 }
 
 .storage-browse__tree-row:hover { background: var(--surface-2); }
-.storage-browse__tree-row.is-current { background: var(--surface-2); }
+.storage-browse__tree-row.is-selected { background: var(--surface-2); }
 .storage-browse__tree-row.is-selected .storage-browse__tree-name { color: var(--primary); }
 
 .storage-browse__tree-toggle {
@@ -201,7 +205,7 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-/* 树里每个目录的展示分页：与列表的翻页同一条规则。 */
+/* 树里每个目录的展示分页：固定页长，翻页只换下标窗口。 */
 .storage-browse__tree-more {
   display: flex;
   align-items: center;
@@ -226,86 +230,15 @@
 
 .storage-browse__tree-more-button:disabled { opacity: 0.5; cursor: default; }
 
-/* ---------- 当前目录列表 ---------- */
-.storage-browse__list-head,
-.storage-browse__row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 84px 132px;
-  gap: 8px;
-  align-items: center;
-  width: 100%;
-  text-align: left;
-}
-
-.storage-browse__list-head {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-dim);
-  padding: 0 8px 6px;
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 4px;
-}
-
-.storage-browse__list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.storage-browse__row {
-  background: none;
-  border: 0;
-  border-radius: 4px;
-  padding: 5px 8px;
-  color: var(--text);
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.storage-browse__row:hover { background: var(--surface-2); }
-.storage-browse__row.is-selected { background: var(--surface-2); }
-
-.storage-browse__row-name {
+/* 树里的状态行：空目录、加载中、加载失败与重试。 */
+.storage-browse__tree-status {
   display: flex;
   align-items: center;
-  gap: 4px;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-
-.storage-browse__row-caret { color: var(--text-dim); font-size: 10px; }
-
-.storage-browse__row-size,
-.storage-browse__row-time {
-  color: var(--text-dim);
-  font-size: 11px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.storage-browse__more {
-  display: flex;
-  flex-direction: column;
   gap: 6px;
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
+  padding: 4px 0;
 }
 
-@media (max-width: 640px) {
-  .storage-browse__list-head,
-  .storage-browse__row { grid-template-columns: minmax(0, 1fr) 72px; }
-  .storage-browse__row-time { display: none; }
-}
+.storage-browse__tree-status .storage-browse__hint { flex: 0 1 auto; }
 
 /* ---------- 预览 / 属性 标签 ---------- */
 .storage-browse__tabs {
@@ -405,9 +338,6 @@
 .storage-browse__json { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .storage-browse__json-actions { display: flex; gap: 6px; }
 .storage-browse__json-more { display: flex; }
-
-/* 目录列表的展示分页控件。 */
-.storage-browse__pager { display: flex; gap: 6px; }
 
 /* Markdown：禁用内嵌 HTML 的呈现由解析层保证，这里只做排版。 */
 .storage-browse__markdown { display: flex; flex-direction: column; gap: 8px; min-width: 0; }

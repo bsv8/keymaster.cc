@@ -11,10 +11,10 @@ import type { createChannelProtocolRelations } from "./channelProtocolRelations.
 
 export interface ChannelPublicationPort { ownerPublicKeyHex: string; service: Pick<SatSubscriptionService, "publish"> }
 interface ChannelPublicationSigner {
-  signHash(input: Omit<Parameters<typeof signHash>[0], "from_public_key">): ReturnType<typeof signHash>;
-  signPublic(input: Omit<Parameters<typeof signPublic>[0], "from_public_key">): ReturnType<typeof signPublic>;
-  signPrivate(input: { recipientPublicKeyHex: string; protocol: UnsignedPrivateMessage["protocol"]; body: UnsignedPrivateMessage["body"]; messageId: string; nowMs: number }): SignedPrivateMessage;
-  seal(message: SignedPrivateMessage): ReturnType<typeof sealSigned>;
+  signHash(input: Omit<Parameters<typeof signHash>[0], "from_public_key">, signal?: AbortSignal): ReturnType<typeof signHash> | Promise<ReturnType<typeof signHash>>;
+  signPublic(input: Omit<Parameters<typeof signPublic>[0], "from_public_key">, signal?: AbortSignal): ReturnType<typeof signPublic> | Promise<ReturnType<typeof signPublic>>;
+  signPrivate(input: { recipientPublicKeyHex: string; protocol: UnsignedPrivateMessage["protocol"]; body: UnsignedPrivateMessage["body"]; messageId: string; nowMs: number }, signal?: AbortSignal): SignedPrivateMessage | Promise<SignedPrivateMessage>;
+  seal(message: SignedPrivateMessage, signal?: AbortSignal): ReturnType<typeof sealSigned>;
 }
 export interface ChannelPublicationDependencies {
   session(): { sessionEpoch: string; activePublicKeyHex?: string; vaultStatus: string };
@@ -55,12 +55,12 @@ async function publishChannelHashRequestUnsafe(
   const hash = parseSHA256Hash(input.hash);
   const ownerSessionEpoch = deps.session().sessionEpoch;
   const issuedAtMs = Date.now();
-  const signed = deps.signer.signHash({
+  const signed = await deps.signer.signHash({
     message_id: newMessageID(),
     issued_at_ms: issuedAtMs,
     expires_at_ms: issuedAtMs + 10 * 60 * 1000,
     body: { hash, locators: [newWebRTCSDPLocator()] }
-  });
+  }, signal);
   const contentJson = marshalHashRequest(signed);
   // Supplier 通常不会把本 owner 的 Publish 回送给自己；本地仍必须保存
   // 这条 SDK 生成的 VerifiedHashRequest，才能审查远端随后发来的 offer。
@@ -99,13 +99,13 @@ async function publishPublic(runtime: ChannelPublicationPort, channel: string, c
     assertOwner(runtime);
     const ownerSessionEpoch = deps.session().sessionEpoch;
       const { issuedAtMs, expiresAtMs } = publicMessageTimes();
-    const signed = deps.signer.signPublic({
+    const signed = await deps.signer.signPublic({
       channel,
         message_id: newMessageID(),
       issued_at_ms: issuedAtMs,
       expires_at_ms: expiresAtMs,
       body: content,
-    });
+    }, signal);
     assertOwner(runtime, ownerSessionEpoch);
     await runtime.service.publish({ channel, contentJson: marshalPublicMessage(signed) }, signal);
     if (deps.session().vaultStatus !== "unlocked"
@@ -137,13 +137,13 @@ async function publishPrivateEnvelopeUnsafe(input: {
   // 过期时间必须由 ChannelProtocol 的子协议上限决定：Ping 60 秒，
   // WebRTC 120 秒，其它私密消息最多 24 小时。签名构造集中在同一个
   // helper，测试可以直接走与 Coordinator 相同的真实签名入口。
-  const signed = deps.signer.signPrivate({
+  const signed = await deps.signer.signPrivate({
     recipientPublicKeyHex: recipient,
     protocol: input.protocol,
     body: input.body,
     messageId,
     nowMs: now
-  });
+  }, input.signal);
   let verifiedWebrtc: import("bsv8-channel-protocol/inbox").VerifiedPrivateMessage | undefined;
   if (input.protocol === WEBRTC_SIGNAL_PROTOCOL) {
     verifiedWebrtc = verifySignedPrivateMessage(signed);
@@ -178,7 +178,7 @@ async function publishPrivateEnvelopeUnsafe(input: {
   }
   let envelope: Awaited<ReturnType<typeof sealSigned>>;
   try {
-    envelope = await deps.signer.seal(signed);
+    envelope = await deps.signer.seal(signed, input.signal);
     assertOwner(input.runtime, ownerSessionEpoch);
   } catch (error) {
     if (webrtcOfferKey) channelWebrtcOffers.delete(webrtcOfferKey);

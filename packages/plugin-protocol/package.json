@@ -10,6 +10,7 @@
   },
   "types": "./src/index.ts",
   "dependencies": {
+    "@keymaster/vaultlink-integration": "workspace:*",
     "@bsv/sdk": "^1.6.12",
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",

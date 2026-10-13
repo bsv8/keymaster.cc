@@ -1,3 +1,4 @@
+import { type NetworkIdentity, type BackgroundTaskKeyScope, sameNetworkIdentity } from "@keymaster/contracts";
 // apps/web/src/keymasterSessionCoordinatorClient.ts
 // Keymaster Session Coordinator Client Transport
 //
@@ -98,6 +99,9 @@ type CoordinatorSendError = Error & {
   dispatchStatus?: CoordinatorDispatchStatus;
   /** 请求在本页面 DTO 校验阶段失败，尚未进入 Runtime。 */
   requestValidation?: boolean;
+  /** 捕获发起请求的物理连接世代；迟到失败不能撤销后继连接。 */
+  connectionAttempt?: number;
+  connectionUnavailable?: boolean;
 };
 
 export type { CoordinatorConnectionState };
@@ -242,6 +246,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   };
 
   private eventListeners = new Map<string, Set<EventListener<CoordinatorTopicEvent>>>();
+  private runtimeReadyListeners = new Set<(runtime: RuntimeHandle) => void>();
   private topicCaches = new Map<CoordinatorTopic, CoordinatorTopicEvent>();
   private sessionRevisionCache = -1;
   private backgroundSnapshotRevisionCache = -1;
@@ -371,6 +376,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         this.reconnectTimer = null;
       }
       this.connectionState = "ready";
+      for (const listener of this.runtimeReadyListeners) listener(runtime);
     } catch (err) {
       // 只有明确出现新 attempt 才吞掉旧连接错误。
       if (attempt !== this.connectionAttempt) return;
@@ -552,6 +558,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   }
 
   private handleWorkerError(message: string): void {
+    this.reportRecoverableCoordinatorFailure("coordinator-stream-runtime", new Error(message));
+    console.warn("[coordinator] Runtime boundary lost", message);
     this.isConnected = false;
     if (this.connectionState !== "fatal") this.connectionState = "recoverable";
     this.removeRuntimeSubscription?.();
@@ -600,6 +608,13 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   }
 
   /** 当前 WebLoom SharedWorker 句柄；重连后旧句柄永不复用。 */
+  /** Assembly follows every successfully reopened physical Runtime connection. */
+  subscribeRuntimeReady(listener: (runtime: RuntimeHandle) => void): () => void {
+    this.runtimeReadyListeners.add(listener);
+    if (this.connectionState === "ready" && this.runtimeHandle) listener(this.runtimeHandle);
+    return () => { this.runtimeReadyListeners.delete(listener); };
+  }
+
   getRuntimeHandle(): RuntimeHandle | undefined {
     return this.runtimeHandle ?? undefined;
   }
@@ -677,9 +692,19 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     const stream = runtime.capability(COORDINATOR_TOPIC_STREAM_CAPABILITY);
     const subscription = stream.subscribe({ topics }, {
       initialCredit: 16,
+      initialByteCredit: 1024 * 1024,
       timeoutMs: this.requestTimeoutMs,
       operationId: `coordinator-topics:${this.clientId}`,
-      onNext: (event) => { this.applyTopicEvent(event); },
+      onNext: (event) => {
+        try { this.applyTopicEvent(event); }
+        catch (error) {
+          // The transport deliberately masks callback failures as handler_failed.
+          // Keep the failing topic and local exception observable without logging
+          // event payloads (which can contain private application data).
+          console.warn("[coordinator] Topic projection failed", event.topic, error instanceof Error ? error.message : "unknown projection error");
+          throw error;
+        }
+      },
     });
     this.topicSubscription = subscription;
     // A typed stream parser can reject an item before onNext is invoked. Treat
@@ -688,7 +713,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     // diagnostic visible indefinitely.
     void subscription.closed.catch((cause) => {
       if (this.topicSubscription !== subscription || !this.isConnected) return;
-      this.handleWorkerError(`Coordinator topic stream failed${cause instanceof Error ? `: ${cause.message}` : ""}`);
+      const code = cause && typeof cause === "object" && "code" in cause ? String(cause.code) : "unknown";
+      this.handleWorkerError(`Coordinator topic stream failed (${code})${cause instanceof Error ? `: ${cause.message}` : ""}`);
     });
     await subscription.ready;
   }
@@ -714,10 +740,16 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     return this.requestCommand(request);
   }
 
+  /** Trusted Window assembly reports cleanup against the authority's current attempt. */
+  async lockCleanup(cleanup: NonNullable<Extract<CoordinatorClientRequest, { kind: "lock" }>["cleanup"]>, epoch = this.bootstrapSnapshotCache.sessionEpoch): Promise<CoordinatorCommandResult> {
+    return this.requestCommand({ kind: "lock", clientId: this.clientId, requestId: this.generateRequestId(), expectedSessionEpoch: epoch, cleanup });
+  }
+
   async vaultOperation<O extends CoordinatorVaultOperation>(operation: O): Promise<CoordinatorValueResult<CoordinatorVaultOperationResultFor<O>>> {
     const request = { kind: "vault.operation" as const, clientId: this.clientId, requestId: this.generateRequestId(), operation, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
     try {
-      const response = await this.sendRequest(request);
+      const awaitingWallet = operation.type === "hardware" || operation.type === "migrateToHardware" || operation.type === "migrateToSoftware" || operation.type === "sealLocalSecret" || operation.type === "openLocalSecret" || operation.type === "payment" && ["register","session-open","sign-p2pkh","sign-standard","sign-feepool"].includes(operation.command.action);
+      const response = await this.sendRequest(request, awaitingWallet ? 300_000 : undefined);
       if (response.ack.status !== "ok") return response.ack;
       return {
         status: "ok",
@@ -741,7 +773,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch,
     } as const;
     try {
-      const response = await this.sendRequest(request);
+      const response = await this.sendRequest(request, operation.type === "signDigest" || operation.type === "signConnectEnvelope" ? 300_000 : undefined);
       if (response.ack.status !== "ok" || !response.cryptoResult) return { ack: response.ack };
       return { ack: response.ack, result: response.cryptoResult };
     } catch (cause) {
@@ -775,8 +807,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     return this.requestCommand(request);
   }
 
-  async backgroundCancelByKey(publicKeyHex: string): Promise<CoordinatorCommandResult> {
-    return this.requestCommand({ kind: "background.cancel-by-key", clientId: this.clientId, requestId: this.generateRequestId(), publicKeyHex, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
+  async backgroundCancelByKey(identity: NetworkIdentity): Promise<CoordinatorCommandResult> {
+    return this.requestCommand({ kind: "background.cancel-by-key", clientId: this.clientId, requestId: this.generateRequestId(), networkIdentity: identity, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
   }
 
   async storageControl(control: CoordinatorStorageControl): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
@@ -1025,7 +1057,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       if (signal?.aborted) return { status: "transport-error", message: "Noise signer request cancelled", retryable: false };
       onAbort = () => { void this.msfileCancel(request.requestId); };
       signal?.addEventListener("abort", onAbort, { once: true });
-      const response = await this.sendRequest(request);
+      const response = await this.sendRequest(request, 300_000);
       if (signal?.aborted) return { status: "transport-error", message: "Noise signer request cancelled", retryable: false };
       if (response.ack.status !== "ok") return response.ack;
       return { status: "ok", value: requiredCoordinatorOperationResult(response, request.kind), sessionEpoch: response.sessionEpoch };
@@ -1041,7 +1073,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       if (signal?.aborted) return { status: "transport-error", message: "Peer Record signer request cancelled", retryable: false };
       onAbort = () => { void this.msfileCancel(request.requestId); };
       signal?.addEventListener("abort", onAbort, { once: true });
-      const response = await this.sendRequest(request);
+      const response = await this.sendRequest(request, 300_000);
       if (signal?.aborted) return { status: "transport-error", message: "Peer Record signer request cancelled", retryable: false };
       if (response.ack.status !== "ok") return response.ack;
       return { status: "ok", value: requiredCoordinatorOperationResult(response, request.kind), sessionEpoch: response.sessionEpoch };
@@ -1067,7 +1099,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
   }
 
-  async p2pkhSettingsUpdate(settings: { includeTestnet: boolean; feeRateSatoshisPerKb?: Partial<Record<"low" | "medium" | "high", number>> }): Promise<CoordinatorCommandResult> {
+  async p2pkhSettingsUpdate(settings: { bsvNetwork: "main" | "test"; feeRateSatoshisPerKb?: Partial<Record<"low" | "medium" | "high", number>> }): Promise<CoordinatorCommandResult> {
     return this.requestCommand({ kind: "p2pkh.settings.update", clientId: this.clientId, requestId: this.generateRequestId(), settings, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
   }
 
@@ -1147,11 +1179,24 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     const staleOrRevoked = code === "service_reference_stale"
       || code === "service_revoked"
       || code === "transport_disconnected";
+    const requestAttempt = (cause as CoordinatorSendError | undefined)?.connectionAttempt;
+    const belongsToPreviousConnection = requestAttempt !== undefined && requestAttempt !== this.connectionAttempt;
+    // Domain handlers can propagate a revoked storage/owner capability while
+    // the root Coordinator endpoint is healthy. Reject that operation, but do
+    // not destroy the transport (including an in-progress reconnect) and its
+    // restored owner services. Runtime/stream lifecycle still handles actual
+    // endpoint loss; rejecting this operation never authorizes a new spend.
+    // Likewise, a late error from an old request cannot close a new connection.
+    if (belongsToPreviousConnection || (cause as CoordinatorSendError | undefined)?.connectionUnavailable === true
+      || code === "service_revoked" || code === "service_reference_stale") {
+      this.reportRecoverableCoordinatorFailure(kind, cause);
+      return { status: "transport-error", message: cause instanceof Error ? cause.message : "Coordinator request scope is stale", retryable: false, dispatchStatus };
+    }
     // 远端 handler 抛出的业务错误（例如存储根尚未就绪时的 owner bind 失败）
     // 不是本连接断线：把它按普通失败返回给调用方，绝不销毁 Runtime/会话。
     // 否则一次可重试的业务失败会被升级成整条会话重建，窗口在此期间会
     // 回落锁定并让插件装配失败。
-    if (code === "handler_failed" || code === "capability_unavailable") {
+    if (code === "handler_failed" || code === "capability_unavailable" || code === "resource_limit_exceeded") {
       this.reportRecoverableCoordinatorFailure(kind, cause);
       return {
         status: "transport-error",
@@ -1160,6 +1205,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         dispatchStatus: "unknown",
       };
     }
+    console.warn("[coordinator] RPC reset connection", { kind, code, message: cause instanceof Error ? cause.message : "Coordinator command failed" });
     if (this.connectionState !== "fatal") this.connectionState = "recoverable";
     this.isConnected = false;
     this.removeRuntimeSubscription?.();
@@ -1234,7 +1280,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   ): Promise<CoordinatorRpcResponseForRequest<R>> {
     const runtime = this.runtimeHandle;
     if (!this.isConnected || !runtime) {
-      throw coordinatorSendError("Not connected to Coordinator", "not-dispatched");
+      throw Object.assign(coordinatorSendError("Not connected to Coordinator", "not-dispatched"), { connectionUnavailable: true });
     }
     const attempt = this.connectionAttempt;
     try {
@@ -1251,6 +1297,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     } catch (error) {
       const failure = error instanceof Error ? error as CoordinatorSendError : coordinatorSendError(String(error), "unknown");
       failure.dispatchStatus ??= "unknown";
+      failure.connectionAttempt = attempt;
       throw failure;
     }
   }
@@ -1355,6 +1402,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         ...this.bootstrapSnapshotCache,
         sessionEpoch: event.sessionEpoch,
         vaultStatus: event.vaultStatus,
+        lockCleanup: event.lockCleanup,
         activePublicKeyHex: event.activePublicKeyHex ?? undefined,
         activeKeyIdentity: event.vaultStatus === "unlocked" ? event.activeKeyIdentity : undefined,
         // session.state 是权威全量投影：运行世代与钱包身份世代都随它一起推进。

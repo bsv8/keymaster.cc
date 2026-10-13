@@ -53,8 +53,9 @@ export const pageSetup: PluginSetup = ctx => {
   ctx.provide(PAGE_UI_RENDERER_CAPABILITY, page.renderer);
   const Shell = bindPageUi(ctx, AppShell, noticeControls);
   page.registry.bind(ctx.consumer, ctx.scope).view.register({ kind: "frame", slot: "unlocked-shell", id: "page.shell", label: "Page", render: () => createElement(Shell) });
+  const Onboarding=bindPageUi(ctx,OnboardingShell);
   page.registry.bind(ctx.consumer, ctx.scope).view.register({ kind: "frame", slot: "onboarding", id: "page.onboarding", label: "Onboarding",
-    render: location => createElement(OnboardingShell, { width: location.width, children: location.children }) });
+    render: location => createElement(Onboarding, { width: location.width, children: location.children }) });
   const Home = bindPageUi(ctx, HomePage);
   page.registry.bind(ctx.consumer, ctx.scope).view.register({ id: "home.overview", kind: "page", path: "/", label: { key: "home.route.label", fallback: "Home" }, render: () => createElement(Home) });
   business.register("page", { id: "home", label: { key: "home.domain.label", fallback: "Overview" }, order: 0,

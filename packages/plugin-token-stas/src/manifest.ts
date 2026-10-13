@@ -1,3 +1,4 @@
+import { sameNetworkIdentity } from "@keymaster/contracts";
 import { WOC_CAPABILITY } from "@keymaster/contracts";
 import { P2PKH_ASSET_READER_CAPABILITY } from "@keymaster/contracts";
 import { STORAGE_KV_CLIENTS_CAPABILITY } from "@keymaster/contracts";
@@ -145,8 +146,8 @@ const stasTokenPluginDefinition = {
       if (event.providerId !== "p2pkh") return;
       if (!event.kinds.includes("resource")) return;
       // 仅当事件属于当前 active key 时触发
-      const activeHex = walletState.snapshot().activePublicKeyHex;
-      if (!activeHex || event.publicKeyHex !== activeHex) return;
+      const active = walletState.snapshot().activeKeyIdentity;
+      if (!active || !event.networkIdentity || !sameNetworkIdentity(active, event.networkIdentity)) return;
       // 异步检查 snapshot 以决定 reason
       void (async () => {
         try {

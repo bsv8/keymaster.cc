@@ -25,6 +25,7 @@ async function createHost(status: "uninitialized" | "locked") {
     ? { status, sessionEpoch: "epoch-1", runGeneration: "run-1", vaultLifecycleRevision: 1, walletGeneration: "" }
     : { status, sessionEpoch: "epoch-1", runGeneration: "run-1", vaultLifecycleRevision: 1, walletGeneration: "wallet-1" };
   const vault = {
+    coldStart: async () => ({ state: "ready" as const, key: { publicKeyHex: "02".padEnd(66, "a"), label: "Primary", backend: "software" as const } }),
     status: () => status,
     walletSnapshot: () => snapshot,
     subscribeWalletState: (handler: (next: VaultLifecycleSnapshot) => void) => {
@@ -32,7 +33,7 @@ async function createHost(status: "uninitialized" | "locked") {
       return () => undefined;
     },
     getCurrentKey: async () => (status === "locked"
-      ? { publicKeyHex: "02".padEnd(66, "a"), label: "Primary", format: "generated", capabilities: ["p2pkh"], createdAt: "2026-09-08T00:00:00.000Z" }
+      ? {bsvNetwork: "main" as const,  publicKeyHex: "02".padEnd(66, "a"), label: "Primary", format: "generated", capabilities: ["p2pkh"], createdAt: "2026-09-08T00:00:00.000Z" }
       : undefined),
     hasVault: async () => status !== "uninitialized",
     initialize: async () => { throw new Error("not reached"); },
@@ -50,7 +51,7 @@ async function createHost(status: "uninitialized" | "locked") {
   } as unknown as VaultService;
   const walletState: VaultWalletState = {
     snapshot: () => walletStateFixtureSnapshot((() => ({}))(), () => { throw new Error("no wallet Key yet"); }),
-    
+
     subscribe: () => () => undefined,
   };
   const host = createPluginHost({

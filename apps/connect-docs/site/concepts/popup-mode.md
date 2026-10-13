@@ -4,6 +4,7 @@ Popup 是独立部署网页的默认模式：
 
 ```ts
 const keymaster = new KeymasterConnectClient({
+  networkIdentity: { bsvNetwork: "main", publicKeyHex: selectedPublicKeyHex },
   targetOrigin: keymasterDeploymentOrigin, // 受信任 Keymaster 的精确来源
   mode: "popup"
 });

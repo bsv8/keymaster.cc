@@ -1,6 +1,10 @@
 {
   "name": "@keymaster/plugin-woc",
-  "exports": { ".": "./src/index.ts", "./coordinator": "./src/coordinator.ts" },
+  "exports": {
+    ".": "./src/index.ts",
+    "./coordinator": "./src/coordinator.ts",
+    "./worker": "./src/worker.ts"
+  },
   "private": true,
   "version": "0.1.0",
   "type": "module",

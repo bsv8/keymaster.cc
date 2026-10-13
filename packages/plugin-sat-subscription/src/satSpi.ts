@@ -36,7 +36,7 @@ export interface SatP2pkhService {
   /** 读取当前产品费率；没有该方法时使用中档默认值。 */
   getGlobalSettings?(): {
     /** 是否允许使用 P2PKH 测试网资产、地址和交易。 */
-    includeTestnet?: boolean;
+    bsvNetwork?: "main" | "test";
     feeRateSatoshisPerKb?: Partial<Record<"low" | "medium" | "high", number>>;
   };
   /** 创建 owner 绑定的 P2PKH 交易预览。 */
@@ -216,7 +216,7 @@ function selectBsvAccount(
 }
 
 function assertP2pkhNetworkEnabled(p2pkh: SatP2pkhService, mapping: ReturnType<typeof mapSpiBsvNetwork>): void {
-  if (mapping.p2pkhNetwork === "test" && p2pkh.getGlobalSettings?.().includeTestnet !== true) {
+  if (mapping.p2pkhNetwork !== p2pkh.getGlobalSettings?.().bsvNetwork) {
     throw new SatSubscriptionError("unavailable", "P2PKH 设置未启用测试网，请先在 P2PKH 设置中启用测试网");
   }
 }

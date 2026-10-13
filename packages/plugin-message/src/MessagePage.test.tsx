@@ -72,7 +72,7 @@ function makeFakeWalletState(): VaultWalletState {
   const listeners = new Set<(state: VaultLifecycleSnapshot) => void>();
   let active: VaultLifecycleSnapshot = walletStateFixtureSnapshot({ activePublicKeyHex: OWNER });
   return {
-    snapshot: () => walletStateFixtureSnapshot((() => active)(), () => ({ publicKeyHex: OWNER, label: "fake", capabilities: [], createdAt: "" })),
+    snapshot: () => walletStateFixtureSnapshot((() => active)(), () => ({bsvNetwork: "main" as const,  publicKeyHex: OWNER, label: "fake", capabilities: [], createdAt: "" })),
 
     subscribe: (handler: (state: VaultLifecycleSnapshot) => void) => {
       listeners.add(handler);

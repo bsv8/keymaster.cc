@@ -9,7 +9,8 @@
     "./provider": "./src/satProvider.ts",
     "./state": "./src/satState.ts",
     "./repository": "./src/satRepository.ts",
-    "./styles.css": "./src/styles.css"
+    "./styles.css": "./src/styles.css",
+    "./worker": "./src/worker.ts"
   },
   "types": "./src/index.ts",
   "dependencies": {

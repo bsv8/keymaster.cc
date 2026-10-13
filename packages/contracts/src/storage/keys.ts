@@ -138,3 +138,9 @@ export function validateKeyHoldDocument(value: unknown): KeyHoldDocumentV1 {
 
 /** 与 `validateKeyHoldDocument` 同义的文档名写法。 */
 export const validateKeyholdDocument = validateKeyHoldDocument;
+
+/** 钱包视图；序列化为 keymaster.network-keyhold，内部 KeyHold 使用官方 SDK。 */
+export interface NetworkKeyHoldDocument extends KeyHoldDocumentV1 {
+  bsvNetwork: import("../networkIdentity.js").BsvNetwork;
+  networkAuthenticationHex: string;
+}

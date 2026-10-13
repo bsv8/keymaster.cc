@@ -101,11 +101,14 @@ export function createWorkerStorageClients<Binding extends WorkerStorageBinding>
     };
   }
 
-  function moduleFiles(moduleId: string, purposeId: string, appStorageName?: string): BorrowedModuleFileStore {
-    const key = `${moduleId}\u0000${purposeId}\u0000${appStorageName ?? "*"}`;
+  function openFiles(platform: boolean, moduleId: string, purposeId: string, appStorageName?: string): BorrowedModuleFileStore {
+    // 私有核心入口与模块入口不共用缓存；不得让模块从缓存借到核心权限。
+    const key = `${platform ? "platform" : "module"}\u0000${moduleId}\u0000${purposeId}\u0000${appStorageName ?? "*"}`;
     const existing = files.get(key);
     if (existing) return existing;
-    const borrowed = borrow<ModuleFileStore>(moduleId, purposeId, "files", (root, declaration) => root.openModuleFileStore({ declaration, ...(appStorageName === undefined ? {} : { appStorageName }) }));
+    const borrowed = borrow<ModuleFileStore>(moduleId, purposeId, "files", (root, declaration) => platform
+      ? root.openPlatformFileStore({ declaration })
+      : root.openModuleFileStore({ declaration, ...(appStorageName === undefined ? {} : { appStorageName }) }));
     const handle: BorrowedModuleFileStore = {
       get walletGeneration() { return borrowed.binding()?.walletGeneration ?? ""; },
       get sessionEpoch() { return borrowed.binding()?.sessionEpoch ?? ""; },
@@ -149,5 +152,9 @@ export function createWorkerStorageClients<Binding extends WorkerStorageBinding>
     deps.registerMaintenance(handle);
     return handle;
   }
-  return { moduleFiles, keyValue, invalidateAll() { for (const binding of bindings) binding.invalidate(); } };
+  return {
+    moduleFiles: (moduleId: string, purposeId: string, appStorageName?: string) => openFiles(false, moduleId, purposeId, appStorageName),
+    platformFiles: (moduleId: string, purposeId: string) => openFiles(true, moduleId, purposeId),
+    keyValue, invalidateAll() { for (const binding of bindings) binding.invalidate(); },
+  };
 }

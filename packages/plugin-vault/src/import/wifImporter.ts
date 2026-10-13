@@ -52,6 +52,7 @@ async function wifToPrivateKey(wif: string): Promise<{ hex: string; network: "ma
     if (hash[i] !== expectedChecksum[i]) throw new Error("Invalid WIF checksum");
   }
   const version = body[0];
+  if (version !== 0x80 && version !== 0xef) throw new Error("Invalid WIF network version");
   const network: "main" | "test" = version === 0x80 ? "main" : "test";
   const compressed = body.length === 34 && body[33] === 0x01;
   const keyBytes = body.subarray(1, 33);

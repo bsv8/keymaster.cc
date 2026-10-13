@@ -15,8 +15,8 @@
 //
 // 硬切换 001：
 //   - balance 展示改为 `{ total }`（不再用 confirmed）。
-//   - assets 列表受 `includeTestnet` 控制：false 时只暴露 bsv。
-//   - includeTestnet 通过 service.onGlobalSettingsChange 订阅——同 tab 写入
+//   - assets 列表受 `bsvNetwork` 控制：false 时只暴露 bsv。
+//   - bsvNetwork 通过 service.onGlobalSettingsChange 订阅——同 tab 写入
 //     由 settings 页调用 service.applyGlobalSettings 主动通知；跨 tab 由
 //     service 内部 storage 监听回灌。
 
@@ -85,11 +85,11 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAss
   }
 
   /**
-   * 硬切换 001：根据 includeTestnet 决定哪些 asset 进入 assets 列表。
+   * 硬切换 001：根据 bsvNetwork 决定哪些 asset 进入 assets 列表。
    */
   function visibleAssetIds(): P2pkhAssetId[] {
     const settings = deps.service.getGlobalSettings();
-    if (settings.includeTestnet) return ASSET_IDS;
+    if (settings.bsvNetwork === "test") return ["bsvtest"];
     return ASSET_IDS.filter((id) => id !== "bsvtest");
   }
 
@@ -157,7 +157,7 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAss
     },
     async getAsset(assetId) {
       if (!isP2pkhAssetId(assetId)) return undefined;
-      // includeTestnet=false 时不暴露 testnet。
+      // bsvNetwork=false 时不暴露 testnet。
       if (!visibleAssetIds().includes(assetId)) return undefined;
       // 未就绪时 getAsset 返回 undefined：调用方应展示空态而不是 0 余额。
       if (isNotReady()) return undefined;

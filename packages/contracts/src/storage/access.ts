@@ -1,3 +1,4 @@
+import { networkIdentityStorageRoot, type NetworkIdentity as importNetworkIdentity } from "../networkIdentity.js";
 import { deriveThirdPartyStorageModuleId } from "../appIdentity.js";
 import type { KeyValueStore } from "./kv.js";
 import type { SnapshotStore, StorageSnapshotJsonCompatible } from "./snapshot.js";
@@ -50,7 +51,7 @@ export interface PluginStorageDeclaration {
  *   - 已验证 App 身份与平台登记的存储 name。
  * 调用方不能修改这些字段，也没有桶或 Owner 前缀。
  */
-export interface StorageNamespaceBinding extends PluginStorageDeclaration {
+export interface StorageNamespaceBinding extends PluginStorageDeclaration, importNetworkIdentity {
   /** 持久的钱包身份世代，来自 `.keymaster/meta`。 */
   walletGeneration: string;
   /** 发放授权时的 Coordinator session 世代。 */
@@ -136,7 +137,7 @@ export function buildStorageNamespaceRoot(binding: StorageNamespaceBinding): str
   if (declaration.authority === "third-party-app") {
     if (binding.appStorageName === undefined) throw new Error("third-party-app storage requires a registered appStorageName");
     if (!binding.verifiedAppIdentity) throw new Error("third-party-app storage requires a verified app identity");
-    return buildWalletStorageRoot({
+    return networkIdentityStorageRoot(binding) + buildWalletStorageRoot({
       authority: "third-party-app",
       moduleId: declaration.moduleId,
       purposeId: declaration.purposeId,
@@ -146,7 +147,7 @@ export function buildStorageNamespaceRoot(binding: StorageNamespaceBinding): str
   if (binding.appStorageName !== undefined || binding.verifiedAppIdentity !== undefined) {
     throw new Error("app storage identity is only valid for third-party-app authority");
   }
-  return buildWalletStorageRoot({
+  return networkIdentityStorageRoot(binding) + buildWalletStorageRoot({
     authority: declaration.authority,
     moduleId: declaration.moduleId,
     purposeId: declaration.purposeId,
@@ -206,6 +207,7 @@ export interface OwnerAppStore extends KeyValueStore {}
 
 /** 平台根存储权威；物理路径、数据库连接和内部实现不会穿过此接口进入插件。 */
 export interface PlatformRootStore {
+  readonly identity: importNetworkIdentity;
   /** 当前钱包身份世代。 */
   readonly walletGeneration: string;
   /** 打开 Host 已预绑定的模块 K-V。 */

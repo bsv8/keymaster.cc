@@ -23,7 +23,7 @@
     "prepare:lifecycle-evidence": "node scripts/prepare-plugin-lifecycle-evidence.mjs",
     "verify:lifecycle-production-gates": "node scripts/check-plugin-lifecycle-production-gates.mjs",
     "verify:lifecycle-release": "pnpm verify:final-io-audit && pnpm verify:lifecycle-deployment && pnpm test:e2e:external && pnpm test:e2e:irreversible-io && pnpm test:e2e:recovery && pnpm verify:lifecycle-production-gates",
-    "typecheck": "tsc -b",
+    "typecheck": "pnpm --filter @keymaster/vaultlink-integration build && tsc -b",
     "check:contracts": "node scripts/check-contracts.mjs",
     "test:contracts": "vitest run packages/contracts/src",
     "test:types": "pnpm check:plugin-catalog && pnpm typecheck && pnpm check:contracts && pnpm test:contracts && pnpm lint:worker-boundaries",
@@ -44,6 +44,8 @@
     "test:e2e:multi-tab-refresh-smoke": "pnpm check:integration-coverage && pnpm typecheck:e2e && playwright test --config=e2e/playwright.integration.config.ts e2e/integration/journeys/local/multi-tab-recovery.spec.ts --project=local-integration",
     "test:e2e:integration": "pnpm check:integration-coverage && pnpm typecheck:e2e && playwright test --config=e2e/playwright.integration.config.ts --project=local-integration",
     "test:e2e:integration:list": "playwright test --config=e2e/playwright.integration.config.ts --project=local-integration --list",
+    "test:e2e:forum": "pnpm check:integration-coverage && pnpm typecheck:e2e && playwright test --config=e2e/playwright.forum.config.ts --project=forum",
+    "test:e2e:forum-purchase": "pnpm check:integration-coverage && pnpm typecheck:e2e && playwright test --config=e2e/playwright.forum-purchase.config.ts --project=forum-purchase",
     "test:e2e:msfile": "pnpm check:integration-coverage && pnpm typecheck:e2e && playwright test --config=e2e/playwright.msfile.config.ts --project=msfile",
     "test:e2e:msfile:list": "playwright test --config=e2e/playwright.msfile.config.ts --project=msfile --list",
     "test:e2e:satsubscription": "pnpm check:integration-coverage && pnpm typecheck:e2e && node scripts/run-satsubscription-e2e.mjs",
@@ -70,7 +72,11 @@
     "generate:plugin-catalog": "node scripts/materialize-plugin-catalog.mjs --write && node scripts/generate-plugin-function-dependencies.mjs",
     "check:plugin-catalog": "node scripts/materialize-plugin-catalog.mjs && node scripts/generate-plugin-function-dependencies.mjs --check",
     "generate:plugin-dependencies": "node scripts/generate-plugin-function-dependencies.mjs",
-    "check:plugin-dependencies": "node scripts/generate-plugin-function-dependencies.mjs --check"
+    "check:plugin-dependencies": "node scripts/generate-plugin-function-dependencies.mjs --check",
+    "test:e2e:rockey": "node Coding/keymaster/e2e-rockey/run.mjs",
+    "test:e2e:rockey:prepare": "node Coding/keymaster/e2e-rockey/run.mjs --prepare",
+    "test:e2e:rockey:list": "node Coding/keymaster/e2e-rockey/run.mjs --list",
+    "test:e2e:rockey:flash": "node Coding/keymaster/e2e-rockey/run.mjs --flash"
   },
   "devDependencies": {
     "@keymaster/contracts": "workspace:*",

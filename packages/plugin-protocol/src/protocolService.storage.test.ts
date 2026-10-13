@@ -75,7 +75,7 @@ function makeStorage(overrides: Partial<StorageRuntimeController> = {}): Storage
   } as unknown as StorageRuntimeController;
 }
 
-function makeHarness(storageController: StorageRuntimeController, session: ConnectSessionRecord | null = {
+function makeHarness(storageController: StorageRuntimeController, session: ConnectSessionRecord | null = {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: OWNER_PUBLIC_KEY_HEX },
   sessionId: SESSION_ID,
   origin: ORIGIN,
   ownerPublicKeyHex: OWNER_PUBLIC_KEY_HEX,
@@ -89,7 +89,7 @@ function makeHarness(storageController: StorageRuntimeController, session: Conne
   const opener = { closed: false } as Window;
   const results: ProtocolResultMessage[] = [];
   const walletState = {
-    snapshot: () => walletStateFixtureSnapshot({ activePublicKeyHex: OWNER_PUBLIC_KEY_HEX }, () => ({ publicKeyHex: OWNER_PUBLIC_KEY_HEX, label: "Owner", capabilities: [], createdAt: "now" })),
+    snapshot: () => walletStateFixtureSnapshot({ activePublicKeyHex: OWNER_PUBLIC_KEY_HEX }, () => ({bsvNetwork: "main" as const,  publicKeyHex: OWNER_PUBLIC_KEY_HEX, label: "Owner", capabilities: [], createdAt: "now" })),
     subscribe: () => () => {},
   };
   const service = new ProtocolServiceImpl({
@@ -112,6 +112,7 @@ function makeHarness(storageController: StorageRuntimeController, session: Conne
 
 function storageRequest(id: string, extra: Record<string, unknown> = {}) {
   return {
+    networkIdentity: {bsvNetwork: "main" as const, publicKeyHex: OWNER_PUBLIC_KEY_HEX},
     v: PROTOCOL_VERSION,
     type: "request" as const,
     id,
@@ -122,6 +123,7 @@ function storageRequest(id: string, extra: Record<string, unknown> = {}) {
 
 function storageMethodRequest(id: string, method: string, params: Record<string, unknown> = {}) {
   return {
+    networkIdentity: {bsvNetwork: "main" as const, publicKeyHex: OWNER_PUBLIC_KEY_HEX},
     v: PROTOCOL_VERSION,
     type: "request" as const,
     id,
@@ -257,7 +259,7 @@ describe("ProtocolService storage adapter", () => {
 });
 
 function makeSessionWithoutIdentity(): ConnectSessionRecord {
-  return {
+  return {networkIdentity: { bsvNetwork: "main" as const, publicKeyHex: OWNER_PUBLIC_KEY_HEX },
     sessionId: SESSION_ID,
     origin: ORIGIN,
     ownerPublicKeyHex: OWNER_PUBLIC_KEY_HEX,

@@ -47,6 +47,7 @@ export function createWalletStateAccess(
 export function immutableWalletSnapshot(snapshot: Readonly<VaultLifecycleSnapshot>): Readonly<VaultLifecycleSnapshot> {
   const { activePublicKeyHex, activeKeyIdentity, ...state } = snapshot;
   return Object.freeze({ ...state,
+    ...(state.lockCleanup ? { lockCleanup: Object.freeze({ ...state.lockCleanup }) } : {}),
     ...(state.status === "unlocked" && activePublicKeyHex ? { activePublicKeyHex,
       ...(activeKeyIdentity ? { activeKeyIdentity: Object.freeze({ ...activeKeyIdentity, capabilities: Object.freeze([...activeKeyIdentity.capabilities]) as unknown as string[] }) } : {}) } : {}),
   });
@@ -61,11 +62,13 @@ export function createWalletStateSource(read: () => Readonly<VaultLifecycleSnaps
   const pending: { snapshot: Readonly<VaultLifecycleSnapshot>; sequence: number }[] = [];
   let delivering = false;
   return {
-    snapshot: () => immutableWalletSnapshot(last),
+    // React useSyncExternalStore compares snapshots by Object.is. Reuse the
+    // committed immutable object until publish() commits an actual change.
+    snapshot: () => last,
     subscribe(handler: (snapshot: Readonly<VaultLifecycleSnapshot>) => void) {
       const observer = { handler, delivered: commitSequence };
       subscribers.add(observer);
-      try { handler(immutableWalletSnapshot(last)); } catch { /* observer isolation */ }
+      try { handler(last); } catch { /* observer isolation */ }
       return () => { subscribers.delete(observer); };
     },
     publish() {

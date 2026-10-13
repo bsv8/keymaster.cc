@@ -1,3 +1,4 @@
+import { validateNetworkIdentity, sameNetworkIdentity, networkIdentityStorageRoot, type NetworkIdentity } from "@keymaster/contracts";
 import type { StorageBrowseWallet } from "../../runtime/storageBrowsePrivate.js";
 // 平台存储根：所有受限句柄的唯一装配点。
 //
@@ -43,9 +44,12 @@ const CENTRALLY_DECLARED: readonly PluginStorageDeclaration[] = Object.freeze([
 /** 只供 Storage Worker 实现与可信装配使用，不发布给其他插件。 */
 export interface StoragePrivateRootStore extends PlatformRootStore {
   openBrowseStore(): Promise<StorageBrowseWallet>;
+  /** 只交给可信 Worker 装配；普通模块入口不能打开核心额度账本。 */
+  openPlatformFileStore(input: { declaration: PluginStorageDeclaration }): Promise<ModuleFileStore>;
 }
 
 export interface PlatformRootStoreOptions {
+  identity: NetworkIdentity;
   /** 正式本地介质；只由 Coordinator 注入。 */
   store: WalletStore;
   /** 每次装配时由 Coordinator 提供的当前世代快照。 */
@@ -86,6 +90,7 @@ function centrallyDeclared(declaration: PluginStorageDeclaration): boolean {
 
 /** 构造平台存储根。 */
 export function createPlatformRootStore(options: PlatformRootStoreOptions): StoragePrivateRootStore {
+  const identity = validateNetworkIdentity(options.identity);
   /**
    * 世代栅栏：句柄绑定时的世代必须仍然是当前世代。
    *
@@ -95,6 +100,7 @@ export function createPlatformRootStore(options: PlatformRootStoreOptions): Stor
   function gateFor(binding: StorageNamespaceBinding): () => boolean {
     return () => {
       const live = options.generations();
+      if (!sameNetworkIdentity(binding, identity)) return false;
       if (binding.walletGeneration !== live.walletGeneration) return false;
       if (binding.sessionEpoch !== live.sessionEpoch) return false;
       if (binding.runGeneration !== live.runGeneration) return false;
@@ -113,6 +119,7 @@ function platformRootMatchesGeneration(live: { walletGeneration: string; session
   function currentBinding(): StorageNamespaceBinding {
     const live = options.generations();
     return Object.freeze({
+      ...identity,
       moduleId: "coordinator",
       purposeId: "settings",
       authority: "platform-only",
@@ -128,6 +135,7 @@ function platformRootMatchesGeneration(live: { walletGeneration: string; session
     const live = options.generations();
     const binding: StorageNamespaceBinding = Object.freeze({
       ...declaration,
+      ...identity,
       walletGeneration: live.walletGeneration,
       sessionEpoch: live.sessionEpoch,
       runGeneration: live.runGeneration,
@@ -160,6 +168,7 @@ function platformRootMatchesGeneration(live: { walletGeneration: string; session
     const live = options.generations();
     const binding: StorageNamespaceBinding = Object.freeze({
       ...declaration,
+      ...identity,
       walletGeneration: live.walletGeneration,
       sessionEpoch: live.sessionEpoch,
       runGeneration: live.runGeneration,
@@ -198,6 +207,7 @@ function platformRootMatchesGeneration(live: { walletGeneration: string; session
   }
 
   return {
+    identity,
     get walletGeneration(): string {
       return options.generations().walletGeneration;
     },
@@ -259,6 +269,14 @@ function platformRootMatchesGeneration(live: { walletGeneration: string; session
       const binding = bind(declaration);
       return createModuleFileStore({ store: options.store, binding, isCurrent: gateFor(binding) });
     },
+    openPlatformFileStore: async (input: { declaration: PluginStorageDeclaration }): Promise<ModuleFileStore> => {
+      const declaration = validatePluginStorageDeclaration(input.declaration);
+      if (declaration.authority !== "platform-only" || declaration.model !== "files" || !centrallyDeclared(declaration)) {
+        throw new StorageRuntimeError("storage_forbidden", "Platform file store requires a centrally declared platform-only files namespace");
+      }
+      const binding = bind(declaration);
+      return createModuleFileStore({ store: options.store, binding, isCurrent: gateFor(binding) });
+    },
     openPlatformSnapshot: async <T>(input: {
       declaration: PluginStorageDeclaration;
       validate: (value: unknown) => StorageSnapshotJsonCompatible<T>;
@@ -291,7 +309,7 @@ function platformRootMatchesGeneration(live: { walletGeneration: string; session
         if (input.appStorageName === undefined) {
           throw new StorageRuntimeError("storage_forbidden", "Clearing an app root requires its registered appStorageName");
         }
-        const root = buildWalletStorageRoot({
+        const root = networkIdentityStorageRoot(identity) + buildWalletStorageRoot({
           authority: "third-party-app",
           moduleId: declaration.moduleId,
           purposeId: declaration.purposeId,

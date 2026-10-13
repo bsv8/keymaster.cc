@@ -23,7 +23,7 @@ const mocks = vi.hoisted(() => {
     supportsRecipientPublicKeyHex: vi.fn(() => true)
   };
   return {
-    includeTestnet: false,
+    bsvNetwork: "main",
     contacts: [] as Array<{ publicKeyHex: string; name: string; tags: string[]; createdAt: string; updatedAt: string }>,
     offers: [
       {
@@ -71,7 +71,7 @@ vi.mock("@keymaster/runtime", () => ({
     t: (_key: string, values?: { defaultValue?: string }) => values?.defaultValue ?? _key
   }),
   useResourceViewSelector: (_store: unknown, resourceId: string, _args: readonly string[], _selector: unknown, fallback: unknown) => {
-    if (resourceId === "p2pkh.settings") return mocks.includeTestnet;
+    if (resourceId === "p2pkh.settings") return mocks.bsvNetwork;
     if (resourceId === "p2pkh.transfer-offers") return mocks.offers;
     if (resourceId === "p2pkh.transfer-active") return { activePublicKeyHex: OWNER };
     if (resourceId === "p2pkh.transfer-contacts") return mocks.contacts;
@@ -120,7 +120,7 @@ describe("TransferPage 收款方与 P2PKH 范围", () => {
   beforeEach(() => {
     mocks.widget.mockImplementation(TestWidget);
     mocks.contactPicker.mockImplementation(TestContactPicker);
-    mocks.includeTestnet = false;
+    mocks.bsvNetwork = "main";
     mocks.contacts.length = 0;
     window.history.replaceState(null, "", "/transfer");
   });
@@ -170,7 +170,7 @@ describe("TransferPage 收款方与 P2PKH 范围", () => {
     window.history.replaceState(null, "", `/transfer?recipientAddress=${TEST_ADDRESS}`);
     render(<TransferPage />);
 
-    expect(screen.getByText("未启用 testnet，请在设置中开启。")).toBeTruthy();
+    expect(screen.getByText("收款地址的网络与当前身份不一致。")).toBeTruthy();
     expect(screen.queryByTestId("p2pkh-transfer-widget")).toBeNull();
   });
 
@@ -179,12 +179,12 @@ describe("TransferPage 收款方与 P2PKH 范围", () => {
     fireEvent.click(screen.getByRole("tab", { name: "手工输入" }));
     fireEvent.change(screen.getByPlaceholderText("粘贴公钥、地址，或搜索联系人"), { target: { value: TEST_ADDRESS } });
 
-    expect(screen.getByText("未启用 testnet，请在设置中开启。")).toBeTruthy();
+    expect(screen.getByText("收款地址的网络与当前身份不一致。")).toBeTruthy();
     expect(screen.queryByTestId("p2pkh-transfer-widget")).toBeNull();
   });
 
   it("T06：testnet 开启时地址网络锁定不可切换", () => {
-    mocks.includeTestnet = true;
+    mocks.bsvNetwork = "test";
     window.history.replaceState(null, "", `/transfer?recipientAddress=${TEST_ADDRESS}&network=main`);
     render(<TransferPage />);
 
@@ -193,15 +193,12 @@ describe("TransferPage 收款方与 P2PKH 范围", () => {
     expect(screen.getByTestId("provider-step").textContent).toContain(TEST_ADDRESS);
   });
 
-  it("T07：公钥切换 testnet 后重新派生地址并提示重新核对", async () => {
-    mocks.includeTestnet = true;
+  it("T07：测试网身份按固定网络派生公钥地址，没有网络切换入口", async () => {
+    mocks.bsvNetwork = "test";
     window.history.replaceState(null, "", `/transfer?recipientPublicKeyHex=${OWNER}`);
     render(<TransferPage />);
-
-    const network = screen.getByRole("combobox", { name: "网络" });
-    fireEvent.change(network, { target: { value: "test" } });
+    expect(screen.queryByRole("combobox", {name:"网络"})).toBeNull();
     await waitFor(() => expect(screen.getByTestId("recipient-address").textContent).toBe(TEST_ADDRESS));
-    expect(screen.getByText("地址已更新，请重新核对。")).toBeTruthy();
     expect(screen.getByTestId("provider-step").textContent).toContain(TEST_ADDRESS);
   });
 
@@ -249,10 +246,10 @@ describe("TransferPage 收款方与 P2PKH 范围", () => {
   });
 
   it("地址模式手工输入时显示锁定的网络选择器", () => {
-    mocks.includeTestnet = true;
+    mocks.bsvNetwork = "test";
     render(<TransferPage />);
     fireEvent.click(screen.getByRole("tab", { name: "手工输入" }));
-    fireEvent.change(screen.getByPlaceholderText("粘贴公钥、地址，或搜索联系人"), { target: { value: MAIN_ADDRESS } });
+    fireEvent.change(screen.getByPlaceholderText("粘贴公钥、地址，或搜索联系人"), { target: { value: TEST_ADDRESS } });
 
     expect(screen.getByRole("combobox", { name: "网络" })).toHaveProperty("disabled", true);
   });

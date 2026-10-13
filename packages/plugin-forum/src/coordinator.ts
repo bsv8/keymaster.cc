@@ -1,13 +1,3 @@
-// Forum 的 Worker 侧入口。
-//
-// 这个版本的 Forum 只在 Window 运行单元里装配，所以这里不导出装配代码、UI
-// 或任何 Window 私有实现；它只提供 Worker 可能需要的纯逻辑（协议编解码、
-// 领域解析、分页纪律、发布协议计算），以便未来的 Worker 单元或集成测试在
-// 不把浏览器依赖带进 Worker 模块图的前提下复用同一份实现。
-//
-// 具体不放进这个入口的东西：manifest / setup / UI / 仓储 / lane / 传输。
-// Worker 模块图必须保持轻量，Node HTTP server 适配依赖不能进入浏览器入口。
-
 export * from "./protocol/bytes.js";
 export * from "./protocol/cbor.js";
 export * from "./protocol/crypto.js";
@@ -39,3 +29,8 @@ export {
   projectForumMarkdown,
   renderForumMarkdown,
 } from "./markdown/markdown.js";
+export { createForumWorkerService } from "./workerService.js";
+export { executeForumWorkerRequest } from "./workerHandler.js";
+export { streamForumAttachment } from "./attachmentStream.js";
+export { createForumServiceProxy } from "./forumServiceProxy.js";
+export { createForumRepository } from "./storage/forumRepository.js";

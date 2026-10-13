@@ -11,6 +11,7 @@
 import type { EcdsaSignatureFormat } from "@keymaster/contracts";
 
 export interface SessionCryptoBootstrapInput {
+  bsvNetwork: import("@keymaster/contracts").BsvNetwork;
   sessionId: string;
   publicKeyHex: string;
   /** Catalog Hold-unlocked raw key; transferred only to the worker. */

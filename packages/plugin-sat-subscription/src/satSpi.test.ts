@@ -11,7 +11,7 @@ const SUPPLIER = { supplierId: "primary", name: "Primary", supplierPublicKeyHex:
 const INFO = { currencies: [{ currency: "BSV", network: "mainnet", paymentAddress: "1supplier", balance: 10_000n }], projectType: "test", projectInfoCbor: new Uint8Array([0xa0]) };
 const TESTNET_INFO = { currencies: [{ currency: "BSV", network: "testnet", paymentAddress: "mqrAdPBmbvhLohuqFneSmn8TfZahUvu9eJ", balance: 10_000n }], projectType: "test", projectInfoCbor: new Uint8Array([0xa0]) };
 
-function makeFixture(input: { failFirstCollect?: boolean; balanceAfterCollect?: bigint; info?: typeof INFO; includeTestnet?: boolean } = {}) {
+function makeFixture(input: { failFirstCollect?: boolean; balanceAfterCollect?: bigint; info?: typeof INFO; bsvNetwork?: "main" | "test" } = {}) {
   const info = input.info ?? INFO;
   const store = createSatSubscriptionState({ ownerPublicKeyHex: OWNER, initial: { suppliers: [SUPPLIER], ownerSettings: { ownerPublicKeyHex: OWNER, defaultPublishSupplierId: "primary", receiveSupplierIds: [] } } });
   const requests: Uint8Array[] = [];
@@ -34,7 +34,7 @@ function makeFixture(input: { failFirstCollect?: boolean; balanceAfterCollect?: 
     })
   };
   const p2pkh: SatP2pkhService = {
-    getGlobalSettings: () => ({ includeTestnet: input.includeTestnet ?? true }),
+    getGlobalSettings: () => ({ bsvNetwork: input.bsvNetwork ?? "main" }),
     prepareTransfer: vi.fn(async (input) => ({ ...input, network: input.assetId === "bsv" ? "main" : "test", feeRateSatoshisPerKb: input.feeRateSatoshisPerKb, changeAddress: "1change", estimatedFeeSatoshis: 5, rawTxHex: "00" })),
     submitTransfer: vi.fn(async () => ({ status: "local-confirmed", txid: "aa".repeat(32) }))
   };
@@ -67,7 +67,7 @@ describe("Sat SPI service", () => {
   });
 
   it("prepares and submits a BSV testnet top-up with bsvtest/test", async () => {
-    const fixture = makeFixture({ info: TESTNET_INFO, includeTestnet: true });
+    const fixture = makeFixture({ info: TESTNET_INFO, bsvNetwork: "test" });
     const preview = await fixture.service.prepareTopUp({ supplierId: "primary", currency: "BSV", network: "testnet", amountSatoshis: 1234n });
     expect(preview).toMatchObject({ network: "testnet", paymentAddress: TESTNET_INFO.currencies[0]!.paymentAddress });
     expect(fixture.p2pkh.prepareTransfer).toHaveBeenCalledWith(expect.objectContaining({ assetId: "bsvtest", recipientAddress: TESTNET_INFO.currencies[0]!.paymentAddress }));
@@ -82,7 +82,7 @@ describe("Sat SPI service", () => {
   });
 
   it("returns unavailable when P2PKH testnet is disabled", async () => {
-    const fixture = makeFixture({ info: TESTNET_INFO, includeTestnet: false });
+    const fixture = makeFixture({ info: TESTNET_INFO, bsvNetwork: "main" });
     await expect(fixture.service.prepareTopUp({ supplierId: "primary", currency: "BSV", network: "testnet", amountSatoshis: 1234n })).rejects.toMatchObject({
       code: "unavailable",
       message: expect.stringContaining("P2PKH 设置未启用测试网")
@@ -91,7 +91,7 @@ describe("Sat SPI service", () => {
   });
 
   it("derives the owner Collect address on the SPI testnet", async () => {
-    const fixture = makeFixture({ info: TESTNET_INFO, includeTestnet: true });
+    const fixture = makeFixture({ info: TESTNET_INFO, bsvNetwork: "test" });
     const result = await fixture.service.collectNew({ supplierId: "primary", currency: "BSV", network: "testnet", amount: 100n });
     expect(result.state).toBe("unknown_result");
     expect(fixture.p2pkh.prepareTransfer).not.toHaveBeenCalled();
@@ -105,7 +105,7 @@ describe("Sat SPI service", () => {
   });
 
   it("does not broadcast a testnet preview after its network or owner is tampered", async () => {
-    const fixture = makeFixture({ info: TESTNET_INFO, includeTestnet: true });
+    const fixture = makeFixture({ info: TESTNET_INFO, bsvNetwork: "test" });
     const preview = await fixture.service.prepareTopUp({ supplierId: "primary", currency: "BSV", network: "testnet", amountSatoshis: 1234n });
     await expect(fixture.service.submitTopUp({ ...preview, p2pkhPreview: { ...(preview.p2pkhPreview as object), ownerPublicKeyHex: "03" + "44".repeat(32) } })).rejects.toMatchObject({ code: "identity" });
     await expect(fixture.service.submitTopUp({ ...preview, network: "mainnet" })).rejects.toMatchObject({ code: "conflict" });

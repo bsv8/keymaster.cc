@@ -65,8 +65,7 @@ export function createContactsPresenceTask(deps: ContactsPresenceTaskDeps): Back
       minIntervalMs: 5 * 60 * 1000
     },
     keyScope: () => {
-      const publicKeyHex = deps.walletState.snapshot().activePublicKeyHex;
-      return publicKeyHex ? { publicKeyHex } : undefined;
+      return deps.walletState.snapshot().activeKeyIdentity;
     },
     canRun: () => {
       if (deps.vault.status() !== "unlocked") {

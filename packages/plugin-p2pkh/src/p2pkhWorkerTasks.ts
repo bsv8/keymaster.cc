@@ -9,15 +9,14 @@ export interface P2pkhWorkerTaskDependencies {
   refreshUtxos(signal: AbortSignal): Promise<{ main?: number; test?: number }>;
   emitDataChanged(kinds: AssetDataInvalidationEvent["kinds"], seqs?: { main?: number; test?: number }): void;
 }
-export type P2pkhWorkerTaskDefinition = BackgroundTaskDefinition & { syncPolicy: "managed" | "smart" };
+export type P2pkhWorkerTaskDefinition = BackgroundTaskDefinition & { unitId: string; syncPolicy: "managed" | "smart" };
 /** P2PKH owns the task definitions and domain execution. The coordinator owns
  * scheduling, physical completion accounting and the final I/O lease.
  */
 export function createP2pkhWorkerTaskDefinitions(deps: P2pkhWorkerTaskDependencies): readonly P2pkhWorkerTaskDefinition[] {
   const history = createP2pkhCoordinatorTasks(deps);
   const keyScope = () => {
-    const publicKeyHex = deps.walletState.snapshot().activePublicKeyHex;
-    return publicKeyHex ? { publicKeyHex } : undefined;
+    return deps.walletState.snapshot().activeKeyIdentity;
   };
   return [
     {

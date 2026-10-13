@@ -6,7 +6,7 @@ export interface P2pkhWorkerAssetReaderDependencies {
   walletState: VaultWalletState;
   storage: BorrowedModuleFileStore;
   snapshots(): ReturnType<typeof createP2pkhUtxoSnapshotStore> | undefined;
-  includeTestnet(): boolean;
+  bsvNetwork(): "main" | "test";
 }
 export function createP2pkhWorkerAssetReader(deps: P2pkhWorkerAssetReaderDependencies): P2pkhAssetReader {
   return {
@@ -46,6 +46,6 @@ export function createP2pkhWorkerAssetReader(deps: P2pkhWorkerAssetReaderDepende
       }
       return rows;
     },
-    getGlobalSettings: () => ({ includeTestnet: deps.includeTestnet() })
+    getGlobalSettings: () => ({ bsvNetwork: deps.bsvNetwork() })
   };
 }

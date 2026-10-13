@@ -26,7 +26,7 @@ export interface PageUiRegistry {
   /** 使用贡献方真实 consumer 与 Scope 创建框架注册视图，归属不接受自报字符串。 */
   bind(consumer: PluginConsumer, scope: LifecycleScope): ScopedRegistryView<PageUiRegistration>;
 }
-export type PageFrameSlot = "unlocked-shell" | "wallet-entry" | "wallet-guard" | "storage-guard" | "protocol-popup" | "onboarding" | "uri-action";
+export type PageFrameSlot = "unlocked-shell" | "wallet-entry" | "wallet-recovery" | "wallet-guard" | "storage-guard" | "protocol-popup" | "onboarding" | "uri-action";
 export interface PageUiRenderer {
   /** 精确路径优先，其次按静态段优先匹配 :param 路径。 */
   hasPage(path: string): boolean;

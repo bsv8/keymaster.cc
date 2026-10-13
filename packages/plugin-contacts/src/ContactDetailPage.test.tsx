@@ -29,7 +29,7 @@ const CONTACT: Contact = {
 function walletState(): VaultWalletState {
   const state: VaultLifecycleSnapshot = walletStateFixtureSnapshot({ activePublicKeyHex: OWNER });
   return {
-    snapshot: () => walletStateFixtureSnapshot((() => state)(), () => ({ publicKeyHex: OWNER, label: "test", capabilities: [], createdAt: "now" })),
+    snapshot: () => walletStateFixtureSnapshot((() => state)(), () => ({bsvNetwork: "main" as const,  publicKeyHex: OWNER, label: "test", capabilities: [], createdAt: "now" })),
 
     subscribe: () => () => undefined
   };

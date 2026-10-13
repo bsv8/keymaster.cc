@@ -250,7 +250,7 @@ button { font-family: inherit; }
 
 /* ---------- Shell ---------- */
 .app-shell { display: flex; flex-direction: column; min-height: 100vh; }
-.app-topbar { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; background: var(--surface); border-bottom: 1px solid var(--border); gap: 12px; }
+.app-topbar { position: sticky; top: 0; z-index: 50; display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; background: var(--surface); border-bottom: 1px solid var(--border); gap: 12px; }
 /* IndexedDB 永久存储授权条：显示在 header 上方，未授权时不允许关闭。 */
 .indexeddb-persistence-bar {
   display: flex;

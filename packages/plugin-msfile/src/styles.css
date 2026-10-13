@@ -757,31 +757,40 @@ textarea.msfile-settings__control {
 .msfile-bucket {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 16px;
   min-width: 0;
 }
 
 .msfile-bucket__header {
-  display: flex;
   align-items: flex-start;
+  border-bottom: 1px solid var(--border, #e5e7eb);
+  display: flex;
   gap: 10px;
+  padding-bottom: 12px;
 }
 
 .msfile-bucket__header h3 {
+  font-size: 18px;
   margin: 0 0 4px;
 }
 
 .msfile-bucket__header p {
-  color: var(--km-text-muted, #6b7280);
+  color: var(--text-dim, #6b7280);
+  font-size: 13px;
+  line-height: 1.55;
   margin: 0;
 }
 
+/* BitFS 购买任务：独立卡片，任务之间保持统一间距。 */
 .msfile-bucket__tasks {
-  border-top: 1px solid var(--km-border, #e5e7eb);
+  background: var(--surface, #ffffff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: calc(var(--radius, 8px) + 2px);
+  box-shadow: 0 1px 1px color-mix(in srgb, var(--text, #111827) 4%, transparent);
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding-top: 12px;
+  gap: 12px;
+  padding: 16px;
 }
 
 .msfile-bucket__tasks-head,
@@ -793,42 +802,60 @@ textarea.msfile-settings__control {
   justify-content: space-between;
 }
 
-.msfile-bucket__tasks-head h4 {
+.msfile-bucket__tasks-head h4,
+.msfile-bucket__stored-head h4 {
+  font-size: 15px;
   margin: 0 0 4px;
 }
 
 .msfile-bucket__task {
-  border: 1px solid var(--km-border, #e5e7eb);
-  border-radius: 8px;
+  background: var(--surface-2, #f3f4f6);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: var(--radius, 8px);
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
+  gap: 10px;
+  padding: 12px 14px;
 }
 
 .msfile-bucket__task-title {
-  align-items: baseline;
+  align-items: center;
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   min-width: 0;
 }
 
-.msfile-bucket__task-title code {
-  color: var(--km-text-muted, #6b7280);
-  font-size: 0.8rem;
+.msfile-bucket__task-title strong {
+  font-size: 14px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.msfile-bucket__task-title code,
+.msfile-bucket__seed code {
+  background: color-mix(in srgb, var(--text, #111827) 6%, transparent);
+  border-radius: 6px;
+  color: var(--text-dim, #6b7280);
+  font-size: 12px;
+  padding: 1px 6px;
 }
 
 .msfile-bucket__task-message {
-  font-size: 0.85rem;
+  font-size: 13px;
+  line-height: 1.55;
   margin: 0;
 }
 
 .msfile-bucket__task-metrics {
+  background: var(--surface, #ffffff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: var(--radius, 8px);
   display: grid;
-  gap: 8px 14px;
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px 14px;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
   margin: 0;
+  padding: 10px 12px;
 }
 
 .msfile-bucket__task-metrics div {
@@ -836,34 +863,90 @@ textarea.msfile-settings__control {
 }
 
 .msfile-bucket__task-metrics dt {
-  color: var(--km-text-muted, #6b7280);
-  font-size: 0.75rem;
+  color: var(--text-dim, #6b7280);
+  font-size: 12px;
 }
 
 .msfile-bucket__task-metrics dd {
-  font-size: 0.85rem;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
   margin: 2px 0 0;
   overflow-wrap: anywhere;
 }
 
 .msfile-bucket__task-actions {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   justify-content: flex-end;
 }
 
 .msfile-bucket__price-limit {
+  background: var(--surface, #ffffff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: var(--radius, 8px);
   display: grid;
-  gap: 6px;
+  gap: 8px;
+  padding: 10px 12px;
 }
 
-.msfile-bucket__price-limit input {
-  accent-color: var(--km-primary, #2563eb);
+.msfile-bucket__price-limit input[type="range"] {
+  accent-color: var(--primary, #f7b955);
+  appearance: none;
+  background: transparent;
+  height: 22px;
+  margin: 0;
   width: 100%;
 }
 
+.msfile-bucket__price-limit input[type="range"]:disabled {
+  opacity: .6;
+}
+
+.msfile-bucket__price-limit input[type="range"]::-webkit-slider-runnable-track {
+  background: color-mix(in srgb, var(--text, #111827) 14%, transparent);
+  border-radius: 999px;
+  height: 6px;
+}
+
+.msfile-bucket__price-limit input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  background: var(--primary, #f7b955);
+  border: 2px solid var(--surface, #ffffff);
+  border-radius: 50%;
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--text, #111827) 35%, transparent);
+  height: 18px;
+  margin-top: -6px;
+  width: 18px;
+}
+
+.msfile-bucket__price-limit input[type="range"]:disabled::-webkit-slider-thumb {
+  background: var(--text-dim, #6b7280);
+}
+
+.msfile-bucket__price-limit input[type="range"]::-moz-range-track {
+  background: color-mix(in srgb, var(--text, #111827) 14%, transparent);
+  border-radius: 999px;
+  height: 6px;
+}
+
+.msfile-bucket__price-limit input[type="range"]::-moz-range-thumb {
+  background: var(--primary, #f7b955);
+  border: 2px solid var(--surface, #ffffff);
+  border-radius: 50%;
+  height: 18px;
+  width: 18px;
+}
+
+.msfile-bucket__price-limit input[type="range"]:disabled::-moz-range-thumb {
+  background: var(--text-dim, #6b7280);
+}
+
 .msfile-bucket__price-limit label {
+  align-items: baseline;
   display: flex;
   flex-wrap: wrap;
+  font-size: 13px;
   gap: 5px;
   justify-content: space-between;
 }
@@ -879,13 +962,14 @@ textarea.msfile-settings__control {
 
 .msfile-bucket__quotes li {
   align-items: center;
-  border: 1px solid var(--km-border, #e5e7eb);
-  border-radius: 8px;
+  background: var(--surface, #ffffff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: var(--radius, 8px);
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 8px 12px;
   justify-content: space-between;
-  padding: 8px 10px;
+  padding: 10px 12px;
 }
 
 .msfile-bucket__quote-info {
@@ -896,51 +980,140 @@ textarea.msfile-settings__control {
   min-width: 0;
 }
 
+.msfile-bucket__quote-info strong {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
 .msfile-bucket__quote-info span {
-  color: var(--km-text-muted, #6b7280);
-  font-size: 0.8rem;
+  color: var(--text-dim, #6b7280);
+  font-size: 12px;
 }
 
 .msfile-bucket__hint {
-  color: var(--km-text-muted, #6b7280);
-  font-size: 0.85rem;
+  color: var(--text-dim, #6b7280);
+  font-size: 13px;
+  line-height: 1.55;
   margin: 0;
 }
 
+/* 上传区：虚线卡片，和只读列表区分。 */
 .msfile-bucket__upload {
   align-items: center;
+  background: var(--surface, #ffffff);
+  border: 1px dashed var(--border, #e5e7eb);
+  border-radius: calc(var(--radius, 8px) + 2px);
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 10px 12px;
+  padding: 14px 16px;
 }
 
 .msfile-bucket__file-label {
-  font-size: 0.85rem;
-  color: var(--km-text-muted, #6b7280);
+  color: var(--text, #111827);
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .msfile-bucket__file-input {
+  color: var(--text-dim, #6b7280);
+  font-size: 13px;
   max-width: 320px;
 }
 
 .msfile-bucket__progress {
-  color: var(--km-text-muted, #6b7280);
-  font-size: 0.85rem;
+  color: var(--text-dim, #6b7280);
+  font-size: 13px;
   margin: 0;
 }
 
 .msfile-bucket__error {
   align-items: center;
-  color: var(--km-danger, #dc2626);
+  background: color-mix(in srgb, var(--danger, #e35a5a) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger, #e35a5a) 32%, transparent);
+  border-radius: var(--radius, 8px);
+  color: var(--danger, #dc2626);
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   margin: 0;
+  padding: 10px 12px;
 }
 
 .msfile-bucket__ok {
-  color: var(--km-success, #16a34a);
+  background: color-mix(in srgb, var(--success, #16a34a) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--success, #16a34a) 32%, transparent);
+  border-radius: var(--radius, 8px);
+  color: var(--success, #15803d);
   margin: 0;
+  padding: 10px 12px;
+}
+
+/* 已存储内容：标题 + 计数 + 表格卡片。 */
+.msfile-bucket__stored {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.msfile-bucket__stored-head {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.msfile-bucket__stored-head h4 {
+  margin: 0;
+}
+
+.msfile-bucket__count {
+  align-items: center;
+  background: var(--surface-2, #f3f4f6);
+  border-radius: 999px;
+  color: var(--text-dim, #6b7280);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 700;
+  height: 22px;
+  justify-content: center;
+  min-width: 22px;
+  padding: 0 8px;
+}
+
+.msfile-bucket__table {
+  background: var(--surface, #ffffff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: calc(var(--radius, 8px) + 2px);
+  box-shadow: 0 1px 1px color-mix(in srgb, var(--text, #111827) 4%, transparent);
+  overflow: hidden;
+}
+
+.msfile-bucket__table .ui-data-table {
+  overflow-x: auto;
+}
+
+.msfile-bucket__table .ui-data-table table {
+  min-width: 760px;
+}
+
+.msfile-bucket__table .ui-data-table th,
+.msfile-bucket__table .ui-data-table td {
+  padding: 10px 12px;
+  vertical-align: middle;
+}
+
+.msfile-bucket__table .ui-data-table th {
+  background: var(--surface-2, #f3f4f6);
+  border-bottom: 1px solid var(--border, #e5e7eb);
+  white-space: nowrap;
+}
+
+.msfile-bucket__table .ui-data-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.msfile-bucket__table .ui-data-table tbody tr:hover td {
+  background: color-mix(in srgb, var(--primary, #f7b955) 8%, transparent);
 }
 
 .msfile-bucket__row-actions {
@@ -950,12 +1123,14 @@ textarea.msfile-settings__control {
 }
 
 .msfile-bucket__preview {
-  border: 1px solid var(--km-border, #e5e7eb);
-  border-radius: 8px;
+  background: var(--surface, #ffffff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: calc(var(--radius, 8px) + 2px);
+  box-shadow: 0 1px 1px color-mix(in srgb, var(--text, #111827) 4%, transparent);
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
+  gap: 10px;
+  padding: 14px 16px;
 }
 
 .msfile-bucket__preview-head {
@@ -969,20 +1144,21 @@ textarea.msfile-settings__control {
 }
 
 .msfile-bucket__text-preview {
-  background: var(--km-surface-subtle, #f3f4f6);
-  border-radius: 7px;
-  font-size: 0.85rem;
+  background: var(--surface-2, #f3f4f6);
+  border-radius: var(--radius, 8px);
+  font-size: 13px;
+  line-height: 1.55;
   margin: 0;
   max-height: 320px;
   overflow: auto;
-  padding: 8px;
+  padding: 10px;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
 .msfile-bucket__frame-preview {
-  border: 1px solid var(--km-border, #e5e7eb);
-  border-radius: 7px;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: var(--radius, 8px);
   display: block;
   min-height: 320px;
   width: 100%;
@@ -1000,25 +1176,92 @@ textarea.msfile-settings__control {
   justify-content: flex-end;
 }
 
-.msfile-bucket__name {
-  display: inline-flex;
+.msfile-bucket__name,
+.msfile-bucket__seed {
   align-items: center;
+  display: inline-flex;
   gap: 6px;
   min-width: 0;
 }
 
+/* 状态徽章：默认中性；按任务阶段/警告语义着色。 */
 .msfile-bucket__badge {
-  border: 1px solid var(--km-warning, #d97706);
+  background: color-mix(in srgb, var(--text, #111827) 6%, transparent);
+  border: 1px solid var(--border, #e5e7eb);
   border-radius: 999px;
-  color: var(--km-warning, #d97706);
-  font-size: 0.72rem;
-  padding: 0 6px;
+  color: var(--text-dim, #6b7280);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 10px;
   white-space: nowrap;
 }
+
+.msfile-bucket__badge--completed {
+  background: color-mix(in srgb, var(--success, #16a34a) 12%, transparent);
+  border-color: color-mix(in srgb, var(--success, #16a34a) 40%, transparent);
+  color: var(--success, #15803d);
+}
+
+.msfile-bucket__badge--warning,
+.msfile-bucket__badge--funding-unknown,
+.msfile-bucket__badge--payment-unknown,
+.msfile-bucket__badge--close-unknown,
+.msfile-bucket__badge--cancel-unknown,
+.msfile-bucket__badge--refund-unknown {
+  background: color-mix(in srgb, var(--warning, #d97706) 12%, transparent);
+  border-color: color-mix(in srgb, var(--warning, #d97706) 42%, transparent);
+  color: var(--warning, #b45309);
+}
+
+.msfile-bucket__badge--failed,
+.msfile-bucket__badge--connection-closed {
+  background: color-mix(in srgb, var(--danger, #e35a5a) 10%, transparent);
+  border-color: color-mix(in srgb, var(--danger, #e35a5a) 40%, transparent);
+  color: var(--danger, #dc2626);
+}
+
+.msfile-bucket__badge--discovering,
+.msfile-bucket__badge--opening,
+.msfile-bucket__badge--cancelling-opening,
+.msfile-bucket__badge--funding,
+.msfile-bucket__badge--requesting-seed,
+.msfile-bucket__badge--requesting-blocks,
+.msfile-bucket__badge--content-committing,
+.msfile-bucket__badge--closing-pool,
+.msfile-bucket__badge--cancelling-pool,
+.msfile-bucket__badge--refund-ready {
+  background: color-mix(in srgb, var(--primary, #f7b955) 20%, transparent);
+  border-color: color-mix(in srgb, var(--primary, #f7b955) 48%, transparent);
+  color: var(--text, #111827);
+}
+
+/* 已取消/已退款保持默认中性色，不抢注意力。 */
 
 .msfile-bucket__actions {
   align-items: center;
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+/* 首页 MSFile 空间里的折叠入口。 */
+.msfile-bucket--collapsed {
+  background: var(--surface, #ffffff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: calc(var(--radius, 8px) + 2px);
+  padding: 16px;
+}
+
+@media (max-width: 620px) {
+  .msfile-bucket__tasks {
+    padding: 12px;
+  }
+
+  .msfile-bucket__task-actions {
+    justify-content: stretch;
+  }
+
+  .msfile-bucket__task-actions > * {
+    flex: 1 1 auto;
+  }
 }

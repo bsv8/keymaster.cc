@@ -12,6 +12,7 @@ export interface WalletSnapshot {
   readonly walletGeneration?: string;
   readonly publicKeyHex?: string;
   readonly keyLabel?: string;
+  readonly bsvNetwork?: "main" | "test";
 }
 
 /** 打开生产 preview，确认页面本身已进入可观察状态。 */
@@ -41,7 +42,10 @@ export async function readWalletSnapshot(page: Page): Promise<WalletSnapshot | n
   }
   if (keyHoldText !== undefined) {
     try {
-      const keyHold = JSON.parse(keyHoldText) as { publicKeyHex?: unknown; label?: unknown };
+      const envelope = JSON.parse(keyHoldText) as { format?: unknown; bsvNetwork?: unknown; keyHold?: { publicKeyHex?: unknown; label?: unknown } };
+      const keyHold = envelope.format === "keymaster.network-keyhold" ? envelope.keyHold : undefined;
+      if (!keyHold) throw new Error("钱包缺少网络身份 KeyHold 封装");
+      if (envelope.bsvNetwork === "main" || envelope.bsvNetwork === "test") snapshot.bsvNetwork = envelope.bsvNetwork;
       if (typeof keyHold.publicKeyHex === "string") snapshot.publicKeyHex = keyHold.publicKeyHex;
       if (typeof keyHold.label === "string") snapshot.keyLabel = keyHold.label;
     } catch {

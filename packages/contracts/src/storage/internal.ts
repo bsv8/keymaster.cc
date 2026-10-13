@@ -1,3 +1,4 @@
+import type { NetworkIdentity as importNetworkIdentity } from "../networkIdentity.js";
 import { defineCapability } from "webloom-framework";
 import type { OwnerAppStore } from "./access.js";
 import type { KeyValueStore } from "./kv.js";
@@ -64,7 +65,7 @@ export type CoordinatorPlatformStorageData =
   | { type: "platform.commit"; platformGrantId: string; partition: string; ifRevision?: number; operations: import("./kv.js").KeyValueCommitOperation[] };
 
 /** 平台 K-V 授权；物理路径、数据库连接和内部 revision 只保存在 Worker 内。 */
-export interface StoragePlatformGrant {
+export interface StoragePlatformGrant extends importNetworkIdentity {
   platformGrantId: string;
   walletGeneration: string;
   runGeneration: string;
@@ -90,7 +91,7 @@ export interface StorageBindingCoordinatorClient {
  * 授权只描述逻辑坐标（moduleId + purposeId）与四件世代身份；物理路径、
  * 数据库连接和 revision 编号留在 Worker 内，不穿过 wire。
  */
-export interface StorageOwnerGrant {
+export interface StorageOwnerGrant extends importNetworkIdentity {
   storageGrantId: string;
   walletGeneration: string;
   runGeneration: string;
@@ -109,7 +110,7 @@ export interface StorageOwnerGrant {
  * 目录由平台登记的 `appStorageName` 决定，访问权由验证后的 App 身份决定；
  * 两者都不可由调用方自报，因此同名的两个 App 不可能共用目录。
  */
-export interface ThirdPartyAppStorageGrant {
+export interface ThirdPartyAppStorageGrant extends importNetworkIdentity {
   storageGrantId: string;
   walletGeneration: string;
   runGeneration: string;
@@ -129,4 +130,4 @@ export type StorageBindingGrant = StorageOwnerGrant | ThirdPartyAppStorageGrant;
 export type { WalletStore, WalletObject, WalletObjectMeta, WalletWriteCondition, WalletPutResult, WalletBatchOperation, WalletBatchCondition, WalletBatchInput, WalletBatchResult } from "./walletStoreInternal.js";
 export { StorageRuntimeError, storageErrorCode, type StorageDiagnostic } from "./runtimeError.js";
 
-export { WALLET_INITIALIZATION_PATH, type WalletVaultKeyStore, type WalletVaultLifecycleStore } from "./walletStoreInternal.js";
+export { WALLET_INITIALIZATION_PATH, WALLET_MIGRATION_PATH, WALLET_PAYMENT_POLICY_PATH, type WalletVaultKeyStore, type WalletVaultLifecycleStore, type WalletVaultMigrationStore } from "./walletStoreInternal.js";

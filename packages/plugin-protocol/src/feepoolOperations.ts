@@ -30,6 +30,7 @@ import type { P2pkhTransferAssetId, ProtocolFeePoolAction, ProtocolFeePoolRecord
  *     四元组校验 op，禁止跨 session / 跨 owner 复用 operationId。
  */
 export interface FeepoolPendingOp {
+  channelId: string;
   /** 内部稳定 op id（与 prepare 返回的 operationId 一致）。 */
   operationId: string;
   /** prepare 时的 exact origin；commit 时按这个做 origin 一致性检查。 */

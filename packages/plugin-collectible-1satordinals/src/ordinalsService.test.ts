@@ -22,14 +22,14 @@ import {
 
 const ACTIVE_PK = "pk-active";
 
-function fakeWalletState(activePublicKeyHex?: string): VaultWalletState {
-  return { snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex }))()) } as unknown as VaultWalletState;
+function fakeWalletState(activePublicKeyHex?: string, bsvNetwork: "main" | "test" = "main"): VaultWalletState {
+  return { snapshot: () => { const state = walletStateFixtureSnapshot({ activePublicKeyHex }, () => ({ publicKeyHex: activePublicKeyHex!, bsvNetwork, label: "Identity", capabilities: ["p2pkh"], createdAt: "2026-10-11" })); return { ...state, activeKeyIdentity: state.activeKeyIdentity ? { ...state.activeKeyIdentity, bsvNetwork } : undefined }; } } as unknown as VaultWalletState;
 }
 
-function fakeP2pkh(utxos: P2pkhUtxoFor1Sat[], includeTestnet = false): P2pkhServiceFor1Sat {
+function fakeP2pkh(utxos: P2pkhUtxoFor1Sat[], bsvNetwork = false): P2pkhServiceFor1Sat {
   return {
     listUtxos: () => Promise.resolve(utxos),
-    getGlobalSettings: () => ({ includeTestnet })
+    getGlobalSettings: () => ({ bsvNetwork: bsvNetwork ? "test" as const : "main" as const })
   };
 }
 
@@ -83,16 +83,15 @@ describe("createOrdinalsService", () => {
     expect(out[0]!.address).toBe("addr-A");
   });
 
-  it("includeTestnet=true 时同时扫描 main / test", async () => {
+  it("test 身份只扫描 test", async () => {
     const queried: Array<{ network: string; outpoint: string }> = [];
     const svc = createOrdinalsService({
-      walletState: fakeWalletState(ACTIVE_PK),
+      walletState: fakeWalletState(ACTIVE_PK, "test"),
       p2pkh: fakeP2pkh([{ txid: "deadbeef", vout: 2, value: 1000, address: "addr-A" }], true),
-      wocOneSat: fakeWoc(new Set(["main:deadbeef_2"]), queried)
+      wocOneSat: fakeWoc(new Set(["test:deadbeef_2"]), queried)
     });
     const out = await svc.listActiveKeyCollectibles();
     expect(queried).toEqual([
-      { network: "main", outpoint: "deadbeef_2" },
       { network: "test", outpoint: "deadbeef_2" }
     ]);
     expect(out.map((h) => h.outpoint)).toEqual(["deadbeef:2"]);
@@ -120,18 +119,16 @@ describe("createOrdinalsService", () => {
   it("getOutpointInscription 返回 null（404）的 UTXO 被跳过", async () => {
     const queried: Array<{ network: string; outpoint: string }> = [];
     const svc = createOrdinalsService({
-      walletState: fakeWalletState(ACTIVE_PK),
+      walletState: fakeWalletState(ACTIVE_PK, "test"),
       p2pkh: fakeP2pkh([
         { txid: "hit", vout: 0, value: 1000, address: "addr-A" },
         { txid: "miss", vout: 1, value: 1000, address: "addr-A" }
       ], true),
-      wocOneSat: fakeWoc(new Set(["main:hit_0"]), queried)
+      wocOneSat: fakeWoc(new Set(["test:hit_0"]), queried)
     });
     const out = await svc.listActiveKeyCollectibles();
     // 两个都查询了，但只有命中的进入结果。
     expect(queried).toEqual([
-      { network: "main", outpoint: "hit_0" },
-      { network: "main", outpoint: "miss_1" },
       { network: "test", outpoint: "hit_0" },
       { network: "test", outpoint: "miss_1" }
     ]);
@@ -150,7 +147,7 @@ describe("createOrdinalsService", () => {
     expect(hit?.outpoint).toBe("cafe:3");
   });
 
-  it("getOutpoint 会回落到 testnet 查询", async () => {
+  it("main 身份不能回落到 testnet 查询", async () => {
     const queried: Array<{ network: string; outpoint: string }> = [];
     const svc = createOrdinalsService({
       walletState: fakeWalletState(ACTIVE_PK),
@@ -159,10 +156,9 @@ describe("createOrdinalsService", () => {
     });
     const hit = await svc.getOutpoint("testhit:4");
     expect(queried).toEqual([
-      { network: "main", outpoint: "testhit_4" },
-      { network: "test", outpoint: "testhit_4" }
+      { network: "main", outpoint: "testhit_4" }
     ]);
-    expect(hit?.network).toBe("test");
+    expect(hit).toBeNull();
   });
 
   it("getOutpoint 非法格式返回 null，不查询 WOC", async () => {

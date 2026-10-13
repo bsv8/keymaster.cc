@@ -51,7 +51,7 @@ async function fixture() {
     }); } : ctx => { ctx.provide(WEBRTC_SERVICE_CAPABILITY, rtc); } },
   });
   hosts.push(host);
-  host.provide(VAULT_WALLET_STATE_CAPABILITY, walletStateFixtureAccess({ snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: OWNER }))(), () => ({ publicKeyHex: OWNER, label: "Owner", capabilities: [], createdAt: "now" })),
+  host.provide(VAULT_WALLET_STATE_CAPABILITY, walletStateFixtureAccess({ snapshot: () => walletStateFixtureSnapshot((() => ({ activePublicKeyHex: OWNER }))(), () => ({bsvNetwork: "main" as const,  publicKeyHex: OWNER, label: "Owner", capabilities: [], createdAt: "now" })),
      subscribe: () => () => {},
   }));
   host.provide(CHANNEL_RUNTIME_CAPABILITY, { forPlugin: () => channel, forSystem: () => channel });

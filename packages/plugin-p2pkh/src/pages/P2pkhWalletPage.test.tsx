@@ -71,17 +71,17 @@ function makeLocal(id: string, overrides: Partial<P2pkhLocalTransaction> = {}): 
   };
 }
 
-function registerWallet(includeTestnet: boolean, history: P2pkhHistoryRecord[] = [historyRecord], serviceOverrides: Partial<P2pkhService> = {}, walletOverrides: Partial<WalletSnapshot> = {}, coordinatorOverrides: Partial<SessionCoordinatorClient> = {}, balanceOverrides: Partial<GlobalBalanceSnapshot> = {}) {
+function registerWallet(bsvNetwork: boolean, history: P2pkhHistoryRecord[] = [historyRecord], serviceOverrides: Partial<P2pkhService> = {}, walletOverrides: Partial<WalletSnapshot> = {}, coordinatorOverrides: Partial<SessionCoordinatorClient> = {}, balanceOverrides: Partial<GlobalBalanceSnapshot> = {}) {
   const host = createPluginHost({  initialI18nResources: [p2pkhResources] });
   const registry = host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY);
-  const testResource = { resourceId: "p2pkh:test", publicKeyHex: owner, label: "test", address: "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn", network: "test" as const, createdAt: "now", generation: 0 };
+  const testResource = {bsvNetwork: "main" as const,  resourceId: "p2pkh:test", publicKeyHex: owner, label: "test", address: "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn", network: "test" as const, createdAt: "now", generation: 0 };
   const defaultBalances: GlobalBalanceSnapshot["balances"] = {
     mainnet: { total: 1000, available: true, breakdown },
-    ...(includeTestnet ? { testnet: { total: 2000, available: true } } : {}),
+    ...(bsvNetwork ? { testnet: { total: 2000, available: true } } : {}),
   };
   const balanceSnapshot: GlobalBalanceSnapshot = {
     publicKeyHex: owner,
-    includeTestnet,
+    bsvNetwork: bsvNetwork ? "test" : "main",
     balances: balanceOverrides.balances ?? defaultBalances,
     revision: 1,
     ...balanceOverrides,
@@ -94,13 +94,13 @@ function registerWallet(includeTestnet: boolean, history: P2pkhHistoryRecord[] =
     subscribe: () => () => undefined,
     invalidation: "immediate",
   });
-  registry.register({ id: "p2pkh.settings", scope: "global", key: () => ["p2pkh.settings"], load: async () => ({ includeTestnet } satisfies P2pkhGlobalSettings), subscribe: () => () => undefined, invalidation: "immediate" });
+  registry.register({ id: "p2pkh.settings", scope: "global", key: () => ["p2pkh.settings"], load: async () => ({ bsvNetwork: bsvNetwork ? "test" : "main" } satisfies P2pkhGlobalSettings), subscribe: () => () => undefined, invalidation: "immediate" });
   registry.register({
     id: "p2pkh.wallet",
     scope: "active-key",
     key: (_args: unknown, context: { activePublicKeyHex?: string }) => ["p2pkh.wallet", context.activePublicKeyHex ?? "none"],
     load: async () => ({
-      resources: [testResource, { resourceId: "p2pkh:main", publicKeyHex: owner, label: "main", address: "1abc", network: "main" as const, createdAt: "now", generation: 0 }],
+      resources: [testResource, {bsvNetwork: "main" as const,  resourceId: "p2pkh:main", publicKeyHex: owner, label: "main", address: "1abc", network: "main" as const, createdAt: "now", generation: 0 }],
       history,
       locals: [],
       utxos: [],
@@ -148,7 +148,7 @@ describe("P2pkhWalletPage", () => {
     render(<PluginHostProvider host={host}><P2pkhWalletPage network="test" /></PluginHostProvider>);
     await waitFor(() => expect(screen.getAllByText(txid)).toHaveLength(1));
     expect(screen.getByText("On-chain transactions · Testnet")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Testnet" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Mainnet" })).toBeNull();
   });
 
   it("never shows a local-only row on the chain transactions page", async () => {
@@ -238,7 +238,7 @@ describe("P2pkhWalletPage", () => {
     window.history.replaceState({}, "", "/p2pkh/testnet/transactions");
     const host = registerWallet(false);
     render(<PluginHostProvider host={host}><P2pkhWalletPage network="test" /></PluginHostProvider>);
-    expect(await screen.findByText("Testnet is disabled")).toBeTruthy();
+    expect(await screen.findByText("Network identity mismatch")).toBeTruthy();
     expect(screen.queryByText("2,000 sats")).toBeNull();
   });
 

@@ -3,6 +3,8 @@
 P2PKH 管理普通 BSV 的地址、链上历史、本地提交、余额和转账。Token 与收藏品有自己的
 业务状态，不把 P2PKH 的数据模型直接套到其他资产。
 
+带找零的协议 spend 按实际签名字节计算矿工费，费用不足时才提高。修改找零会改变签名及 DER 长度，因此达到足够费用即停止，不追求相邻费用值之间的精确相等。无找零的固定协议布局与显式矿工费预算仍按原规则校验。
+
 ## 数据真值
 
 ```text
@@ -10,7 +12,7 @@ UTXO：WoC `unspent/all`（每个 owner + network + address 一次请求）
       → 严格校验 → Coordinator Worker 内存快照（唯一真值，不落盘）
 
 历史：WoC confirmed history（分页）
-      → 只保存 txid / height / fee 元数据（`<net>/history.json`，完整分页成功后整文件替换）
+      → 只保存 txid / height / fee 元数据（`<network>/<publicKeyHex>/p2pkh/history.json`，网络由外层身份根隔离，完整分页成功后整文件替换；兼容读取旧 `<net>/history.json`，下次成功保存时移除旧文件）
 
 详情：打开交易详情页时按 txid 懒加载 raw transaction
       → 临时解析输入/输出用于展示，不写任何派生状态
@@ -98,8 +100,8 @@ P2PKH 的链上数据分成两个独立任务，互不阻塞：
 
 - 准备交易前刷新一次 `unspent/all`；提交前再次刷新，并确认 preview 中的全部输入
   仍然存在且数值未变。
-- 普通 P2PKH 可花集合固定为：`WoC unspent/all − isSpentInMempoolTx=true`。
-  普通 P2PKH 不读取本地 input claim，也不读取协议资产的 protected outpoint。
+- 普通 P2PKH 可花集合来自 WoC，排除 `isSpentInMempoolTx=true` 及 Worker 权威确认受保护的专用资金/协议输入。
+  页面不直接读取协议 claim；过滤在 Worker 快照和广播入口执行。
 - `utxoBinding` 保存本次选币快照的 `resourceId`（资源 ID）和 `seq`（快照序号）；
   `seq` 是整组 UTXO 的唯一并发门禁，不是单个 outpoint 的锁。
 - 本地广播产生的找零不再主动加入可花集合；只有 WoC 返回该找零后才能再次消费。
@@ -206,7 +208,7 @@ P2PKH 设置 `includeTestnet=false`（默认）时：
 ## 安全边界
 
 - 选币只考虑当前快照中未被 `isSpentInMempoolTx=true` 标记的 P2PKH 输出。
-- 普通 P2PKH 不使用 input claim 或 protected outpoint；协议资产的保护由协议资产自身负责。
+- 普通 P2PKH 不创建协议 input claim；Worker 从协议权威记录恢复保护，在选币快照和广播两处阻止误花。
 - 广播结果未知时不自动重发原交易，也不使用单纯的超时 TTL 解锁 seq；只能等待 WoC 观察、内容变化
   刷新，或超过 10 分钟后确认该交易已被丢弃。
 - `WocService` 对插件只提供余额、历史、UTXO 和交易观察等只读接口；广播统一经过中心广播服务。
@@ -219,5 +221,13 @@ P2PKH 设置 `includeTestnet=false`（默认）时：
 广播实例**（不新增 capability、不跨 realm），同样自动重试，并订阅 Worker 本地序号通知唤醒。
 `broadcastWithCoordinator` 仅保留为 Worker 内部兼容/测试回退路径。协议资产（BSV-21 / STAS /
 1Sat）的 gas 花费已纳入同一快照序号门禁与中心出口，其自动重试属于后续版本范围。普通 P2PKH
-结果未知时保留本地审计行；协议资产的 claim/protected 记录仍只服务协议资产，不作为普通 P2PKH 的
-余额或选币过滤条件。
+结果未知时保留本地审计行。协议资产的 claim 与保护不构造链上余额，但受保护输出不能进入普通转账的可花集合。
+
+
+## Forum 协议资金与恢复
+
+`p2pkh.coordinator-worker` 向同 realm 的 Forum Worker 提供受控协议 spend、专用资金和提交观测，复用 Worker transfer 的同一中心广播服务、文件根与快照序号门禁。专用资金仍使用 `funding/` 原记录；注册表只是当前会话的 provider 投影。恢复读取所有资金分页，损坏记录使花费失败；未知状态保留保护。
+
+协议提交及关联输入 claim 的写前证据存于 `protocol/<提交编号摘要>.json`。派发前先写未知状态，重启按原提交编号对账。普通 raw 不能绕过专用资金保护；协议交易只有与持久记录的身份、网络、交易 ID、完整输入及 active claim 一致才可通过，BitFS 的保护继续按原规则执行。
+
+专用资金回收与裸公钥 data/tip 输出归集都是显式领域操作，返回当前 owner 的 P2PKH 地址；只有明确接受广播后才清除对应资金记录。未知、拒绝或不一致的结果保留证据，不当作回收成功。真实网络和脚本执行证据见集成测试覆盖矩阵。

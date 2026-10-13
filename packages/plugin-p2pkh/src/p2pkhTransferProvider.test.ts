@@ -10,7 +10,7 @@ const OWNER = "02" + "11".repeat(32);
 function createDeps() {
   let snapshot: GlobalBalanceSnapshot = {
     publicKeyHex: OWNER,
-    includeTestnet: false,
+    bsvNetwork: "main",
     balances: { mainnet: { total: 1000, available: true } },
     revision: 1,
   };
@@ -19,7 +19,7 @@ function createDeps() {
       getSnapshot: () => snapshot,
       subscribe: () => () => undefined,
     } satisfies BalanceBroadcaster,
-    getGlobalSettings: () => ({ includeTestnet: false }),
+    getGlobalSettings: () => ({ bsvNetwork: "main" }),
     syncStatus: () => "idle" as const,
     onSyncStatusChange: () => () => undefined,
     onGlobalSettingsChange: () => () => undefined,

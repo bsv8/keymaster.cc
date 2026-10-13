@@ -30,21 +30,62 @@ import { readMsFileSeed, storeMsFileSeed, type MsFileSeedSource } from "./storag
 
 /** 远程获取通道；由 MSFile 装配阶段注入，缺失时如实报告「无可用渠道」。 */
 export interface MsFileRemoteContentFetcher {
-  /** 当前可用的来源路由标识。 */
+  /** 当前可用的**下载**来源路由标识；不代表发布渠道。 */
   listSourceIds(): readonly string[];
   /** 把缺失内容取回本地并完成落盘；返回 true 表示已落盘。 */
   fetch(input: { seedHashHex: string; allowPurchase: boolean; signal?: AbortSignal }): Promise<boolean>;
+}
+
+/**
+ * 发布可达性的**证据**来源。
+ *
+ * 与下载通道严格分开：只有它能证明「读者能取得这份内容」。实现卖方模式或
+ * BitFS 发布的插件在这里接入；没有接入时 `publicationEvidence` 缺席，
+ * `publicationReachability` 一律报 `published: false`。
+ */
+export interface MsFilePublicationEvidenceSource {
+  publicationEvidence(
+    seedHashHex: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<{ published: boolean; sourceIds: readonly string[]; detail: string }>;
+}
+
+/**
+ * 卖方发布渠道的证据。
+ *
+ * 只回答「读者能不能取得」，不回答「内容是否完整」——后者由内容验证负责。
+ */
+export interface MsFileSellerPublicationEvidence {
+  /**
+   * 当前发布渠道是否可用。
+   *
+   * 返回 `sourceIds` 作为证据来源：渠道不可用时返回空数组，而不是编造一个 id。
+   */
+  publicationEvidence(): Promise<{ published: boolean; sourceIds: readonly string[]; detail: string }>;
 }
 
 export interface MsFileContentServiceDeps {
   store: BorrowedOwnerFileStore;
   /** 已有 MSFile 服务，用于复用全局价格与并发策略的当前快照。 */
   service?: Pick<MsFileService, "getBitfsBuyerSettings" | "getSettingsSnapshot">;
+  /**
+   * 卖方发布渠道的证据源（可选）。
+   *
+   * 卖方模式开启且运行单元就绪时，本地保存的内容才真的能被别的读者经 BitFS 取到；
+   * 这是发布可达性的**真实**证据，与「下载来源」无关。缺席时可达性一律报 false。
+   */
   remote?: MsFileRemoteContentFetcher;
+  /** 发布可达性证据；缺席或不可用时如实报「渠道缺失」。 */
+  publication?: MsFileSellerPublicationEvidence;
   /** 上限；缺省用 MSFILE_MAX_CONTENT_BYTES。防止资源耗尽。 */
   maxContentBytes?: number;
+  /** 附件字节上限；缺省 32 MiB。附件是媒体文件，比正文的 1 MiB 宽松。 */
+  maxAttachmentBytes?: number;
   now?(): number;
 }
+
+/** 附件字节上限；媒体文件比正文大，但仍然要防资源耗尽。 */
+export const MSFILE_MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
 
 interface ContentEntry {
   readonly seedHashHex: string;
@@ -61,6 +102,7 @@ export function createMsFileContentService(deps: MsFileContentServiceDeps): MsFi
   const entries = new Map<string, ContentEntry>();
   const listeners = new Map<string, Set<(status: MsFileContentStatus) => void>>();
   const maxContentBytes = deps.maxContentBytes ?? MSFILE_MAX_CONTENT_BYTES;
+  const maxAttachmentBytes = deps.maxAttachmentBytes ?? MSFILE_MAX_ATTACHMENT_BYTES;
 
   const publish = (entry: ContentEntry): void => {
     const snapshot = toStatus(entry);
@@ -86,6 +128,7 @@ export function createMsFileContentService(deps: MsFileContentServiceDeps): MsFi
   const readLocalVerified = async (
     seedHashHex: string,
     signal: AbortSignal | undefined,
+    asAttachment = false,
   ): Promise<MsFileVerifiedContent | undefined> => {
     let assembled: Awaited<ReturnType<typeof readMsFileSeed>>;
     try {
@@ -96,8 +139,10 @@ export function createMsFileContentService(deps: MsFileContentServiceDeps): MsFi
       return undefined;
     }
     const byteLength = assembled.parts.reduce((total, part) => total + part.byteLength, 0);
-    if (byteLength > maxContentBytes) {
-      throw new MsFileContentTooLargeError(byteLength, maxContentBytes);
+    // 附件走独立限额：正文那 1 MiB 是 Markdown 的规则，不是媒体文件的规则。
+    const limit = asAttachment ? maxAttachmentBytes : maxContentBytes;
+    if (byteLength > limit) {
+      throw new MsFileContentTooLargeError(byteLength, limit);
     }
     // 组装后的总长度必须与 meta 声明的原始大小一致，否则不是完整内容。
     if (byteLength !== Number(assembled.meta.fileSizeBytes)) {
@@ -127,10 +172,10 @@ export function createMsFileContentService(deps: MsFileContentServiceDeps): MsFi
     publish(entry);
   };
 
-  const ensureLocalFirst = async (seedHashHex: string, signal?: AbortSignal): Promise<MsFileContentStatus> => {
+  const ensureLocalFirst = async (seedHashHex: string, signal?: AbortSignal, asAttachment = false): Promise<MsFileContentStatus> => {
     const entry = entryFor(seedHashHex);
     try {
-      const local = await readLocalVerified(seedHashHex, signal);
+      const local = await readLocalVerified(seedHashHex, signal, asAttachment);
       if (local !== undefined) {
         markVerified(entry, local);
         return toStatus(entry);
@@ -151,7 +196,11 @@ export function createMsFileContentService(deps: MsFileContentServiceDeps): MsFi
   };
 
   /** 同 hash 的共享飞行中任务。 */
-  const sharedFlight = (seedHashHex: string, allowPurchase: boolean): { promise: Promise<MsFileContentStatus>; controller: AbortController } => {
+  const sharedFlight = (
+    seedHashHex: string,
+    allowPurchase: boolean,
+    asAttachment: boolean,
+  ): { promise: Promise<MsFileContentStatus>; controller: AbortController } => {
     const entry = entryFor(seedHashHex);
     const existing = entry.flight;
     if (existing !== undefined) {
@@ -165,7 +214,9 @@ export function createMsFileContentService(deps: MsFileContentServiceDeps): MsFi
       entry.failureCode = undefined;
       publish(entry);
       try {
-        const localFirst = await ensureLocalFirst(seedHashHex, controller.signal);
+        // 下载后的校验必须用同一个限额：否则完整落盘的 2 MiB 附件会因为正文上限
+        // 被判 too-large，随后在附件入口里读不到。
+        const localFirst = await ensureLocalFirst(seedHashHex, controller.signal, asAttachment);
         if (localFirst.state === "verified") return localFirst;
         const remote = deps.remote;
         if (remote === undefined || remote.listSourceIds().length === 0) {
@@ -182,7 +233,7 @@ export function createMsFileContentService(deps: MsFileContentServiceDeps): MsFi
           publish(entry);
           return toStatus(entry);
         }
-        const content = await readLocalVerified(seedHashHex, controller.signal);
+        const content = await readLocalVerified(seedHashHex, controller.signal, asAttachment);
         if (content === undefined) {
           entry.state = "verification-failed";
           entry.failureCode = "integrity-error";
@@ -233,11 +284,11 @@ export function createMsFileContentService(deps: MsFileContentServiceDeps): MsFi
       }
       if (input.allowPurchase !== true) {
         // 列表浏览不得自动购买正文：没有明确授权就只查本地。
-        return ensureLocalFirst(input.seedHashHex, input.signal);
+        return ensureLocalFirst(input.seedHashHex, input.signal, input.asAttachment === true);
       }
       // 授权路径直接进入共享任务：飞行中任务内部先做本地优先检查。
       // 先查本地再登记任务会让并发调用各自通过本地检查，从而产生两个任务。
-      const { promise, controller } = sharedFlight(input.seedHashHex, true);
+      const { promise, controller } = sharedFlight(input.seedHashHex, true, input.asAttachment === true);
       try {
         // 取消只让**本消费者**立刻返回，不能去中止共享控制器：那会连带杀死
         // 其他消费者仍然需要的任务。共享任务在最后一个消费者离开时才中止。
@@ -269,6 +320,52 @@ export function createMsFileContentService(deps: MsFileContentServiceDeps): MsFi
       }
       markVerified(entry, local);
       return local;
+    },
+
+    async openVerifiedAttachment(seedHashHexHex, options) {
+      if (!isValidMsFileContentSeedHash(seedHashHexHex)) return undefined;
+      const entry = entryFor(seedHashHexHex);
+      // 附件走与正文相同的完整性验证：读盘、核对总长度与 meta 声明的 fileSizeBytes。
+      // 唯一区别是不套 Markdown 的字节上限——那是正文的规则，不是附件的。
+      try {
+        const local = await readMsFileSeed({ store: deps.store, seedHashHex: seedHashHexHex, ...(options?.signal ? { signal: options.signal } : {}) });
+        const byteLength = local.parts.reduce((total, part) => total + part.byteLength, 0);
+        if (byteLength !== Number(local.meta.fileSizeBytes)) {
+          throw new MsFileContentIntegrityError(`组装长度 ${byteLength} 与 fileSizeBytes ${local.meta.fileSizeBytes} 不一致`);
+        }
+        if (byteLength > maxAttachmentBytes) {
+          throw new MsFileContentTooLargeError(byteLength, maxAttachmentBytes);
+        }
+        const bytes = new Uint8Array(byteLength);
+        let offset = 0;
+        for (const part of local.parts) {
+          bytes.set(part, offset);
+          offset += part.byteLength;
+        }
+        const content: MsFileVerifiedContent = {
+          seedHashHex: seedHashHexHex,
+          bytes,
+          byteLength: byteLength.toString(),
+          mediaType: local.meta.mediaType,
+          fileName: local.meta.fileName,
+        };
+        markVerified(entry, content);
+        return content;
+      } catch (error) {
+        if (isCancellation(error, options?.signal)) throw error;
+        // 超限只影响附件这一路：内容本身仍然完整，所以不改内容状态（那会让
+        // 「附件太大」伪装成「内容损坏」）。返回 undefined 即可，调用方据此显示
+        // 「附件超出上限」。
+        if (error instanceof MsFileContentTooLargeError) return undefined;
+        // 真正读不出来（损坏或缺失）要让投影失效，不能继续呈现过时可用标记。
+        if (entry.state !== "fetching") {
+          entry.state = "verification-failed";
+          entry.failureCode = "integrity-error";
+          entry.verifiedBytes = undefined;
+          publish(entry);
+        }
+        return undefined;
+      }
     },
 
     async importContent(input: MsFileContentImportInput): Promise<{ seedHashHex: string; byteLength: string }> {
@@ -312,20 +409,36 @@ export function createMsFileContentService(deps: MsFileContentServiceDeps): MsFi
 
     async publicationReachability(seedHashHex: string, options?: { signal?: AbortSignal }): Promise<MsFilePublicationReachability> {
       const local = await ensureLocalFirst(seedHashHex, options?.signal);
-      const sourceIds = deps.remote?.listSourceIds() ?? [];
-      if (local.state === "verified" && sourceIds.length > 0) {
-        return { seedHashHex, published: true, sourceIds, detail: "本地已保存且存在可用供应渠道" };
-      }
-      if (local.state === "verified") {
-        // 本地已存不等于读者可取得。
+      const remote = deps.remote;
+      // 下载来源与发布证据是**两件事**：BitFS 买方通道只能证明「我能取到」，
+      // 不能证明「别的读者能取到」。因此 `listSourceIds` 里的来源不参与发布判断。
+      const downloadSourceIds = remote?.listSourceIds() ?? [];
+      if (local.state !== "verified") {
         return {
           seedHashHex,
           published: false,
-          sourceIds: [],
-          detail: "内容只保存在本地，没有读者可用的供应渠道；发布渠道尚未实现",
+          sourceIds: downloadSourceIds,
+          detail: "内容尚未完整保存",
         };
       }
-      return { seedHashHex, published: false, sourceIds, detail: "内容尚未完整保存" };
+      // 真正的发布证据由发布渠道提供；它缺席或不可用时一律报不可达。
+      const evidence = await deps.publication?.publicationEvidence().catch(() => undefined);
+      if (evidence?.published === true) {
+        return {
+          seedHashHex,
+          published: true,
+          sourceIds: evidence.sourceIds.length > 0 ? evidence.sourceIds : downloadSourceIds,
+          detail: evidence.detail,
+        };
+      }
+      return {
+        seedHashHex,
+        published: false,
+        sourceIds: downloadSourceIds,
+        detail:
+          evidence?.detail ??
+          "内容只保存在本地或仅可通过买方通道下载；发布渠道尚未实现，读者可达性未建立",
+      };
     },
   };
 
