@@ -11,6 +11,8 @@ export interface LocalInitializationInput {
   readonly keyLabel: string;
   /** 仅在当前调用栈内使用的测试密码（Key 密码）。 */
   readonly password: string;
+  /** 导入时明确选择网络；创建后不可切换。 */
+  readonly bsvNetwork?: "main" | "test";
 }
 
 /**
@@ -58,6 +60,7 @@ export async function initializeLocalUserWithImportedHexKey(
   // PageHeader 渲染 <h1>，所以第 1 步标题是 heading 而不是 dialog。
   await expect(page.getByRole("heading", { name: /导入私钥|Import a key/iu })).toBeVisible({ timeout: 20_000 });
   await page.getByRole("button", { name: /Hex/ }).click();
+  await page.getByRole("radio", { name: input.bsvNetwork === "test" ? /测试网.*Testnet/u : /主网.*Mainnet/u }).check();
   await page.getByRole("button", { name: /下一步|^Next$/u }).click();
   const privateKeyField = page.getByLabel(/Text|文本/);
   await privateKeyField.fill(input.privateKeyHex);
@@ -73,6 +76,7 @@ export async function initializeLocalUserWithImportedHexKey(
 
   const snapshot = await readWalletSnapshot(page);
   expect(snapshot?.initialized, "导入一次性 Key 同样只产生一把钱包 Key").toBe(true);
+  expect(snapshot?.bsvNetwork, "钱包必须持久保存导入时选择的网络身份").toBe(input.bsvNetwork ?? "main");
   await assertSetupSecretNotPersisted(page, input.password);
   await assertSetupSecretNotPersisted(page, input.privateKeyHex);
 

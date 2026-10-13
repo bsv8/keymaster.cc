@@ -129,11 +129,11 @@ Gate(3 项)：
 
 ## 4.1 bitfs
 
-BitFS 执行档启动一个真实 SatSubscription 和一次性 PostgreSQL。浏览器 A 导入 `key01.hex` 作为买方，浏览器 B 导入 `key02.hex` 作为卖方；Node 从 `seed-key.hex` 按购买预算的反推值乘以 120% 资助 key01。卖方上传固定 MP4，买方通过免费 Hash 频道发现报价，保持连接超过 30 秒建连期限后完成 testnet 购买、关池、文件校验和回款。测试核验持久化 Kind 1–7、Kind 12/13、关池交易和双方错误诊断；购买等待输出状态变化及待确认 txid。`BITFS_E2E_TIMEOUT_MS` 可覆盖执行器的整体期限，需为真实网络调用及文件传输留出时间；业务按 WOC 广播成功回执推进，不等待出块。
+BitFS 执行档启动一个真实 SatSubscription 和一次性 PostgreSQL。浏览器 A 导入 `key01.hex` 作为买方，浏览器 B 导入 `key02.hex` 作为卖方，双方在导入时明确选择测试网；Node 从 `seed-key.hex` 按购买预算的反推值乘以 120% 资助 key01。测试通过正式钱包通知界面批准本场景的渠道注册、签名和付款。卖方上传固定 MP4，买方在首页通过免费 Hash 频道发现报价，保持连接超过 30 秒建连期限后完成 testnet 购买、关池、文件校验和回款。测试核验持久化 Kind 1–7、Kind 12/13、关池交易和双方错误诊断；购买等待输出状态变化及待确认 txid。`BITFS_E2E_TIMEOUT_MS` 可覆盖执行器的整体期限，需为真实网络调用及文件传输留出时间；业务按 WOC 广播成功回执推进，不等待出块。
 
 | 编号 | 文件 | 中文说明 | 覆盖需求 |
 | --- | --- | --- | --- |
-| J-REAL-BITFS-PURCHASE | `journeys/bitfs/real-bitfs-purchase.spec.ts` | 双浏览器、单数字标价、真实 WebRTC BitFS DataChannel、testnet 专款/关池/回款与源文件 SHA-256 对账 | KM-MSFILE-001、KM-SATSUB-001、KM-ASSET-001、KM-BROADCAST-001 |
+| J-REAL-BITFS-PURCHASE | `journeys/bitfs/real-bitfs-purchase.spec.ts` | 双浏览器上传与首页购买、单数字标价、真实 WebRTC BitFS DataChannel、testnet 专款/关池/回款与源文件 SHA-256 对账 | KM-MSFILE-001、KM-SATSUB-001、KM-ASSET-001、KM-BROADCAST-001 |
 
 ---
 

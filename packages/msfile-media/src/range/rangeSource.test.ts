@@ -27,7 +27,7 @@ function concat(parts: readonly Uint8Array[]): Uint8Array {
   return result;
 }
 
-async function fixture(options: { delayMs?: number; invalidBlock?: boolean; maxConcurrentReads?: number } = {}) {
+async function fixture(options: { delayMs?: number; invalidBlock?: boolean; maxConcurrentReads?: number; sourceId?: string } = {}) {
   const first = new Uint8Array(MSFILE_BLOCK_SIZE_BYTES);
   first.fill(0x11);
   // 测试正文使用 MP3 声明 MIME；容器和 Codec 由浏览器原生解析。
@@ -70,7 +70,7 @@ async function fixture(options: { delayMs?: number; invalidBlock?: boolean; maxC
   };
   const source = new MsFileRangeSource({
     seedHashHex: seedHash,
-    supplierPublicKeyHex: `02${"11".repeat(32)}`,
+    ...(options.sourceId === undefined ? { supplierPublicKeyHex: `02${"11".repeat(32)}` } : { sourceId: options.sourceId }),
     fileSizeBytes: BigInt(MSFILE_BLOCK_SIZE_BYTES * 2),
     declaredMediaType: "audio/mpeg",
     reader,
@@ -90,6 +90,18 @@ async function readAll(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> 
 }
 
 describe("MsFileRangeSource", () => {
+  it.each(["local-bitfs", `remote-proxy:02${"11".repeat(32)}`])("通过正式来源 %s 读取并校验 Range 正文", async sourceId => {
+    const { source, first } = await fixture({ sourceId });
+    try {
+      const response = await source.describeResponse("GET", "bytes=0-3");
+      expect(await readAll(source.readStream(response.startByte, response.endByteExclusive))).toEqual(first.slice(0, 4));
+    } finally { await source.dispose(); }
+  });
+
+  it("拒绝没有有效供应商身份的远端来源", async () => {
+    await expect(fixture({ sourceId: "remote-proxy:invalid" })).rejects.toMatchObject({ code: "msfile_media_configuration" });
+  });
+
   it("按 Block 切片输出，响应长度与实际正文一致", async () => {
     const { source, first, second, blockReads, firstHash, secondHash } = await fixture();
     const response = await source.describeResponse("GET", `bytes=${String(MSFILE_BLOCK_SIZE_BYTES - 2)}-${String(MSFILE_BLOCK_SIZE_BYTES + 2)}`);

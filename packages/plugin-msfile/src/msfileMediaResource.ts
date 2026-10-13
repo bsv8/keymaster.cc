@@ -76,7 +76,7 @@ function sessionFor(args: readonly string[]): MsFileMediaSession {
   const service = configuredService;
   const session = createMsFileNativeMediaSession({
     seedHashHex,
-    supplierPublicKeyHex: sourceId,
+    sourceId,
     fileSizeBytes,
     declaredMediaType,
     reader: {

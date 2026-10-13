@@ -111,6 +111,7 @@ function makeCentralBroadcast(
 }
 
 function makeService(options?: {
+  previousTransactions?: (network: "main" | "test", inputs: readonly { txid: string }[]) => Promise<string[]>;
   claimStore?: ReturnType<typeof makeClaimStore>;
   broadcast?: TestBroadcast;
   submitOnceResult?: unknown;
@@ -121,7 +122,7 @@ function makeService(options?: {
   const claimStore = options?.claimStore ?? makeClaimStore();
   const payment=paymentRequester(privHex),paymentActions:string[]=[];
   const service = createP2pkhProtocolSpendService({
-    previousTransactions,
+    previousTransactions: options?.previousTransactions ?? previousTransactions,
     vault: {
       requestPayment: async (command: Parameters<typeof payment>[0]) => {paymentActions.push(command.action);return payment(command);},
       status: () => "unlocked",
@@ -199,6 +200,27 @@ afterEach(async () => {
 });
 
 describe("createP2pkhProtocolSpendService", () => {
+  it("signs with verified local previous transaction bytes while the WoC hex index is unavailable", async () => {
+    const reader = vi.fn(async () => { throw new Error("WOC 404 hex index not ready"); });
+    const { service, owner } = makeService({ previousTransactions: reader });
+    const coin = { ...fundingCoin(owner.publicKeyHex, 10000), address: owner.address };
+    const [raw] = await previousTransactions("main", [coin]);
+    const preview = await service.presign({ ownerPublicKeyHex: owner.publicKeyHex, network: "main", feeRateSatoshisPerKb: 1,
+      inputs: [{ ...coin, previousTransactionHex: raw }], outputs: [{ value: 9900, scriptHex: "51" }], noChangeRule: { maxMinerFeeSatoshis: 100 } });
+    expect(preview.txid).toMatch(/^[0-9a-f]{64}$/u);
+    expect(reader).not.toHaveBeenCalled();
+  });
+
+  it.each(["txid", "value"])("rejects local previous transaction evidence with mismatched %s before signing", async mismatch => {
+    const { service, owner, paymentActions } = makeService();
+    const coin = { ...fundingCoin(owner.publicKeyHex, 10000), address: owner.address };
+    const [raw] = await previousTransactions("main", [coin]);
+    const evidence = { ...coin, previousTransactionHex: raw, ...(mismatch === "txid" ? { txid: "ab".repeat(32) } : { value: 10001 }) };
+    await expect(service.presign({ ownerPublicKeyHex: owner.publicKeyHex, network: "main", feeRateSatoshisPerKb: 1,
+      inputs: [evidence], outputs: [{ value: 9900, scriptHex: "51" }], noChangeRule: { maxMinerFeeSatoshis: 101 } })).rejects.toThrow();
+    expect(paymentActions).toEqual([]);
+  });
+
   it("unsigned previews allocate no claims or payment budget; submit signs once and rejects changed, canceled and reused tickets",async()=>{
     const {service,owner,claimStore,paymentActions}=makeService();
     const input={ownerPublicKeyHex:owner.publicKeyHex,network:"main" as const,inputs:[{...fundingCoin(owner.publicKeyHex,10000,"91".repeat(32)),address:owner.address}],outputs:[{value:1000,scriptHex:"6a"}],changeAddress:owner.address,feeRateSatoshisPerKb:1};

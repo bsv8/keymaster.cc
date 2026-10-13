@@ -17,6 +17,8 @@ export const P2PKH_PROTOCOL_SPEND_CAPABILITY = defineCapability<ProtocolSpendSer
 });
 
 export interface ProtocolSpendInput {
+  /** 本地 exact outbox 的完整前序交易；签名前必须按 txid、输出金额和脚本复核。 */
+  previousTransactionHex?: string;
   txid: string;
   vout: number;
   value: number;

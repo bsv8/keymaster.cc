@@ -73,6 +73,26 @@ afterEach(() => {
 });
 
 describe("P2PKH service (snapshot + history)", () => {
+  it("rehydrates a testnet identity without requesting a mainnet address", async () => {
+    const storage = createMemoryOwnerFileStore();
+    const deriveP2pkhAddress = vi.fn(async (input: { network: "main" | "test" }) => {
+      if (input.network !== "test") throw new Error("network-mismatch");
+      return { publicKeyHex: OWNER, address: "mk2QpYatsKicvFVuTAQLBryyccRXMUaGHP" };
+    });
+    const service = createP2pkhService({
+      vault: { status: () => "unlocked", createActiveKeyCrypto: async () => ({ deriveP2pkhAddress }) } as never,
+      walletState: walletState("test"), messageBus, storage: storage as never,
+      coordinator: coordinatorWithSnapshot([]) as never,
+    });
+    try {
+      await service.rehydrate();
+      expect((await service.listResources()).map(row => ({ id: row.resourceId, network: row.network })))
+        .toEqual([{ id: "p2pkh:test", network: "test" }]);
+      expect(deriveP2pkhAddress).toHaveBeenCalledWith(expect.objectContaining({ network: "test" }));
+      expect(deriveP2pkhAddress.mock.calls.every(([input]) => input.network === "test")).toBe(true);
+    } finally { service.dispose?.(); }
+  });
+
   it("lists resources and history from the state repository", async () => {
     const storage = createMemoryOwnerFileStore();
     const repository = createP2pkhStateRepository(await openP2pkhStateRepository(storage as never));

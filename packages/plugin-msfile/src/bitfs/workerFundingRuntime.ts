@@ -94,14 +94,18 @@ const BITFS_FUNDING_MIN_OUTPUT_SATOSHIS = 546;
  * 中文说明：Worker 可以请求 Window lane 预签并释放未广播交易；`submit`
  * 永远报错，BitFS exact outbox + broadcaster 是唯一允许的派发路径。
  */
-function createMsfileBitfsProtocolSpend(): ProtocolSpendService {
+function createMsfileBitfsProtocolSpend(transactions?: BitfsTransactionJournal): ProtocolSpendService {
   return {
     async prepare(){throw Error("BitFS funding requires explicit presign");},
     async presign(input) {
+      const inputs = await Promise.all(input.inputs.map(async item => {
+        const raw = await transactions?.getTransaction(item.txid);
+        return raw ? { ...item, previousTransactionHex: Array.from(raw, byte => byte.toString(16).padStart(2, "0")).join("") } : item;
+      }));
       return await deps.executor({
         type: "lane",
         laneId: "msfile",
-        operation: { type: "bitfs-funding-prepare", input },
+        operation: { type: "bitfs-funding-prepare", input: { ...input, inputs } },
       }) as ProtocolSpendPreview;
     },
     async submit() {
@@ -201,7 +205,7 @@ function createMsfileBitfsFundingSplitDeps(input: {
     }
   };
   return {
-    protocolSpend: createMsfileBitfsProtocolSpend(),
+    protocolSpend: createMsfileBitfsProtocolSpend(input.transactions),
     async getAvailableSnapshot() {
       assertContext({ ownerPublicKeyHex: owner, network: input.network, generation: input.generation });
       const settings = await deps.readP2pkhSettings();

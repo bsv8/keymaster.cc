@@ -1247,7 +1247,7 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
             <MsFileMediaPlayer
               key={`${state.hash}:${state.selected.sourceId}`}
               seedHashHex={state.hash}
-              supplierPublicKeyHex={state.selected.sourceId}
+              sourceId={state.selected.sourceId}
               fileSizeBytes={state.selected.fileSizeBytes}
               declaredMediaType={state.selected.mediaType}
               filename={state.selected.filename}

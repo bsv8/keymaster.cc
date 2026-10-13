@@ -23,6 +23,7 @@ import {
   type UnsignedTx,
 } from "./p2pkhSigner.js";
 import { resourceIdFor } from "./storage/p2pkhStateRepository.js";
+import { parseP2pkhTransaction } from "./p2pkhTransactionParser.js";
 
 // value 必须随协议 claim 一起写入，供协议资产自身的审计与恢复使用；
 // 普通 P2PKH 余额不读取这些 claim，避免把协议资产保护混入 P2PKH 选币。
@@ -289,9 +290,20 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
         inputClaimIds = (await deps.claimStore.tryClaimInputs({submissionId, resourceId: resourceIdFor(input.network), publicKeyHex: resolvedOwner.publicKeyHex, network: input.network,
           inputs: input.inputs.map(u => ({txid: u.txid, vout: u.vout, value: u.value})),
         })).claimIds;
+        const previousTransactions = await Promise.all(input.inputs.map(async item => {
+          if (item.previousTransactionHex !== undefined) {
+            const previous = parseP2pkhTransaction(item.previousTransactionHex, item.txid);
+            const output = previous.outputs[item.vout];
+            if (!output || output.value !== item.value) throw new Error("Protocol previous transaction output does not match input");
+            return item.previousTransactionHex;
+          }
+          const [raw] = await deps.previousTransactions(input.network, [item]);
+          if (!raw) throw new Error("Complete previous transaction reader unavailable");
+          return raw;
+        }));
         const rawTxHex = await signProtocolPayment({
           rawTxHex: Array.from(serializeTx(unsigned), b => b.toString(16).padStart(2, "0")).join(""),
-          prevTransactionHexes: await deps.previousTransactions(input.network, input.inputs),
+          prevTransactionHexes: previousTransactions,
           publicKeyHex: resolvedOwner.publicKeyHex, network: input.network,
           pluginId: input.requestingPluginId ?? "p2pkh", requestPayment: c => deps.vault.requestPayment(c),
         });

@@ -9,6 +9,7 @@
 import {
   isValidMsFileHashHex,
   isValidMsFileSupplierPublicKeyHex,
+  isValidMsFileSourceId,
   MSFILE_BLOCK_SIZE_BYTES,
   MSFILE_DIGEST_SIZE_BYTES,
   MSFILE_MEDIA_BLOCK_READ_CONCURRENCY_DEFAULT,
@@ -199,7 +200,10 @@ export class MsFileRangeSource {
   private container: MsFileNativeMediaContainer | undefined;
 
   constructor(input: MsFileVodSourceInput, options: MsFileRangeSourceOptions = {}) {
-    if (!isValidMsFileHashHex(input.seedHashHex) || !isValidMsFileSupplierPublicKeyHex(input.supplierPublicKeyHex)) {
+    const validSource = input.sourceId !== undefined
+      ? input.supplierPublicKeyHex === undefined && isValidMsFileSourceId(input.sourceId)
+      : isValidMsFileSupplierPublicKeyHex(input.supplierPublicKeyHex);
+    if (!isValidMsFileHashHex(input.seedHashHex) || !validSource) {
       throw new MsFileMediaError("msfile_media_configuration");
     }
     if (typeof input.fileSizeBytes !== "bigint" || input.fileSizeBytes < 0n || input.fileSizeBytes > MAX_SAFE_BIGINT) {

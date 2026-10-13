@@ -741,10 +741,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     const bsvNetwork = getCurrentSettings().bsvNetwork;
     let rehydrateError: unknown;
     try {
-      await getOrCreateAddress("main");
-      if (bsvNetwork === "test") {
-        await getOrCreateAddress("test");
-      }
+      await getOrCreateAddress(bsvNetwork);
     } catch (err) {
       rehydrateError = err;
     }

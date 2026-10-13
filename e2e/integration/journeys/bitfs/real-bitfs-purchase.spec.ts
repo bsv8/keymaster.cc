@@ -17,7 +17,7 @@ import {
   waitForBitfsPurchaseCompleted,
 } from "../../drivers/bitfsMsFileDriver.js";
 import { saveMsFilePriceLimits } from "../../drivers/msfileDriver.js";
-import { enableTestnetAssets, setP2pkhFeeRate, waitForP2pkhSyncIdle, waitForTestnetUtxoSnapshot } from "../../drivers/p2pkhDriver.js";
+import { setP2pkhFeeRate, waitForP2pkhSyncIdle, waitForTestnetUtxoSnapshot } from "../../drivers/p2pkhDriver.js";
 import {
   enableSatSupplierReceiveAndDefault,
   saveSatSupplierFromPage,
@@ -39,8 +39,9 @@ import { TestnetFundingResource, type OneTimeWallet } from "../../resources/test
 import { createWocTestnetChainAdapter, type WocTestnetChainAdapter } from "../../resources/testnet/wocChainAdapter.js";
 import { attachBrowserErrors, captureBrowserErrors } from "../../support/browserEvidence.js";
 import { attachVisibleDiagnostic } from "../../support/diagnostics.js";
-import { readRawWalletObjects } from "../../support/walletStorageFormats.js";
+import { readWalletModuleObjects } from "../../support/walletStorageFormats.js";
 import { currentRunId } from "../../support/ids.js";
+import { redactText } from "../../support/redaction.js";
 import { REAL_BITFS_PURCHASE_SCENARIO } from "../../support/scenarioMetadata.js";
 import type { BrowserErrorEvidence } from "../../support/types.js";
 
@@ -69,6 +70,27 @@ interface BitfsUser {
   readonly publicKeyHex: string;
   readonly password: string;
   readonly browserErrors: BrowserErrorEvidence;
+  readonly stopApprovals: () => Promise<void>;
+}
+
+/** 测试用户通过正式通知 UI 批准本场景的签名/付款，不绕过钱包授权。 */
+function approveJourneyRequests(page: Page): () => Promise<void> {
+  let stopped = false;
+  const run = (async () => {
+    while (!stopped && !page.isClosed()) {
+      const request = page.locator(".wallet-notifications__item--pending").filter({ hasText: / · (?:window-p2p|channel|bitfs|msfile) · /u }).first();
+      const approve = request.getByRole("button", { name: /^Approve$|^批准$/u });
+      if (await approve.isVisible()) {
+        announce(`批准测试钱包请求：${await request.locator("h3").innerText()}`);
+        await approve.click({ timeout: 5_000 });
+      }
+      await page.waitForTimeout(250);
+    }
+  })();
+  // 立即接住异步异常，并在清理时重新抛出，避免把 UI 授权失败吞掉。
+  let failure: unknown;
+  const finished = run.catch(error => { if (!stopped) failure = error; });
+  return async () => { stopped = true; await finished; if (failure) throw failure; };
 }
 
 async function launchUser(input: { readonly password: string; readonly privateKeyHex: string; readonly keyLabel: string }): Promise<BitfsUser> {
@@ -91,8 +113,8 @@ async function launchUser(input: { readonly password: string; readonly privateKe
   });
   const browserErrors = captureBrowserErrors(page, context);
   try {
-    const ready = await initializeLocalUserWithImportedHexKey(page, input);
-    return { browser, context, page, publicKeyHex: ready.publicKeyHex, password: input.password, browserErrors };
+    const ready = await initializeLocalUserWithImportedHexKey(page, { ...input, bsvNetwork: "test" });
+    return { browser, context, page, publicKeyHex: ready.publicKeyHex, password: input.password, browserErrors, stopApprovals: approveJourneyRequests(page) };
   } catch (error) {
     await context.close().catch(() => undefined);
     await browser.close().catch(() => undefined);
@@ -125,7 +147,14 @@ async function configureSupplier(user: BitfsUser, server: SatSubscriptionLocalSe
     multiaddrs: [server.multiaddr],
     enabled: true,
   });
-  await waitForSatSupplierConnectionState(user.page, SUPPLIER_ID, "online");
+  try {
+    await waitForSatSupplierConnectionState(user.page, SUPPLIER_ID, "online");
+  } catch (error) {
+    process.stdout.write(`[bitfs-e2e] 供应商连接失败服务日志：${redactText(server.serverLogTail(30).join("\n"), [user.password])}\n`);
+    process.stdout.write(`[bitfs-e2e] 供应商连接失败浏览器错误：${redactText(JSON.stringify(user.browserErrors), [user.password])}\n`);
+    process.stdout.write(`[bitfs-e2e] 供应商连接失败页面：${redactText(await user.page.locator("main").innerText(), [user.password])}\n`);
+    throw error;
+  }
   await enableSatSupplierReceiveAndDefault(user.page, SUPPLIER_ID);
 }
 
@@ -235,8 +264,6 @@ test(JOURNEY_ID + "：双浏览器 BitFS 报价、testnet 购买与关池回款"
     announce("等待免费 Hash 订阅");
     await waitForFreeSubscriptions(server, material.buyerPublicKeyHex, material.sellerPublicKeyHex);
 
-    announce("开启买方 testnet");
-    await enableTestnetAssets(buyer.page);
     announce("设置买方费率");
     await setP2pkhFeeRate(buyer.page, "medium", Number(BITFS_E2E_POOL_FEE_RATE_SATOSHIS_PER_KB));
     announce("等待买方同步");
@@ -293,8 +320,8 @@ test(JOURNEY_ID + "：双浏览器 BitFS 报价、testnet 购买与关池回款"
       } });
     } catch (error) {
       const ledger = await server.ledgerSummary();
-       const sellerEntries = await readRawWalletObjects(seller.page, "^msfiles/|^sat-subscription/");
-       const buyerEntries = users[0] ? await readRawWalletObjects(users[0].page, "^msfiles/") : [];
+       const sellerEntries = await readWalletModuleObjects(seller.page, "^msfiles/|^sat-subscription/");
+       const buyerEntries = users[0] ? await readWalletModuleObjects(users[0].page, "^msfiles/") : [];
        const sellerMeta = sellerEntries.find((entry) => entry.path === `msfiles/meta/${expectedSeedHashHex}.json`);
        const sellerSat = sellerEntries.filter((entry) => /sat-subscription|setting/u.test(entry.path));
        const sellerDiagnostics = sellerEntries.filter((entry) => entry.path.includes("msfiles/bitfs-e2e-diagnostics/"));
@@ -316,8 +343,8 @@ test(JOURNEY_ID + "：双浏览器 BitFS 报价、testnet 购买与关池回款"
     try {
        await waitForBitfsPurchaseCompleted(buyer.page, expectedSeedHashHex);
      } catch (error) {
-       const buyerEntries = users[0] ? await readRawWalletObjects(users[0].page, "^msfiles/") : [];
-       const sellerEntries = await readRawWalletObjects(seller.page, "^msfiles/|^sat-subscription/");
+       const buyerEntries = users[0] ? await readWalletModuleObjects(users[0].page, "^msfiles/") : [];
+       const sellerEntries = await readWalletModuleObjects(seller.page, "^msfiles/|^sat-subscription/");
        const buyerDiagnostics = buyerEntries.filter((entry) => entry.path.includes("msfiles/bitfs-e2e-diagnostics/"));
        const sellerDiagnostics = sellerEntries.filter((entry) => entry.path.includes("msfiles/bitfs-e2e-diagnostics/"));
        const buyerJournal = buyerEntries.filter((entry) => entry.path.includes("msfiles/bitfs-journal/"));
@@ -384,12 +411,14 @@ test(JOURNEY_ID + "：双浏览器 BitFS 报价、testnet 购买与关池回款"
     }
     try {
       for (const user of users) {
+        if (journeyError) process.stdout.write(`[bitfs-e2e] 失败页面：${redactText(await user.page.locator("body").innerText(), knownSecrets)}\n`);
         await attachBrowserErrors(testInfo, user.browserErrors, knownSecrets);
         await attachVisibleDiagnostic(user.page, testInfo);
       }
     } catch (error) {
       evidenceError = error;
     }
+    try { await Promise.all(users.map(user => user.stopApprovals())); } catch (error) { cleanupError ??= error; }
     await Promise.all(users.map((user) => user.context.close().catch(() => undefined)));
     await Promise.all(users.map((user) => user.browser.close().catch(() => undefined)));
     try {

@@ -99,8 +99,8 @@ export async function readRawLocalStorage(page: Page): Promise<RawEntry[]> {
  * 这是本地钱包的正式物理真值。主键就是 path 本身，因此没有桶或 owner
  * 分组；对象值按 UTF-8 文本返回，调用方只校验公开结构。
  */
-export async function readRawWalletObjects(page: Page, pathPattern?: string, includeBinary = false): Promise<RawWalletObjectEntry[]> {
-  return page.evaluate(({ databaseName, storeName, schemaVersion, pattern, includeBinary }) => new Promise<Array<{ path: string; text: string; bytesBase64?: string }>>((resolve, reject) => {
+export async function readRawWalletObjects(page: Page, pathPattern?: string, includeBinary = false, relativeTo = ""): Promise<RawWalletObjectEntry[]> {
+  return page.evaluate(({ databaseName, storeName, schemaVersion, pattern, includeBinary, relativeTo }) => new Promise<Array<{ path: string; text: string; bytesBase64?: string }>>((resolve, reject) => {
     const pathFilter = pattern ? new RegExp(pattern, "u") : undefined;
     const request = indexedDB.open(databaseName, schemaVersion);
     request.onupgradeneeded = () => {
@@ -126,7 +126,9 @@ export async function readRawWalletObjects(page: Page, pathPattern?: string, inc
           resolve(entries);
           return;
         }
-        const objectPath = position.key as string;
+        const physicalPath = position.key as string;
+        if (!physicalPath.startsWith(relativeTo)) { position.continue(); return; }
+        const objectPath = physicalPath.slice(relativeTo.length);
         if (pathFilter && !pathFilter.test(objectPath)) {
           position.continue();
           return;
@@ -140,7 +142,18 @@ export async function readRawWalletObjects(page: Page, pathPattern?: string, inc
         position.continue();
       };
     };
-  }), { databaseName: WALLET_DATABASE_NAME, storeName: WALLET_OBJECT_STORE, schemaVersion: WALLET_SCHEMA_VERSION, pattern: pathPattern ?? null, includeBinary });
+  }), { databaseName: WALLET_DATABASE_NAME, storeName: WALLET_OBJECT_STORE, schemaVersion: WALLET_SCHEMA_VERSION, pattern: pathPattern ?? null, includeBinary, relativeTo });
+}
+
+/** 按钱包当前网络身份读取模块对象，返回模块相对路径；不混读其他身份。 */
+export async function readWalletModuleObjects(page: Page, pathPattern?: string): Promise<RawWalletObjectEntry[]> {
+  const objects = await readRawWalletObjects(page, "^key\\.json$");
+  const key = objects.find(entry => entry.path === WALLET_KEYHOLD_PATH);
+  if (!key) throw new Error("缺少钱包 KeyHold");
+  const envelope = JSON.parse(key.text) as { format: string; bsvNetwork: string; keyHold?: { publicKeyHex: string } };
+  if (envelope.format !== "keymaster.network-keyhold" || !/^(main|test)$/u.test(envelope.bsvNetwork) || !envelope.keyHold || !/^(02|03)[0-9a-f]{64}$/u.test(envelope.keyHold.publicKeyHex)) throw new Error("钱包网络身份无效");
+  const prefix = `${envelope.bsvNetwork}/${envelope.keyHold.publicKeyHex}/`;
+  return readRawWalletObjects(page, pathPattern, false, prefix);
 }
 
 /** 删除钱包里的单个对象；只用于验证"raw 缺失"这类失败展示。 */

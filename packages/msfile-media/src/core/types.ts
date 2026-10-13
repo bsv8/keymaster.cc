@@ -36,18 +36,21 @@ export interface MsFileMediaBlockReader {
   readBlock(input: { blockHashHex: string; signal: AbortSignal }): Promise<Uint8Array>;
 }
 
-export interface MsFileVodSourceInput {
+export type MsFileVodSourceInput = {
   /** Seed 的 32 字节小写 hex Hash。 */
   seedHashHex: string;
-  /** 本次 session 固定使用的供应商压缩公钥。 */
-  supplierPublicKeyHex: string;
   /** Stat 返回的精确文件字节数。 */
   fileSizeBytes: bigint;
   /** 供应商声明的 MIME；仅白名单类型进入原生播放，容器/Codec 由浏览器解析。 */
   declaredMediaType: string;
   /** 已由 plugin-msfile 绑定到金额和 transport 的 reader。 */
   reader: MsFileMediaBlockReader;
-}
+} & (
+  /** 当前 MSFile 路由：本地 BitFS 或带供应商公钥的远端代理。 */
+  { sourceId: string; supplierPublicKeyHex?: never }
+  | /** 直接供应商 reader 的压缩公钥；与 sourceId 互斥。 */
+  { sourceId?: never; supplierPublicKeyHex: string }
+);
 
 /** 旧 MSE 后端的兼容选项；当前原生 Range 路径不读取。 */
 export interface MsFileVodSourceOptions {
