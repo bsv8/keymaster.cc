@@ -1,3 +1,4 @@
+import { chromiumLaunchOptions } from "./integration/support/chromiumMemory.mjs";
 import { defineConfig, devices } from "@playwright/test";
 import { configureRunSuite } from "./integration/support/runData.js";
 
@@ -7,6 +8,8 @@ const { outputDir } = configureRunSuite("lifecycle-local");
 // 正式 registry 0.5.0 验收使用 playwright.lifecycle.registry.config.ts，
 // 并由 registry-only 临时副本入口执行。
 export default defineConfig({
+  // 小内存机器默认串行，减少多个浏览器争用物理内存。
+  workers: 1,
   testDir: "./integration",
   testMatch: /gates\/lifecycle\/(?:coordinator-runtime-lifecycle|plugin-lifecycle-production)\.spec\.ts$/u,
   timeout: 30_000,
@@ -15,6 +18,7 @@ export default defineConfig({
   reporter: process.env.CI ? "github" : "list",
   outputDir,
   use: {
+    launchOptions: chromiumLaunchOptions(),
     baseURL: "http://127.0.0.1:4174",
     trace: "on-first-retry",
     screenshot: "only-on-failure",
@@ -31,7 +35,7 @@ export default defineConfig({
       name: "lifecycle-local",
       use: {
         ...devices["Desktop Chrome"],
-        launchOptions: { args: ["--enable-precise-memory-info"] },
+        launchOptions: chromiumLaunchOptions({ args: ["--enable-precise-memory-info"] }),
       },
     },
   ],

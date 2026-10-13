@@ -1,3 +1,4 @@
+import { chromiumLaunchOptions } from "./integration/support/chromiumMemory.mjs";
 import { defineConfig, devices } from "@playwright/test";
 import { configureRunSuite } from "./integration/support/runData.js";
 
@@ -12,6 +13,8 @@ const { outputDir } = configureRunSuite("dev-local");
  *   - 该档只跑本地 Journey，且必须从当前工作树启动全新的 dev server。
  */
 export default defineConfig({
+  // 小内存机器默认串行，减少多个浏览器争用物理内存。
+  workers: 1,
   testDir: "./integration",
   timeout: 180_000,
   forbidOnly: Boolean(process.env.CI),
@@ -19,6 +22,7 @@ export default defineConfig({
   reporter: process.env.CI ? "github" : "list",
   outputDir,
   use: {
+    launchOptions: chromiumLaunchOptions(),
     baseURL: "http://127.0.0.1:4174",
     trace: "retain-on-failure",
     screenshot: "only-on-failure",

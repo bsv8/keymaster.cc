@@ -1,3 +1,4 @@
+import { chromiumLaunchOptions } from "./integration/support/chromiumMemory.mjs";
 import { defineConfig, devices } from "@playwright/test";
 import { configureRunSuite } from "./integration/support/runData.js";
 
@@ -14,6 +15,7 @@ export default defineConfig({
   reporter: process.env.CI ? "github" : "list",
   outputDir,
   use: {
+    launchOptions: chromiumLaunchOptions(),
     baseURL: "http://127.0.0.1:4173",
     // 真实资源 Journey 会在初始化阶段短暂接触一次性私钥；禁止把页面、
     // console 或网络附件自动写入报告。

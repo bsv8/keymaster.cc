@@ -1,3 +1,4 @@
+import { chromiumLaunchOptions } from "../../support/chromiumMemory.mjs";
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
@@ -72,7 +73,7 @@ interface BitfsUser {
 }
 
 async function launchUser(input: { readonly password: string; readonly privateKeyHex: string; readonly keyLabel: string }): Promise<BitfsUser> {
-  const browser = await chromium.launch();
+  const browser = await chromium.launch(chromiumLaunchOptions());
   const context = await browser.newContext({ baseURL: PREVIEW_ORIGIN, acceptDownloads: true });
   const page = await context.newPage();
   page.on("dialog", (dialog) => { void dialog.accept(); });

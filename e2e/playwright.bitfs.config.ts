@@ -1,3 +1,4 @@
+import { chromiumLaunchOptions } from "./integration/support/chromiumMemory.mjs";
 import { defineConfig, devices } from "@playwright/test";
 import { configureRunSuite } from "./integration/support/runData.js";
 
@@ -12,6 +13,7 @@ export default defineConfig({
   outputDir,
   workers: 1,
   use: {
+    launchOptions: chromiumLaunchOptions(),
     baseURL: "http://127.0.0.1:4173",
     trace: "off",
     screenshot: "off",

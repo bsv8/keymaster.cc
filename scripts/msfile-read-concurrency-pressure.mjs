@@ -1,3 +1,4 @@
+import { chromiumLaunchOptions } from "../e2e/integration/support/chromiumMemory.mjs";
 import { chromium } from "@playwright/test";
 
 // 与 MSFile wire/content contract 一致的最坏 attachment 大小。
@@ -10,10 +11,10 @@ const PRESSURE_CASES = [
   { name: "above-selected-budget", seedConcurrency: 12, blockConcurrency: 64 },
 ];
 
-const browser = await chromium.launch({
+const browser = await chromium.launch(chromiumLaunchOptions({
   headless: true,
   args: ["--enable-precise-memory-info"],
-});
+}));
 const page = await browser.newPage();
 await page.setContent("<!doctype html><meta charset=\"utf-8\"><title>MSFile read concurrency pressure</title>");
 

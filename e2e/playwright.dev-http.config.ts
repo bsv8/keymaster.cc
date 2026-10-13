@@ -1,9 +1,12 @@
+import { chromiumLaunchOptions } from "./integration/support/chromiumMemory.mjs";
 import { defineConfig, devices } from "@playwright/test";
 import { configureRunSuite } from "./integration/support/runData.js";
 
 const { outputDir } = configureRunSuite("dev-http");
 
 export default defineConfig({
+  // 小内存机器默认串行，减少多个浏览器争用物理内存。
+  workers: 1,
   testDir: "./integration",
   testMatch: /gates\/dev-http\/coordinator-dev-http\.spec\.ts$/u,
   // 在非安全 HTTP 的 Chromium 中，真实 Local 初始化会在 URL/DOM 完成屏障前
@@ -15,6 +18,7 @@ export default defineConfig({
   reporter: process.env.CI ? "github" : "list",
   outputDir,
   use: {
+    launchOptions: chromiumLaunchOptions(),
     // 故意使用非 loopback 主机名：Chromium 可能把 loopback HTTP 当作可信来源，
     // 无法复现用户报告的非安全上下文路径。
     baseURL: "http://keymaster-http.test:5174",
@@ -34,9 +38,9 @@ export default defineConfig({
       name: "dev-http",
       use: {
         ...devices["Desktop Chrome"],
-        launchOptions: {
+        launchOptions: chromiumLaunchOptions({
           args: ["--host-resolver-rules=MAP keymaster-http.test 127.0.0.1"],
-        },
+        }),
       },
     },
   ],

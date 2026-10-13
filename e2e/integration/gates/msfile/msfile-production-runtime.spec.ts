@@ -1,3 +1,4 @@
+import { chromiumLaunchOptions } from "../../support/chromiumMemory.mjs";
 // 施工单 002：Headless Chromium -> Keymaster production runtime -> 正式 Go msfile-nas。
 // 不注入 MsFileTransport 测试替身；Go 进程、Noise/Yamux、WebRTC Direct/WSS、
 // SharedWorker、trusted capability 与 Connect SDK 都走生产实现。
@@ -454,13 +455,13 @@ test.describe(GATE_ID + "：MSFile production runtime（施工单 002）", () =>
       "--global-name=KeymasterConnectE2E", `--outfile=${sdkOutput}`,
     ], { cwd: process.cwd(), maxBuffer: 8 * 1024 * 1024 });
     sdkBundle = await fs.readFile(sdkOutput, "utf8");
-    browser = await chromium.launch({
+    browser = await chromium.launch(chromiumLaunchOptions({
       headless: true,
       args: [
         "--enable-precise-memory-info",
         `--ignore-certificate-errors-spki-list=${fixture.certificateSpkiSha256Base64}`,
       ],
-    });
+    }));
     context = await browser.newContext({ baseURL: KEYMASTER_ORIGIN, locale: "en-US" });
     await context.addInitScript(() => {
       // 留空 enabled，验证 msfilePlugin.meta.defaultEnabled=true 的真实默认启动路径。
@@ -556,7 +557,7 @@ test.describe(GATE_ID + "：MSFile production runtime（施工单 002）", () =>
 
     // 新浏览器不配置 SPKI 测试信任：同一 WSS 必须失败，证明成功链路没有
     // 通过 ignoreHTTPSErrors 全局绕过 TLS。
-    const untrustedBrowser = await chromium.launch({ headless: true });
+    const untrustedBrowser = await chromium.launch(chromiumLaunchOptions({ headless: true }));
     const untrustedContext = await untrustedBrowser.newContext({ baseURL: KEYMASTER_ORIGIN });
     let untrustedPage: Page | undefined;
     try {

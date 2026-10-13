@@ -1,3 +1,4 @@
+import { chromiumLaunchOptions } from "./integration/support/chromiumMemory.mjs";
 import { defineConfig, devices } from "@playwright/test";
 import { configureRunSuite } from "./integration/support/runData.js";
 
@@ -19,6 +20,7 @@ export default defineConfig({
   reporter: process.env.CI ? "github" : "list",
   outputDir,
   use: {
+    launchOptions: chromiumLaunchOptions(),
     baseURL: "http://127.0.0.1:4175",
     trace: "on-first-retry",
     screenshot: "only-on-failure",
@@ -35,7 +37,7 @@ export default defineConfig({
       name: "lifecycle-registry",
       use: {
         ...devices["Desktop Chrome"],
-        launchOptions: { args: ["--enable-precise-memory-info"] },
+        launchOptions: chromiumLaunchOptions({ args: ["--enable-precise-memory-info"] }),
       },
     },
   ],

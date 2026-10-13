@@ -1,3 +1,4 @@
+import { chromiumLaunchOptions } from "../../support/chromiumMemory.mjs";
 import { createHash } from "node:crypto";
 import { chromium, expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { bytesToHex, publicKeyFromPrivateKey } from "bitcoin-libp2p/identity";
@@ -72,7 +73,7 @@ async function launchUser(input: {
   readonly privateKeyHex: string;
   readonly keyLabel: string;
 }): Promise<RealUser> {
-  const browser = await chromium.launch();
+  const browser = await chromium.launch(chromiumLaunchOptions());
   const context = await browser.newContext({ baseURL: PREVIEW_ORIGIN });
   const page = await context.newPage();
   const browserErrors = captureBrowserErrors(page, context);

@@ -1,3 +1,4 @@
+import { chromiumLaunchOptions } from "../../support/chromiumMemory.mjs";
 import { chromium, expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { initializeLocalUser } from "../../drivers/initialSetupDriver.js";
 import {
@@ -67,7 +68,7 @@ interface MediaRangeEvidence {
  */
 test(JOURNEY_ID + "：BSV8 官方 msfiles 服务的四个文件按正确方式打开", async ({}, testInfo) => {
   test.setTimeout(600_000);
-  const browser: Browser = await chromium.launch();
+  const browser: Browser = await chromium.launch(chromiumLaunchOptions());
   const context: BrowserContext = await browser.newContext({ baseURL: PREVIEW_ORIGIN, acceptDownloads: true });
   const page: Page = await context.newPage();
   const browserErrors: BrowserErrorEvidence = captureBrowserErrors(page, context);

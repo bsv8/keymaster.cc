@@ -1,3 +1,4 @@
+import { chromiumLaunchOptions } from "../../support/chromiumMemory.mjs";
 import { randomBytes } from "node:crypto";
 import { chromium, expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { bytesToHex, publicKeyFromPrivateKey } from "bitcoin-libp2p/identity";
@@ -175,7 +176,7 @@ test(JOURNEY_ID + "：SS server 设置页 testnet 小额充值只查余额与回
     });
 
     await test.step("固定 Key 初始化并开启 testnet，启动本地 SS（含 scanner）后保存供应商", async () => {
-      const browser = await chromium.launch();
+      const browser = await chromium.launch(chromiumLaunchOptions());
       const context = await browser.newContext({ baseURL: "http://127.0.0.1:4173" });
       const page = await context.newPage();
       const browserErrors = captureBrowserErrors(page, context);

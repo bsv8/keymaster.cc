@@ -1,3 +1,4 @@
+import { chromiumLaunchOptions } from "../e2e/integration/support/chromiumMemory.mjs";
 // 真实浏览器/两个 SharedWorker/两个页面门禁；隔离构建不添加生产测试入口。
 import { build } from "vite";
 import { chromium } from "@playwright/test";
@@ -24,7 +25,7 @@ try {
     } catch { response.writeHead(404).end(); }
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
-  browser = await chromium.launch({ headless: true });
+  browser = await chromium.launch(chromiumLaunchOptions({ headless: true }));
   const context = await browser.newContext();
   const errors = [];
   const first = await context.newPage(), second = await context.newPage();

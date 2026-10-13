@@ -1,3 +1,4 @@
+import { chromiumLaunchOptions } from "../../support/chromiumMemory.mjs";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { chromium, expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
@@ -69,7 +70,7 @@ test(JOURNEY_ID + "：真实 msfile-nas 的 Seed 文件获取与下载", async (
   test.setTimeout(480_000);
   await assertMsFileProxyProtocolCommit();
   const nas: MsFileNasResource = await startMsFileNasResource({ files: msfileNasJourneyFixtures() });
-  const browser: Browser = await chromium.launch();
+  const browser: Browser = await chromium.launch(chromiumLaunchOptions());
   const context: BrowserContext = await browser.newContext({ baseURL: PREVIEW_ORIGIN, acceptDownloads: true });
   const page: Page = await context.newPage();
   const browserErrors: BrowserErrorEvidence = captureBrowserErrors(page, context);

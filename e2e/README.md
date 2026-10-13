@@ -43,6 +43,26 @@ e2e/runs/<执行档>/<run-id>/
 
 ## 执行档总表
 
+### 小内存机器的浏览器策略
+
+浏览器执行档默认 `workers: 1`（一次运行一个测试进程），减少多个浏览器争用
+物理内存；单个场景需要的多个页面、Worker 或买卖双方浏览器仍按原场景启动。
+`support/chromiumMemory.mjs` 统一配置 Playwright 自动启动和场景手工启动的 Chromium：
+
+- `--browser-test`：当前 Chromium 149 在此开关下跳过系统内存压力监控器，减少
+  宿主机内存压力对功能测试的干扰。实现依据见
+  [Chromium 的 CreateMemoryPressureMonitor](https://raw.githubusercontent.com/chromium/chromium/149.0.7827.55/content/browser/browser_main_loop.cc)。
+- `--disable-low-end-device-mode`：禁用低内存设备模式。
+- `KEYMASTER_E2E_LOW_MEMORY=0`：关闭上述两个参数，恢复浏览器默认内存策略。
+  验证真实内存压力行为时必须关闭，例如
+  `KEYMASTER_E2E_LOW_MEMORY=0 pnpm test:e2e:local-core`。
+
+Swap（磁盘交换空间）由 Linux 管理；上述参数不会强制内存驻留磁盘，也不会
+修改机器的交换空间或 `vm.swappiness`（系统使用交换空间的倾向）。它们无法阻止
+系统内存和 Swap 耗尽后的 OOM（内存耗尽终止进程）、JavaScript 堆上限或正常的
+Worker 生命周期结束，因此不能作为“Worker 永不退出”的保证。交换造成的超时
+可按具体场景通过 Playwright `--timeout` 调整；浏览器升级后需重新核对开关行为。
+
 | 执行档(Group) | 配置/入口 | 命令 | 目录范围 | 中文说明 |
 | --- | --- | --- | --- | --- |
 | maintenance | `e2e/playwright.maintenance.config.ts` | `pnpm collect:testnet:key01` | `e2e/maintenance` | 手工维护脚本：Node 侧归集 key01 遗留 testnet 余额，不启动浏览器 |

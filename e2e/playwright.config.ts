@@ -1,3 +1,4 @@
+import { chromiumLaunchOptions } from "./integration/support/chromiumMemory.mjs";
 import { defineConfig, devices } from "@playwright/test";
 import { configureRunSuite } from "./integration/support/runData.js";
 
@@ -5,6 +6,8 @@ import { configureRunSuite } from "./integration/support/runData.js";
 const { outputDir } = configureRunSuite("local-core");
 
 export default defineConfig({
+  // 小内存机器默认串行，减少多个浏览器争用物理内存。
+  workers: 1,
   // 默认入口只运行不依赖仓库外资源的 local-core 执行档；所有 spec 都在
   // integration 规划下，避免根目录测试被误放进生产 preview。
   testDir: "./integration",
@@ -14,6 +17,7 @@ export default defineConfig({
   reporter: process.env.CI ? "github" : "list",
   outputDir,
   use: {
+    launchOptions: chromiumLaunchOptions(),
     baseURL: "http://127.0.0.1:4173",
     trace: "on-first-retry",
     screenshot: "only-on-failure",
@@ -34,7 +38,7 @@ export default defineConfig({
       testMatch: /(?:journeys\/local|gates\/local)\/[^/]+\.spec\.ts$/u,
       use: {
         ...devices["Desktop Chrome"],
-        launchOptions: { args: ["--enable-precise-memory-info"] }
+        launchOptions: chromiumLaunchOptions({ args: ["--enable-precise-memory-info"] })
       }
     }
   ]
