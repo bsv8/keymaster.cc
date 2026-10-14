@@ -97,7 +97,8 @@ export function validateWalletMeta(value: unknown): WalletMetaV1 {
 export interface WalletColdStartState {
   state: WalletState;
   /** state 为 ready 时携带的元数据。 */
-  meta?: WalletMetaV1;
+  /** Stable network/public-key binding; no persisted wallet generation. */
+  walletGeneration?: string;
   /** 仅用于界面提示的脱敏原因。 */
   reason?: string;
 }
@@ -349,7 +350,8 @@ export type WalletInitializeResult =
 export interface WalletColdStartSnapshot {
   state: WalletState;
   /** state 为 ready 时的元数据。 */
-  meta?: WalletMetaV1;
+  /** Stable network/public-key binding; no persisted wallet generation. */
+  walletGeneration?: string;
   /** ready 状态下的唯一 Key 公开信息；不解密。 */
   key?: {
     bsvNetwork: BsvNetwork;

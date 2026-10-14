@@ -12,8 +12,8 @@ import type { AppIdentitySnapshot } from "./appIdentity.js";
 
 /** 已验证 Connect App 的 owner 访问授权。 */
 export interface OwnerAppStorageGrant extends importNetworkIdentity {
-  /** Connect 会话 ID。 */
-  connectSessionId: string;
+  /** 钱包压缩公钥；与消息外层网络身份及实际来源一起定位连接。 */
+  walletPublicKeyHex: string;
   /** 发起请求的精确 Origin。 */
   transportOrigin: string;
   /** 装配层验证后的 App 身份。 */
@@ -33,8 +33,8 @@ export interface OwnerAppStorageGrant extends importNetworkIdentity {
 }
 
 export interface StorageListParams {
-  /** Connect 会话 ID。 */
-  connectSessionId: string;
+  /** 钱包压缩公钥；与消息外层网络身份及实际来源一起定位连接。 */
+  walletPublicKeyHex: string;
   /** 目录前缀。 */
   prefix?: string;
   /** 分页游标。 */
@@ -72,8 +72,8 @@ export interface StorageListResult {
 }
 
 export interface StorageDirectoryParams {
-  /** Connect 会话 ID。 */
-  connectSessionId: string;
+  /** 钱包压缩公钥；与消息外层网络身份及实际来源一起定位连接。 */
+  walletPublicKeyHex: string;
   /** 目录路径。 */
   path: string;
   /** 是否允许覆盖已有 marker。 */
@@ -90,8 +90,8 @@ export interface StorageDirectoryResult {
 }
 
 export interface StoragePutParams {
-  /** Connect 会话 ID。 */
-  connectSessionId: string;
+  /** 钱包压缩公钥；与消息外层网络身份及实际来源一起定位连接。 */
+  walletPublicKeyHex: string;
   /** 文件路径。 */
   path: string;
   /** 二进制文件内容。 */
@@ -114,8 +114,8 @@ export interface StoragePutResult {
 }
 
 export interface StorageGetParams {
-  /** Connect 会话 ID。 */
-  connectSessionId: string;
+  /** 钱包压缩公钥；与消息外层网络身份及实际来源一起定位连接。 */
+  walletPublicKeyHex: string;
   /** 文件路径。 */
   path: string;
   /** 起始偏移（字节）。 */
@@ -146,8 +146,8 @@ export interface StorageGetResult {
 }
 
 export interface StorageDeleteParams {
-  /** Connect 会话 ID。 */
-  connectSessionId: string;
+  /** 钱包压缩公钥；与消息外层网络身份及实际来源一起定位连接。 */
+  walletPublicKeyHex: string;
   /** 文件路径。 */
   path: string;
 }

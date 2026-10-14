@@ -25,7 +25,7 @@ export interface StorageWorkerRequestPorts {
   assertAvailable(): void;
   unavailable(message: string): Error;
   ensureRuntime(peerId?: string): Promise<StorageRuntimeController>;
-  appSession(id: string): Promise<(NonNullable<Awaited<ReturnType<Parameters<typeof createStorageGrantAuthority>[0]["appSession"]>>> & { sessionId: string }) | null>;
+  appSession(identity: import("@keymaster/contracts").NetworkIdentity, origin: string): Promise<(NonNullable<Awaited<ReturnType<Parameters<typeof createStorageGrantAuthority>[0]["appSession"]>>> & { sessionId: string }) | null>;
   appStorageName(identity: { publisherPublicKeyHex: string; appId: string }): string;
   failure(error: unknown): void;
   admission: { open(peerId: string): boolean; revoked(peerId: string): boolean; response(requestId: string): CoordinatorResponse };
@@ -49,7 +49,7 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
     withReadLease: task => ports.io.run("read", undefined, task, { auditOperation: "storage.browse" }),
   });
 
-  const storageRequests = new Map<string, { controller: AbortController; clientId: string; connectSessionId?: string }>();
+  const storageRequests = new Map<string, { controller: AbortController; clientId: string; walletPublicKeyHex?: string }>();
 
   const storageRequestKey = (clientId: string, requestId: string): string => `${clientId}\u0000${requestId}`;
 
@@ -239,22 +239,22 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
     return ports.io.run(operation, controller.signal, () => executeStorageDataUnsafe(request, controller, actualClientId), { auditOperation: "storage.connect.data" });
   }
 
-  function revokeStorageSessionRequests(connectSessionId: string): void {
+  function revokeStorageSessionRequests(walletPublicKeyHex: string): void {
     for (const [requestId, pending] of storageRequests) {
-      if (pending.connectSessionId === connectSessionId) { pending.controller.abort(); storageRequests.delete(requestId); }
+      if (pending.walletPublicKeyHex === walletPublicKeyHex) { pending.controller.abort(); storageRequests.delete(requestId); }
     }
-    for (const [grantId, grant] of storageGrants) if (grant.context.connectSessionId === connectSessionId) storageGrants.delete(grantId);
+    for (const [grantId, grant] of storageGrants) if (grant.context.walletPublicKeyHex === walletPublicKeyHex) storageGrants.delete(grantId);
   }
 
-  async function abortStorageSession(connectSessionId: string, peerId: string): Promise<void> {
-    revokeStorageSessionRequests(connectSessionId);
+  async function abortStorageSession(walletPublicKeyHex: string, peerId: string): Promise<void> {
+    revokeStorageSessionRequests(walletPublicKeyHex);
     const service = await ports.ensureRuntime(peerId);
-    await service.abortSession(connectSessionId);
+    await service.abortSession(walletPublicKeyHex);
   }
 
   async function executeStorageRequest(request: Extract<CoordinatorClientRequest, { kind: "storage.grant" | "storage.control" | "storage.data" | "storage.cancel" | "storage.session.abort" | "storage.browse.open" | "storage.browse.data" | "storage.browse.close" | "storage.owner.bind" | "storage.platform.bind" | "storage.owner.data" | "storage.platform.data" | "storage.clear.root" }>, actualClientId: string, requestSignal?: AbortSignal): Promise<CoordinatorResponse> {
     if (request.kind === "storage.grant") {
-      const session = await ports.appSession(request.connectSessionId);
+      const session = await ports.appSession(request.networkIdentity, request.transportOrigin);
       if (ports.admission.revoked(actualClientId)) return ports.admission.response(request.requestId);
       if (!session || !session.networkIdentity || !ports.root() || !sameNetworkIdentity(session.networkIdentity, ports.root()!.identity)) return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "error", message: "Storage network identity is invalid or revoked", code: "storage_identity_required" } };
       if (ports.session().vaultStatus !== "unlocked" || !ports.session().activePublicKeyHex || !ports.root()) {
@@ -273,7 +273,7 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
       storageGrants.set(grantId, {
         context: {
           ...session.networkIdentity,
-          connectSessionId: session.sessionId,
+          walletPublicKeyHex: session.ownerPublicKeyHex,
           transportOrigin: session.origin,
           appIdentity: session.appIdentity,
           appStorageName,
@@ -297,7 +297,7 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
       return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "ok" } };
     }
     if (request.kind === "storage.session.abort") {
-      await abortStorageSession(request.connectSessionId, actualClientId);
+      await abortStorageSession(request.walletPublicKeyHex, actualClientId);
       return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "ok" } };
     }
     if (request.kind === "storage.platform.bind") {
@@ -469,7 +469,7 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
       if (request.kind === "storage.data") releaseStoragePortSlot(actualClientId);
       return ports.admission.response(request.requestId);
     }
-    storageRequests.set(requestKey, { controller, clientId: actualClientId, connectSessionId: request.kind === "storage.data" && "grantId" in request.data ? storageGrants.get(request.data.grantId)?.context.connectSessionId : undefined });
+    storageRequests.set(requestKey, { controller, clientId: actualClientId, walletPublicKeyHex: request.kind === "storage.data" && "grantId" in request.data ? storageGrants.get(request.data.grantId)?.context.walletPublicKeyHex : undefined });
     try {
       if (request.kind === "storage.control") {
         let result!: CoordinatorResponse;

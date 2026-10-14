@@ -609,15 +609,14 @@ const THIRD_PARTY_APP_FILES_DECLARATION = Object.freeze({
   schemaVersion: 1,
 } satisfies PluginStorageDeclaration);
 
-async function readProtocolConnectSession(sessionId: string): Promise<{ sessionId: string; origin: string; networkIdentity: import("@keymaster/contracts").NetworkIdentity; ownerPublicKeyHex: string; appIdentity: import("@keymaster/contracts").OwnerAppStorageGrant["appIdentity"]; revokedAt: number | null } | null> {
+async function readProtocolConnectSession(identity: import("@keymaster/contracts").NetworkIdentity, origin: string): Promise<{ sessionId: string; origin: string; networkIdentity: import("@keymaster/contracts").NetworkIdentity; ownerPublicKeyHex: string; appIdentity: import("@keymaster/contracts").OwnerAppStorageGrant["appIdentity"]; revokedAt: number | null } | null> {
   if (testStorageSessionResolver) {
-    const resolved = await testStorageSessionResolver(sessionId);
+    const resolved = await testStorageSessionResolver(identity.publicKeyHex);
     return resolved && resolved.revokedAt === null && Boolean(resolved.sessionId && resolved.origin) && isValidStorageIdentity(resolved.appIdentity)
       ? { sessionId: resolved.sessionId, origin: resolved.origin, networkIdentity: resolved.networkIdentity!, ownerPublicKeyHex: resolved.ownerPublicKeyHex ?? "", appIdentity: resolved.appIdentity, revokedAt: null }
       : null;
   }
-  if (!sessionId) return null;
-  const record = await getAuthoritativeConnectSession(sessionId);
+  const record = await getAuthoritativeConnectSession(identity, origin);
   return record && isValidStorageIdentity(record.appIdentity)
     ? { sessionId: record.sessionId, origin: record.origin, networkIdentity: record.networkIdentity, ownerPublicKeyHex: record.ownerPublicKeyHex, appIdentity: record.appIdentity, revokedAt: null }
     : null;
@@ -3471,7 +3470,7 @@ async function initializeCoordinatorInternal(skipStorageBootstrap = false, propa
         switch (coldStart?.state) {
           case "ready":
             coordinatorMeta.p2pkhSettings = { bsvNetwork: coldStart.key!.bsvNetwork };
-            coordinatorState.walletGeneration = coldStart.meta?.walletGeneration ?? coordinatorState.walletGeneration;
+            coordinatorState.walletGeneration = coldStart.walletGeneration ?? coordinatorState.walletGeneration;
             coordinatorState.vaultStatus = "locked";
             coordinatorState.activePublicKeyHex = undefined;
             break;

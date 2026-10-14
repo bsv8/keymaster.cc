@@ -781,7 +781,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   }
 
   async storageGrant(context: import("@keymaster/contracts").OwnerAppStorageGrant): Promise<import("@keymaster/contracts").CoordinatorValueResult<string>> {
-    const request = { kind: "storage.grant" as const, clientId: this.clientId, requestId: this.generateRequestId(), connectSessionId: context.connectSessionId, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    const request = { kind: "storage.grant" as const, networkIdentity: { bsvNetwork: context.bsvNetwork, publicKeyHex: context.publicKeyHex }, clientId: this.clientId, requestId: this.generateRequestId(), walletPublicKeyHex: context.walletPublicKeyHex, transportOrigin: context.transportOrigin, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
     try {
       const response = await this.sendRequest(request);
       if (response.ack.status !== "ok") return response.ack;
@@ -808,8 +808,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     return this.requestCommand({ kind: "storage.cancel", clientId: this.clientId, requestId: this.generateRequestId(), targetRequestId });
   }
 
-  async storageSessionAbort(connectSessionId: string): Promise<CoordinatorCommandResult> {
-    return this.requestCommand({ kind: "storage.session.abort", clientId: this.clientId, requestId: this.generateRequestId(), connectSessionId, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
+  async storageSessionAbort(walletPublicKeyHex: string): Promise<CoordinatorCommandResult> {
+    return this.requestCommand({ kind: "storage.session.abort", clientId: this.clientId, requestId: this.generateRequestId(), walletPublicKeyHex, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
   }
 
   async storageBindOwner(input: { pluginId: string; declaration: import("@keymaster/contracts").PluginStorageDeclaration }): Promise<import("@keymaster/contracts").CoordinatorValueResult<StorageBindingGrant>> {
@@ -977,8 +977,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     return this.requestCommand({ kind: "msfile.cancel", clientId: this.clientId, requestId: this.generateRequestId(), targetRequestId });
   }
 
-  async msfileSessionAbort(connectSessionId: string): Promise<CoordinatorCommandResult> {
-    return this.requestCommand({ kind: "msfile.session.abort", clientId: this.clientId, requestId: this.generateRequestId(), connectSessionId, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
+  async msfileSessionAbort(walletPublicKeyHex: string): Promise<CoordinatorCommandResult> {
+    return this.requestCommand({ kind: "msfile.session.abort", clientId: this.clientId, requestId: this.generateRequestId(), walletPublicKeyHex, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
   }
 
   /** 申请公共 Window P2P executor lease（同一 epoch 仅一个）。 */

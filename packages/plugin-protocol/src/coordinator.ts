@@ -17,8 +17,8 @@ export function configureProtocolStorageRepository(
   dbPromise = Promise.resolve(openRawProtocolStorageRepository(stores));
 }
 
-export async function getConnectSession(sessionId: string): Promise<ConnectSessionRecord | null> {
-  const record = await (await openProtocolStorageRepository()).getConnectSession(sessionId);
+export async function getConnectSession(identity: import("@keymaster/contracts").NetworkIdentity, origin: string): Promise<ConnectSessionRecord | null> {
+  const record = await (await openProtocolStorageRepository()).getConnectSession(identity, origin);
   if (!record || record.revokedAt !== null || !record.origin || !isVerifiedAppIdentitySnapshot(record.appIdentity)) return null;
   return record;
 }

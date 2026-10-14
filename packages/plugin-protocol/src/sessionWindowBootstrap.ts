@@ -270,7 +270,7 @@ export interface LauncherHandoffInput {
   appId: string;
   appOrigin: string;
   appUrl: string;
-  connectSessionId: string;
+  walletPublicKeyHex: string;
   ownerPublicKeyHex: string;
   resolvedClaims: Record<string, unknown>;
   resolvedAt: number;
@@ -295,7 +295,7 @@ export function buildAppBootstrapPayload(input: LauncherHandoffInput): AppBootst
   if (!input.appId || !input.appOrigin || !input.appUrl) {
     throw new Error("Launcher handoff missing app fields");
   }
-  if (!input.connectSessionId || !input.ownerPublicKeyHex) {
+  if (!input.walletPublicKeyHex || !input.ownerPublicKeyHex) {
     throw new Error("Launcher handoff missing connect session fields");
   }
   if (!input.launchToken) {
@@ -318,7 +318,7 @@ export function buildAppBootstrapPayload(input: LauncherHandoffInput): AppBootst
       appOrigin: input.appOrigin,
       appUrl: input.appUrl
     },
-    connectSessionId: input.connectSessionId,
+    walletPublicKeyHex: input.walletPublicKeyHex,
     ownerPublicKeyHex: input.ownerPublicKeyHex,
     resolvedClaims: input.resolvedClaims as AppBootstrapPayload["resolvedClaims"],
     resolvedAt: input.resolvedAt,

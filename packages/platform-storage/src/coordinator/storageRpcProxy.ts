@@ -88,11 +88,11 @@ export class StorageRpcProxy implements StorageRuntimeController {
     return this.control<StorageRuntimeSummary>({ type: "summary" });
   }
 
-  abortSession(connectSessionId: string): Promise<void> {
-    return this.coordinator.storageSessionAbort(connectSessionId).then((result) => {
+  abortSession(walletPublicKeyHex: string): Promise<void> {
+    return this.coordinator.storageSessionAbort(walletPublicKeyHex).then((result) => {
       if (result.status !== "ok") throw new StorageRuntimeError("storage_unavailable", "Storage session abort failed");
       for (const key of [...this.grants.keys()]) {
-        if (key.startsWith(`${connectSessionId}|`)) this.grants.delete(key);
+        if (key.startsWith(`${walletPublicKeyHex}|`)) this.grants.delete(key);
       }
     });
   }
@@ -177,7 +177,7 @@ export class StorageRpcProxy implements StorageRuntimeController {
 
   /** 同一 Connect 会话 + 同一 App 身份复用同一个目录授权。 */
   private grantFor(ctx: OwnerAppStorageGrant): Promise<string> {
-    const key = `${ctx.connectSessionId}|${ctx.transportOrigin}|${ctx.appIdentity.identityDigestHex}`;
+    const key = `${ctx.walletPublicKeyHex}|${ctx.bsvNetwork}|${ctx.transportOrigin}|${ctx.appIdentity.identityDigestHex}`;
     const existing = this.grants.get(key);
     if (existing) return existing;
     const pending = this.coordinator.storageGrant(ctx).then(unwrap<string>).catch((error) => {
@@ -195,7 +195,7 @@ export class StorageRpcProxy implements StorageRuntimeController {
     signal?: AbortSignal,
   ): Promise<T> {
     if (signal?.aborted) return Promise.reject(new StorageRuntimeError("storage_unavailable", "Storage request was cancelled"));
-    const key = `${ctx.connectSessionId}|${ctx.transportOrigin}|${ctx.appIdentity.identityDigestHex}`;
+    const key = `${ctx.walletPublicKeyHex}|${ctx.bsvNetwork}|${ctx.transportOrigin}|${ctx.appIdentity.identityDigestHex}`;
     return this.grantFor(ctx)
       .then((grantId) => {
         if (signal?.aborted) throw new StorageRuntimeError("storage_unavailable", "Storage request was cancelled");

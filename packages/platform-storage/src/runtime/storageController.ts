@@ -24,7 +24,7 @@ import type { ModuleFileStore } from "@keymaster/contracts";
 import { StorageRuntimeError, storageErrorCode } from "./storageError.js";
 
 interface CursorRecord {
-  connectSessionId: string;
+  walletPublicKeyHex: string;
   appStorageName: string;
   prefix: string;
   after: string | undefined;
@@ -48,7 +48,7 @@ export interface StorageRuntimeControllerDeps {
   /** 为一个已验证 Connect App 打开它的独立目录句柄。 */
   openAppFileStore(ctx: OwnerAppStorageGrant): Promise<ModuleFileStore>;
   /** 中止一个 Connect 会话。 */
-  abortSession(connectSessionId: string): Promise<void>;
+  abortSession(walletPublicKeyHex: string): Promise<void>;
   /** 浏览器持久化授权与配额。 */
   persistence(): Promise<{ persisted: boolean; usageBytes?: number; quotaBytes?: number }>;
   /** 当前状态；由生命周期层驱动。 */
@@ -128,12 +128,12 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
     return { ...base, status: this.deps.status(), medium: "indexeddb", persistence };
   }
 
-  async abortSession(connectSessionId: string): Promise<void> {
+  async abortSession(walletPublicKeyHex: string): Promise<void> {
     // 断开会话同时丢弃它的游标：游标是运行态句柄，不是持久真值。
     for (const [key, record] of [...this.cursors]) {
-      if (record.connectSessionId === connectSessionId) this.cursors.delete(key);
+      if (record.walletPublicKeyHex === walletPublicKeyHex) this.cursors.delete(key);
     }
-    await this.deps.abortSession(connectSessionId);
+    await this.deps.abortSession(walletPublicKeyHex);
   }
 
   async list(ctx: OwnerAppStorageGrant, input: { prefix?: string; cursor?: string; limit?: number; signal?: AbortSignal }): Promise<StorageListResult> {
@@ -173,7 +173,7 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
     const nextCursor = page.nextCursor === undefined
       ? undefined
       : this.issueCursor(ctx, {
-        connectSessionId: ctx.connectSessionId,
+        walletPublicKeyHex: ctx.walletPublicKeyHex,
         appStorageName: ctx.appStorageName,
         prefix,
         after: page.nextCursor,
@@ -293,15 +293,15 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
     this.gcCursors();
     let perSession = 0;
     for (const candidate of this.cursors.values()) {
-      if (candidate.connectSessionId === record.connectSessionId) perSession += 1;
+      if (candidate.walletPublicKeyHex === record.walletPublicKeyHex) perSession += 1;
     }
     if (perSession >= MAX_CURSORS_PER_SESSION) {
       const oldest = [...this.cursors.entries()]
-        .filter(([, candidate]) => candidate.connectSessionId === record.connectSessionId)
+        .filter(([, candidate]) => candidate.walletPublicKeyHex === record.walletPublicKeyHex)
         .sort((left, right) => left[1].expiresAt - right[1].expiresAt)[0];
       if (oldest) this.cursors.delete(oldest[0]);
     }
-    const key = `${record.connectSessionId}|${record.appStorageName}|${record.after ?? ""}|${record.prefix}`;
+    const key = `${record.walletPublicKeyHex}|${record.appStorageName}|${record.after ?? ""}|${record.prefix}`;
     this.cursors.set(key, record);
     return `${id(this.clock)}.${key}`;
   }
@@ -311,7 +311,7 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
     const key = separator < 0 ? cursor : cursor.slice(separator + 1);
     const record = this.cursors.get(key);
     if (!record
-      || record.connectSessionId !== ctx.connectSessionId
+      || record.walletPublicKeyHex !== ctx.walletPublicKeyHex
       || record.appStorageName !== ctx.appStorageName
       || record.prefix !== prefix
       || record.limit !== limit

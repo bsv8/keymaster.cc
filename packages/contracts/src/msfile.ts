@@ -1,3 +1,4 @@
+import type { NetworkIdentity } from "./networkIdentity.js";
 // packages/contracts/src/msfile.ts
 // MSFile 客户端能力契约；人类可读说明见 docs/MSFile.md。
 import { defineCapability } from "webloom-framework";
@@ -205,7 +206,7 @@ export type MsFileStatInput = {
 };
 
 export interface MsFileStatParams {
-  connectSessionId: string;
+  walletPublicKeyHex: string;
   seedHashHex: string;
 }
 
@@ -292,14 +293,14 @@ export interface MsFileReadBlockInput {
 }
 
 export interface MsFileSeedReadParams {
-  connectSessionId: string;
+  walletPublicKeyHex: string;
   /** 要读取的来源路由标识。 */
   sourceId: string;
   seedHashHex: string;
 }
 
 export interface MsFileBlockReadParams {
-  connectSessionId: string;
+  walletPublicKeyHex: string;
   /** 要读取的来源路由标识。 */
   sourceId: string;
   /** Block 所属 Seed；remote wire 不发送该字段。 */
@@ -699,7 +700,7 @@ export type MsFileApprovalKind = MsFileContentKind;
 export interface MsFilePendingApproval {
   approvalId: string;
   createdAt: number;
-  connectSessionId: string;
+  walletPublicKeyHex: string;
   transportOrigin: string;
   ownerPublicKeyHex: string;
   publisherPublicKeyHex: string;
@@ -739,8 +740,8 @@ export type MsFileApprovalDecision =
 
 /* ============== Connect gateway ============== */
 
-export interface MsFileConnectAppContext {
-  connectSessionId: string;
+export interface MsFileConnectAppContext extends NetworkIdentity {
+  walletPublicKeyHex: string;
   transportOrigin: string;
   ownerPublicKeyHex: string;
   appIdentity: AppIdentitySnapshot;
@@ -791,7 +792,7 @@ export interface MsFileService {
   listPendingApprovals(): MsFilePendingApprovalView[];
   resolveApproval(approvalId: string, decision: MsFileApprovalDecision): Promise<void>;
 
-  abortSession(connectSessionId: string): Promise<void>;
+  abortSession(walletPublicKeyHex: string): Promise<void>;
 
   stat(input: MsFileStatInput): Promise<MsFileStatResult>;
   readSeed(input: MsFileReadSeedInput): Promise<MsFileReadResult>;

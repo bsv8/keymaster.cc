@@ -17,7 +17,7 @@ export function createWalletStoreActivity(changed: () => void) {
     snapshot: () => ({ reads: Math.min(reads, 1_024), writes: Math.min(writes, 1_024) }),
     wrap(store: WalletStore): WalletStore {
       return Object.freeze({
-        readMeta: () => run("read", () => store.readMeta()), readKeyHold: () => run("read", () => store.readKeyHold()),
+        readMeta: () => run("read", () => store.readMeta()), cleanupLegacyMarkers: () => run("write", () => store.cleanupLegacyMarkers?.() ?? Promise.resolve()), readKeyHold: () => run("read", () => store.readKeyHold()),
         get: (...args: Parameters<WalletStore["get"]>) => run("read", () => store.get(...args)),
         getRange: (...args: Parameters<WalletStore["getRange"]>) => run("read", () => store.getRange(...args)),
         list: (...args: Parameters<WalletStore["list"]>) => run("read", () => store.list(...args)),

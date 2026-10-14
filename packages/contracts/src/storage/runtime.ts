@@ -105,7 +105,7 @@ export interface StorageRuntimeController {
   exportKeyHold?(): Promise<Uint8Array>;
   /** 重置钱包：撤销授权后原子清空新格式全部数据。 */
   resetWallet?(input: { confirmationLabel: string }): Promise<{ walletGeneration: string; clearedAt: string }>;
-  abortSession(connectSessionId: string): Promise<void>;
+  abortSession(walletPublicKeyHex: string): Promise<void>;
   list(ctx: OwnerAppStorageGrant, input: { prefix?: string; cursor?: string; limit?: number; signal?: AbortSignal }): Promise<StorageListResult>;
   createDirectory(ctx: OwnerAppStorageGrant, input: { path: string; overwrite?: boolean; signal?: AbortSignal }): Promise<StorageDirectoryResult>;
   deleteDirectory(ctx: OwnerAppStorageGrant, input: { path: string; signal?: AbortSignal }): Promise<StorageDirectoryResult>;

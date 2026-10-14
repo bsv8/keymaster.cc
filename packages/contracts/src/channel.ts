@@ -1,3 +1,4 @@
+import type { NetworkIdentity } from "./networkIdentity.js";
 // Channel 运行时契约。
 import { defineCapability } from "webloom-framework";
 //
@@ -146,14 +147,14 @@ export type ChannelCaller =
 /** Coordinator RPC 使用的 caller；Connect caller 由 Session Window 预先验真。 */
 export type ChannelOperationCaller = ChannelCaller | {
   kind: "connect";
-  connectSessionId: string;
+  walletPublicKeyHex: string;
   origin: string;
-};
+} & NetworkIdentity;
 
 /** Session Window 向 Coordinator 传递的已验证 Connect session 上下文。 */
-export interface ConnectChannelCaller {
-  /** 已验证 Connect session 编号；不进入 App content。 */
-  connectSessionId: string;
+export interface ConnectChannelCaller extends NetworkIdentity {
+  /** 已验证钱包公钥；与此上下文的网络一起定位，不进入 App content。 */
+  walletPublicKeyHex: string;
   /** Session Window 已验证的 exact origin。 */
   origin: string;
   /** 从 Connect session 取得的 owner 公钥；App 不可自报。 */

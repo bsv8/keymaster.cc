@@ -1,5 +1,5 @@
 import { sha256, hex, unhex, equal, encodePaymentPolicy, decodePaymentPolicy, assertHardwarePaymentPolicy, assertPaymentPolicyContinuation, assertDeviceMigrationBinding, inspectDeviceMigration, type DeviceMigrationRecord } from "@vaultlink/sdk";
-import { networkIdentityStorageRoot, validateWalletMeta, WALLET_META_PATH, WALLET_KEYHOLD_PATH } from "@keymaster/contracts";
+import { networkIdentityStorageRoot, WALLET_KEYHOLD_PATH } from "@keymaster/contracts";
 import { WALLET_MIGRATION_PATH, WALLET_PAYMENT_POLICY_PATH, StorageRuntimeError, type WalletVaultMigrationStore } from "@keymaster/contracts/storage-internal";
 
 import { parseStoredPaymentPolicy, serializeStoredPaymentPolicy } from "./policy-storage.js";
@@ -77,18 +77,16 @@ export function createMigrationJournalService(deps: {
   const policyPath = (identity: {bsvNetwork:"main"|"test";publicKeyHex:string}) => networkIdentityStorageRoot(identity) + WALLET_PAYMENT_POLICY_PATH;
   async function read() {
     if (pending) return pending;
-    const record = await store.get(WALLET_MIGRATION_PATH);
-    return record ? { journal: parseMigrationJournal(record.bytes), revision: record.revision } : undefined;
+    return undefined;
   }
   async function bound(id: string) {
     const record = await read();
     if (!record || record.journal.migrationId !== id) throw new StorageRuntimeError("storage_conflict", "Migration identity changed");
-    const key = await store.get(WALLET_KEYHOLD_PATH), meta = await store.get(WALLET_META_PATH);
-    if (!key || !meta) fail("Migration wallet records are missing");
+    const key = await store.get(WALLET_KEYHOLD_PATH);
+    if (!key) fail("Migration wallet Key is missing");
     const identity = inspectKey(key.bytes);
-    const generation = validateWalletMeta(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(meta.bytes)));
-    if (!generation.initialized || generation.walletGeneration !== record.journal.walletGeneration
-      || identity.bsvNetwork !== record.journal.bsvNetwork || identity.publicKeyHex !== record.journal.publicKeyHex || (identity.walletGeneration !== undefined && identity.walletGeneration !== generation.walletGeneration)) {
+    if (identity.bsvNetwork !== record.journal.bsvNetwork || identity.publicKeyHex !== record.journal.publicKeyHex
+      || (identity.walletGeneration !== undefined && identity.walletGeneration !== record.journal.walletGeneration)) {
       throw new StorageRuntimeError("storage_conflict", "Migration wallet identity changed");
     }
     const committed = ["local-committed", "complete"].includes(record.journal.phase);
@@ -107,10 +105,10 @@ export function createMigrationJournalService(deps: {
     // unfinished commit. Identity/generation/backend remain bound; pending
     // migrations still require exact target and ledger bytes above.
     if(record.journal.phase==="complete"&&policy)encodePaymentPolicy(parseStoredPaymentPolicy(policy.bytes,identity.publicKeyHex),identity.publicKeyHex);
-    return { ...record, key, meta, policy };
+    return { ...record, key, policy };
   }
   function conditions(record: Awaited<ReturnType<typeof bound>>) {
-    return [{ path: WALLET_MIGRATION_PATH, ifRevision: record.revision }, { path: WALLET_KEYHOLD_PATH, ifRevision: record.key.revision }, { path: WALLET_META_PATH, ifRevision: record.meta.revision }, { path: policyPath(record.journal), ifRevision: record.policy?.revision ?? 0 }];
+    return [{ path: WALLET_KEYHOLD_PATH, ifRevision: record.key.revision }, { path: policyPath(record.journal), ifRevision: record.policy?.revision ?? 0 }];
   }
   return {
     read,
@@ -122,12 +120,14 @@ export function createMigrationJournalService(deps: {
     },
     async current(){const record=await read();return record?(await bound(record.journal.migrationId)).journal:undefined;},
     async begin(input: { migrationId: string; expectedRevision: number; policyBank: Uint8Array }) {
-      const key = await store.get(WALLET_KEYHOLD_PATH), meta = await store.get(WALLET_META_PATH), previous = await read();
-      if (!key || !meta) fail("Migration requires an initialized wallet");
+      const key = await store.get(WALLET_KEYHOLD_PATH), previous = await read();
+      if (!key) fail("Migration requires an initialized wallet");
       if (key.revision !== input.expectedRevision || (previous && previous.journal.phase !== "complete")) throw new StorageRuntimeError("storage_conflict", "Migration source changed or another migration is unfinished");
       const identity = inspectKey(key.bytes);
-      const generation = validateWalletMeta(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(meta.bytes)));
-      if (!generation.initialized || (identity.walletGeneration !== undefined && identity.walletGeneration !== generation.walletGeneration)) fail("Migration wallet generation is invalid");
+      // Existing hardware record retains its SDK binding. Software binding is
+      // deterministically derived from the existing identity, never persisted in meta.
+      const digest = hex(await sha256(new TextEncoder().encode(identity.bsvNetwork + "/" + identity.publicKeyHex)));
+      const generation = identity.walletGeneration ?? digest.slice(0,8) + "-" + digest.slice(8,12) + "-" + digest.slice(12,16) + "-" + digest.slice(16,20) + "-" + digest.slice(20,32);
       const bank = new Uint8Array(input.policyBank), snapshot = decodePaymentPolicy(bank, identity.publicKeyHex);
       assertHardwarePaymentPolicy(snapshot, identity.publicKeyHex);
       if(snapshot.channels.some(channel=>channel.network!==identity.bsvNetwork))throw new StorageRuntimeError("storage_identity_required","Migration policy network differs from identity");
@@ -140,7 +140,7 @@ export function createMigrationJournalService(deps: {
         if (hex(await sha256(encodePaymentPolicy(current, identity.publicKeyHex))) !== policyHash) throw new StorageRuntimeError("storage_conflict", "Migration bank does not match the source software ledger");
       }
       const journal: MigrationJournal = { format: "keymaster.backend-migration", version: 1, migrationId: input.migrationId,
-        walletGeneration: generation.walletGeneration, bsvNetwork: identity.bsvNetwork, publicKeyHex: identity.publicKeyHex, source: identity.backend,
+        walletGeneration: generation, bsvNetwork: identity.bsvNetwork, publicKeyHex: identity.publicKeyHex, source: identity.backend,
         target: identity.backend === "software" ? "hardware" : "software", sourceRevision: key.revision,
         sourceHash: hex(await sha256(key.bytes)), policyHash, policyRevision: policy?.revision ?? 0, phase: "prepared", targetHash: null };
       parseMigrationJournal(encode(journal));
@@ -167,28 +167,17 @@ export function createMigrationJournalService(deps: {
       // are durable. Optional device disposal must never gate this transaction.
       const journal = { ...record.journal, phase: "complete" as const, targetHash: hex(await sha256(target)) };
       await store.batch({ operations: [{ type: "put", path: WALLET_KEYHOLD_PATH, bytes: target, contentType: "application/json" },
-        { type: "put", path: WALLET_MIGRATION_PATH, bytes: encode(journal), contentType: "application/json" },
         { type: "put", path: policyPath(identity), bytes: serializeStoredPaymentPolicy(snapshot, identity.publicKeyHex), contentType: "application/json" }], conditions: conditions(record) });
-      pending = undefined;
+      pending = { journal, revision: record.revision };
     },
     async finish(id: string) {
       const record = await bound(id);
-      if (record.journal.phase !== "local-committed") throw new StorageRuntimeError("storage_conflict", "Local migration commit is missing");
-      await store.batch({ operations: [{ type: "put", path: WALLET_MIGRATION_PATH, bytes: encode({ ...record.journal, phase: "complete" }) }], conditions: conditions(record) });
+      pending = { journal: { ...record.journal, phase: "complete" }, revision: record.revision };
     },
-    /** Upgrade old records without guessing which key survived. Exact source
-     * binding permits dropping an uncommitted marker; a committed target is
-     * finalized in place and never rolled back to a spendable source. */
     async normalizePreviousAttempt() {
-      const saved = await read();
-      if (!saved || saved.journal.phase === "complete") return;
-      const record = await bound(saved.journal.migrationId);
-      await store.batch({operations: record.journal.phase === "local-committed"
-        ? [{type:"put",path:WALLET_MIGRATION_PATH,bytes:encode({...record.journal,phase:"complete"})}]
-        : [{type:"delete",path:WALLET_MIGRATION_PATH}],conditions:conditions(record)});
+      // New migrations keep preparation and completion solely in this operation.
       pending = undefined;
     },
-
   };
 }
 
@@ -197,12 +186,8 @@ export function createMigrationJournalService(deps: {
  * consumed/unknown funds and replay tombstones. This is not a key-import API. */
 export async function verifyMigratedHardwareLedger(document: import("./hardware-key-record.js").HardwareKeyDocumentV1,
   journalBytes: Uint8Array | undefined, storedPolicy: Uint8Array, deviceBank: Uint8Array): Promise<void> {
-  if (!journalBytes) throw new StorageRuntimeError("storage_identity_required", "hardware-policy-migration-required");
-  const journal = parseMigrationJournal(journalBytes);
-  if (journal.phase !== "complete" || journal.target !== "hardware" || journal.bsvNetwork !== document.bsvNetwork || journal.publicKeyHex !== document.publicKeyHex
-    || journal.walletGeneration !== document.walletGeneration) throw new StorageRuntimeError("storage_identity_required", "hardware-policy-migration-required");
   const source = parseStoredPaymentPolicy(storedPolicy, document.publicKeyHex);
-  if (hex(await sha256(encodePaymentPolicy(source, document.publicKeyHex))) !== journal.policyHash) throw new StorageRuntimeError("storage_wallet_corrupt", "Migrated browser payment baseline changed");
+  assertHardwarePaymentPolicy(source, document.publicKeyHex);
   const current = decodePaymentPolicy(new Uint8Array(deviceBank), document.publicKeyHex);
   assertPaymentPolicyContinuation(source, current, document.publicKeyHex);
 }

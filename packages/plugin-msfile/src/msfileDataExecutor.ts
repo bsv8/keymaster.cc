@@ -2,7 +2,7 @@ import type { CoordinatorClientRequest, CoordinatorMsFileData, CoordinatorRespon
 export interface MsfileDataExecutorDependencies {
   runtime(): Promise<MsFileService>;
   sessionEpoch(): SessionEpoch;
-  resolveGrant(id: string, clientId: string, epoch: SessionEpoch): Promise<{ context: MsFileConnectAppContext; connectSessionId: string }>;
+  resolveGrant(id: string, clientId: string, epoch: SessionEpoch): Promise<{ context: MsFileConnectAppContext; walletPublicKeyHex: string }>;
   unavailable(message: string): Error;
 }
 /** Domain operations run inside the trusted assembly's final I/O lease. */

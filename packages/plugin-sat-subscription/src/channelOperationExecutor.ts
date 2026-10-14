@@ -10,7 +10,7 @@ export interface ChannelOperationDependencies<R extends ChannelPublicationPort> 
   publishPublic(runtime: R, channel: string, content: JSONValue, signal?: AbortSignal): Promise<{ messageId: string }>;
   publishPrivate(input: { runtime: R; recipientPublicKeyHex: string; protocol: ChannelPrivateProtocol; body: UnsignedPrivateMessage["body"]; signal?: AbortSignal }): Promise<{ messageId: string; signedMessage: Uint8Array }>;
   openPrivate(owner: string, envelope: Uint8Array, signal?: AbortSignal): Promise<VerifiedPrivateMessage>;
-  connectSession(id: string): Promise<{ origin: string; ownerPublicKeyHex: string; revokedAt: number | null } | null>;
+  connectSession(identity: import("@keymaster/contracts").NetworkIdentity, origin: string): Promise<{ origin: string; ownerPublicKeyHex: string; revokedAt: number | null } | null>;
   disconnected(clientId: string): boolean;
   disconnectedResponse(requestId: string): CoordinatorResponse;
   allowedInbox(caller: ChannelCaller, channel: string): boolean;
@@ -44,7 +44,7 @@ export function createChannelOperationExecutor<R extends ChannelPublicationPort>
           throw new Error("Channel publish became stale after network completion");
         }
         if (operation.caller.kind === "connect") {
-          const session = await deps.connectSession(operation.caller.connectSessionId);
+          const session = await deps.connectSession(operation.caller, operation.caller.origin);
           if (!session || session.revokedAt !== null || session.origin !== operation.caller.origin || session.ownerPublicKeyHex !== operation.ownerPublicKeyHex) {
             throw new Error("Channel Connect session was revoked during publish");
           }
@@ -115,7 +115,7 @@ export function createChannelOperationExecutor<R extends ChannelPublicationPort>
           throw new Error("Channel subscription became stale after reconciliation");
         }
         if (operation.caller.kind === "connect") {
-          const session = await deps.connectSession(operation.caller.connectSessionId);
+          const session = await deps.connectSession(operation.caller, operation.caller.origin);
           if (!session || session.revokedAt !== null || session.origin !== operation.caller.origin || session.ownerPublicKeyHex !== operation.ownerPublicKeyHex) {
             throw new Error("Channel Connect session was revoked during subscription reconciliation");
           }

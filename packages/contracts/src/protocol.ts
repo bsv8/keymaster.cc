@@ -73,17 +73,17 @@ import type {
 //   - 施工单 2026-06-28 001 硬切换：connect session 作为持续登录 caller
 //     的正式真值。
 //       - 新增 connect.login / connect.resume / connect.logout 三个 method；
-//       - cipher.encrypt / cipher.decrypt 强制要求 `connectSessionId`
+//       - cipher.encrypt / cipher.decrypt 强制要求 `walletPublicKeyHex`
 //         输入字段；不再读取钱包全局 active key。
 //       - connect session 持久化到 `protocol storage namespace` 的
 //         `connectSessions` store（K-V version 升 4）。
 //       - popup unlock runtime 仅存在于 popup 当前文档内存；popup
 //         刷新 / 关闭后立即失效，caller 通过 `connect.resume` 补 unlock
 //         即可，不需要重新登录。
-//   - 施工单 2026-06-28 002 硬切换：所有外部业务方法都属于 connectSessionId：
+//   - 施工单 2026-06-28 002 硬切换：所有外部业务方法都属于 walletPublicKeyHex：
 //       - identity.get / intent.sign / cipher.encrypt / cipher.decrypt /
 //         p2pkh.transfer / feepool.prepare / feepool.commit 全部强制要求
-//         `connectSessionId` 入参；`connect.login` 是唯一不要求 sessionId
+//         `walletPublicKeyHex` 入参；`connect.login` 是唯一不要求 sessionId
 //         的入口方法。
 //       - owner 唯一真值 = `ownerPublicKeyHex`；`ownerKeyId` **不**允许
 //         出现在 contract / session record / request record / result payload /
@@ -94,7 +94,7 @@ import type {
 //         `${origin}::${ownerPublicKeyHex}::${counterpartyPublicKeyHex}`，
 //         同 origin 不同 owner 不再串池。
 //       - `ProtocolCommandRecord` 上的 owner snapshot 字段统一改为
-//         `ownerPublicKeyHex` + 新增 `connectSessionId`（业务方法必填）。
+//         `ownerPublicKeyHex` + 新增 `walletPublicKeyHex`（业务方法必填）。
 //       - `connect.login` = 重新认证并新建 session；`connect.resume` =
 //         恢复既有 session，只补 unlock。
 //       - popup 任一时刻只允许一个 auth owner；`connect.resume` 有效时
@@ -412,8 +412,8 @@ export type ProtocolMessage =
  * identity.get 请求参数。
  *
  * 设计缘由（施工单 2026-06-28 002 硬切换）：
- *   - `connectSessionId` 是**强制**输入字段；所有外部业务方法都属于某个
- *     `connectSessionId`（仅 `connect.login` 例外）。缺该字段直接
+ *   - `walletPublicKeyHex` 是**强制**输入字段；所有外部业务方法都属于某个
+ *     `walletPublicKeyHex`（仅 `connect.login` 例外）。缺该字段直接
  *     `invalid_request` 拒绝。
  *   - `identity.get` 不再是"推荐登录入口"；登录走 `connect.login`。
  *     `identity.get` 是"会话内身份断言能力"——`subject` 取自 session 绑
@@ -435,10 +435,10 @@ export interface IdentityGetParams {
    */
   claims?: string[];
   /**
-   * 由 `connect.login` 返回的 sessionId。**必填**。
-   * service 通过此 id 找到绑定 key，不允许 fallback 到 active key。
+   * 由 `connect.login` 返回的钱包公钥。**必填**。
+   * service 通过公钥与来源 找到绑定 key，不允许 fallback 到 active key。
    */
-  connectSessionId: string;
+  walletPublicKeyHex: string;
 }
 
 /** identity.get 解析后的 claim 真值。 */
@@ -469,7 +469,7 @@ export interface IdentityGetResult {
  * intent.sign 请求参数。
  *
  * 设计缘由（施工单 2026-06-28 002 硬切换）：
- *   - `connectSessionId` 是**强制**输入字段；签名主体公钥取自 session
+ *   - `walletPublicKeyHex` 是**强制**输入字段；签名主体公钥取自 session
  *     绑定的 owner，不再读取钱包全局 active key。
  *   - 旧叙事"登录场景推荐 identity.get"已废弃；登录走 `connect.login`。
  */
@@ -487,10 +487,10 @@ export interface IntentSignParams {
   /** 调用方准备好的最终二进制内容。允许为空字节。 */
   content: BinaryField;
   /**
-   * 由 `connect.login` 返回的 sessionId。**必填**。
-   * service 通过此 id 找到绑定 key，不允许 fallback 到 active key。
+   * 由 `connect.login` 返回的钱包公钥。**必填**。
+   * service 通过公钥与来源 找到绑定 key，不允许 fallback 到 active key。
    */
-  connectSessionId: string;
+  walletPublicKeyHex: string;
 }
 
 /** intent.sign 成功结果。 */
@@ -507,9 +507,9 @@ export interface IntentSignResult {
  * cipher.encrypt 请求参数。
  *
  * 设计缘由（施工单 2026-06-28 001 硬切换）：
- *   - `connectSessionId` 是**强制**输入字段；cipher 不再读取钱包全局
- *     active key，必须通过 sessionId 找到绑定 key。
- *   - 缺 `connectSessionId` 直接 `invalid_request` 拒绝；不允许 fallback
+ *   - `walletPublicKeyHex` 是**强制**输入字段；cipher 不再读取钱包全局
+ *     active key，按公钥与实际来源定位绑定 key。
+ *   - 缺 `walletPublicKeyHex` 直接 `invalid_request` 拒绝；不允许 fallback
  *     到当前 active key。
  *   - cipher 仍**不**对外暴露签名真值 envelope；返回 nonce + cipherbytes。
  */
@@ -521,10 +521,10 @@ export interface CipherEncryptParams {
   /** 业务字节本体。 */
   content: BinaryField;
   /**
-   * 由 `connect.login` 返回的 sessionId。**必填**；service 通过此 id
+   * 由 `connect.login` 返回的钱包公钥。**必填**；service 通过公钥与来源
    * 找到绑定 key，不允许 fallback 到 active key。
    */
-  connectSessionId: string;
+  walletPublicKeyHex: string;
 }
 
 /** cipher.encrypt 成功结果。 */
@@ -540,7 +540,7 @@ export interface CipherEncryptResult {
 /**
  * cipher.decrypt 请求参数。
  *
- * 设计缘由：与 `cipher.encrypt` 对称——`connectSessionId` 是强制输入
+ * 设计缘由：与 `cipher.encrypt` 对称——`walletPublicKeyHex` 是强制输入
  * 字段；不允许 fallback 到 active key。
  */
 export interface CipherDecryptParams {
@@ -551,10 +551,10 @@ export interface CipherDecryptParams {
   /** 加密时保存的密文字节。 */
   cipherbytes: BinaryField;
   /**
-   * 由 `connect.login` 返回的 sessionId。**必填**；service 通过此 id
+   * 由 `connect.login` 返回的钱包公钥。**必填**；service 通过公钥与来源
    * 找到绑定 key，不允许 fallback 到 active key。
    */
-  connectSessionId: string;
+  walletPublicKeyHex: string;
 }
 
 /** cipher.decrypt 成功结果。 */
@@ -569,7 +569,7 @@ export interface CipherDecryptResult {
 
 /** App 注册自身支付用途；owner 始终取已连接会话的 origin，不能自报。 */
 export interface PaymentChannelRegisterParams {
-  connectSessionId: string;
+  walletPublicKeyHex: string;
   channelName: string;
   paymentType: "p2pkh" | "feepool.connect";
   assetId?: P2pkhTransferAssetId;
@@ -604,7 +604,7 @@ export type P2pkhTransferAssetId = "bsv-mainnet" | "bsv-testnet";
  *     回。
  *   - `assetId` 可选；缺省 `bsv-mainnet`。`bsv-testnet` 需要 Keymaster
  *     当前身份属于测试网。
- *   - `connectSessionId` 是**强制**输入字段（施工单 2026-06-28 002 硬切换）：
+ *   - `walletPublicKeyHex` 是**强制**输入字段（施工单 2026-06-28 002 硬切换）：
  *     资金 owner 取自 session 绑定 owner，**不**读取全局 active key。
  *     旧 session 失效时直接 fail-fast，不再静默 fallback 到 active key。
  */
@@ -622,10 +622,10 @@ export interface P2pkhTransferParams {
    */
   assetId?: P2pkhTransferAssetId;
   /**
-   * 由 `connect.login` 返回的 sessionId。**必填**。
-   * service 通过此 id 找到绑定 key，不允许 fallback 到 active key。
+   * 由 `connect.login` 返回的钱包公钥。**必填**。
+   * service 通过公钥与来源 找到绑定 key，不允许 fallback 到 active key。
    */
-  connectSessionId: string;
+  walletPublicKeyHex: string;
 }
 
 /** `p2pkh.transfer` 成功结果。 */
@@ -667,7 +667,7 @@ export type ProtocolFeePoolAction = "create" | "spend" | "close_and_recreate";
  *   - site 只提交：
  *       - `counterpartyPublicKeyHex`：对端公钥。
  *       - `amountSatoshis`：**本次想转给对端的金额**（satoshis）。
- *       - `connectSessionId`：本次 transfer 所属 connect sessionId；service
+ *       - `walletPublicKeyHex`：本次 transfer 所属钱包公钥；service
  *         通过 session 找到绑定 owner。**必填**。
  *   - `amountSatoshis` 在所有 action 下语义一致：本次 transfer 的金额。
  *     池大小由 `ProtocolOriginSettingsRecord.feePoolDefaultFundSatoshis`
@@ -695,11 +695,11 @@ export interface FeepoolPrepareParams {
    */
   assetId?: P2pkhTransferAssetId;
   /**
-   * 由 `connect.login` 返回的 sessionId。**必填**。
+   * 由 `connect.login` 返回的钱包公钥。**必填**。
    * feepool 是按 (origin + ownerPublicKeyHex + counterpartyPublicKeyHex +
    * assetId) 四个维度归档的；不同 owner / 不同资产不会串池。
    */
-  connectSessionId: string;
+  walletPublicKeyHex: string;
 }
 
 /**
@@ -777,8 +777,8 @@ export interface FeepoolPrepareResult {
  * output 是被创建的，不是被花费的）。所有 server sig 都在 B-Tx 上。
  *
  * 设计缘由（施工单 2026-06-28 002 硬切换）：
- *   - `connectSessionId` 是**强制**输入字段；`feepool.commit` 必须按
- *     `connectSessionId + origin + ownerPublicKeyHex` 校验 pending op，
+ *   - `walletPublicKeyHex` 是**强制**输入字段；`feepool.commit` 必须按
+ *     `walletPublicKeyHex + origin + ownerPublicKeyHex` 校验 pending op，
  *     不允许跨 session / 跨 owner 复用 operationId。
  */
 export interface FeepoolCommitParams {
@@ -794,10 +794,10 @@ export interface FeepoolCommitParams {
    */
   assetId?: P2pkhTransferAssetId;
   /**
-   * 由 `connect.login` 返回的 sessionId。**必填**。
+   * 由 `connect.login` 返回的钱包公钥。**必填**。
    * `feepool.commit` 校验 operation 与当前 session/owner/origin 一致。
    */
-  connectSessionId: string;
+  walletPublicKeyHex: string;
   /**
    * 主 B-Tx 草稿的 server sig。
    * - create：initial spend sig（由 SDK `clientVerifyServerSpendSig` 验）。
@@ -1038,7 +1038,7 @@ export type ProtocolFailureReason =
  *       popup unlock runtime
  *         = 当前 popup 文档内可直接执行私钥操作的短期运行时材料
  *   - 登录时显式选择 key；后续 connect session 绑定该 key 的 publicKeyHex。
- *   - cipher.* 不再读取钱包全局 active key；通过 `connectSessionId` 找到
+ *   - cipher.* 不再读取钱包全局 active key；通过 `walletPublicKeyHex` 找到
  *     绑定 key。
  *   - popup 刷新 / 关闭 → 当前 popup unlock runtime 失效；auth session
  *     持久化记录仍保留，caller 通过 `connect.resume` 补 unlock 即可。
@@ -1046,9 +1046,9 @@ export type ProtocolFailureReason =
  *
  * 不删除 `identity.get` / `intent.sign` / `cipher.encrypt` / `cipher.decrypt`：
  *   - `identity.get` 仍保留，但**不**再作为 note 这类持续登录 caller
- *     的推荐入口；走 `connect.login` 取 sessionId。
+ *     的推荐入口；走 `connect.login` 获取钱包公钥。
  *   - `cipher.*` 的稳定调用路径改为 session 绑定版本；继续保留旧 method
- *     名但**强制**要求 `connectSessionId` 字段。
+ *     名但**强制**要求 `walletPublicKeyHex` 字段。
  */
 
 /**
@@ -1079,7 +1079,7 @@ export type ProtocolFailureReason =
  */
 export interface ConnectSessionRecord {
   networkIdentity: import("./networkIdentity.js").NetworkIdentity;
-  /** sessionId：service 在 connect.login / launchAppView 时生成；UUID。 */
+  /** 内部缓存与付款核算键：由网络、公钥、来源确定性压缩，不作为公开授权编号。 */
   sessionId: string;
   /** exact event.origin；connect.resume / 业务方法必须严格匹配。 */
   origin: string;
@@ -1135,9 +1135,7 @@ export interface ConnectLoginParams {
 /**
  * `connect.login` 成功结果。
  *
- * 设计缘由：返回 sessionId + owner + claimsSnapshot 三元组，caller 把
- * sessionId 持久化在本地；后续 connect.resume / 业务方法都用这个 sessionId
- * 找回绑定关系。
+ * 返回公钥与 claims 快照；后续请求复用公钥、网络及浏览器实际来源定位身份。
  *
  * 关键（施工单 2026-06-28 002 硬切换 + 硬切换 002 收尾）：**不**再返回
  * `ownerKeyId`。owner 唯一真值 = `ownerPublicKeyHex`；vault 不再保留
@@ -1145,8 +1143,8 @@ export interface ConnectLoginParams {
  */
 export interface ConnectLoginResult {
   networkIdentity: import("./networkIdentity.js").NetworkIdentity;
-  /** 持久化 sessionId；caller 必须存本地。 */
-  connectSessionId: string;
+  /** 钱包压缩公钥；后续请求用它定位身份。 */
+  walletPublicKeyHex: string;
   /** 绑定 key 的压缩公钥 hex；与 session 记录内字段一致。 */
   ownerPublicKeyHex: string;
   /** 本次 login 时一次解析的 claims 真值快照。 */
@@ -1159,30 +1157,29 @@ export interface ConnectLoginResult {
 /**
  * `connect.resume` 请求参数。
  *
- * 设计缘由：resume 必须显式传入 sessionId；service 在执行时按
- * `event.origin` + sessionId 查 session 记录。sessionId 不在 params
- * 里时直接 invalid_request。
+ * resume 显式传入钱包公钥；本地记录为空时按当前 Key 重建缺省连接。
+ * 可重新验证外部 App proof，不恢复已被重置的本地设置。
  */
 export interface ConnectResumeParams {
+  /** 本地数据重置后重新验证已有发行人签名 proof。 */
+  appIdentity?: AppIdentityProofV1;
   /**
-   * 由 `connect.login` 返回的 sessionId。
-   * caller 持 sessionId，popup 持有 session 真值与 unlock runtime。
+   * 由 `connect.login` 返回的钱包公钥。
+   * caller 持公钥，popup 的运行句柄独立受会话世代约束。
    */
-  connectSessionId: string;
+  walletPublicKeyHex: string;
 }
 
 /**
  * `connect.resume` 成功结果。
  *
- * 设计缘由：与 `connect.login` 对称——返回 sessionId + owner + claimsSnapshot
- * 三元组。claimsSnapshot 是 connect.login 时已落库的真值快照；resume 不重新
- * 跑 identity.get，避免 popup unlock 后还要走人工确认。
+ * 返回钱包公钥与当前 claims 快照；新建缺省连接的 claims 为空。
  *
  * 关键（施工单 2026-06-28 002 硬切换）：**不**再返回 `ownerKeyId`。
  */
 export interface ConnectResumeResult {
   networkIdentity: import("./networkIdentity.js").NetworkIdentity;
-  connectSessionId: string;
+  walletPublicKeyHex: string;
   ownerPublicKeyHex: string;
   resolvedClaims: Record<string, ResolvedClaimValue>;
   /**
@@ -1196,11 +1193,10 @@ export interface ConnectResumeResult {
 /**
  * `connect.logout` 请求参数。
  *
- * 设计缘由：logout 只需要 sessionId；service 在执行时按 event.origin + sessionId
- * 找到对应记录并吊销。
+ * logout 按钱包公钥和实际来源撤销本地连接。
  */
 export interface ConnectLogoutParams {
-  connectSessionId: string;
+  walletPublicKeyHex: string;
 }
 
 /**
@@ -1209,7 +1205,7 @@ export interface ConnectLogoutParams {
  * 设计缘由：返回 ok=true 即表示 session 已被吊销；不需要返回 claims。
  */
 export interface ConnectLogoutResult {
-  connectSessionId: string;
+  walletPublicKeyHex: string;
   /** 吊销时间（unix milliseconds）。 */
   revokedAt: number;
 }
@@ -1271,7 +1267,7 @@ export interface ProtocolConnectAuthSnapshot {
  *     不在 `appView` mode / caller origin 与 bootstrap 期记录不一致 → 拒掉；
  *     不允许 fallback 到 `connect.login`。
  *   - 成功结果形状与 `connect.login` 对齐，便于 caller 走同一套"持久化
- *     sessionId + 后续 connect.resume / cipher.*"路径。
+ *     walletPublicKeyHex、完整网络身份 + 后续 connect.resume / cipher.*"路径。
  */
 export interface ConnectLaunchParams {
   /** 由 launcher 写入 client app 启动 URL 的 launchToken。一次性消费。 */
@@ -1283,7 +1279,7 @@ export interface ConnectLaunchParams {
 /** `connect.launch` 成功结果（与 `connect.login` 对齐）。 */
 export interface ConnectLaunchResult {
   networkIdentity: import("./networkIdentity.js").NetworkIdentity;
-  connectSessionId: string;
+  walletPublicKeyHex: string;
   ownerPublicKeyHex: string;
   resolvedClaims: Record<string, ResolvedClaimValue>;
   resolvedAt: number;
@@ -1348,10 +1344,11 @@ export interface LaunchAppViewInput {
  *     `plugin-apps` 仅作展示用，**不**自己再去 `window.open(appUrl)`。
  */
 export interface LaunchAppViewResult {
+  networkIdentity: NetworkIdentity;
   /** Session Window 是否已成功打开新窗口。 */
   sessionWindowOpened: boolean;
-  /** launcher 在点击 `Open App` 时预建的 connect sessionId。 */
-  connectSessionId: string;
+  /** launcher 已确认的钱包公钥；与 networkIdentity 一起定位身份。 */
+  walletPublicKeyHex: string;
   /** 本次为该 app 生成的 launchToken；client app 首条 `connect.launch` 消费。 */
   launchToken: string;
   /** 已拼上 `?launchToken=<id>` 的 client app URL。 */
@@ -1424,8 +1421,8 @@ export interface AppViewContext {
   appOrigin: string;
   /** 启动 client app 用的 URL（含 launchToken）。 */
   appUrl: string;
-  /** bootstrap 时 launcher 已建的 connectSessionId。 */
-  connectSessionId: string;
+  /** bootstrap 时 launcher 已建的 walletPublicKeyHex。 */
+  walletPublicKeyHex: string;
   /** bootstrap 时锁定的 owner public key hex。 */
   ownerPublicKeyHex: string;
   /** bootstrap 时一次解析的 claims 快照。 */
@@ -1513,8 +1510,8 @@ export interface AppBootstrapPayload {
     appOrigin: string;
     appUrl: string;
   };
-  /** launcher 已建的 connect sessionId。 */
-  connectSessionId: string;
+  /** launcher 已确认的钱包公钥。 */
+  walletPublicKeyHex: string;
   ownerPublicKeyHex: string;
   resolvedClaims: Record<string, ResolvedClaimValue>;
   resolvedAt: number;
@@ -1849,7 +1846,7 @@ export type ProtocolCommandDecision = "pending" | "approved" | "rejected" | "fai
  *     但 K-V 落盘必须是 `event.origin` 原样字符串。
  *   - 不持久化私钥 / 大体积密文 / 完整签名结果 / 解密明文 / 完整 rawTx。
  *   - **owner 唯一真值 = `ownerPublicKeyHex`**：所有业务方法在 record
- *     创建时即快照 `connectSessionId` + `ownerPublicKeyHex`；执行时不再
+ *     创建时即快照 `walletPublicKeyHex` + `ownerPublicKeyHex`；执行时不再
  *     改写归属。`ownerKeyId` 不再出现。
  *
  * 字段语义扩展（p2pkh + feepool + connect）：
@@ -1857,7 +1854,7 @@ export type ProtocolCommandDecision = "pending" | "approved" | "rejected" | "fai
  *   - `action` 只在 feepool.prepare/commit 上填写。
  *   - `operationId` 只在 feepool.commit 上填写（指向 prepare 阶段产的 op）。
  *   - `counterpartyPublicKeyHex` 只在 feepool.prepare/commit 上填写。
- *   - `connectSessionId` 业务方法（除 `connect.login`）必填；记录创建时
+ *   - `walletPublicKeyHex` 业务方法（除 `connect.login`）必填；记录创建时
  *     绑定一次，执行时再次校验。`connect.login` record 上该字段为空。
  *   - `failureReason` 是本地终态原因（写本地）；对外 `errorCode` 永远是 `user_rejected`。
  *   - `autoApproved` 在 p2pkh.transfer / feepool.* / identity.get / cipher.*
@@ -1897,12 +1894,12 @@ export interface ProtocolCommandRecord {
   /** 请求正文字节数（cipher.decrypt 时是 `cipherbytes.bytes.byteLength`）。 */
   payloadSize: number;
   /**
-   * 该 record 所属 connect sessionId（业务方法必填；`connect.login` 为空）。
+   * 该 record 所属钱包公钥（业务方法必填；`connect.login` 确认前为空）。
    *
    * 关键不变量（施工单 2026-06-28 002 硬切换）：record 创建时立即绑定，
    * record 生命周期内**不**可漂移——不允许"旧请求漂进新 session"。
    */
-  connectSessionId: string;
+  walletPublicKeyHex: string;
   /**
    * 该 record 在创建时快照的 owner public key hex。
    *
@@ -2120,8 +2117,8 @@ export interface ProtocolStorageRepository {
    * revokedAt）。`connectSessions` store 不允许出现私钥材料或密码字段。
    */
   putConnectSession(record: ConnectSessionRecord): Promise<void>;
-  /** 按 sessionId 读一条 connect session。 */
-  getConnectSession(sessionId: string): Promise<ConnectSessionRecord | null>;
+  /** 按完整网络身份和实际来源读取连接记录。 */
+  getConnectSession(identity: import("./networkIdentity.js").NetworkIdentity, origin: string): Promise<ConnectSessionRecord | null>;
   /** 按 origin 列出该站点下所有 connect session（含 revoked）。 */
   listConnectSessionsByOrigin(origin: string): Promise<ConnectSessionRecord[]>;
   /**
@@ -2161,7 +2158,7 @@ export interface ProtocolStorageRepository {
  *       * `token`：唯一 id；
  *       * `appId` / `appOrigin` / `appUrl`：UI / 启动决策用，与
  *         `AppViewContext` 同源；
- *       * `connectSessionId`：bootstrap 期 launcher 已建的 session；
+ *       * `walletPublicKeyHex`：bootstrap 期 launcher 已建的 session；
  *       * `ownerPublicKeyHex`：bootstrap 期锁定的 owner；
  *       * `resolvedClaims` / `resolvedAt`：bootstrap 期快照；
  *       * `consumed`：true 表示该 token 已被 `connect.launch` 消费；
@@ -2173,7 +2170,7 @@ export interface LaunchTokenRecord {
   appId: string;
   appOrigin: string;
   appUrl: string;
-  connectSessionId: string;
+  walletPublicKeyHex: string;
   ownerPublicKeyHex: string;
   resolvedClaims: Record<string, ResolvedClaimValue>;
   resolvedAt: number;
@@ -2591,7 +2588,7 @@ export interface ProtocolService {
    * 设计缘由（施工单 2026-06-30 003 硬切换）：
    *   - Session Window 点击 `Open App` 后会启动 5s 软超时；
    *   - 若 5s 内仍未收到合法 child `ready`，UI 要提示"连接较慢"。
-   *   - 这是**软超时**：只清掉等待态、提示用户；不重建 `connectSessionId`、
+   *   - 这是**软超时**：只清掉等待态、提示用户；不重建 `walletPublicKeyHex`、
    *     不重新 bootstrap、不偷偷补偿；按钮恢复可点。
    *   - 迟到 child `ready` 仍允许进入 popup 阶段；同时清掉本提示。
    *   - 跑 `connect.*` / 业务方法的请求与本超时**互不绑定**——超时只表达
@@ -2607,7 +2604,7 @@ export interface ProtocolService {
    *     也未到点；UI 用此把 `Open App` 按钮置为 disabled。
    *   - false：未点过 `Open App`、child `ready` 已到达、软超时已触发，
    *     三者任一即 false。**不**因为该 flag 重新进入 waiting。
-   *   - 软超时到点**只**让本 flag 翻回 false；**不**重建 `connectSessionId`、
+   *   - 软超时到点**只**让本 flag 翻回 false；**不**重建 `walletPublicKeyHex`、
    *     **不**重发 bootstrap、**不**重开 child 窗口。
    */
   appClientWaitingForReady(): boolean;
@@ -2670,7 +2667,7 @@ export interface ProtocolService {
    *     transport（child 发 `ready` → Session Window 进入 popup 阶段 →
    *     child 发 request → Session Window 回 result）。
    *   - 5s 软超时只用于 UI 提示"连接较慢"；到点只清等待态，**不**重建
-   *     `connectSessionId` / `launchToken` / bootstrap。
+   *     `walletPublicKeyHex` / `launchToken` / bootstrap。
    *   - 返回被打开的 window；失败返回 null（best-effort）。
    */
   openClientApp(): Window | null;
@@ -2692,7 +2689,7 @@ export interface ProtocolService {
    *       1. 校验 vault 已解锁 + active key ready + owner key 命中；
    *       2. 校验 app 配置合法（`new URL(appUrl).origin === appOrigin`）；
    *       3. 解析 claims 快照（按 input.claims 走 builtin claim 解析）；
-   *       4. 创建新 `connectSessionId` 并落 K-V，写 session 真值三元组
+   *       4. 创建新 `walletPublicKeyHex` 并落 K-V，写 session 真值三元组
    *          （sessionId + origin + ownerPublicKeyHex）；
    *       5. 调 `vault.createAppViewSession({ sessionId, publicKeyHex, password })`
    *          取受控 capability，组装 `SessionRuntimeBootstrap`；

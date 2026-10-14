@@ -634,11 +634,11 @@ function ReadOnlyBody({
       <dd>
         <code>{command.ownerPublicKeyHex || "n/a"}</code>
       </dd>
-      {command.connectSessionId ? (
+      {command.walletPublicKeyHex ? (
         <>
-          <dt>{t("protocol.feed.connectSessionId", { defaultValue: "session id" })}</dt>
+          <dt>{t("protocol.feed.walletPublicKeyHex", { defaultValue: "session id" })}</dt>
           <dd>
-            <code>{command.connectSessionId}</code>
+            <code>{command.walletPublicKeyHex}</code>
           </dd>
         </>
       ) : null}

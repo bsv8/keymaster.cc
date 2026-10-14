@@ -196,7 +196,7 @@ export class MsFileServiceProxy implements MsFileService {
   }
 
   #grantFor(ctx: MsFileConnectAppContext): Promise<string> {
-    const key = `${ctx.connectSessionId}|${ctx.transportOrigin}|${ctx.appIdentity.identityDigestHex}`;
+    const key = `${ctx.walletPublicKeyHex}|${ctx.bsvNetwork}|${ctx.transportOrigin}|${ctx.appIdentity.identityDigestHex}`;
     const existing = this.#grants.get(key);
     if (existing) return existing;
     const pending = this.#coordinator
@@ -333,11 +333,11 @@ export class MsFileServiceProxy implements MsFileService {
     return this.#control({ type: "bitfs.demand.cancel", seedHashHex }).then(() => undefined);
   }
 
-  abortSession(connectSessionId: string): Promise<void> {
+  abortSession(walletPublicKeyHex: string): Promise<void> {
     for (const key of [...this.#grants.keys()]) {
-      if (key.startsWith(`${connectSessionId}|`)) this.#grants.delete(key);
+      if (key.startsWith(`${walletPublicKeyHex}|`)) this.#grants.delete(key);
     }
-    return this.#coordinator.msfileSessionAbort(connectSessionId).then((result) => {
+    return this.#coordinator.msfileSessionAbort(walletPublicKeyHex).then((result) => {
       if (result.status !== "ok" && result.status !== "accepted") throw new MsFileServiceError("msfile_unavailable");
     });
   }

@@ -721,9 +721,9 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     }
   }
 
-  async abortSession(connectSessionId: string): Promise<void> {
+  async abortSession(walletPublicKeyHex: string): Promise<void> {
     for (const [id, entry] of [...this.approvals]) {
-      if (entry.record.connectSessionId !== connectSessionId) continue;
+      if (entry.record.walletPublicKeyHex !== walletPublicKeyHex) continue;
       this.approvals.delete(id);
       entry.reject(new MsFileServiceError("user_rejected", "Connect session was revoked"));
     }
@@ -913,7 +913,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
 
   private async connectCall<T>(ctx: MsFileConnectAppContext, run: () => Promise<T>): Promise<T> {
     await this.ensureReady();
-    if (!ctx || typeof ctx.connectSessionId !== "string" || ctx.connectSessionId.length === 0) {
+    if (!ctx || typeof ctx.walletPublicKeyHex !== "string" || ctx.walletPublicKeyHex.length === 0) {
       throw new MsFileServiceError("msfile_identity_required");
     }
     assertAppKeyShape(ctx);
@@ -957,7 +957,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     const record: MsFilePendingApproval = {
       approvalId: this.randomId(),
       createdAt: this.now(),
-      connectSessionId: ctx.connectSessionId,
+      walletPublicKeyHex: ctx.walletPublicKeyHex,
       transportOrigin: ctx.transportOrigin,
       ownerPublicKeyHex: ctx.ownerPublicKeyHex,
       publisherPublicKeyHex: ctx.appIdentity.publisherPublicKeyHex,

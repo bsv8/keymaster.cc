@@ -114,7 +114,7 @@ export function createVaultWorkerOperations(ports: VaultWorkerOperationsPorts) {
         const assertRecordLive = () => { if (signal?.aborted || ports.peerRevoked(peerId) || ports.wallet.walletStore !== store || ports.wallet.walletKeys !== keys || ports.session().sessionEpoch !== epoch || ports.session().runGeneration !== run) throw Error("migration-session-revoked"); };
         const sourceKey = await ports.io.run("read", signal, () => keys.read(), { auditOperation: "vault.operation" });
         if (!sourceKey) throw Error("network-identity-required");
-        try {          
+        try {
 await ports.keys.hardwareConnections.attachProvision({ bsvNetwork: sourceKey.document.bsvNetwork, peerId, leaseId: command.leaseId, port: command.port, signal, assertRecordLive, walletGeneration: ports.session().walletGeneration! }); connectedByRequest = true; assertRecordLive();
           const state = await ports.keys.hardwareConnections.provision().migrationStatus(); assertRecordLive(); if (journal && journal.phase !== "complete" && state) verifyDeviceMigrationJournal(journal, state);
           else if (recovery && journal!.phase !== "prepared") throw Error("migration-device-record-missing");
@@ -135,12 +135,12 @@ await ports.keys.hardwareConnections.attachProvision({ bsvNetwork: sourceKey.doc
         };
         try {
           if (command.action === "recover-erased") await ports.keys.hardwareConnections.attachErased({ peerId, leaseId: command.leaseId, port: command.port, signal, assertRecordLive, journal });
-          else await ports.keys.hardwareConnections.attach({            
+          else await ports.keys.hardwareConnections.attach({
 peerId, leaseId: command.leaseId, port: command.port, signal, assertRecordLive,
-            document: {              
+            document: {
 format: "keymaster.hardware-key", version: 1, backend: "vaultlink", wireVersion: 2, bsvNetwork: file.document.bsvNetwork, label: file.document.label,
-              publicKeyHex: journal.publicKeyHex, walletGeneration: journal.walletGeneration, backendGeneration: 1            
-}          
+              publicKeyHex: journal.publicKeyHex, walletGeneration: journal.walletGeneration, backendGeneration: 1
+}
 });
           connectedByRequest = true; assertRecordLive();
           const state = await (ports.keys.hardwareConnections.isErasedRecovery() ? ports.keys.hardwareConnections.erased() : ports.keys.hardwareConnections.backend()).migrationStatus(); assertRecordLive();
@@ -165,9 +165,9 @@ format: "keymaster.hardware-key", version: 1, backend: "vaultlink", wireVersion:
         if ((await lifecycle.coldStart()).state !== "uninitialized") throw Error("Wallet already has a Key");
         assertRecordLive(); ports.keys.hardwareEnrollmentInProgress = true;
         try {
-          await ports.keys.hardwareConnections.enroll({            
+          await ports.keys.hardwareConnections.enroll({
 peerId, leaseId: command.leaseId, port: command.port, label: command.label,
-            walletGeneration, assertRecordLive, signal          
+            walletGeneration, assertRecordLive, signal
 });
           connectedByRequest = true; assertRecordLive();
           await ports.io.assertAuthority(); assertRecordLive();
@@ -176,15 +176,15 @@ peerId, leaseId: command.leaseId, port: command.port, label: command.label,
             allowLocalOwnerTransition: true, auditOperation: "vault.operation",
           });
           // initializeHardware 的提交事件只改变此次指定的身份世代。
-          expectedGeneration = walletGeneration;
+          expectedGeneration = meta.walletGeneration;
           assertRecordLive(); ports.keys.hardwareConnections.backend();
           ports.storage.revokeGrants(); ports.storage.invalidateClients(); ports.keys.dropActivePrivateKey();
           bindingEpoch = ports.newEpoch(); ports.commit({ sessionEpoch: bindingEpoch });
           ports.commit({ activePublicKeyHex: document.publicKeyHex }); ports.keys.activeKeyBackend = "hardware";
           ports.commit({ vaultStatus: "unlocked" });
-          ports.keys.setCoordinatorActiveKeySummary({            
+          ports.keys.setCoordinatorActiveKeySummary({
 bsvNetwork: document.bsvNetwork, backend: "hardware", publicKeyHex: document.publicKeyHex, label: document.label,
-            capabilities: ["p2pkh", "bsv.standard", "feepool.connect", "feepool.bitfs", "local-secret.v3"], createdAt: meta.createdAt          
+            capabilities: ["p2pkh", "bsv.standard", "feepool.connect", "feepool.bitfs", "local-secret.v3"], createdAt: new Date().toISOString()
 });
           await ports.binding.installRoot(); bindingToken = ports.storage.token();
           assertRecordLive(); ports.keys.hardwareConnections.backend();
@@ -202,11 +202,11 @@ bsvNetwork: document.bsvNetwork, backend: "hardware", publicKeyHex: document.pub
         const keys = ports.wallet.walletKeys;
         if (!keys) throw ports.storage.unavailable("Hardware wallet record is unavailable");
         const file = await ports.io.run("read", undefined, () => keys.read(), { auditOperation: "vault.operation" });
-        if (!file || file.backend !== "hardware" || file.document.walletGeneration !== ports.session().walletGeneration) throw new Error("Current wallet is not bound to a hardware Key");
+        if (!file || file.backend !== "hardware" || file.document.bsvNetwork + "/" + file.document.publicKeyHex !== ports.session().walletGeneration) throw new Error("Current wallet is not bound to a hardware Key");
         const assertRecordLive = () => {
           if (signal?.aborted || ports.peerRevoked(peerId) || ports.wallet.walletKeys !== keys || ports.storage.token() !== token
             || ports.session().sessionEpoch !== bindingEpoch || ports.session().runGeneration !== run
-            || ports.session().walletGeneration !== file.document.walletGeneration) throw new Error("Hardware wallet binding was revoked");
+            || ports.session().walletGeneration !== file.document.bsvNetwork + "/" + file.document.publicKeyHex) throw new Error("Hardware wallet binding was revoked");
         };
         assertRecordLive();
         await ports.keys.hardwareConnections.attach({ peerId, leaseId: command.leaseId, port: command.port, document: file.document, assertRecordLive, signal });
@@ -242,7 +242,7 @@ bsvNetwork: document.bsvNetwork, backend: "hardware", publicKeyHex: document.pub
         ports.commit({ vaultStatus: "unlocked" });
         ports.keys.setCoordinatorActiveKeySummary({
           bsvNetwork: file.document.bsvNetwork, backend: "hardware", publicKeyHex: file.document.publicKeyHex, label: file.document.label,
-          capabilities: ["p2pkh", "bsv.standard", "feepool.connect", "feepool.bitfs", "local-secret.v3"], createdAt: snapshot.meta?.createdAt ?? ""
+          capabilities: ["p2pkh", "bsv.standard", "feepool.connect", "feepool.bitfs", "local-secret.v3"], createdAt: new Date().toISOString()
         });
         ports.publishWallet();
         await ports.binding.complete();
@@ -378,19 +378,19 @@ bsvNetwork: document.bsvNetwork, backend: "hardware", publicKeyHex: document.pub
         const migrationId = previous && previous.journal.phase !== "complete" ? previous.journal.migrationId : crypto.randomUUID();
         ports.keys.softwareMigrationFailure = undefined;
         if (previous?.journal.phase !== "local-committed" && newPassword.length < 8) throw Error("password-too-short");
-        const migration = createHardwareToSoftwareMigration({          
+        const migration = createHardwareToSoftwareMigration({
 service, device: backend, assertExclusive,
-          createAndVerifyKeyHold: async (privateKey, publicKeyHex) => createAndVerifyMigrationKeyHold({ bsvNetwork: source.document.bsvNetwork, privateKey, publicKeyHex, label: source.document.label }, newPassword)        
+          createAndVerifyKeyHold: async (privateKey, publicKeyHex) => createAndVerifyMigrationKeyHold({ bsvNetwork: source.document.bsvNetwork, privateKey, publicKeyHex, label: source.document.label }, newPassword)
 });
         return migration.run({ migrationId, expectedRevision: source.revision });
       });
-      ports.commit({ walletGeneration: result.walletGeneration });
+      ports.commit({ walletGeneration: result.bsvNetwork + "/" + result.publicKeyHex });
       // The ciphertext/ledger/completed receipt are already durable. Keep only a
       // migration-frozen USB handle for optional disposal; it must not authorize
       // ordinary hardware operations or inherit the new software session.
       const disposal = ports.keys.hardwareConnections.retainForMigrationCleanup(() => {
         if (ports.wallet.walletStore !== store || ports.wallet.walletKeys !== keys || ports.session().runGeneration !== run
-          || ports.session().walletGeneration !== result.walletGeneration
+          || ports.session().walletGeneration !== result.bsvNetwork + "/" + result.publicKeyHex
           || (ports.session().sessionEpoch !== epoch && (ports.keys.activeKeyBackend !== "software" || ports.session().activePublicKeyHex !== result.publicKeyHex)))
           throw Error("migration-session-revoked");
       });
@@ -423,9 +423,9 @@ service, device: backend, assertExclusive,
     // 连接未验证与源钱包错误分开报告，不能把配对中的设备当作导入通道。
     if (!ports.keys.hardwareConnections.isProvisioning() || ports.keys.hardwareConnections.state().status !== "connected") throw Error("hardware-provision-required");
     const store = ports.wallet.walletStore, keys = ports.wallet.walletKeys, portal = ports.keys.hardwareConnections.provision(), epoch = ports.session().sessionEpoch, run = ports.session().runGeneration;
-    const check = () => {      
+    const check = () => {
 if (ports.wallet.walletStore !== store || ports.wallet.walletKeys !== keys || ports.session().sessionEpoch !== epoch || ports.session().runGeneration !== run || ports.keys.hardwareConnections.provision() !== portal
-        || (recovery ? ports.keys.hardwareRecoveryConnection !== recovery : ports.session().vaultStatus !== "unlocked")) throw Error("migration-session-revoked");    
+        || (recovery ? ports.keys.hardwareRecoveryConnection !== recovery : ports.session().vaultStatus !== "unlocked")) throw Error("migration-session-revoked");
 };
     try {
       check();
@@ -434,13 +434,13 @@ if (ports.wallet.walletStore !== store || ports.wallet.walletKeys !== keys || po
       const previous = await service.current(); check();
       const migrationId = previous && previous.phase !== "complete" ? previous.migrationId : crypto.randomUUID();
       const completed = await ports.keys.vaultKeySession.useForMigration(async privateKey => {
-        const migration = createSoftwareToHardwareMigration({          
+        const migration = createSoftwareToHardwareMigration({
 service, device: portal, assertExclusive: check,
           sourceBank: () => service.sourceBank(source.document.publicKeyHex),
           unlockSource: async () => { check(); return new Uint8Array(privateKey); },
-          hardwareDocument: journal => new TextEncoder().encode(JSON.stringify({            
+          hardwareDocument: journal => new TextEncoder().encode(JSON.stringify({
 format: "keymaster.hardware-key", version: 1, backend: "vaultlink", wireVersion: 2, bsvNetwork: journal.bsvNetwork, label: source.document.label,
-            publicKeyHex: journal.publicKeyHex, walletGeneration: journal.walletGeneration, backendGeneration: 1          
+            publicKeyHex: journal.publicKeyHex, walletGeneration: journal.walletGeneration, backendGeneration: 1
 })),
         });
         return migration.run({ migrationId, expectedRevision: source.revision });

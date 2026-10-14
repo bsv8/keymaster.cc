@@ -257,7 +257,6 @@ export function createIndexedDbWalletStore(options: IndexedDbWalletStoreOptions 
   const storeName = options.storeName ?? WALLET_OBJECT_STORE;
   const indexStoreName = options.indexStoreName ?? WALLET_INDEX_STORE;
   const now = options.now ?? (() => Date.now());
-  const generateWalletGeneration = options.generateWalletGeneration ?? (() => crypto.randomUUID());
   let closed = false;
   let connectionError: StorageRuntimeError | undefined;
   let databasePromise: Promise<IDBDatabase> | undefined;
@@ -502,35 +501,19 @@ export function createIndexedDbWalletStore(options: IndexedDbWalletStoreOptions 
     assertOpen();
     if (options.signal?.aborted) throw fail("storage_unavailable", "Storage operation was cancelled");
     const clearedAt = new Date(now()).toISOString();
-    const walletGeneration = generateWalletGeneration();
-    const bytes = new TextEncoder().encode(
-      JSON.stringify({
-        format: WALLET_META_FORMAT,
-        version: 1,
-        schemaVersion: WALLET_CURRENT_SCHEMA_VERSION,
-        initialized: false,
-        walletGeneration,
-        createdAt: clearedAt,
-      })
-    );
-    const meta: WalletObjectMeta = {
-      path: WALLET_META_PATH,
-      size: bytes.byteLength,
-      lastModified: clearedAt,
-      revision: 1,
-      contentType: "application/json",
-    };
     await withStores("readwrite", async (stores) => {
-      await Promise.all([
-        requestToPromise(stores.objects.clear()),
-        requestToPromise(stores.index.clear()),
-      ]);
-      await Promise.all([
-        requestToPromise(stores.objects.put({ bytes, meta } satisfies StoredObjectBytes, WALLET_META_PATH)),
-        requestToPromise(stores.index.put(meta, WALLET_META_PATH)),
-      ]);
+      await Promise.all([requestToPromise(stores.objects.clear()), requestToPromise(stores.index.clear())]);
     });
+    const walletGeneration = "";
     return { walletGeneration, clearedAt };
+  }
+
+  async function cleanupLegacyMarkers(): Promise<void> {
+    await withStores("readwrite", async stores => {
+      for (const path of [".keymaster/meta", ".keymaster/system/wallet/initialization/current", ".keymaster/system/wallet/migration/current"]) {
+        await Promise.all([requestToPromise(stores.objects.delete(path)), requestToPromise(stores.index.delete(path))]);
+      }
+    });
   }
 
   async function persistence(): Promise<{ persisted: boolean; usageBytes?: number; quotaBytes?: number }> {
@@ -550,6 +533,7 @@ export function createIndexedDbWalletStore(options: IndexedDbWalletStoreOptions 
 
   return {
     readMeta,
+    cleanupLegacyMarkers,
     readKeyHold,
     get,
     getRange,

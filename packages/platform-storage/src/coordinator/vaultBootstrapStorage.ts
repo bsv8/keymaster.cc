@@ -27,7 +27,7 @@ export function createVaultBootstrapStorage(store: WalletStore): {
         const unique = new Set(input.operations.map(operation => operation.path));
         // Every write has a journal operation and explicit CAS conditions. Meta is
         // a read/condition only: migrating the backend must preserve the wallet generation.
-        if (unique.size !== input.operations.length || !unique.has(WALLET_MIGRATION_PATH)
+        if (unique.size !== input.operations.length || !unique.has(WALLET_KEYHOLD_PATH)
           || input.operations.some(operation => !allowed.has(operation.path) || (operation.path !== WALLET_MIGRATION_PATH && operation.type !== "put"))
           || !input.conditions?.length || input.conditions.some(condition => !allowed.has(condition.path) && condition.path !== WALLET_META_PATH)
           || [...unique].some(path => !input.conditions!.some(condition => condition.path === path && (condition.ifNoneMatch === true || condition.ifRevision !== undefined)))) {
@@ -42,9 +42,10 @@ export function createVaultBootstrapStorage(store: WalletStore): {
     } satisfies WalletVaultKeyStore),
     lifecycle: Object.freeze({
       readMeta: () => store.readMeta(),
+      cleanupLegacyMarkers: () => store.cleanupLegacyMarkers?.() ?? Promise.resolve(),
       batch: (input, options) => {
         const unique = new Set(input.operations.map(operation => operation.path));
-        if (input.operations.length !== 3 || unique.size !== 3 || input.operations.some(operation => operation.type !== "put" || !paths.has(operation.path)) || input.conditions?.some(condition => !paths.has(condition.path))) {
+        if (input.operations.length !== 1 || unique.size !== 1 || input.operations.some(operation => operation.type !== "put" || operation.path !== WALLET_KEYHOLD_PATH) || input.conditions?.some(condition => condition.path !== WALLET_KEYHOLD_PATH)) {
           throw new StorageRuntimeError("storage_forbidden", "Vault initialization paths are not allowed");
         }
         return store.batch(input, options);

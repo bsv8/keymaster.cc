@@ -5,7 +5,7 @@ import type { StorageRuntimeController } from "./storage/runtime.js";
 
 /** Verified session facts; callers cannot choose a module, purpose or physical App directory. */
 export interface AppStorageBinding extends importNetworkIdentity {
-  connectSessionId: string;
+  walletPublicKeyHex: string;
   transportOrigin: string;
   appIdentity: AppIdentitySnapshot;
   sessionEpoch: string;

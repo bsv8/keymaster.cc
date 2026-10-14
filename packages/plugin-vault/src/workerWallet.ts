@@ -73,13 +73,7 @@ export function createVaultWalletWorker(ports: VaultWalletWorkerPorts) {
     }
     walletLifecycle = createWalletLifecycleService({
       store: vaultStorage.lifecycle,
-      readMigration: async () => {
-        const service = createMigrationJournalService({ store: vaultStorage.migration, inspectKey: inspectWalletKeyBytes });
-        await service.normalizePreviousAttempt();
-        return (await vaultStorage.migration.get(WALLET_MIGRATION_PATH))?.bytes;
-      },
       keys: walletKeys,
-      generateWalletGeneration: () => crypto.randomUUID(),
       generateSessionEpoch: () => crypto.randomUUID(),
       // `address` 只是兼容展示字段，不是身份真值；本 Worker 不在存储层派生
       // 地址，摘要会退回公钥 hex，业务插件需要时从 P2PKH resource 自行派生。
@@ -96,7 +90,7 @@ export function createVaultWalletWorker(ports: VaultWalletWorkerPorts) {
     storageColdStartState = await walletLifecycle.coldStart();
     if (storageColdStartState.state === "ready") {
       ports.network(storageColdStartState.key!.bsvNetwork);
-      ports.commit({ walletGeneration: storageColdStartState.meta?.walletGeneration ?? ports.session().walletGeneration });
+      ports.commit({ walletGeneration: storageColdStartState.walletGeneration ?? ports.session().walletGeneration });
       await ports.binding.installRoot();
       return;
     }

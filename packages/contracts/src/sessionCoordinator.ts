@@ -230,12 +230,12 @@ export type CoordinatorStorageData =
   | { type: "batch"; grantId: string; input: { operations: Array<{ type: "put"; path: string; content: { $type: "binary"; bytes: ArrayBuffer; mime?: string }; contentType?: string } | { type: "delete"; path: string }>; conditions?: Array<{ path: string; ifMatch?: string }> } };
 
 export type CoordinatorClientRequestWithStorage =
-  | { kind: "storage.grant"; clientId: string; requestId: string; connectSessionId: string; expectedSessionEpoch: SessionEpoch }
+  | { kind: "storage.grant"; networkIdentity: import("./networkIdentity.js").NetworkIdentity; clientId: string; requestId: string; walletPublicKeyHex: string; transportOrigin: string; expectedSessionEpoch: SessionEpoch }
   | { kind: "storage.control"; clientId: string; requestId: string; control: CoordinatorStorageControl; expectedSessionEpoch: SessionEpoch }
   | { kind: "storage.data"; clientId: string; requestId: string; data: CoordinatorStorageData; expectedSessionEpoch: SessionEpoch }
   | { kind: "storage.cancel"; clientId: string; requestId: string; targetRequestId: string }
   | { kind: "disconnect"; clientId: string; requestId: string }
-  | { kind: "storage.session.abort"; clientId: string; requestId: string; connectSessionId: string; expectedSessionEpoch: SessionEpoch };
+  | { kind: "storage.session.abort"; clientId: string; requestId: string; walletPublicKeyHex: string; expectedSessionEpoch: SessionEpoch };
 
 /** Host/Coordinator 内部存储请求，不属于插件可见的 SessionCoordinatorClient。 */
 export type CoordinatorClientRequestWithInternalStorage =
@@ -317,7 +317,7 @@ export type CoordinatorClientRequestWithMsfile =
   | { kind: "msfile.data"; clientId: string; requestId: string; data: CoordinatorMsFileData; expectedSessionEpoch: SessionEpoch }
   | { kind: "msfile.cancel"; clientId: string; requestId: string; targetRequestId: string }
   | { kind: "disconnect"; clientId: string; requestId: string }
-  | { kind: "msfile.session.abort"; clientId: string; requestId: string; connectSessionId: string; expectedSessionEpoch: SessionEpoch };
+  | { kind: "msfile.session.abort"; clientId: string; requestId: string; walletPublicKeyHex: string; expectedSessionEpoch: SessionEpoch };
 
 /* ============== Window P2P executor（公共网络基础能力） ============== */
 
@@ -836,12 +836,12 @@ export interface SessionCoordinatorClient {
   storageGrant(context: OwnerAppStorageGrant): Promise<CoordinatorValueResult<string>>;
   storageData(data: CoordinatorStorageData, transfer?: ArrayBuffer[], signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
   storageCancel(targetRequestId: string): Promise<CoordinatorCommandResult>;
-  storageSessionAbort(connectSessionId: string): Promise<CoordinatorCommandResult>;
+  storageSessionAbort(walletPublicKeyHex: string): Promise<CoordinatorCommandResult>;
   msfileControl(control: CoordinatorMsFileControl): Promise<CoordinatorValueResult<unknown>>;
   msfileGrant(context: MsFileConnectAppContext): Promise<CoordinatorValueResult<string>>;
   msfileData(data: CoordinatorMsFileData, transfer?: ArrayBuffer[], signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
   msfileCancel(targetRequestId: string): Promise<CoordinatorCommandResult>;
-  msfileSessionAbort(connectSessionId: string): Promise<CoordinatorCommandResult>;
+  msfileSessionAbort(walletPublicKeyHex: string): Promise<CoordinatorCommandResult>;
   windowP2pExecutorAcquire(ownerPublicKeyHex: string, executorPort?: MessagePort): Promise<CoordinatorValueResult<WindowP2pExecutorLease>>;
   windowP2pExecutorRelease(leaseId: string): Promise<CoordinatorCommandResult>;
   windowP2pExecutorSpikeTransfer(leaseId: string, expectedSessionEpoch: SessionEpoch, bytes: ArrayBuffer): Promise<CoordinatorValueResult<WindowP2pExecutorTransferResult>>;

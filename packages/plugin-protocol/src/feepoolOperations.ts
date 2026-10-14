@@ -25,8 +25,8 @@ import type { P2pkhTransferAssetId, ProtocolFeePoolAction, ProtocolFeePoolRecord
  *     `FINAL_LOCKTIME` 最终版本，得到 `closeDraftTxHex` / `closeClientSignBytes`。
  *     之后才建新池（A-Tx + 初始 B-Tx 草稿）。
  *   - **owner 唯一真值 = `ownerPublicKeyHex`**：op 必须绑定
- *     `connectSessionId` + `ownerPublicKeyHex`。commit 阶段按 origin +
- *     connectSessionId + ownerPublicKeyHex + counterpartyPublicKeyHex
+ *     `walletPublicKeyHex` + `ownerPublicKeyHex`。commit 阶段按 origin +
+ *     walletPublicKeyHex + ownerPublicKeyHex + counterpartyPublicKeyHex
  *     四元组校验 op，禁止跨 session / 跨 owner 复用 operationId。
  */
 export interface FeepoolPendingOp {
@@ -36,7 +36,7 @@ export interface FeepoolPendingOp {
   /** prepare 时的 exact origin；commit 时按这个做 origin 一致性检查。 */
   origin: string;
   /** prepare 时的 connect sessionId（施工单 2026-06-28 002 硬切换）。 */
-  connectSessionId: string;
+  walletPublicKeyHex: string;
   /** prepare 时的 owner 压缩公钥 hex；commit 时按这个做 owner 一致性检查。 */
   ownerPublicKeyHex: string;
   /** prepare 时的对端公钥 hex。 */

@@ -13,7 +13,7 @@ export interface StorageDataExecutorDependencies<Binding> {
   storageUnavailableError(message: string): Error;
   resolvePlatformStorageGrant(id: string, clientId: string): Promise<StoragePlatformGrant>;
   resolveOwnerStorageGrant(id: string, clientId: string): Promise<StorageOwnerGrant>;
-  resolveStorageGrant(id: string, clientId: string): Promise<{ context: OwnerAppStorageGrant; connectSessionId: string }>;
+  resolveStorageGrant(id: string, clientId: string): Promise<{ context: OwnerAppStorageGrant; walletPublicKeyHex: string }>;
   ensureStorageRuntime(clientId: string): Promise<StorageRuntimeController>;
   beginStorageBindingRequest(): () => void;
   currentCoordinatorStorageBinding(): Binding | undefined;

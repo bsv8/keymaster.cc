@@ -15,9 +15,9 @@ import { validateNetworkIdentity, type NetworkIdentity } from "@keymaster/contra
 //   - amountSatoshis 必须是正整数；feeRateSatoshisPerKb 必须 >= 1。
 //   - **所有外部业务方法**（identity.get / intent.sign / cipher.encrypt /
 //     cipher.decrypt / p2pkh.transfer / feepool.prepare / feepool.commit）
-//     强制要求 `connectSessionId` 入参（施工单 2026-06-28 002 硬切换）。
+//     强制要求 `walletPublicKeyHex` 入参（施工单 2026-06-28 002 硬切换）。
 //     缺该字段直接 `invalid_request` 拒绝——不允许 fallback 到"当前 session"
-//     / "全局 active key"。`connect.login` 是唯一不要求 `connectSessionId`
+//     / "全局 active key"。`connect.login` 是唯一不要求 `walletPublicKeyHex`
 //     的入口方法（它本身负责建 session）。
 
 import type {
@@ -190,10 +190,10 @@ function validateIdentityGetParams(raw: unknown): IdentityGetParams {
     }
   }
   // 施工单 2026-06-28 002 硬切换：所有外部业务方法都必须属于某个
-  // connectSessionId（identity.get 是会话内身份断言能力，**不**再
-  // 是登录入口）。缺 `connectSessionId` 直接 invalid_request 拒绝。
-  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
-  return { aud, iat, exp, text, claims: obj.claims as string[] | undefined, connectSessionId };
+  // walletPublicKeyHex（identity.get 是会话内身份断言能力，**不**再
+  // 是登录入口）。缺 `walletPublicKeyHex` 直接 invalid_request 拒绝。
+  const walletPublicKeyHex = expectNonEmptyString(obj.walletPublicKeyHex, "walletPublicKeyHex");
+  return { aud, iat, exp, text, claims: obj.claims as string[] | undefined, walletPublicKeyHex };
 }
 
 function validateIntentSignParams(raw: unknown): IntentSignParams {
@@ -208,8 +208,8 @@ function validateIntentSignParams(raw: unknown): IntentSignParams {
   }
   const content = parseBinaryField(obj.content, "content");
   // 施工单 2026-06-28 002 硬切换：签名主体公钥取自 session 绑定 owner。
-  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
-  return { aud, iat, exp, text, contentType, content, connectSessionId };
+  const walletPublicKeyHex = expectNonEmptyString(obj.walletPublicKeyHex, "walletPublicKeyHex");
+  return { aud, iat, exp, text, contentType, content, walletPublicKeyHex };
 }
 
 function validateCipherEncryptParams(raw: unknown): CipherEncryptParams {
@@ -217,10 +217,10 @@ function validateCipherEncryptParams(raw: unknown): CipherEncryptParams {
   const text = expectString(obj.text, "text");
   const contentType = expectString(obj.contentType, "contentType");
   const content = parseBinaryField(obj.content, "content");
-  // 施工单 2026-06-28 001 硬切换：connectSessionId 是**强制**输入字段；
+  // 施工单 2026-06-28 001 硬切换：walletPublicKeyHex 是**强制**输入字段；
   // 不允许缺省 / 不允许 fallback 到 active key。
-  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
-  return { text, contentType, content, connectSessionId };
+  const walletPublicKeyHex = expectNonEmptyString(obj.walletPublicKeyHex, "walletPublicKeyHex");
+  return { text, contentType, content, walletPublicKeyHex };
 }
 
 function validateCipherDecryptParams(raw: unknown): CipherDecryptParams {
@@ -228,9 +228,9 @@ function validateCipherDecryptParams(raw: unknown): CipherDecryptParams {
   const text = expectString(obj.text, "text");
   const nonce = parseBinaryField(obj.nonce, "nonce");
   const cipherbytes = parseBinaryField(obj.cipherbytes, "cipherbytes");
-  // 与 cipher.encrypt 对称：connectSessionId 强制字段。
-  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
-  return { text, nonce, cipherbytes, connectSessionId };
+  // 与 cipher.encrypt 对称：walletPublicKeyHex 强制字段。
+  const walletPublicKeyHex = expectNonEmptyString(obj.walletPublicKeyHex, "walletPublicKeyHex");
+  return { text, nonce, cipherbytes, walletPublicKeyHex };
 }
 
 /** 严格比较 `aud` 与 `event.origin`；不补端口 / 不 lower host。 */
@@ -257,10 +257,10 @@ function validateP2pkhTransferParams(raw: unknown): P2pkhTransferParams {
     feeRateSatoshisPerKb = v;
   }
   // 施工单 2026-06-28 002 硬切换：资金 owner 取自 session 绑定 owner，
-  // 不再读取全局 active key。缺 `connectSessionId` 直接 invalid_request。
-  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
+  // 不再读取全局 active key。缺 `walletPublicKeyHex` 直接 invalid_request。
+  const walletPublicKeyHex = expectNonEmptyString(obj.walletPublicKeyHex, "walletPublicKeyHex");
   const channelId = expectPaymentChannelId(obj.channelId);
-  return { channelId, recipientAddress, amountSatoshis, feeRateSatoshisPerKb, assetId, connectSessionId };
+  return { channelId, recipientAddress, amountSatoshis, feeRateSatoshisPerKb, assetId, walletPublicKeyHex };
 }
 
 function validateFeepoolPrepareParams(raw: unknown): FeepoolPrepareParams {
@@ -270,8 +270,8 @@ function validateFeepoolPrepareParams(raw: unknown): FeepoolPrepareParams {
   const amountSatoshis = expectPositiveInteger(obj.amountSatoshis, "amountSatoshis");
   const assetId = expectPublicAssetId(obj.assetId, "assetId");
   // 施工单 2026-06-28 002 硬切换：feepool 必须绑定 session / owner。
-  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
-  return { channelId: expectPaymentChannelId(obj.channelId), counterpartyPublicKeyHex, amountSatoshis, assetId, connectSessionId };
+  const walletPublicKeyHex = expectNonEmptyString(obj.walletPublicKeyHex, "walletPublicKeyHex");
+  return { channelId: expectPaymentChannelId(obj.channelId), counterpartyPublicKeyHex, amountSatoshis, assetId, walletPublicKeyHex };
 }
 
 function expectPaymentChannelId(raw: unknown): string {
@@ -284,7 +284,7 @@ function validatePaymentChannelRegisterParams(raw: unknown): PaymentChannelRegis
   const channelName = expectNonEmptyString(obj.channelName, "channelName");
   if (!/^[a-z][a-z0-9.-]{0,31}$/.test(channelName)) throw new ProtocolValidationError("invalid_request", "Invalid channelName");
   if (obj.paymentType !== "p2pkh" && obj.paymentType !== "feepool.connect") throw new ProtocolValidationError("invalid_request", "Unsupported paymentType");
-  return {channelName, paymentType: obj.paymentType, assetId: expectPublicAssetId(obj.assetId, "assetId"), connectSessionId: expectNonEmptyString(obj.connectSessionId, "connectSessionId")};
+  return {channelName, paymentType: obj.paymentType, assetId: expectPublicAssetId(obj.assetId, "assetId"), walletPublicKeyHex: expectNonEmptyString(obj.walletPublicKeyHex, "walletPublicKeyHex")};
 }
 
 function validateFeepoolCommitParams(raw: unknown): FeepoolCommitParams {
@@ -315,14 +315,14 @@ function validateFeepoolCommitParams(raw: unknown): FeepoolCommitParams {
   // closeCounterpartySignatures（仅 close_and_recreate 需要）。
   const closeCounterpartySignatures = optionalSignatures("closeCounterpartySignatures");
   // 施工单 2026-06-28 002 硬切换：commit 必须按 session / owner 校验 op。
-  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
+  const walletPublicKeyHex = expectNonEmptyString(obj.walletPublicKeyHex, "walletPublicKeyHex");
   const assetId = expectPublicAssetId(obj.assetId, "assetId");
   return {
     operationId,
     channelId: expectPaymentChannelId(obj.channelId),
     counterpartyPublicKeyHex,
     assetId,
-    connectSessionId,
+    walletPublicKeyHex,
     counterpartySignatures,
     closeCounterpartySignatures
   };
@@ -369,8 +369,15 @@ function validateConnectLoginParams(raw: unknown): ConnectLoginParams {
  */
 function validateConnectResumeParams(raw: unknown): ConnectResumeParams {
   const obj = expectObject(raw, "connect.resume params");
-  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
-  return { connectSessionId };
+  for (const field of Object.keys(obj)) if (field !== "walletPublicKeyHex" && field !== "appIdentity") throw new ProtocolValidationError("invalid_request", "connect.resume contains an unsupported field");
+  const walletPublicKeyHex = expectNonEmptyString(obj.walletPublicKeyHex, "walletPublicKeyHex");
+  if (!/^(02|03)[0-9a-f]{64}$/iu.test(walletPublicKeyHex)) throw new ProtocolValidationError("invalid_request", "walletPublicKeyHex must be a compressed public key");
+  let appIdentity: ConnectResumeParams["appIdentity"];
+  if (obj.appIdentity !== undefined) {
+    try { verifyAppIdentityProof(obj.appIdentity); appIdentity = obj.appIdentity as ConnectResumeParams["appIdentity"]; }
+    catch (error) { throw new ProtocolValidationError("invalid_request", error instanceof Error ? error.message : "appIdentity is invalid"); }
+  }
+  return { walletPublicKeyHex, ...(appIdentity ? { appIdentity } : {}) };
 }
 
 /**
@@ -378,8 +385,8 @@ function validateConnectResumeParams(raw: unknown): ConnectResumeParams {
  */
 function validateConnectLogoutParams(raw: unknown): ConnectLogoutParams {
   const obj = expectObject(raw, "connect.logout params");
-  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
-  return { connectSessionId };
+  const walletPublicKeyHex = expectNonEmptyString(obj.walletPublicKeyHex, "walletPublicKeyHex");
+  return { walletPublicKeyHex };
 }
 
 /* ============== connect.launch（施工单 2026-06-29 001 硬切换） ============== */
@@ -426,9 +433,9 @@ function validateChannelSubscriptionSetParams(raw: unknown): ChannelSubscription
 /** price.get / price.subscribe / price.unsubscribe 共用校验：只接受 session。 */
 function validatePriceParams(raw: unknown): PriceSubscribeParams {
   const obj = expectObject(raw, "price params");
-  requireExactKeys(obj, ["connectSessionId"], "price params");
-  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
-  return { connectSessionId };
+  requireExactKeys(obj, ["walletPublicKeyHex"], "price params");
+  const walletPublicKeyHex = expectNonEmptyString(obj.walletPublicKeyHex, "walletPublicKeyHex");
+  return { walletPublicKeyHex };
 }
 
 export function validateExactChannel(value: unknown, field = "channel"): string {
@@ -515,7 +522,7 @@ function storagePath(value: unknown, field: string, allowEmpty = false): string 
 }
 
 function storageSession(obj: Record<string, unknown>, name: string): string {
-  return expectNonEmptyString(obj.connectSessionId, `${name}.connectSessionId`);
+  return expectNonEmptyString(obj.walletPublicKeyHex, `${name}.walletPublicKeyHex`);
 }
 
 function storageBinary(value: unknown, field: string): BinaryField {
@@ -528,40 +535,40 @@ function storageBinary(value: unknown, field: string): BinaryField {
 
 function validateStorageListParams(raw: unknown): StorageListParams {
   const obj = storageObject(raw, "storage.list params");
-  const connectSessionId = storageSession(obj, "storage.list");
+  const walletPublicKeyHex = storageSession(obj, "storage.list");
   const prefix = obj.prefix === undefined ? "" : storagePath(obj.prefix, "prefix", true);
   const cursor = obj.cursor === undefined ? undefined : expectNonEmptyString(obj.cursor, "cursor");
   const limit = obj.limit === undefined ? STORAGE_DEFAULT_LIST_LIMIT : obj.limit;
   if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > STORAGE_MAX_LIST_LIMIT) {
     throw new ProtocolValidationError("invalid_request", "limit must be between 1 and 1000");
   }
-  return { connectSessionId, prefix, cursor, limit };
+  return { walletPublicKeyHex, prefix, cursor, limit };
 }
 
 function validateStorageDirectoryParams(raw: unknown, name: string, allowOverwrite: boolean): StorageDirectoryParams {
   const obj = storageObject(raw, `${name} params`);
-  const connectSessionId = storageSession(obj, name);
+  const walletPublicKeyHex = storageSession(obj, name);
   const path = storagePath(obj.path, "path");
   const overwrite = obj.overwrite === undefined ? undefined : obj.overwrite;
   if (overwrite !== undefined && typeof overwrite !== "boolean") throw new ProtocolValidationError("invalid_request", "overwrite must be boolean");
-  return allowOverwrite ? { connectSessionId, path, overwrite } : { connectSessionId, path };
+  return allowOverwrite ? { walletPublicKeyHex, path, overwrite } : { walletPublicKeyHex, path };
 }
 
 function validateStoragePutParams(raw: unknown): StoragePutParams {
   const obj = storageObject(raw, "storage.put params");
-  const connectSessionId = storageSession(obj, "storage.put");
+  const walletPublicKeyHex = storageSession(obj, "storage.put");
   const path = storagePath(obj.path, "path");
   if (path.endsWith("/")) throw new ProtocolValidationError("invalid_request", "object path must not end with '/'");
   const content = storageBinary(obj.content, "content");
   const contentType = obj.contentType === undefined ? undefined : expectString(obj.contentType, "contentType");
   const overwrite = obj.overwrite === undefined ? undefined : obj.overwrite;
   if (overwrite !== undefined && typeof overwrite !== "boolean") throw new ProtocolValidationError("invalid_request", "overwrite must be boolean");
-  return { connectSessionId, path, content, contentType, overwrite };
+  return { walletPublicKeyHex, path, content, contentType, overwrite };
 }
 
 function validateStorageGetParams(raw: unknown): StorageGetParams {
   const obj = storageObject(raw, "storage.get params");
-  const connectSessionId = storageSession(obj, "storage.get");
+  const walletPublicKeyHex = storageSession(obj, "storage.get");
   const path = storagePath(obj.path, "path");
   if (path.endsWith("/")) throw new ProtocolValidationError("invalid_request", "object path must not end with '/'");
   const offset = obj.offset === undefined ? 0 : obj.offset;
@@ -570,15 +577,15 @@ function validateStorageGetParams(raw: unknown): StorageGetParams {
   if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 1 || length > STORAGE_MAX_PAYLOAD_BYTES) throw new ProtocolValidationError("storage_limit_exceeded", "length exceeds the maximum payload size");
   if (offset > Number.MAX_SAFE_INTEGER - (length - 1)) throw new ProtocolValidationError("storage_limit_exceeded", "requested range exceeds safe integer bounds");
   const ifMatch = obj.ifMatch === undefined ? undefined : expectString(obj.ifMatch, "ifMatch");
-  return { connectSessionId, path, offset, length, ifMatch };
+  return { walletPublicKeyHex, path, offset, length, ifMatch };
 }
 
 function validateStorageDeleteParams(raw: unknown): StorageDeleteParams {
   const obj = storageObject(raw, "storage.delete params");
-  const connectSessionId = storageSession(obj, "storage.delete");
+  const walletPublicKeyHex = storageSession(obj, "storage.delete");
   const path = storagePath(obj.path, "path");
   if (path.endsWith("/")) throw new ProtocolValidationError("invalid_request", "object path must not end with '/'");
-  return { connectSessionId, path };
+  return { walletPublicKeyHex, path };
 }
 
 /* ============== msfile.* validation（现行说明：BSV8_E2E/docs/keymaster.cc/MSFile.md） ============== */
@@ -630,13 +637,13 @@ function msfileSourceId(obj: Record<string, unknown>, name: string): string {
 
 function validateMsFileStatParams(raw: unknown): MsFileStatParams {
   const obj = msfileObject(raw, "msfile.stat params");
-  return { connectSessionId: storageSession(obj, "msfile.stat"), seedHashHex: msfileHash(obj.seedHashHex, "seedHashHex") };
+  return { walletPublicKeyHex: storageSession(obj, "msfile.stat"), seedHashHex: msfileHash(obj.seedHashHex, "seedHashHex") };
 }
 
 function validateMsFileSeedReadParams(raw: unknown): MsFileSeedReadParams {
   const obj = msfileObject(raw, "msfile.seed.read params");
   return {
-    connectSessionId: storageSession(obj, "msfile.seed.read"),
+    walletPublicKeyHex: storageSession(obj, "msfile.seed.read"),
     sourceId: msfileSourceId(obj, "msfile.seed.read"),
     seedHashHex: msfileHash(obj.seedHashHex, "seedHashHex")
   };
@@ -645,7 +652,7 @@ function validateMsFileSeedReadParams(raw: unknown): MsFileSeedReadParams {
 function validateMsFileBlockReadParams(raw: unknown): MsFileBlockReadParams {
   const obj = msfileObject(raw, "msfile.block.read params");
   return {
-    connectSessionId: storageSession(obj, "msfile.block.read"),
+    walletPublicKeyHex: storageSession(obj, "msfile.block.read"),
     sourceId: msfileSourceId(obj, "msfile.block.read"),
     seedHashHex: msfileHash(obj.seedHashHex, "seedHashHex"),
     blockHashHex: msfileHash(obj.blockHashHex, "blockHashHex")

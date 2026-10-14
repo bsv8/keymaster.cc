@@ -49,8 +49,10 @@ export interface WalletBatchResult {
 }
 
 export interface WalletStore {
-  /** 只读冷启动:meta 记录。 */
+  /** 只读兼容访问旧 meta；不参与冷启动身份判定。 */
   readMeta(): Promise<WalletObject | undefined>;
+  /** Upgrade only: delete retired wallet-state markers, preserving Key/business objects. */
+  cleanupLegacyMarkers?(): Promise<void>;
   /** 读取唯一 KeyHold 的原始字节。 */
   readKeyHold(): Promise<Uint8Array | undefined>;
   /** 读取一个对象;不存在返回 undefined。 */
@@ -85,7 +87,7 @@ export interface WalletStore {
 /** Vault 冷启动前的私有端口；不授予列举、Range、删除或连接管理能力。 */
 export type WalletVaultKeyStore = Pick<WalletStore, "get" | "put">;
 /** 初始化必须保留单事务提交；该端口只由可信 Worker 装配发放。 */
-export type WalletVaultLifecycleStore = Pick<WalletStore, "readMeta" | "batch" | "resetWallet">;
+export type WalletVaultLifecycleStore = Pick<WalletStore, "readMeta" | "batch" | "resetWallet" | "cleanupLegacyMarkers">;
 /** Backend migration uses a separate, fixed-path Worker port. It is never a plugin storage capability. */
 export type WalletVaultMigrationStore = Pick<WalletStore, "get" | "batch">;
 export const WALLET_MIGRATION_PATH = ".keymaster/system/wallet/migration/current";

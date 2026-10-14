@@ -15,12 +15,12 @@ const session = await keymaster.login({ text: "登录示例应用" });
 
 // 先注册支付用途，再在每次付款中携带返回的渠道编号。
 const { channelId } = await keymaster.registerPaymentChannel({
-  connectSessionId: session.connectSessionId,
+  walletPublicKeyHex: session.walletPublicKeyHex,
   channelName: "checkout",
   paymentType: "p2pkh"
 });
 await keymaster.p2pkhTransfer({
-  connectSessionId: session.connectSessionId,
+  walletPublicKeyHex: session.walletPublicKeyHex,
   channelId,
   recipientAddress: recipient,
   amountSatoshis: 1000

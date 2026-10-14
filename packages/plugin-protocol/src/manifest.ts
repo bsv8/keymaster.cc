@@ -161,7 +161,7 @@ const protocolResources: I18nPluginResources = {
       "protocol.feed.contentType": "Content type",
       "protocol.feed.activeKey": "Signer public key (legacy)",
       "protocol.feed.ownerKey": "Session owner public key",
-      "protocol.feed.connectSessionId": "Connect session id",
+      "protocol.feed.walletPublicKeyHex": "Connect session id",
       "protocol.feed.error": "Error",
       "protocol.feed.timeline": "Timeline",
       /* ============== 施工单 002 硬切换：新增 i18n key ============== */
@@ -348,7 +348,7 @@ const protocolResources: I18nPluginResources = {
       "protocol.feed.contentType": "内容类型",
       "protocol.feed.activeKey": "签名公钥（兼容）",
       "protocol.feed.ownerKey": "会话 owner 公钥",
-      "protocol.feed.connectSessionId": "connect session id",
+      "protocol.feed.walletPublicKeyHex": "connect session id",
       "protocol.feed.error": "错误",
       "protocol.feed.timeline": "时间",
       /* ============== 施工单 002 硬切换：新增 i18n key ============== */

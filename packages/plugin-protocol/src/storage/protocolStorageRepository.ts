@@ -1,3 +1,4 @@
+import { sameNetworkIdentity } from "@keymaster/contracts";
 // Protocol V1 storage repository.
 //
 // Each durable concern is bound to its own Host-owned purpose handle:
@@ -72,7 +73,7 @@ export function openProtocolStorageRepository(stores: ProtocolStorageStores): Pr
   const commandKey = (id: string) => `${COMMAND_PREFIX}${id}`;
   const originKey = (origin: string) => `${ORIGIN_PREFIX}${encodeURIComponent(origin)}`;
   const feePoolKey = (key: string) => `${FEE_POOL_PREFIX}${encodeURIComponent(key)}`;
-  const sessionKey = (id: string) => `${SESSION_PREFIX}${id}`;
+  const sessionKey = (id: string) => `${SESSION_PREFIX}${encodeURIComponent(id)}`;
 
   return {
     /* ----- command-history ----- */
@@ -118,8 +119,12 @@ export function openProtocolStorageRepository(stores: ProtocolStorageStores): Pr
     async putConnectSession(record: ConnectSessionRecord) {
       await sessions.put(sessionKey(record.sessionId), record, { partition: PARTITION });
     },
-    async getConnectSession(sessionId: string) {
-      return (await sessions.get<ConnectSessionRecord>(sessionKey(sessionId), { partition: PARTITION }))?.value ?? null;
+    async getConnectSession(identity: import("@keymaster/contracts").NetworkIdentity, origin: string) {
+      const matches = (await listValues<ConnectSessionRecord>(sessions, SESSION_PREFIX))
+        .map(row => row.value).filter(record => record.networkIdentity && sameNetworkIdentity(record.networkIdentity, identity)
+          && record.ownerPublicKeyHex.toLowerCase() === identity.publicKeyHex.toLowerCase()
+          && record.origin === origin);
+      return matches.length === 1 ? matches[0]! : null;
     },
     async listConnectSessionsByOrigin(origin: string) {
       return (await listValues<ConnectSessionRecord>(sessions, SESSION_PREFIX))
@@ -135,6 +140,7 @@ export function openProtocolStorageRepository(stores: ProtocolStorageStores): Pr
         ...existing
           .filter((row) => row.value.sessionId !== record.sessionId
             && row.value.origin === record.origin
+            && row.value.networkIdentity.bsvNetwork === record.networkIdentity.bsvNetwork
             && row.value.revokedAt === null)
           .map((row) => ({
             type: "put" as const,

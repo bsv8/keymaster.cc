@@ -12,8 +12,8 @@ import { defineCapability } from "webloom-framework";
 
 /** Connect App 的 `price.get` 入参。 */
 export interface PriceGetParams {
-  /** 已验证 Connect session 编号。 */
-  connectSessionId: string;
+  /** 钱包压缩公钥；网络由消息外层 NetworkIdentity 指定。 */
+  walletPublicKeyHex: string;
 }
 
 /**
@@ -35,8 +35,8 @@ export type PriceGetResult = PriceValue;
 
 /** `price.subscribe` / `price.unsubscribe` 入参。 */
 export interface PriceSubscribeParams {
-  /** 已验证 Connect session 编号。 */
-  connectSessionId: string;
+  /** 钱包压缩公钥；网络由消息外层 NetworkIdentity 指定。 */
+  walletPublicKeyHex: string;
 }
 
 /** `price.subscribe` / `price.unsubscribe` 结果。 */

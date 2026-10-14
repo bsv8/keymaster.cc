@@ -10,9 +10,9 @@ export function createAppStorageClients(controller: StorageRuntimeController, pr
       consumer.capability(APP_STORAGE_CLIENTS_CAPABILITY);
       const assert = () => { scope.assertActive(); providerScope?.assertActive(); if (consumer.status !== "active") throw new Error("App storage gateway revoked"); };
       assert();
-      if (!binding.connectSessionId || !binding.transportOrigin || !binding.walletGeneration || !binding.sessionEpoch || !binding.runGeneration || !binding.appIdentity?.publisherPublicKeyHex || !binding.appIdentity.appId || !binding.appIdentity.identityDigestHex) throw new Error("App storage requires a verified session binding");
+      if (!binding.walletPublicKeyHex || !binding.transportOrigin || !binding.walletGeneration || !binding.sessionEpoch || !binding.runGeneration || !binding.appIdentity?.publisherPublicKeyHex || !binding.appIdentity.appId || !binding.appIdentity.identityDigestHex) throw new Error("App storage requires a verified session binding");
       const appIdentity = Object.freeze({ ...binding.appIdentity });
-      const grant: OwnerAppStorageGrant = Object.freeze({ ...validateNetworkIdentity(binding), connectSessionId: binding.connectSessionId, transportOrigin: binding.transportOrigin,
+      const grant: OwnerAppStorageGrant = Object.freeze({ ...validateNetworkIdentity(binding), walletPublicKeyHex: binding.walletPublicKeyHex, transportOrigin: binding.transportOrigin,
         sessionEpoch: binding.sessionEpoch, walletGeneration: binding.walletGeneration, runGeneration: binding.runGeneration, appIdentity,
         appStorageName: deriveAppStorageName(appIdentity),
         moduleId: deriveThirdPartyStorageModuleId(appIdentity.publisherPublicKeyHex, appIdentity.appId), purposeId: "files",

@@ -16,7 +16,7 @@ export function parseKeyHoldDocument(input: string | Uint8Array): NetworkKeyHold
   const raw = typeof input === "string" ? input : new TextDecoder("utf-8", { fatal: true }).decode(input);
   if (raw.startsWith("\ufeff")) throw new TypeError("KeyHold BOM is not allowed");
   const envelope = JSON.parse(raw) as Record<string, unknown>;
-  if (envelope.format !== "keymaster.network-keyhold" || envelope.version !== 1 || Object.keys(envelope).sort().join(",") !== "bsvNetwork,format,keyHold,networkAuthenticationHex,version") throw new TypeError("Wallet network is missing; explicit identity upgrade is required");
+  if (envelope.format !== "keymaster.network-keyhold" || envelope.version !== 1 || !["bsvNetwork,format,keyHold,networkAuthenticationHex,version", "backend,bsvNetwork,format,keyHold,networkAuthenticationHex,version"].includes(Object.keys(envelope).sort().join(",")) || (envelope.backend !== undefined && envelope.backend !== "software")) throw new TypeError("Wallet network is missing; explicit identity upgrade is required");
   const bsvNetwork = validateBsvNetwork(envelope.bsvNetwork);
   if (typeof envelope.networkAuthenticationHex !== "string" || !/^[0-9a-f]{64}$/u.test(envelope.networkAuthenticationHex)) throw new TypeError("Wallet network authentication is invalid");
   return { ...parseDocument(JSON.stringify(envelope.keyHold)), bsvNetwork, networkAuthenticationHex: envelope.networkAuthenticationHex };
@@ -25,7 +25,7 @@ export function exportPortableKeyHoldDocument(document: NetworkKeyHoldDocument):
   return serializeDocument(hold(document));
 }
 export function serializeKeyHoldDocument(document: NetworkKeyHoldDocument): string {
-  return JSON.stringify({ format: "keymaster.network-keyhold", version: 1, bsvNetwork: validateBsvNetwork(document.bsvNetwork), networkAuthenticationHex: document.networkAuthenticationHex, keyHold: JSON.parse(serializeDocument(hold(document))) });
+  return JSON.stringify({ format: "keymaster.network-keyhold", version: 1, backend: "software", bsvNetwork: validateBsvNetwork(document.bsvNetwork), networkAuthenticationHex: document.networkAuthenticationHex, keyHold: JSON.parse(serializeDocument(hold(document))) });
 }
 export async function decryptKeyHoldDocument(document: NetworkKeyHoldDocument, password: string): Promise<{ label: string; publicKeyHex: string; privateKey: Uint8Array }> {
   const result = await unlockDocument(hold(document), password);

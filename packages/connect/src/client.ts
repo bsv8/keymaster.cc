@@ -15,6 +15,7 @@ import {
   type ConnectLoginResult,
   type ConnectLogoutResult,
   type ConnectResumeResult,
+  type ConnectResumeParams,
   type IdentityGetParams,
   type IdentityGetResult,
   type IntentSignParams,
@@ -207,7 +208,7 @@ const DEFAULT_CLOSE_POLL_MS = 500;
  * `price.changed` pushes. The price is display-only reference data.
  *
  * @groupDescription Storage
- * Manage app-scoped directories, objects, and multipart uploads.
+ * Manage app-scoped directories and objects.
  *
  * @groupDescription Transport
  * Manage the Session Window and send lower-level protocol requests.
@@ -348,8 +349,8 @@ export class KeymasterConnectClient {
    *
    * @group Connect
    */
-  resume(connectSessionId: string, options?: KeymasterRequestOptions): Promise<ConnectResumeResult> {
-    return this.request("connect.resume", { connectSessionId }, options);
+  resume(identity: string | ConnectResumeParams, options?: KeymasterRequestOptions): Promise<ConnectResumeResult> {
+    return this.request("connect.resume", typeof identity === "string" ? { walletPublicKeyHex: identity } : identity, options);
   }
 
   /**
@@ -357,8 +358,8 @@ export class KeymasterConnectClient {
    *
    * @group Connect
    */
-  logout(connectSessionId: string, options?: KeymasterRequestOptions): Promise<ConnectLogoutResult> {
-    return this.request("connect.logout", { connectSessionId }, options);
+  logout(walletPublicKeyHex: string, options?: KeymasterRequestOptions): Promise<ConnectLogoutResult> {
+    return this.request("connect.logout", { walletPublicKeyHex }, options);
   }
 
   /**

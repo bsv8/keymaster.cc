@@ -609,7 +609,7 @@ function AppViewBootstrapWaitPage({
  *     软超时提示（"连接较慢"）；迟到 child `ready` 到达后：
  *       - waiting / 软超时 flag 一并清掉；
  *       - UI 从 `show app` 直接切到传统 popup 主界面。
- *   - **不**在本页偷偷重建 `connectSessionId` / `launchToken` /
+ *   - **不**在本页偷偷重建 `walletPublicKeyHex` / `launchToken` /
  *     bootstrap（施工单 2026-06-30 003 硬切换 2.4 / 4.3）。
  *   - **不**主动向 child 发 `ready`：child 必须在自己 listener 就绪后
  *     向 Session Window 发 `ready`（方向对称）。

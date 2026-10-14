@@ -30,7 +30,7 @@ import type { AppStorageBinding, AppStorageClient } from "@keymaster/contracts";
 //   - **所有外部业务方法**（identity.get / intent.sign / cipher.encrypt /
 //     cipher.decrypt / p2pkh.transfer / feepool.prepare / feepool.commit /
 //     storage.*）
-//     强制要求 `connectSessionId` 入参（施工单 2026-06-28 002 硬切换）。
+//     强制要求 `walletPublicKeyHex` 入参（施工单 2026-06-28 002 硬切换）。
 //     accept 阶段同步预校验 session 真值（fail-fast）：
 //       - session 不存在 / 已 revoke / origin 不匹配 / owner key 不 ready
 //         → 直接 phase=failed，对外回 user_rejected / invalid_origin；
@@ -38,7 +38,7 @@ import type { AppStorageBinding, AppStorageClient } from "@keymaster/contracts";
 //   - **owner 唯一真值 = `ownerPublicKeyHex`**：`ownerKeyId` **不**出现
 //     在 record / result payload / 内部 pendingOp 字段里。执行时按
 //     `session.ownerPublicKeyHex` 查 walletState.getKey() 拿当前 vault 内
-//   - record 在创建时立即绑定 `connectSessionId` + `ownerPublicKeyHex`；
+//   - record 在创建时立即绑定 `walletPublicKeyHex` + `ownerPublicKeyHex`；
 //     record 生命周期内**不**可漂移。执行阶段再次校验 session 仍有效
 //     （logout 后同 session 下旧 request 后续执行必须失败）。
 //   - `feepool` 持久化 key 维度补 `ownerPublicKeyHex`：
@@ -244,7 +244,7 @@ const BOOTSTRAP_TIMEOUT_MS = 30_000;
  *
  * 设计缘由：
  *   - child `ready` 是 UI 切段信号，到点未到**只**用于提示"连接较慢"。
- *   - 到点只清等待态、提示用户，不重建 `connectSessionId` / `launchToken` /
+ *   - 到点只清等待态、提示用户，不重建 `walletPublicKeyHex` / `launchToken` /
  *     bootstrap、不偷偷重发 ready。
  *   - 旧 `APPVIEW_READY_RETRY_INTERVAL_MS`（300ms pump 间隔）已删除：
  *     `ready` 方向对称，child 自己声明 listener 就绪，Session Window
@@ -386,7 +386,7 @@ interface RequestRecord {
    * `connect.login` record 上该字段为空（login 自身负责建 session）。
    * record 生命周期内**不**可漂移；不允许"旧请求漂进新 session"。
    */
-  connectSessionId: string;
+  walletPublicKeyHex: string;
   payloadSize?: number;
   /**
    * record 在创建时快照的 owner public key hex（施工单 2026-06-28 002
@@ -631,7 +631,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - Session Window 不再向 child 主动泵 `ready`；因此这里的 setTimeout
    *     只表达"等待 child 主动发来 `ready`"的 5s 软超时。
    *   - 到点只把 `appClientConnectTimedOutFlag = true` 并清掉
-   *     `appClientWaitingForReadyFlag`，**不**重建 `connectSessionId`、
+   *     `appClientWaitingForReadyFlag`，**不**重建 `walletPublicKeyHex`、
    *     **不**重新 bootstrap、**不**偷偷重发 ready。
    *   - 旧 `appClientReadyPumpHandle`（setInterval 反复 pump ready）
    *     已删除；`ready` 职责改由 child 自己声明。
@@ -663,7 +663,8 @@ export class ProtocolServiceImpl implements ProtocolService {
       appId: string;
       appOrigin: string;
       appUrl: string;
-      connectSessionId: string;
+      networkIdentity: NetworkIdentity;
+      walletPublicKeyHex: string;
       ownerPublicKeyHex: string;
       resolvedClaims: Record<string, unknown>;
       resolvedAt: number;
@@ -674,13 +675,13 @@ export class ProtocolServiceImpl implements ProtocolService {
   /**
    * Session Window 当前已注册 owner runtime 内存 Map（施工单 2026-06-30 002
    * 硬切换）：
-   * `connectSessionId -> { runtime: SessionRuntimeBootstrap; createdAt: number }`。
+   * `walletPublicKeyHex -> { runtime: SessionRuntimeBootstrap; createdAt: number }`。
    *
    * 设计缘由：
  *   - 来源 = `bootstrap_runtime`：launcher consume bootstrap 后**只**在
  *     当前窗口内存注册 owner runtime；**不**导入 unlock runtime，
  *     **不**把 vault 切到 unlocked 态。
- *   - 与 `connectSessionId` 一一对应；业务方法按 `connectSessionId`
+ *   - 与 `walletPublicKeyHex` 一一对应；业务方法按 `walletPublicKeyHex`
  *     取 runtime。runtime 不存在时仅 connect mode 允许再尝试
  *     `vault_runtime` 来源；从 vault 借 owner 私钥 hex 提供同一份 runtime。
  *   - 两条来源对外行为一致（同一把 owner 同一份私钥 hex）；仅 connect
@@ -990,7 +991,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.channelSessionEpoch++;
     const sessionIds = new Set<string>();
     for (const rec of this.requestsByRecordId.values()) {
-      if (rec.connectSessionId) sessionIds.add(rec.connectSessionId);
+      if (rec.walletPublicKeyHex) sessionIds.add(rec.walletPublicKeyHex);
       if (
         rec.phase === "executing" &&
         (rec.method.startsWith("storage.") || rec.method.startsWith("msfile."))
@@ -1402,7 +1403,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   pageUnloading(): void {
     const sessionIds = new Set<string>();
     for (const rec of this.requestsByRecordId.values()) {
-      if (rec.connectSessionId) sessionIds.add(rec.connectSessionId);
+      if (rec.walletPublicKeyHex) sessionIds.add(rec.walletPublicKeyHex);
       if (
         rec.phase === "executing" &&
         (rec.method.startsWith("storage.") || rec.method.startsWith("msfile."))
@@ -1817,7 +1818,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *     `targetOrigin`。构造失败一律按 fail-closed 返回 null，不重建
    *     session / launchToken / bootstrap。
    *   - 5s 软超时只用于 UI 提示"连接较慢"；到点只清等待态，**不**重建
-   *     `connectSessionId` / `launchToken` / bootstrap。
+   *     `walletPublicKeyHex` / `launchToken` / bootstrap。
    *   - 返回被打开的 window；失败返回 null（best-effort）。
    *   - **不**在打开后立即绑定 `currentAppClientSource`——`ready` 应当
    *     由 child 自己声明，source 绑定由 child `ready` 到达后做；
@@ -1897,7 +1898,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *          `new URL(appUrl).origin === appOrigin`；否则 throw "invalid_app_config"）；
    *       4. 解析 claims 快照（按 input.claims 走 builtin claim 解析，与
    *          `connect.login` 一致）；
-   *       5. 创建新 `connectSessionId`，按 session 真值三元组落库
+   *       5. 创建新 `walletPublicKeyHex`，按 session 真值三元组落库
    *          （sessionId + origin + ownerPublicKeyHex，无 `runtimeBinding`）；
    *       6. 用现有 `vault.createAppViewSession({ sessionId, publicKeyHex, password })`
    *          取 capability，组装 `SessionRuntimeBootstrap`；
@@ -2102,7 +2103,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     //    必须读 session 真值。runtime 来源由 `resolveOwnerRuntime`
     //    在每次执行时按当前窗口状态决定。
     const now = Date.now();
-    const sessionId = this.deps.generateId ? this.deps.generateId() : crypto.randomUUID();
+    const sessionId = await this.connectBindingKey(key, input.appOrigin);
     const sessionRecord: ConnectSessionRecord = {
       sessionId,
       origin: input.appOrigin,
@@ -2165,7 +2166,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       appId: input.appId,
       appOrigin: input.appOrigin,
       appUrl: appUrlWithLaunchToken,
-      connectSessionId: sessionId,
+      walletPublicKeyHex: key.publicKeyHex,
       networkIdentity: validateNetworkIdentity(key),
       ownerPublicKeyHex: key.publicKeyHex,
       resolvedClaims: resolvedClaims as Record<string, unknown>,
@@ -2211,7 +2212,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     sessionWindowNavigated = true;
     return {
       sessionWindowOpened: true,
-      connectSessionId: sessionId,
+      networkIdentity: validateNetworkIdentity(key),
+      walletPublicKeyHex: key.publicKeyHex,
       launchToken,
       appUrl: appUrlWithLaunchToken
     };
@@ -2278,7 +2280,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       appId: payload.app.appId,
       appOrigin: payload.app.appOrigin,
       appUrl: payload.app.appUrl,
-      connectSessionId: payload.connectSessionId,
+      walletPublicKeyHex: payload.walletPublicKeyHex,
       ownerPublicKeyHex: payload.ownerPublicKeyHex,
       resolvedClaims: claimsSnapshot,
       resolvedAt: payload.resolvedAt,
@@ -2288,17 +2290,18 @@ export class ProtocolServiceImpl implements ProtocolService {
       appId: payload.app.appId,
       appOrigin: payload.app.appOrigin,
       appUrl: payload.app.appUrl,
-      connectSessionId: payload.connectSessionId,
+      networkIdentity: payload.networkIdentity,
+      walletPublicKeyHex: payload.walletPublicKeyHex,
       ownerPublicKeyHex: payload.ownerPublicKeyHex,
       resolvedClaims: claimsSnapshot,
       resolvedAt: payload.resolvedAt,
       consumed: false
     });
-    const previousRuntime = this.ownerRuntimesBySessionId.get(payload.connectSessionId)?.runtime;
+    const previousRuntime = this.ownerRuntimesBySessionId.get(payload.walletPublicKeyHex)?.runtime;
     if (previousRuntime) {
       this.disposeSessionRuntimeBootstrap(previousRuntime, "replaced");
     }
-    this.ownerRuntimesBySessionId.set(payload.connectSessionId, {
+    this.ownerRuntimesBySessionId.set(payload.walletPublicKeyHex, {
       runtime,
       createdAt: Date.now()
     });
@@ -2454,7 +2457,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - 旧实现这里用 setInterval 反复 pump `ready`；新实现已删除 pump，
    *     `ready` 方向对称要求 child 自己声明。
    *   - 这里只启动 5s setTimeout：到点只把 `appClientConnectTimedOut = true`
-   *     并清掉等待态，**不**重建 `connectSessionId` / `launchToken` /
+   *     并清掉等待态，**不**重建 `walletPublicKeyHex` / `launchToken` /
    *     bootstrap、**不**重发 `ready`、**不**自动补救。
    *   - child `ready` 到达或 child request 到达都会清掉 timer。
    */
@@ -2712,14 +2715,14 @@ export class ProtocolServiceImpl implements ProtocolService {
       status: "pending",
       enteredPhaseAt: now,
       autoApproved: false,
-      // 关键（施工单 2026-06-28 002 硬切换）：`connectSessionId` +
+      // 关键（施工单 2026-06-28 002 硬切换）：`walletPublicKeyHex` +
       // `ownerPublicKeyHex` 在 record 创建时立即绑定一次。后续写卡
       // **不**再读 walletState.snapshot()——即使 popup 会话里用户切换 active
       // key，这条 record 的 owner / session 归属也不会被污染。
       // 业务方法在下方 method 分支里**先**做 session 预校验，再回填
       // 这两个字段；`connect.login` 在 bootstrapConnectLoginRecord
       // 之后回填。
-      connectSessionId: "",
+      walletPublicKeyHex: "",
       ownerPublicKeyHex: "",
       createdAt: now,
       updatedAt: now,
@@ -2772,13 +2775,13 @@ export class ProtocolServiceImpl implements ProtocolService {
       }
       // session 有效：locked → waiting_unlock_manual；unlocked → 直接
       // queued（**不**经过 confirming）。解锁后同样直接 queued。
-      rec.connectSessionId = resumeParams.connectSessionId;
+      rec.walletPublicKeyHex = resumeParams.walletPublicKeyHex;
       rec.ownerPublicKeyHex = rec.connectResumeSnapshot?.ownerPublicKeyHex ?? "";
       rec.autoExecuteAfterUnlock = true;
       this.applyManualPhaseDecision(recordId, origin, /* skipConfirmWhenUnlocked */ true);
       return;
     } else if (method === "connect.launch") {
-      // appView 首登：launchToken 是唯一真值；**不**要求 connectSessionId，
+      // appView 首登：launchToken 是唯一真值；**不**要求 walletPublicKeyHex，
       // **不**需要解锁 / 确认 UI。无论当前 vault 是否 locked，record 都先
       // 入 `executionQueue`；由 `drainExecutionQueue()` 走
       // `probeExecutionCondition` 决定立即执行还是 fail-fast。
@@ -2799,7 +2802,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         await this.scheduleFailFastRequest(recordId, "user_rejected", "internal_error");
         return;
       }
-      rec.connectSessionId = channelSession.sessionId;
+      rec.walletPublicKeyHex = channelSession.sessionId;
       rec.ownerPublicKeyHex = channelSession.ownerPublicKeyHex;
       if (this.lockStateValue === "locked") {
         // 锁定会话立即使 Channel 调用失效；不把 App 请求挂在解锁队列中。
@@ -2817,20 +2820,20 @@ export class ProtocolServiceImpl implements ProtocolService {
       return;
     } else {
       // 施工单 2026-06-28 002 硬切换：所有外部业务方法都属于某个
-      // connectSessionId。统一预校验 session 真值，session 无效时
+      // walletPublicKeyHex。统一预校验 session 真值，session 无效时
       // fail-fast（与 cipher.* 旧逻辑同语义）。
       //
       // 业务方法：identity.get / intent.sign / cipher.encrypt /
       // cipher.decrypt / p2pkh.transfer / feepool.prepare / feepool.commit。
-      const sessionParams = parsed.params as { connectSessionId?: string };
-      const sessionId = sessionParams?.connectSessionId;
+      const sessionParams = parsed.params as { walletPublicKeyHex?: string };
+      const sessionId = sessionParams?.walletPublicKeyHex;
       if (typeof sessionId !== "string" || sessionId.length === 0) {
-        // 校验层应当已经拒绝；这里是兜底——任何缺 connectSessionId 的
+        // 校验层应当已经拒绝；这里是兜底——任何缺 walletPublicKeyHex 的
         // 业务 method 都不允许落 record；按 invalid_request 兜底处理。
         await this.scheduleFailFastRequest(recordId, "user_rejected", "internal_error");
         return;
       }
-      const sessionFail = await this.preCheckConnectSession(sessionId, origin);
+      const sessionFail = await this.preCheckConnectSession({ ...rec.networkIdentity, publicKeyHex: sessionId }, origin);
       if (sessionFail !== null) {
         await this.scheduleFailFastRequest(recordId, sessionFail.code, sessionFail.reason);
         return;
@@ -2841,7 +2844,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       let session: ConnectSessionRecord | null = null;
       let dbError = false;
       try {
-        session = await this.fetchSessionForBinding(sessionId);
+        session = await this.fetchSessionForBinding({ ...rec.networkIdentity, publicKeyHex: sessionId }, rec.origin);
       } catch (err) {
         // K-V 异常：accept 阶段无法读到 session 真值；走 manual
         // confirm 路径，execute 阶段 `requireConnectSession` 再校验。
@@ -2850,7 +2853,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         dbError = true;
       }
       if (dbError) {
-        rec.connectSessionId = sessionId;
+        rec.walletPublicKeyHex = sessionId;
         // 不 return；让 request 继续走 manual confirm / execute 路径。
       } else if (session === null) {
         // 极端竞态：preCheck 通过 → session 突然被外部 logout / 删除。
@@ -2858,7 +2861,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         await this.scheduleFailFastRequest(recordId, "user_rejected", "internal_error");
         return;
       } else {
-        rec.connectSessionId = sessionId;
+        rec.walletPublicKeyHex = sessionId;
         rec.ownerPublicKeyHex = session.ownerPublicKeyHex;
         if ((method.startsWith("storage.") || method.startsWith("msfile.")) && !session.appIdentity) {
           // MSFile 与 Storage 一致：无 verified App Identity 的 session 不允许
@@ -2966,15 +2969,15 @@ export class ProtocolServiceImpl implements ProtocolService {
    *     会再做一次校验。
    */
   private async preCheckConnectSession(
-    sessionId: string,
+    identity: NetworkIdentity,
     origin: string
   ): Promise<{ code: ProtocolErrorCode; reason: ProtocolFailureReason } | null> {
-    if (!sessionId) {
+    if (!identity.publicKeyHex) {
       return { code: "user_rejected", reason: "internal_error" };
     }
     let session: ConnectSessionRecord | null = null;
     try {
-      session = await this.fetchSessionForBinding(sessionId);
+      session = await this.fetchSessionForBinding(identity, origin);
     } catch (err) {
       // 关键（施工单 2026-06-28 002 收口）：K-V 异常**不**触发 fail-fast。
       // 与"K-V unavailable 降级"边界一致：允许 manual confirm 继续走
@@ -3039,16 +3042,43 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - 跨 origin 不在本函数判断；caller 拿到 session 后自己
    *     `session.origin !== event.origin` 决定走 `invalid_origin`。
    */
-  private async fetchSessionForBinding(
-    sessionId: string
-  ): Promise<ConnectSessionRecord | null> {
-    if (!this.deps.storageRepository) {
-      throw new Error("connect session storage unavailable");
-    }
-    const session = await this.deps.storageRepository.getConnectSession(sessionId);
-    if (!session) return null;
-    if (session.revokedAt !== null) return null;
-    return session;
+  /** SDK 付款账本只接受 96 字符内的 ID；压缩已有网络/公钥/来源坐标，不签发授权 ID。 */
+  private async connectBindingKey(identity: NetworkIdentity, origin: string): Promise<string> {
+    const coordinate = JSON.stringify([identity.bsvNetwork, identity.publicKeyHex.toLowerCase(), origin]);
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(coordinate)));
+    return "connect." + Array.from(digest, byte => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  private async publicOwnerKey(identity: NetworkIdentity): Promise<KeyIdentity | undefined> {
+    const publicKeyHex = identity.publicKeyHex;
+    const active = this.requireCurrentOwnerKey(publicKeyHex);
+    if (active && sameNetworkIdentity(active, identity)) return active;
+    const stored = await this.deps.vault.getCurrentKey();
+    if (!stored || !sameNetworkIdentity(stored, identity)) return undefined;
+    return { bsvNetwork: stored.bsvNetwork, publicKeyHex: stored.publicKeyHex, label: stored.label,
+      backend: stored.format === "keymaster.hardware-key" ? "hardware" : "software",
+      capabilities: ["p2pkh"], createdAt: new Date().toISOString() };
+  }
+
+  private async fetchSessionForBinding(identity: NetworkIdentity, origin: string): Promise<ConnectSessionRecord | null> {
+    const publicKeyHex = identity.publicKeyHex;
+    if (!/^(02|03)[0-9a-f]{64}$/iu.test(publicKeyHex)) return null;
+    if (!this.deps.storageRepository) return null;
+    const cached = await this.deps.storageRepository.getConnectSession(identity, origin);
+    if (cached?.revokedAt !== null && cached !== null) return null;
+    if (cached) return sameNetworkIdentity(cached.networkIdentity, identity) ? cached : null;
+    const key = await this.publicOwnerKey(identity);
+    if (!key) return null;
+    // A valid owner identity is sufficient to reconnect after local reset.
+    // This creates current defaults, not restored permissions or an App Identity.
+    const now = Date.now();
+    const record: ConnectSessionRecord = {
+      sessionId: await this.connectBindingKey(key, origin),
+      origin, networkIdentity: validateNetworkIdentity(key), ownerPublicKeyHex: key.publicKeyHex,
+      ownerLabel: key.label, claimsSnapshot: {}, createdAt: now, lastUsedAt: now, revokedAt: null,
+    };
+    await this.deps.storageRepository.putConnectSession(record);
+    return record;
   }
 
   /**
@@ -3185,7 +3215,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     let session: ConnectSessionRecord | null = null;
     try {
-      session = await this.deps.storageRepository.getConnectSession(params.connectSessionId);
+      session = await this.fetchSessionForBinding({ ...rec.networkIdentity, publicKeyHex: params.walletPublicKeyHex }, origin);
     } catch (err) {
       return { code: "user_rejected", reason: "internal_error" };
     }
@@ -3193,13 +3223,23 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (session.revokedAt !== null) return { code: "user_rejected", reason: "internal_error" };
     if (session.origin !== origin) return { code: "invalid_origin", reason: "internal_error" };
     try {
-      const key = this.requireCurrentOwnerKey(session.ownerPublicKeyHex);
+      const key = await this.publicOwnerKey(session.networkIdentity);
       if (!key) {
         return { code: "user_rejected", reason: "internal_error" };
       }
       rec.connectAuthBackend = key.backend ?? "software";
     } catch (err) {
       return { code: "user_rejected", reason: "internal_error" };
+    }
+    if (params.appIdentity) {
+      try {
+        const appIdentity = verifyAppIdentityProof(params.appIdentity);
+        this.assertLoginRequirements(params.appIdentity, true);
+        session = { ...session, appIdentity };
+        await this.deps.storageRepository.putConnectSession(session);
+      } catch {
+        return { code: "user_rejected", reason: "internal_error" };
+      }
     }
     rec.connectResumeSnapshot = {
       sessionId: session.sessionId,
@@ -3700,7 +3740,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     ) {
       return { kind: "execute" };
     }
-    // connect.launch 是唯一的非 connectSessionId 业务入口；session 真值
+    // connect.launch 是唯一的非 walletPublicKeyHex 业务入口；session 真值
     // 通过 launchToken 在 `launchTokensByToken` 内取。
     let sessionId: string | undefined;
     if (rec.method === "connect.launch") {
@@ -3712,19 +3752,19 @@ export class ProtocolServiceImpl implements ProtocolService {
       if (!record) {
         return { kind: "fail" };
       }
-      sessionId = record.connectSessionId;
+      sessionId = record.walletPublicKeyHex;
     } else if (rec.method === "channel.publish" || rec.method === "channel.subscription_set") {
-      sessionId = rec.connectSessionId || undefined;
+      sessionId = rec.walletPublicKeyHex || undefined;
     } else {
-      const params = rec.params as { connectSessionId?: string } | undefined;
-      sessionId = params?.connectSessionId;
+      const params = rec.params as { walletPublicKeyHex?: string } | undefined;
+      sessionId = params?.walletPublicKeyHex;
     }
     if (!sessionId) {
       return { kind: "fail" };
     }
     let session: ConnectSessionRecord | null = null;
     try {
-      session = await this.fetchSessionForBinding(sessionId);
+      session = await this.fetchSessionForBinding({ ...rec.networkIdentity, publicKeyHex: sessionId }, rec.origin);
     } catch {
       session = null;
     }
@@ -3780,11 +3820,11 @@ export class ProtocolServiceImpl implements ProtocolService {
   private async runRequest(rec: RequestRecord): Promise<void> {
     rec.abortController = new AbortController();
     try {
-      const boot = rec.connectSessionId ? this.ownerRuntimesBySessionId.get(rec.connectSessionId)?.runtime : undefined;
+      const boot = rec.walletPublicKeyHex ? this.ownerRuntimesBySessionId.get(rec.walletPublicKeyHex)?.runtime : undefined;
       const activeIdentity = boot?.networkIdentity ?? this.requireCurrentOwnerKey(rec.networkIdentity.publicKeyHex);
       if (!activeIdentity || !sameNetworkIdentity(activeIdentity, rec.networkIdentity)) throw new ProtocolValidationError("invalid_request", "Network identity mismatch");
       const result = await this.dispatch(rec);
-      this.rememberChannelSessionFromResult(rec, result);
+      await this.rememberChannelSessionFromResult(rec, result);
       if (
       rec.cancelRequested &&
       (rec.method.startsWith("storage.") || rec.method.startsWith("msfile.")) &&
@@ -3895,16 +3935,16 @@ export class ProtocolServiceImpl implements ProtocolService {
     return null;
   }
 
-  private async requireStorageContext(rec: RequestRecord, connectSessionId: string): Promise<AppStorageClient> {
+  private async requireStorageContext(rec: RequestRecord, walletPublicKeyHex: string): Promise<AppStorageClient> {
     const service = this.currentStorageController();
     if (!service || !this.deps.bindAppStorage) throw protocolError("storage_unavailable", "Storage service is unavailable");
-    const session = await this.requireConnectSession(rec, connectSessionId);
+    const session = await this.requireConnectSession(rec, walletPublicKeyHex);
     if (!session.appIdentity) throw protocolError("storage_identity_required", "Storage requires a verified app identity proof snapshot");
     if (!session.ownerPublicKeyHex) throw protocolError("storage_identity_required", "Storage requires an active owner");
     const summary = await service.summary();
     if (!summary.walletGeneration) throw protocolError("storage_unavailable", "Storage requires an initialized wallet");
     const lifecycle = this.deps.walletState.snapshot();
-    return this.deps.bindAppStorage({ ...session.networkIdentity, connectSessionId: session.sessionId, transportOrigin: rec.origin,
+    return this.deps.bindAppStorage({ ...session.networkIdentity, walletPublicKeyHex: session.ownerPublicKeyHex, transportOrigin: rec.origin,
       appIdentity: session.appIdentity, sessionEpoch: lifecycle.sessionEpoch,
       walletGeneration: summary.walletGeneration, runGeneration: lifecycle.runGeneration,
     });
@@ -3912,38 +3952,38 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   private async executeStorageList(rec: RequestRecord): Promise<StorageListResult> {
     const params = rec.params as import("@keymaster/contracts").StorageListParams;
-    const client = await this.requireStorageContext(rec, params.connectSessionId);
+    const client = await this.requireStorageContext(rec, params.walletPublicKeyHex);
     return client.list( { prefix: params.prefix, cursor: params.cursor, limit: params.limit, signal: rec.abortController?.signal });
   }
 
   private async executeStorageDirectoryCreate(rec: RequestRecord): Promise<StorageDirectoryResult> {
     const params = rec.params as import("@keymaster/contracts").StorageDirectoryParams;
-    const client = await this.requireStorageContext(rec, params.connectSessionId);
+    const client = await this.requireStorageContext(rec, params.walletPublicKeyHex);
     return client.createDirectory( { path: params.path, overwrite: params.overwrite, signal: rec.abortController?.signal });
   }
 
   private async executeStorageDirectoryDelete(rec: RequestRecord): Promise<StorageDirectoryResult> {
     const params = rec.params as import("@keymaster/contracts").StorageDirectoryParams;
-    const client = await this.requireStorageContext(rec, params.connectSessionId);
+    const client = await this.requireStorageContext(rec, params.walletPublicKeyHex);
     return client.deleteDirectory( { path: params.path, signal: rec.abortController?.signal });
   }
 
   private async executeStoragePut(rec: RequestRecord): Promise<StoragePutResult> {
     const params = rec.params as import("@keymaster/contracts").StoragePutParams;
     rec.payloadSize = params.content.bytes.byteLength;
-    const client = await this.requireStorageContext(rec, params.connectSessionId);
+    const client = await this.requireStorageContext(rec, params.walletPublicKeyHex);
     return client.put( { path: params.path, content: params.content, contentType: params.contentType, overwrite: params.overwrite, signal: rec.abortController?.signal });
   }
 
   private async executeStorageGet(rec: RequestRecord): Promise<StorageGetResult> {
     const params = rec.params as import("@keymaster/contracts").StorageGetParams;
-    const client = await this.requireStorageContext(rec, params.connectSessionId);
+    const client = await this.requireStorageContext(rec, params.walletPublicKeyHex);
     return client.getRange( { path: params.path, offset: params.offset, length: params.length, ifMatch: params.ifMatch, signal: rec.abortController?.signal });
   }
 
   private async executeStorageDelete(rec: RequestRecord): Promise<StorageDeleteResult> {
     const params = rec.params as import("@keymaster/contracts").StorageDeleteParams;
-    const client = await this.requireStorageContext(rec, params.connectSessionId);
+    const client = await this.requireStorageContext(rec, params.walletPublicKeyHex);
     return client.delete( { path: params.path, signal: rec.abortController?.signal });
   }
 
@@ -3951,18 +3991,19 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   private async requireMsfileContext(
     rec: RequestRecord,
-    connectSessionId: string
+    walletPublicKeyHex: string
   ): Promise<{ service: MsFileService; context: MsFileConnectAppContext }> {
     const service = this.currentMsfileService();
     if (!service) throw protocolError("msfile_unavailable", "MSFile service is unavailable");
-    const session = await this.requireConnectSession(rec, connectSessionId);
+    const session = await this.requireConnectSession(rec, walletPublicKeyHex);
     if (!session.appIdentity) {
       throw protocolError("msfile_identity_required", "MSFile requires a verified app identity proof snapshot");
     }
     return {
       service,
       context: {
-        connectSessionId: session.sessionId,
+        ...session.networkIdentity,
+        walletPublicKeyHex: session.ownerPublicKeyHex,
         transportOrigin: rec.origin,
         ownerPublicKeyHex: session.ownerPublicKeyHex,
         appIdentity: session.appIdentity
@@ -3972,13 +4013,13 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   private async executeMsfileStat(rec: RequestRecord): Promise<MsFileStatResult> {
     const params = rec.params as import("@keymaster/contracts").MsFileStatParams;
-    const { service, context } = await this.requireMsfileContext(rec, params.connectSessionId);
+    const { service, context } = await this.requireMsfileContext(rec, params.walletPublicKeyHex);
     return service.connect.stat(context, { seedHashHex: params.seedHashHex, signal: rec.abortController?.signal });
   }
 
   private async executeMsfileSeedRead(rec: RequestRecord): Promise<MsFileReadResult> {
     const params = rec.params as import("@keymaster/contracts").MsFileSeedReadParams;
-    const { service, context } = await this.requireMsfileContext(rec, params.connectSessionId);
+    const { service, context } = await this.requireMsfileContext(rec, params.walletPublicKeyHex);
     return service.connect.readSeed(context, {
       sourceId: params.sourceId,
       seedHashHex: params.seedHashHex,
@@ -3988,7 +4029,7 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   private async executeMsfileBlockRead(rec: RequestRecord): Promise<MsFileReadResult> {
     const params = rec.params as import("@keymaster/contracts").MsFileBlockReadParams;
-    const { service, context } = await this.requireMsfileContext(rec, params.connectSessionId);
+    const { service, context } = await this.requireMsfileContext(rec, params.walletPublicKeyHex);
     return service.connect.readBlock(context, {
       sourceId: params.sourceId,
       seedHashHex: params.seedHashHex,
@@ -4009,7 +4050,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 过一次；执行阶段再校验一次防"中段时间窗"内 session 注销 / 失效。
     // 施工单 2026-06-30 002 硬切换：签名 / 公钥派生走统一 owner
     // runtime resolver（`bootstrap_runtime` / `vault_runtime` 来源对外
-    const session = await this.requireConnectSession(rec, params.connectSessionId);
+    const session = await this.requireConnectSession(rec, params.walletPublicKeyHex);
     const publicKeyBytes = await this.fetchPublicKeyBytesWithSession(session);
     const label = session.ownerLabel;
 
@@ -4046,7 +4087,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     // 签名主体公钥取自 session 绑定 owner；走统一 `resolveOwnerRuntime`
     // resolver，两条来源（`bootstrap_runtime` / `vault_runtime`）对外行为一致。
-    const session = await this.requireConnectSession(rec, params.connectSessionId);
+    const session = await this.requireConnectSession(rec, params.walletPublicKeyHex);
     const publicKeyBytes = await this.fetchPublicKeyBytesWithSession(session);
     const contentSha256 = sha256Bytes(new Uint8Array(params.content.bytes));
     const envelopeCbor = cborEncode([
@@ -4070,7 +4111,7 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   private async executeCipherEncrypt(rec: RequestRecord): Promise<CipherEncryptResult> {
     const params = rec.params as CipherEncryptParams;
-    const session = await this.requireConnectSession(rec, params.connectSessionId);
+    const session = await this.requireConnectSession(rec, params.walletPublicKeyHex);
     const siteKey = await this.deriveSiteKeyWithSession(session, rec.origin);
     const inner = cborEncode([
       PROTOCOL_VERSION,
@@ -4087,7 +4128,7 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   private async executeCipherDecrypt(rec: RequestRecord): Promise<CipherDecryptResult> {
     const params = rec.params as CipherDecryptParams;
-    const session = await this.requireConnectSession(rec, params.connectSessionId);
+    const session = await this.requireConnectSession(rec, params.walletPublicKeyHex);
     let siteKey: Uint8Array;
     try {
       siteKey = await this.deriveSiteKeyWithSession(session, rec.origin);
@@ -4166,7 +4207,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     let session: ConnectSessionRecord | null = null;
     try {
-      session = await this.fetchSessionForBinding(sessionId);
+      session = await this.fetchSessionForBinding({ ...rec.networkIdentity, publicKeyHex: sessionId }, rec.origin);
     } catch (err) {
       // K-V 异常：与"K-V unavailable 降级"边界一致——execute 阶段
       // 也走"未查到 session"路径，统一 user_rejected。
@@ -4178,7 +4219,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       // 其它统一 `user_rejected`。
       let raw: ConnectSessionRecord | null = null;
       try {
-        raw = await this.deps.storageRepository.getConnectSession(sessionId);
+        raw = await this.deps.storageRepository.getConnectSession(rec.networkIdentity, rec.origin);
       } catch {
         throw localFailure("internal_error", "connect session storage unavailable");
       }
@@ -4295,7 +4336,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     session: ConnectSessionRecord
   ): Promise<OwnerExecutionRuntime> {
     // 1) bootstrap_runtime 来源：拿当前窗口已注入的 owner runtime。
-    const bootEntry = this.ownerRuntimesBySessionId.get(session.sessionId);
+    const bootEntry = this.ownerRuntimesBySessionId.get(session.ownerPublicKeyHex);
     if (bootEntry) {
       const runtime = bootEntry.runtime;
       // 公钥比较统一 toLowerCase：launcher 端可能用大小写不一。
@@ -4355,16 +4396,16 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 从 `rec` 上拿 connect session 真值（施工单 2026-06-30 002）。
    *
    * `vault.createActiveKeyCrypto(publicKeyHex)`；本单让所有业务方法统一走
-   * `resolveOwnerRuntime` 后，session 真值通过 `rec.connectSessionId`
+   * `resolveOwnerRuntime` 后，session 真值通过 `rec.walletPublicKeyHex`
    * + `fetchSessionForBinding` 取出。
    */
   private async requireSessionFromRec(
     rec: RequestRecord
   ): Promise<ConnectSessionRecord> {
-    if (!rec.connectSessionId) {
-      throw localFailure("internal_error", "rec.connectSessionId missing");
+    if (!rec.walletPublicKeyHex) {
+      throw localFailure("internal_error", "rec.walletPublicKeyHex missing");
     }
-    const session = await this.fetchSessionForBinding(rec.connectSessionId);
+    const session = await this.fetchSessionForBinding({ ...rec.networkIdentity, publicKeyHex: rec.walletPublicKeyHex }, rec.origin);
     if (!session) {
       throw localFailure("internal_error", "connect session not found");
     }
@@ -4478,7 +4519,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       }
     }
     const now = Date.now();
-    const sessionId = this.nextRecordId();
+    const sessionId = await this.connectBindingKey(key, rec.origin);
     const record: ConnectSessionRecord = {
       sessionId,
       origin: rec.origin,
@@ -4497,7 +4538,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     };
     await this.deps.storageRepository.putConnectSessionAndRevokeOriginPeers(record);
     return {
-      connectSessionId: sessionId,
+      walletPublicKeyHex: key.publicKeyHex,
       networkIdentity: validateNetworkIdentity(key),
       ownerPublicKeyHex: key.publicKeyHex,
       resolvedClaims: resolvedClaims,
@@ -4520,7 +4561,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    */
   private async executeConnectResume(rec: RequestRecord): Promise<ConnectResumeResult> {
     const params = rec.params as ConnectResumeParams;
-    const session = await this.requireConnectSession(rec, params.connectSessionId);
+    const session = await this.requireConnectSession(rec, params.walletPublicKeyHex);
     const storageRepository = this.deps.storageRepository;
     if (!storageRepository) {
       throw localFailure("internal_error", "connect.resume: session storage unavailable");
@@ -4534,7 +4575,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const next: ConnectSessionRecord = { ...session, lastUsedAt: now };
     await storageRepository.putConnectSession(next);
     return {
-      connectSessionId: session.sessionId,
+      walletPublicKeyHex: session.ownerPublicKeyHex,
       networkIdentity: session.networkIdentity,
       ownerPublicKeyHex: session.ownerPublicKeyHex,
       resolvedClaims: session.claimsSnapshot,
@@ -4571,7 +4612,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!this.deps.storageRepository) {
       throw localFailure("internal_error", "connect.logout: session storage unavailable");
     }
-    const existing = await this.deps.storageRepository.getConnectSession(params.connectSessionId);
+    const existing = await this.deps.storageRepository.getConnectSession(rec.networkIdentity, rec.origin);
     const now = Date.now();
     let result: ConnectLogoutResult;
     if (!existing) {
@@ -4579,7 +4620,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       // "sessionId 本地丢失 → 不需要 logout"的情况，但即使重复 logout
       // 也不报错。
       result = {
-        connectSessionId: params.connectSessionId,
+        walletPublicKeyHex: params.walletPublicKeyHex,
         revokedAt: now
       };
     } else if (existing.origin !== rec.origin) {
@@ -4587,24 +4628,24 @@ export class ProtocolServiceImpl implements ProtocolService {
     } else if (existing.revokedAt !== null) {
       // 已 revoke 视为幂等成功。
       result = {
-        connectSessionId: existing.sessionId,
+        walletPublicKeyHex: existing.ownerPublicKeyHex,
         revokedAt: existing.revokedAt
       };
     } else {
       const next: ConnectSessionRecord = { ...existing, revokedAt: now };
       await this.deps.storageRepository.putConnectSession(next);
       result = {
-        connectSessionId: existing.sessionId,
+        walletPublicKeyHex: existing.ownerPublicKeyHex,
         revokedAt: now
       };
     }
     // revoke 成功后，立刻清掉当前窗口内该 session 的 bootstrap runtime。
     // 这一步不依赖 vault.lock 成功与否：session 一旦 logout，旧 owner
     // capability 就不应继续常驻内存。
-    this.clearSessionRuntimeBootstrap(result.connectSessionId, "logout");
-    this.priceSubscribedSessionIds.delete(result.connectSessionId);
-    await this.currentStorageController()?.abortSession(result.connectSessionId);
-    await this.currentMsfileService()?.abortSession(result.connectSessionId);
+    this.clearSessionRuntimeBootstrap(result.walletPublicKeyHex, "logout");
+    if (existing) this.priceSubscribedSessionIds.delete(existing.sessionId);
+    await this.currentStorageController()?.abortSession(result.walletPublicKeyHex);
+    await this.currentMsfileService()?.abortSession(result.walletPublicKeyHex);
     // 清掉 popup 当前 unlock runtime。**同步** await：施工单 4.4 + 5.1.3
     // 要求 logout 同时"吊销 session + 清 popup unlock runtime"——
     // 任意一步失败即视为 logout 不完整；fire-and-forget 会让 caller 在
@@ -4686,7 +4727,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     // 校验 session 真值（与 connect.resume 同一路径）：session 不存在 /
     // 已 revoke / origin 不匹配 / owner 不 ready 都拒掉。
-    const session = await this.deps.storageRepository.getConnectSession(record.connectSessionId);
+    const session = await this.deps.storageRepository.getConnectSession(record.networkIdentity, record.appOrigin);
     if (!session) {
       throw localFailure(
         "internal_error",
@@ -4726,7 +4767,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 这样失败可由调用方观察并重试，而不会留下半成功的内存状态。
     this.launchTokensByToken.set(params.launchToken, { ...record, consumed: true });
     return {
-      connectSessionId: session.sessionId,
+      walletPublicKeyHex: session.ownerPublicKeyHex,
       networkIdentity: session.networkIdentity,
       ownerPublicKeyHex: session.ownerPublicKeyHex,
       resolvedClaims: session.claimsSnapshot,
@@ -4743,21 +4784,23 @@ export class ProtocolServiceImpl implements ProtocolService {
    */
 
   private channelCallerFor(context: {
+    networkIdentity: NetworkIdentity;
     origin: string;
     sessionId: string;
     ownerPublicKeyHex: string;
   }): import("@keymaster/contracts").ConnectChannelCaller {
     return {
-      connectSessionId: context.sessionId,
+      ...context.networkIdentity,
+      walletPublicKeyHex: context.ownerPublicKeyHex,
       origin: context.origin,
       ownerPublicKeyHex: context.ownerPublicKeyHex
     };
   }
 
-  private rememberChannelSessionFromResult(
+  private async rememberChannelSessionFromResult(
     rec: RequestRecord,
     result: MethodResult | null
-  ): void {
+  ): Promise<void> {
     if (
       rec.method !== "connect.login" &&
       rec.method !== "connect.resume" &&
@@ -4767,19 +4810,22 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     if (!result || typeof result !== "object") return;
     const value = result as {
-      connectSessionId?: unknown;
+      walletPublicKeyHex?: unknown;
       ownerPublicKeyHex?: unknown;
     };
     if (
-      typeof value.connectSessionId !== "string" ||
-      value.connectSessionId.length === 0 ||
+      typeof value.walletPublicKeyHex !== "string" ||
+      value.walletPublicKeyHex.length === 0 ||
       typeof value.ownerPublicKeyHex !== "string" ||
       value.ownerPublicKeyHex.length === 0
     ) {
       return;
     }
+    const epoch = this.channelSessionEpoch;
+    const session = await this.deps.storageRepository?.getConnectSession(rec.networkIdentity, rec.origin);
+    if (!session || epoch !== this.channelSessionEpoch) return;
     const previous = this.channelSessionBySource.get(rec.source);
-    if (previous && previous.sessionId !== value.connectSessionId) {
+    if (previous && previous.sessionId !== session.sessionId) {
       this.deps.connectChannelRuntime?.release(this.channelCallerFor(previous));
       this.channelSubscriptionsBySessionId.delete(previous.sessionId);
       this.channelQuotaBySessionId.delete(previous.sessionId);
@@ -4787,7 +4833,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.channelSessionBySource.set(rec.source, {
       networkIdentity: rec.networkIdentity,
       origin: rec.origin,
-      sessionId: value.connectSessionId,
+      sessionId: session.sessionId,
       ownerPublicKeyHex: value.ownerPublicKeyHex,
       epoch: this.channelSessionEpoch
     });
@@ -4805,6 +4851,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   private async requireChannelContext(rec: RequestRecord): Promise<{
+    networkIdentity: NetworkIdentity;
     sessionId: string;
     origin: string;
     ownerPublicKeyHex: string;
@@ -4814,12 +4861,12 @@ export class ProtocolServiceImpl implements ProtocolService {
       !context ||
       context.epoch !== this.channelSessionEpoch ||
       context.origin !== rec.origin ||
-      context.sessionId !== rec.connectSessionId ||
+      context.ownerPublicKeyHex !== rec.walletPublicKeyHex ||
       context.ownerPublicKeyHex !== rec.ownerPublicKeyHex
     ) {
       throw localFailure("runtime_missing", "Channel transport session is no longer valid");
     }
-    const session = await this.requireConnectSession(rec, context.sessionId);
+    const session = await this.requireConnectSession(rec, context.ownerPublicKeyHex);
     if (
       session.origin !== context.origin ||
       session.ownerPublicKeyHex !== context.ownerPublicKeyHex ||
@@ -4990,7 +5037,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   /** `price.get` 一次获取当前展示价；能力缺失也返回 0，不报错。 */
   private async executePriceGet(rec: RequestRecord): Promise<PriceGetResult> {
     const params = rec.params as PriceGetParams;
-    await this.requireConnectSession(rec, params.connectSessionId);
+    await this.requireConnectSession(rec, params.walletPublicKeyHex);
     const reader = this.currentPriceReader();
     if (!reader) return { amount: "0.00", unit: "USDT", updatedAtMs: 0 };
     try {
@@ -5008,7 +5055,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   /** `price.subscribe` 把当前会话加入价格推送集合。 */
   private async executePriceSubscribe(rec: RequestRecord): Promise<PriceSubscriptionResult> {
     const params = rec.params as PriceSubscribeParams;
-    const session = await this.requireConnectSession(rec, params.connectSessionId);
+    const session = await this.requireConnectSession(rec, params.walletPublicKeyHex);
     this.priceSubscribedSessionIds.add(session.sessionId);
     this.ensurePriceReaderSubscription();
     return { subscribed: true };
@@ -5017,7 +5064,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   /** `price.unsubscribe` 把当前会话移出价格推送集合。 */
   private async executePriceUnsubscribe(rec: RequestRecord): Promise<PriceSubscriptionResult> {
     const params = rec.params as PriceSubscribeParams;
-    const session = await this.requireConnectSession(rec, params.connectSessionId);
+    const session = await this.requireConnectSession(rec, params.walletPublicKeyHex);
     this.priceSubscribedSessionIds.delete(session.sessionId);
     return { subscribed: false };
   }
@@ -5030,7 +5077,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
   private async executePaymentChannelRegister(rec: RequestRecord): Promise<PaymentChannelRegisterResult> {
     const params = rec.params as PaymentChannelRegisterParams;
-    const session = await this.requireConnectSession(rec, params.connectSessionId);
+    const session = await this.requireConnectSession(rec, params.walletPublicKeyHex);
     this.assertSessionOwnerIsActive(session);
     const owner = await this.paymentOwner(session);
     const network = params.assetId === "bsv-testnet" ? "test" : "main";
@@ -5038,7 +5085,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const channelId = await appPaymentChannelId(owner, params.channelName, params.paymentType, network);
     // 注册只建立零额度渠道。owner 不取 App 自报，额度仍只由钱包设置/设备确认。
     await this.deps.vault.requestPayment({action: "register", id: channelId, owner, kind: "app", network, paymentType: params.paymentType});
-    await this.requireConnectSession(rec, params.connectSessionId);
+    await this.requireConnectSession(rec, params.walletPublicKeyHex);
     this.assertSessionOwnerIsActive(session);
     return {channelId};
   }
@@ -5063,7 +5110,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       // 不再读全局 active key。execute 阶段先 requireConnectSession 校验
       // session 仍有效，再把 session 绑定的 owner public key 交给
       // 走选币 + 签名）。
-      const session = await this.requireConnectSession(rec, params.connectSessionId);
+      const session = await this.requireConnectSession(rec, params.walletPublicKeyHex);
       const ownerPublicKeyHex = session.ownerPublicKeyHex;
       // 硬切换 002 收尾：protocol 层显式校验 session owner == 当前
       // active key。硬门禁（`walletState.openOwnerAppStore` 要求
@@ -5143,7 +5190,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     try {
       // 施工单 2026-06-28 002 硬切换：feepool 走 session 绑定 owner；
       // poolKey 补 ownerPublicKeyHex 维度（不再仅按 origin + counterparty）。
-      const session = await this.requireConnectSession(rec, params.connectSessionId);
+      const session = await this.requireConnectSession(rec, params.walletPublicKeyHex);
       const ownerPublicKeyHex = session.ownerPublicKeyHex;
       // 硬切换 002 收尾：feepool.prepare 会通过 `buildAndMaybeBuildBaseTx`
       // 走 `p2pkhService.listUtxos({ ownerPublicKeyHex })` 取 value。协议
@@ -5359,14 +5406,14 @@ export class ProtocolServiceImpl implements ProtocolService {
       }
 
       // 关键（施工单 2026-06-28 002 硬切换）：pending op 必须绑定
-      // connectSessionId + ownerPublicKeyHex。commit 阶段按 origin +
-      // connectSessionId + ownerPublicKeyHex + counterpartyPublicKeyHex
+      // walletPublicKeyHex + ownerPublicKeyHex。commit 阶段按 origin +
+      // walletPublicKeyHex + ownerPublicKeyHex + counterpartyPublicKeyHex
       // 四元组校验 op，禁止跨 session / 跨 owner 复用 operationId。
       this.pendingOps.set(operationId, {
         operationId,
         channelId: params.channelId,
         origin: rec.origin,
-        connectSessionId: rec.connectSessionId,
+        walletPublicKeyHex: rec.walletPublicKeyHex,
         ownerPublicKeyHex,
         counterpartyPublicKeyHex: params.counterpartyPublicKeyHex,
         assetId: publicAssetId,
@@ -5515,9 +5562,9 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     try {
       // 施工单 2026-06-28 002 硬切换：feepool.commit 必须按 origin +
-      // connectSessionId + ownerPublicKeyHex + counterpartyPublicKeyHex
+      // walletPublicKeyHex + ownerPublicKeyHex + counterpartyPublicKeyHex
       // 四元组校验 pending op，禁止跨 session / 跨 owner 复用 operationId。
-      const session = await this.requireConnectSession(rec, params.connectSessionId);
+      const session = await this.requireConnectSession(rec, params.walletPublicKeyHex);
       const op = this.pendingOps.get(params.operationId);
       if (!op) {
         throw localFailure("unknown_operation", "operationId not found in current session");
@@ -5526,7 +5573,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         throw localFailure("cross_origin_operation", "operationId from a different origin");
       }
       if (op.channelId !== params.channelId) throw localFailure("internal_error", "operationId bound to a different payment channel");
-      if (op.connectSessionId !== session.sessionId) {
+      if (op.walletPublicKeyHex !== session.ownerPublicKeyHex) {
         throw localFailure("internal_error", "operationId from a different connect session");
       }
       if (op.ownerPublicKeyHex !== session.ownerPublicKeyHex) {
@@ -5953,7 +6000,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 把 RequestRecord 投影成 ProtocolCommandRecord，并 upsert。
    *
    * 关键（施工单 2026-06-27 002 反馈修复 + 施工单 2026-06-28 002 硬切换）：
-   *   - `connectSessionId` + `ownerPublicKeyHex` 从 `rec` 字段读取——即 record
+   *   - `walletPublicKeyHex` + `ownerPublicKeyHex` 从 `rec` 字段读取——即 record
    *     创建时快照下来的值，**不**再读 `walletState.snapshot()` / 钱包全局
    *     active key。这样符合 contract `ProtocolCommandRecord.ownerPublicKeyHex`
    *     注释："record 在创建时快照的 owner public key hex"。
@@ -6000,7 +6047,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       claimsSummary: this.summarizeClaims(rec.params),
       contentType: this.summarizeContentType(rec.params),
       payloadSize: rec.payloadSize ?? this.summarizePayloadSize(rec.params),
-      connectSessionId: rec.connectSessionId,
+      walletPublicKeyHex: rec.walletPublicKeyHex,
       ownerPublicKeyHex: rec.ownerPublicKeyHex,
       createdAt: rec.createdAt,
       updatedAt: rec.updatedAt,

@@ -33,7 +33,7 @@ function ownerOperation(
   return {
     ...operation,
     ownerPublicKeyHex: caller.ownerPublicKeyHex,
-    caller: { kind: "connect", connectSessionId: caller.connectSessionId, origin: caller.origin }
+    caller: { kind: "connect", bsvNetwork: caller.bsvNetwork, publicKeyHex: caller.publicKeyHex, walletPublicKeyHex: caller.walletPublicKeyHex, origin: caller.origin }
   };
 }
 
@@ -54,7 +54,7 @@ export function createConnectChannelRuntime(
       const operation: CoordinatorChannelOperation = {
         type: "subscription-set",
         ownerPublicKeyHex: caller.ownerPublicKeyHex,
-        caller: { kind: "connect", connectSessionId: caller.connectSessionId, origin: caller.origin },
+        caller: { kind: "connect", bsvNetwork: caller.bsvNetwork, publicKeyHex: caller.publicKeyHex, walletPublicKeyHex: caller.walletPublicKeyHex, origin: caller.origin },
         channels: [...channels],
       };
       return unwrap(await coordinator.channelOperation(operation), "Channel subscription set") as ChannelSubscriptionSetResult;
@@ -63,7 +63,7 @@ export function createConnectChannelRuntime(
       const operation: CoordinatorChannelOperation = {
         type: "release",
         ownerPublicKeyHex: caller.ownerPublicKeyHex,
-        caller: { kind: "connect", connectSessionId: caller.connectSessionId, origin: caller.origin },
+        caller: { kind: "connect", bsvNetwork: caller.bsvNetwork, publicKeyHex: caller.publicKeyHex, walletPublicKeyHex: caller.walletPublicKeyHex, origin: caller.origin },
       };
       void coordinator.channelOperation(operation).catch(() => undefined);
     },

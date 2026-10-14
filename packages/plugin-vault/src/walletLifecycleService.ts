@@ -5,8 +5,7 @@
 // 也不决定写入授权。
 //
 // 三个关键约束在这里落地：
-//   - 初始化是**一次** WalletStore.batch：KeyHold、.keymaster/meta 和必要初始
-//     系统记录同事务提交，事务完成才算成功；取消或失败不留半成品。
+//   - 初始化是**一次** WalletStore.batch：仅最终 Key 文件同事务提交，事务完成才算成功；取消或失败不留半成品。
 //   - 每个句柄绑定钱包身份世代、会话 epoch 和 Worker 运行世代；重置、锁定和
 //     Worker 重启都会改变其中一项，旧句柄和迟到结果在这里被拒绝。
 //   - 重置先撤销授权，再原子清空新格式数据；失败不报告完成，且旧授权不因
@@ -21,38 +20,29 @@ import type {
   WalletKeySummary,
   WalletLifecycleEvent,
   WalletLifecycleService,
-  WalletMetaV1,
   WalletUnlockResult,
   WalletUserFacingError,
 } from "@keymaster/contracts";
 import {
   validateBsvNetwork,
   KEYHOLD_LIMITS,
-  WALLET_CURRENT_SCHEMA_VERSION,
-  WALLET_META_FORMAT,
-  WALLET_META_PATH,
-  validateWalletMeta,
 } from "@keymaster/contracts";
 import * as secp256k1 from "@noble/secp256k1";
 import type { WalletVaultLifecycleStore } from "@keymaster/contracts/storage-internal";
 import { validateHardwareKeyDocument, type HardwareKeyDocumentV1 } from "@keymaster/vaultlink-integration";
-import { parseMigrationJournal, type MigrationJournal } from "@keymaster/vaultlink-integration/migration";
+
 import type { WalletKeyRepository } from "./walletKeyRepository.js";
 import { createKeyHoldDocument, serializeKeyHoldDocument } from "./keyholdDocument.js";
-import { StorageRuntimeError, storageErrorCode, WALLET_INITIALIZATION_PATH } from "@keymaster/contracts/storage-internal";
+import { StorageRuntimeError, storageErrorCode } from "@keymaster/contracts/storage-internal";
 
 /** 解锁后建立的会话世代前缀。 */
 const SESSION_EPOCH_PATTERN = /^[0-9a-f-]{36}$/u;
 
 export interface WalletLifecycleDeps {
-  /** Fixed-path public migration record; only the trusted bootstrap port can read it. */
-  readMigration?: () => Promise<Uint8Array | undefined>;
   /** 正式本地介质。 */
   store: WalletVaultLifecycleStore;
   /** 固定路径的单 Key 仓储；只用于解锁、改密、改名和导出。 */
   keys: WalletKeyRepository;
-  /** 生成新的钱包身份世代。 */
-  generateWalletGeneration: () => string;
   /** 生成会话 epoch。 */
   generateSessionEpoch: () => string;
   /** 生成公开地址（用于 Key 摘要展示）。 */
@@ -143,7 +133,7 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
   /** 当前钱包身份世代；未初始化时为空串。 */
   walletGeneration(): string;
   /** Worker 内部：调用方已完成设备配对与持有权证明。 */
-  initializeHardware(document: HardwareKeyDocumentV1): Promise<WalletMetaV1>;
+  initializeHardware(document: HardwareKeyDocumentV1): Promise<{ walletGeneration: string }>;
   /** 校验某个 grant 的世代是否仍然是当前的。 */
   isGrantLive(input: { walletGeneration: string; sessionEpoch: string; runGeneration: string }): boolean;
   /** 撤销指定 App 的授权并清空它的独立目录。 */
@@ -158,132 +148,26 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
     deps.publish(event);
   };
 
-  async function readMetaBytes(): Promise<WalletMetaV1 | undefined> {
-    const record = await deps.store.readMeta();
-    if (!record) return undefined;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(record.bytes));
-    } catch {
-      return undefined;
-    }
-    try {
-      return validateWalletMeta(parsed);
-    } catch {
-      return undefined;
-    }
+  function identityBinding(key: { bsvNetwork: string; publicKeyHex: string }): string {
+    return key.bsvNetwork + "/" + key.publicKeyHex;
   }
 
-  /**
-   * 冷启动：只读 meta 与固定 KeyHold。
-   *
-   * 判定规则（缺一不可）：
-   *   - 两项都不存在 → uninitialized；
-   *   - meta 存在但标记未初始化、且没有 KeyHold → uninitialized（重置墓碑）；
-   *   - 两项都在且合法 → ready；
-   *   - 只有一项存在，或存在但不可解析 → corrupt；
-   *   - meta 的 schemaVersion 高于当前实现 → unsupported。
-   *
-   * corrupt 与 unsupported 都不允许静默创建空钱包：那样会用默认值覆盖仍可能
-   * 可恢复的数据。
-   */
   async function coldStart(): Promise<WalletColdStartSnapshot> {
-    let migration: MigrationJournal | undefined;
     try {
-      const bytes = await deps.readMigration?.();
-      if (bytes) migration = parseMigrationJournal(bytes);
-    } catch {
-      walletGeneration = "";
-      return { state: "corrupt", reason: "Backend migration record is unreadable; recovery is required" };
-    }
-    if (migration && migration.phase !== "complete") {
-      walletGeneration = migration.walletGeneration;
-      return { state: "corrupt", reason: `Backend migration ${migration.migrationId} is unfinished (${migration.phase}); recover this migration before unlocking` };
-    }
-    const metaRecord = await deps.store.readMeta();
-    let meta: WalletMetaV1 | undefined;
-    let metaCorrupt = false;
-    if (metaRecord) {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(metaRecord.bytes));
-      } catch {
-        metaCorrupt = true;
-      }
-      if (!metaCorrupt) {
-        try {
-          meta = validateWalletMeta(parsed);
-        } catch {
-          metaCorrupt = true;
-        }
-      }
-    }
-
-    let key: WalletColdStartSnapshot["key"];
-    let keyPresent = false;
-    let keyCorrupt = false;
-    let identityUpgradeReason: string | undefined;
-    try {
-      const keyHold = await deps.keys.read();
-      if (keyHold) {
-        keyPresent = true;
-        key = { bsvNetwork: keyHold.document.bsvNetwork, publicKeyHex: keyHold.document.publicKeyHex, label: keyHold.document.label, backend: keyHold.backend };
-        if (keyHold.backend === "hardware" && keyHold.document.walletGeneration !== meta?.walletGeneration) {
-          keyCorrupt = true;
-        }
-      }
+      const file = await deps.keys.read();
+      await deps.store.cleanupLegacyMarkers?.();
+      if (!file) { walletGeneration = ""; return { state: "uninitialized" }; }
+      walletGeneration = identityBinding(file.document);
+      return { state: "ready", walletGeneration, key: {
+        bsvNetwork: file.document.bsvNetwork, publicKeyHex: file.document.publicKeyHex,
+        label: file.document.label, backend: file.backend,
+      } };
     } catch (error) {
-      keyPresent = true;
-      keyCorrupt = true;
-      if(error instanceof Error && error.message === "Wallet network is missing; explicit identity upgrade is required") identityUpgradeReason = error.message;
-    }
-
-    if (migration && (!meta?.initialized || migration.walletGeneration !== meta.walletGeneration
-      || migration.bsvNetwork !== key?.bsvNetwork || migration.publicKeyHex !== key?.publicKeyHex || migration.target !== key?.backend)) {
-      walletGeneration = meta?.walletGeneration ?? "";
-      return { state: "corrupt", ...(meta ? { meta } : {}), reason: "Completed backend migration does not match the current wallet" };
-    }
-
-    if (!metaRecord && !keyPresent) {
       walletGeneration = "";
-      return { state: "uninitialized" };
+      return { state: "corrupt", reason: error instanceof Error ? error.message : "Wallet Key is unreadable" };
     }
-    // 重置会原子清空数据并留下一份 initialized:false 的 meta 作为墓碑。这个
-    // 组合是「有意清空」的证据，不是损坏：判成 corrupt 会让用户重置后永远
-    // 无法重新创建或导入，也违背「重置成功后回到未初始化状态」。
-    if (meta && !meta.initialized && !keyPresent && !metaCorrupt && !keyCorrupt) {
-      walletGeneration = "";
-      return { state: "uninitialized" };
-    }
-    if (metaCorrupt || keyCorrupt || (metaRecord && !meta) || (!metaRecord && keyPresent) || (meta && !meta.initialized && keyPresent)) {
-      walletGeneration = meta?.walletGeneration ?? "";
-      return {
-        state: "corrupt",
-        ...(meta === undefined ? {} : { meta }),
-        reason: identityUpgradeReason ?? (metaCorrupt || keyCorrupt ? "wallet meta or key hold is unreadable" : "wallet initialization record is incomplete"),
-      };
-    }
-    if (!meta) {
-      walletGeneration = "";
-      return { state: "corrupt", reason: "wallet meta is missing" };
-    }
-    if (meta.schemaVersion > WALLET_CURRENT_SCHEMA_VERSION) {
-      walletGeneration = meta.walletGeneration;
-      return {
-        state: "unsupported",
-        meta,
-        reason: `local schema v${meta.schemaVersion} is newer than this build`,
-      };
-    }
-    if (!keyPresent) {
-      walletGeneration = meta.walletGeneration;
-      return { state: "corrupt", meta, reason: "key hold is missing" };
-    }
-    walletGeneration = meta.walletGeneration;
-    return { state: "ready", meta, ...(key === undefined ? {} : { key }) };
   }
 
-  /** Key 摘要的公钥/地址/能力组装。 */
   function summarize(input: {
     bsvNetwork: import("@keymaster/contracts").BsvNetwork;
     publicKeyHex: string;
@@ -308,26 +192,20 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
   /**
    * 创建或导入唯一 Key。
    *
-   * KeyHold 字节、meta 与初始系统记录在**同一个** WalletStore.batch 内提交。
+   * 最终 Key 字节在 WalletStore.batch 中原子提交。
    * 失败或取消时整批 abort，IndexedDB 里不会留下可被当作完整钱包使用的
    * 半成品。
    */
-  async function initializeHardware(candidate: HardwareKeyDocumentV1): Promise<WalletMetaV1> {
+  async function initializeHardware(candidate: HardwareKeyDocumentV1): Promise<{ walletGeneration: string }> {
     const document = validateHardwareKeyDocument(candidate);
     secp256k1.Point.fromHex(document.publicKeyHex);
     if ((await coldStart()).state !== "uninitialized") throw new StorageRuntimeError("storage_conflict", "Wallet already has a Key");
-    const createdAt = new Date(now()).toISOString();
-    const meta: WalletMetaV1 = {format: WALLET_META_FORMAT, version: 1, schemaVersion: WALLET_CURRENT_SCHEMA_VERSION,
-      initialized: true, walletGeneration: document.walletGeneration, createdAt};
-    await deps.store.batch({operations: [
-      {type: "put", path: "key.json", bytes: encode(document), contentType: "application/json"},
-      {type: "put", path: WALLET_META_PATH, bytes: encode(meta), contentType: "application/json"},
-      {type: "put", path: WALLET_INITIALIZATION_PATH, bytes: encode({format: "keymaster.wallet-initialization", version: 1,
-        initializedAt: createdAt, walletGeneration: document.walletGeneration}), contentType: "application/json"},
-    ], conditions: [{path: "key.json", ifNoneMatch: true}]});
-    walletGeneration = document.walletGeneration;
-    emit({type: "initialized", walletGeneration});
-    return meta;
+    await deps.store.batch({ operations: [
+      { type: "put", path: "key.json", bytes: encode(document), contentType: "application/json" },
+    ], conditions: [{ path: "key.json", ifNoneMatch: true }] });
+    walletGeneration = identityBinding(document);
+    emit({ type: "initialized", walletGeneration });
+    return { walletGeneration };
   }
 
   async function initialize(plan: WalletInitializePlan): Promise<WalletInitializeResult> {
@@ -432,40 +310,14 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
       };
     }
 
-    const walletIdentity = deps.generateWalletGeneration();
-    const meta: WalletMetaV1 = {
-      format: WALLET_META_FORMAT,
-      version: 1,
-      schemaVersion: WALLET_CURRENT_SCHEMA_VERSION,
-      initialized: true,
-      walletGeneration: walletIdentity,
-      createdAt,
-    };
+    const walletIdentity = draft.bsvNetwork + "/" + publicKeyHex;
 
     try {
       // 唯一的提交边界：KeyHold、meta 与初始化记录同事务落盘。
       // 条件创建保证并发初始化只有一个成功，另一方得到 conflict 而不是覆盖。
-      await deps.store.batch({
-        operations: [
-          { type: "put", path: "key.json", bytes: keyHoldBytes, contentType: "application/json" },
-          { type: "put", path: WALLET_META_PATH, bytes: encode(meta), contentType: "application/json" },
-          {
-            type: "put",
-            path: WALLET_INITIALIZATION_PATH,
-            bytes: encode({
-              format: "keymaster.wallet-initialization",
-              version: 1,
-              initializedAt: createdAt,
-              walletGeneration: walletIdentity,
-            }),
-            contentType: "application/json",
-          },
-        ],
-        // 条件创建只判 KeyHold 是否缺席：这才是「唯一 Key 已被创建」的真值。
-        // meta 不参与条件，因为重置会主动留下一份 initialized:false 的墓碑，
-        // 把它也要求为缺席会让重置之后的初始化永远冲突。
-        conditions: [{ path: "key.json", ifNoneMatch: true }],
-      });
+      await deps.store.batch({ operations: [
+        { type: "put", path: "key.json", bytes: keyHoldBytes, contentType: "application/json" },
+      ], conditions: [{ path: "key.json", ifNoneMatch: true }] });
     } catch (caught) {
       privateKeyBytes.fill(0);
       const code = errorCode(caught);
@@ -540,23 +392,23 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
       // 每次解锁都换新 epoch：旧 grant、任务和句柄立即失效。
       deps.establishSession({
         sessionEpoch,
-        walletGeneration: snapshot.meta?.walletGeneration ?? walletGeneration,
+        walletGeneration: snapshot.walletGeneration ?? walletGeneration,
         publicKeyHex: unlocked.document.publicKeyHex,
       });
       // 认证通过后才把私钥副本交给 Worker；本方法随即清零，不向外泄漏。
       // 交接的是独占副本：下面的 finally 只清零本服务的缓冲区。
       deps.adoptUnlockedKey?.({
-        identity: { bsvNetwork: unlocked.document.bsvNetwork, publicKeyHex: unlocked.document.publicKeyHex, label: unlocked.document.label, capabilities: ["p2pkh"], createdAt: snapshot.meta?.createdAt ?? "" },
+        identity: { bsvNetwork: unlocked.document.bsvNetwork, publicKeyHex: unlocked.document.publicKeyHex, label: unlocked.document.label, capabilities: ["p2pkh"], createdAt: new Date(now()).toISOString() },
         privateKeyBytes: new Uint8Array(unlocked.privateKeyBytes),
         publicKeyHex: unlocked.document.publicKeyHex,
-        walletGeneration: snapshot.meta?.walletGeneration ?? walletGeneration,
+        walletGeneration: snapshot.walletGeneration ?? walletGeneration,
         sessionEpoch,
       });
-      emit({ type: "unlocked", sessionEpoch, walletGeneration: snapshot.meta?.walletGeneration ?? walletGeneration });
+      emit({ type: "unlocked", sessionEpoch, walletGeneration: snapshot.walletGeneration ?? walletGeneration });
       return {
         bsvNetwork: unlocked.document.bsvNetwork,
         sessionEpoch,
-        walletGeneration: snapshot.meta?.walletGeneration ?? walletGeneration,
+        walletGeneration: snapshot.walletGeneration ?? walletGeneration,
         publicKeyHex: unlocked.document.publicKeyHex,
       };
     } finally {
@@ -612,7 +464,7 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
 
   async function rename(label: string): Promise<void> {
     const updated = await deps.keys.rename(label);
-    walletGeneration = walletGeneration || (await readMetaBytes())?.walletGeneration || "";
+    walletGeneration = identityBinding(updated.document);
     emit({ type: "renamed", label: updated.document.label });
   }
 
@@ -640,7 +492,7 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
     // 先撤销会话、grant 与任务权限。
     deps.revokeGrants("reset");
     const cleared = await deps.store.resetWallet();
-    walletGeneration = cleared.walletGeneration;
+    walletGeneration = "";
     emit({ type: "reset", walletGeneration: cleared.walletGeneration });
     return cleared;
   }

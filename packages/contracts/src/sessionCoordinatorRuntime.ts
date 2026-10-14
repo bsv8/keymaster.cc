@@ -1133,7 +1133,8 @@ function parseMsFileConnectContext(value: unknown): MsFileConnectAppContext {
   const ownerPublicKeyHex = text(context.ownerPublicKeyHex, "MSFile connect ownerPublicKeyHex", 66);
   if (!isValidMsFileSupplierPublicKeyHex(ownerPublicKeyHex)) throw new TypeError("Coordinator MSFile connect owner public key is invalid");
   return {
-    connectSessionId: text(context.connectSessionId, "MSFile connect connectSessionId", 256),
+    ...validateNetworkIdentity(context),
+    walletPublicKeyHex: text(context.walletPublicKeyHex, "MSFile connect walletPublicKeyHex", 256),
     transportOrigin: text(context.transportOrigin, "MSFile connect transportOrigin", 2_048),
     ownerPublicKeyHex,
     appIdentity: parseAppIdentitySnapshot(context.appIdentity),
@@ -1338,7 +1339,7 @@ function parseChannelCaller(value: unknown): ChannelOperationCaller {
   const kind = text(caller.kind, "Channel operation.caller.kind", 32);
   if (kind === "plugin") return { kind: "plugin", pluginId: text(caller.pluginId, "Channel operation.caller.pluginId", 256) };
   if (kind === "system") return { kind: "system", systemId: text(caller.systemId, "Channel operation.caller.systemId", 256) };
-  if (kind === "connect") return { kind: "connect", connectSessionId: text(caller.connectSessionId, "Channel operation.caller.connectSessionId", 256), origin: text(caller.origin, "Channel operation.caller.origin", 2_048) };
+  if (kind === "connect") return { kind: "connect", ...validateNetworkIdentity(caller), walletPublicKeyHex: text(caller.walletPublicKeyHex, "Channel operation.caller.walletPublicKeyHex", 256), origin: text(caller.origin, "Channel operation.caller.origin", 2_048) };
   throw new TypeError("Coordinator Channel caller kind is unsupported");
 }
 
@@ -1496,11 +1497,11 @@ function parseCoordinatorRequest(value: unknown): CoordinatorRpcRequest {
     }
     case "session.activity":
       return { kind };
-    case "storage.grant": return { kind, connectSessionId: text(request.connectSessionId, "storage.grant.connectSessionId", 256), expectedSessionEpoch: epoch("expectedSessionEpoch") };
+    case "storage.grant": return { kind, networkIdentity: validateNetworkIdentity(request.networkIdentity), transportOrigin: text(request.transportOrigin, "storage.grant.transportOrigin", 2048), walletPublicKeyHex: text(request.walletPublicKeyHex, "storage.grant.walletPublicKeyHex", 256), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "storage.control": return { kind, control: parseStorageControl(request.control), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "storage.data": return { kind, data: parseStorageData(request.data), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "storage.cancel": return { kind, targetRequestId: target() };
-    case "storage.session.abort": return { kind, connectSessionId: text(request.connectSessionId, "storage.session.abort.connectSessionId", 256), expectedSessionEpoch: epoch("expectedSessionEpoch") };
+    case "storage.session.abort": return { kind, walletPublicKeyHex: text(request.walletPublicKeyHex, "storage.session.abort.walletPublicKeyHex", 256), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "storage.owner.bind":
       return { kind, pluginId: text(request.pluginId, kind + ".pluginId", 256), declaration: parseStorageDeclaration(request.declaration, kind + ".declaration"), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "storage.platform.bind":
@@ -1523,7 +1524,7 @@ function parseCoordinatorRequest(value: unknown): CoordinatorRpcRequest {
     case "msfile.control": return { kind, control: parseMsFileControl(request.control), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "msfile.data": return { kind, data: parseMsFileData(request.data), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "msfile.cancel": return { kind, targetRequestId: target() };
-    case "msfile.session.abort": return { kind, connectSessionId: text(request.connectSessionId, "msfile.session.abort.connectSessionId", 256), expectedSessionEpoch: epoch("expectedSessionEpoch") };
+    case "msfile.session.abort": return { kind, walletPublicKeyHex: text(request.walletPublicKeyHex, "msfile.session.abort.walletPublicKeyHex", 256), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "window-p2p.executor.acquire": {
       const executorPort = request.executorPort === undefined ? undefined : messagePortValue(request.executorPort, "window-p2p.executor.acquire.executorPort");
       return { kind, ownerPublicKeyHex: text(request.ownerPublicKeyHex, kind + ".ownerPublicKeyHex", 256), expectedSessionEpoch: epoch("expectedSessionEpoch"), ...(executorPort === undefined ? {} : { executorPort }) };
@@ -1956,17 +1957,14 @@ function parseWalletColdStartSnapshot(value: unknown, field: string): WalletCold
   const result = expectRecord(value, field);
   const state = enumValue(result.state, ["uninitialized", "ready", "corrupt", "unsupported"] as const, field + ".state");
   const reason = optionalText(result.reason, field + ".reason", 512);
-  let meta: WalletColdStartSnapshot["meta"];
-  if (result.meta !== undefined) {
-    try { meta = validateWalletMeta(result.meta); } catch { throw new TypeError(`Coordinator ${field}.meta is invalid`); }
-  }
+  const walletGeneration = optionalText(result.walletGeneration, field + ".walletGeneration", 256);
   let key: WalletColdStartSnapshot["key"];
   if (result.key !== undefined) {
     const record = expectRecord(result.key, field + ".key");
     const backend = record.backend === undefined ? undefined : enumValue(record.backend, ["software", "hardware"] as const, field + ".key.backend");
     key = { bsvNetwork: enumValue(record.bsvNetwork, ["main", "test"] as const, field + ".key.bsvNetwork"), publicKeyHex: text(record.publicKeyHex, field + ".key.publicKeyHex", 66), label: text(record.label, field + ".key.label", 1024), ...(backend === undefined ? {} : { backend }) };
   }
-  return { state, ...(meta === undefined ? {} : { meta }), ...(key === undefined ? {} : { key }), ...(reason === undefined ? {} : { reason }) };
+  return { state, ...(walletGeneration === undefined ? {} : { walletGeneration }), ...(key === undefined ? {} : { key }), ...(reason === undefined ? {} : { reason }) };
 }
 
 function parseWalletUnlockResult(value: unknown, field: string): WalletUnlockResult {
