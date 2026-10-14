@@ -24,7 +24,7 @@
     "@multiformats/multiaddr": "13.0.3",
     "bitcoin-libp2p": "0.3.1",
     "bsv8-channel-protocol": "0.6.0",
-    "go-bitfs": "0.3.2",
+    "go-bitfs": "0.3.3",
     "@keymaster/vaultlink-integration": "workspace:*"
   },
   "scripts": {}

@@ -167,8 +167,9 @@ export async function inspectBitfsAuthorization(raw, previous, own, auth) {
     const a = object(auth, ['document', 'refundTemplate']), document = bytes(a.document), refund = bytes(a.refundTemplate);
     const wire = await inspectBitfsWire({ kind: 5, document }, own), v = authorization(document);
     const review = await inspectFeePool(raw, previous, own, 'bitfs', 'state', 'payer'), baseline = await inspectFeePool(refund, previous, own, 'bitfs', 'state', 'payer');
+    // 普通累计付款保留开池退款锁；不得通过 Kind 5 授权提前清零锁定值。
     const target = parseTransaction(raw), template = parseTransaction(refund);
-    if (review.paid !== uint(v[3]) || target.inputs[0].sequence !== Number(uint(v[2])) || target.outputs.length !== 3 || target.outputs[2].satoshis !== 0n || target.locktime !== 0 || baseline.paid !== 0n || template.inputs[0].sequence >= target.inputs[0].sequence || !equal(await sha256d(refund), bytes(v[1])))
+    if (review.paid !== uint(v[3]) || target.inputs[0].sequence !== Number(uint(v[2])) || target.outputs.length !== 3 || target.outputs[2].satoshis !== 0n || target.locktime !== template.locktime || baseline.paid !== 0n || template.inputs[0].sequence >= target.inputs[0].sequence || !equal(await sha256d(refund), bytes(v[1])))
         fail('invalid-authorization');
     return { ...review, digests: [wire.digest] };
 }

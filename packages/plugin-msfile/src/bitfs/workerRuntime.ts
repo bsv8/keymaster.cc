@@ -1110,6 +1110,7 @@ async function ensureMsfileBitfsBuyerProtocol(
     downloadPlan,
     selectionPriority: buyerSettings.sellerSelectionPriority,
     blocksPerBatch: buyerSettings.blocksPerBatch,
+    refundDelayBlocks: buyerSettings.refundDelayBlocks,
     onDownloadPlanChanged() {
       setTimeout(() => {
         for (const [candidateSessionId, candidateLink] of msfileBitfsWebRtcBuyerLinks) {
@@ -2341,6 +2342,7 @@ async function configureMsfileSellerRuntime(
        runtimeInstanceId: () => runtimeInstanceId,
        nowMs: () => Date.now(),
       blockHeight: () => deps.blockHeight(deps.network()),
+      minRefundDelayBlocks: () => service.describeState().sellerSettings.minRefundDelayBlocks,
       onPaymentTransaction: async ({ txid, rawTxHex }) => {
         const wocConfig = deps.woc()?.getConfig();
         await writeBitfsDiagnostic("seller-payment-transaction.json", {

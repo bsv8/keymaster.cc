@@ -49,10 +49,11 @@ export interface MsFileStatusResourceSnapshot {
 type AmountDraft = { text: string; unlimited: boolean };
 type ConcurrencyField = keyof MsFileReadConcurrencySettings;
 type ConcurrencyDraft = Record<ConcurrencyField, string>;
-type BitfsBuyerSettingsDraft = Omit<MsFileBitfsBuyerSettings, "maxConcurrentDownloads" | "maxConcurrentSellerSessions" | "blocksPerBatch"> & {
+type BitfsBuyerSettingsDraft = Omit<MsFileBitfsBuyerSettings, "maxConcurrentDownloads" | "maxConcurrentSellerSessions" | "blocksPerBatch" | "refundDelayBlocks"> & {
   maxConcurrentDownloads: string;
   maxConcurrentSellerSessions: string;
   blocksPerBatch: string;
+  refundDelayBlocks: string;
 };
 
 /** 卖方状态缺省文案；正式界面优先使用 i18n 资源。 */
@@ -150,6 +151,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
     maxConcurrentDownloads: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.maxConcurrentDownloads),
     maxConcurrentSellerSessions: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.maxConcurrentSellerSessions),
     blocksPerBatch: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.blocksPerBatch),
+    refundDelayBlocks: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.refundDelayBlocks),
   });
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [supplierEditorOpen, setSupplierEditorOpen] = useState(false);
@@ -166,6 +168,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
         maxConcurrentDownloads: String(buyerSettings.maxConcurrentDownloads),
         maxConcurrentSellerSessions: String(buyerSettings.maxConcurrentSellerSessions),
         blocksPerBatch: String(buyerSettings.blocksPerBatch),
+        refundDelayBlocks: String(buyerSettings.refundDelayBlocks),
       });
       setAuthorizations(await service.listAppAuthorizations());
       setError(null);
@@ -208,7 +211,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
       supportedArbiterPublicKeys: sellerArbitersDraft.split("\n").map((value) => value.trim().toLowerCase()).filter(Boolean),
     });
     if (!candidate) {
-      setError("卖方设置不合法：请检查价格、报价期限、仲裁方公钥和并发上限。");
+      setError("卖方设置不合法：请检查价格、报价期限、仲裁方公钥、并发上限和最低退款等待区块数。");
       return;
     }
     try {
@@ -228,9 +231,10 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
       maxConcurrentDownloads: Number(bitfsBuyerDraft.maxConcurrentDownloads),
       maxConcurrentSellerSessions: Number(bitfsBuyerDraft.maxConcurrentSellerSessions),
       blocksPerBatch: Number(bitfsBuyerDraft.blocksPerBatch),
+      refundDelayBlocks: Number(bitfsBuyerDraft.refundDelayBlocks),
     });
     if (!candidate) {
-      setError("BitFS 买方设置不合法：请检查单块自动购买上限、文件任务数、单文件卖家数和每批块数（1–16）。");
+      setError("BitFS 买方设置不合法：请检查单块自动购买上限、文件任务数、单文件卖家数、每批块数（1–16）及退款等待区块数（正整数）。");
       return;
     }
     if (!service.updateBitfsBuyerSettings) {
@@ -244,6 +248,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
         maxConcurrentDownloads: String(candidate.maxConcurrentDownloads),
         maxConcurrentSellerSessions: String(candidate.maxConcurrentSellerSessions),
         blocksPerBatch: String(candidate.blocksPerBatch),
+        refundDelayBlocks: String(candidate.refundDelayBlocks),
       });
       setStatusMessage("BitFS 买方设置已保存。已开始的购买不会改变开池报价。");
     } catch (cause) {
@@ -702,6 +707,20 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
               onChange={(event) => setSellerDraft((current) => ({ ...current, maxConcurrentSales: Number(event.target.value) }))}
             />
           </div>
+          <div className="msfile-settings__field">
+            <label htmlFor="msfile-seller-min-refund-blocks">{t("msfile.settings.seller.minRefundDelayBlocks", { defaultValue: "接受买方费用池的最低剩余区块数" })}</label>
+            <input
+              id="msfile-seller-min-refund-blocks"
+              className="msfile-settings__control"
+              type="number"
+              min={1}
+              max={499_999_999}
+              step={1}
+              value={sellerDraft.minRefundDelayBlocks}
+              onChange={(event) => setSellerDraft((current) => ({ ...current, minRefundDelayBlocks: Number(event.target.value) }))}
+            />
+            <p>{t("msfile.settings.seller.minRefundDelayBlocksHint", { defaultValue: "收到开池请求时检查。剩余区块数低于此值就拒绝开池；已签出的开池响应仍按原证据恢复。" })}</p>
+          </div>
           <div className="msfile-settings__field is-wide">
             <label htmlFor="msfile-seller-arbiters">{t("msfile.settings.seller.arbiters", { defaultValue: "接受的仲裁方压缩公钥（每行一个）" })}</label>
             <textarea
@@ -793,6 +812,20 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
               value={bitfsBuyerDraft.blocksPerBatch}
               onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, blocksPerBatch: event.target.value }))}
             />
+          </div>
+          <div className="msfile-settings__field">
+            <label htmlFor="msfile-buyer-refundDelayBlocks">{t("msfile.settings.bitfsBuyer.refundDelayBlocks", { defaultValue: "费用池退款等待区块数" })}</label>
+            <input
+              id="msfile-buyer-refundDelayBlocks"
+              className="msfile-settings__control"
+              type="number"
+              min={1}
+              max={MSFILE_BITFS_BUYER_LIMITS.refundDelayBlocks}
+              step={1}
+              value={bitfsBuyerDraft.refundDelayBlocks}
+              onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, refundDelayBlocks: event.target.value }))}
+            />
+            <p>{t("msfile.settings.bitfsBuyer.refundDelayBlocksHint", { defaultValue: "从开池时的区块高度起计算。仅影响新费用池，已开池的退款到期高度保持不变。" })}</p>
           </div>
         </div>
         <div className="msfile-settings__section-actions">

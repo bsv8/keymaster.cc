@@ -31,6 +31,7 @@ import {
   type BitfsBuyerLocalPaymentState,
 } from "./buyerPoolState.js";
 import { bitfsWorkflowFacts } from "./sdk.js";
+import { deriveBitfsPoolRefundLockHeight } from "./poolLockTime.js";
 import { bitfsTxidHex } from "./txid.js";
 import { commitPurchasedMsFileContent, inspectPurchasedMsFileSeed } from "../storage/msfileSeedStore.js";
 
@@ -165,6 +166,8 @@ export interface BitfsBuyerProtocolDeps {
   selectionPriority: "price" | "recent-speed";
   /** 每笔池内付款最多请求的不同文件 Block 数。 */
   blocksPerBatch: number;
+  /** 新池退款等待区块数；当前池开池后不再重新计算。 */
+  refundDelayBlocks: number;
   /** 下载计划更新后唤醒其他可接收内容的卖家池。 */
   onDownloadPlanChanged?(): void;
   /** 获取当前明确的链高度；无高度时拒绝使用高度锁事实。 */
@@ -517,11 +520,13 @@ export class BitfsBuyerProtocol {
         ? bytesToHex(quote.terms.supportedArbiterPublicKeys[0])
         : "";
       if (!arbiterPublicKeyHex) throw new Error("签名报价没有支持的仲裁方，不能安全开池");
-      const nowUnixSeconds = Math.floor(this.deps.nowMs() / 1_000);
+      const currentBlockHeight = await this.deps.blockHeight();
+      this.deps.assertCurrentContext();
+      const expiryLockTime = deriveBitfsPoolRefundLockHeight(currentBlockHeight, this.deps.refundDelayBlocks);
       const rawKind2 = await this.deps.task.prepareOpening({
         sessionId: record.sessionId,
         openingAmountSatoshis,
-        expiryLockTime: nowUnixSeconds + 30 * 24 * 60 * 60,
+        expiryLockTime,
         minerFeeRateSatoshisPerKilobyte: this.deps.minerFeeRateSatoshisPerKilobyte,
         arbiterPublicKeyHex,
       });
@@ -1488,9 +1493,10 @@ export class BitfsBuyerProtocol {
   }
 
   private async facts() {
-    // 新费用池使用 UTC 时间型的远期退款锁；SDK 按当前时间验到期，
-    // 每个文件块无需为这一固定规则再次向 WoC 查询区块高度。
-    return bitfsWorkflowFacts(this.deps.nowMs());
+    // 普通付款延续开池高度锁；每个步骤消费统一链高度读数，不用时钟推算。
+    const height = await this.deps.blockHeight();
+    this.deps.assertCurrentContext();
+    return bitfsWorkflowFacts(this.deps.nowMs(), height);
   }
 
   private async requiredSession(sessionId: string): Promise<BitfsSessionRecord> {

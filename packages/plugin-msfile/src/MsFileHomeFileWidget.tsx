@@ -1104,7 +1104,7 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
                     {t("msfile.home.bitfs.contentBudget", { defaultValue: "内容费上限估算" })}: {bitfsOpeningBudgetEstimate(quote)} sats；{t("msfile.home.bitfs.feeExcluded", { defaultValue: "另计链上手续费" })}。
                   </p>
                   <p className="msfile-home-file__supplier-detail">
-                    {t("msfile.home.bitfs.refundLock", { defaultValue: "点击购买后会开一个约 30 天退款锁的资金池；当前批次付款签名前可取消并协商关池，文件交付付款后也会协商关池，余款退回当前 Key。" })}
+                    {t("msfile.home.bitfs.refundLock", { defaultValue: "点击购买后按设置的区块等待期建立费用池；当前批次付款签名前可取消并协商关池，文件交付付款后也会协商关池，余款退回当前 Key。" })}
                   </p>
                   {(() => {
                     const purchase = state.bitfsDemand?.purchase;

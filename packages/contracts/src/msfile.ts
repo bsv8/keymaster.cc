@@ -344,6 +344,8 @@ export interface MsFileSellerSettings {
   supportedArbiterPublicKeys: string[];
   /** 当前 Key 同时处理的销售会话上限。 */
   maxConcurrentSales: number;
+  /** 卖方预签时要求距离退款到期至少剩余的区块数；低于此值拒绝新开池。 */
+  minRefundDelayBlocks: number;
 }
 
 /** 当前 Key 的 BitFS 买方自动购买策略；强制下载限额按单个文件单独设置。 */
@@ -360,6 +362,8 @@ export interface MsFileBitfsBuyerSettings {
   maxConcurrentSellerSessions: number;
   /** 一个 Kind 5/6/7 批次最多购买的不同 Block 数。 */
   blocksPerBatch: number;
+  /** 新费用池退款等待的区块数；开池时加到真实链高度，池内付款保持该到期高度。 */
+  refundDelayBlocks: number;
   /** 用户按 Seed 单独保存的强制下载完整 Block 最高价；与自动购买上限分开。 */
   filePriceLimitsBySeedHash?: Record<string, MsFileSatoshiAmount>;
 }
@@ -372,6 +376,7 @@ export const MSFILE_BITFS_BUYER_SETTINGS_DEFAULT: Readonly<MsFileBitfsBuyerSetti
   maxConcurrentDownloads: 1,
   maxConcurrentSellerSessions: 3,
   blocksPerBatch: 10,
+  refundDelayBlocks: 5,
   filePriceLimitsBySeedHash: Object.freeze({}),
 });
 
@@ -380,6 +385,8 @@ export const MSFILE_BITFS_BUYER_LIMITS = Object.freeze({
   maxConcurrentDownloads: 16,
   maxConcurrentSellerSessions: 16,
   blocksPerBatch: 16,
+  /** nLockTime 小于 500000000 才按区块高度解释；开池还须检查当前高度之和。 */
+  refundDelayBlocks: 499_999_999,
 });
 
 /** 严格校验买方设置；非法输入整体拒绝保存。 */
@@ -401,6 +408,7 @@ export function normalizeMsFileBitfsBuyerSettings(input: unknown): MsFileBitfsBu
   }
   const maxConcurrentSellerSessions = value.maxConcurrentSellerSessions === undefined ? 1 : value.maxConcurrentSellerSessions;
   const blocksPerBatch = value.blocksPerBatch === undefined ? 10 : value.blocksPerBatch;
+  const refundDelayBlocks = value.refundDelayBlocks === undefined ? MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.refundDelayBlocks : value.refundDelayBlocks;
   if (typeof value.buyerAutoPurchaseEnabled !== "boolean"
     || maxFullBlockPriceSatoshis === undefined
     || (value.sellerSelectionPriority !== "price" && value.sellerSelectionPriority !== "recent-speed")
@@ -412,7 +420,10 @@ export function normalizeMsFileBitfsBuyerSettings(input: unknown): MsFileBitfsBu
     || (maxConcurrentSellerSessions as number) > MSFILE_BITFS_BUYER_LIMITS.maxConcurrentSellerSessions
     || !Number.isSafeInteger(blocksPerBatch)
     || (blocksPerBatch as number) < 1
-    || (blocksPerBatch as number) > MSFILE_BITFS_BUYER_LIMITS.blocksPerBatch) return undefined;
+    || (blocksPerBatch as number) > MSFILE_BITFS_BUYER_LIMITS.blocksPerBatch
+    || !Number.isSafeInteger(refundDelayBlocks)
+    || (refundDelayBlocks as number) < 1
+    || (refundDelayBlocks as number) > MSFILE_BITFS_BUYER_LIMITS.refundDelayBlocks) return undefined;
   return {
     buyerAutoPurchaseEnabled: value.buyerAutoPurchaseEnabled,
     maxFullBlockPriceSatoshis,
@@ -420,6 +431,7 @@ export function normalizeMsFileBitfsBuyerSettings(input: unknown): MsFileBitfsBu
     maxConcurrentDownloads: value.maxConcurrentDownloads as number,
     maxConcurrentSellerSessions: maxConcurrentSellerSessions as number,
     blocksPerBatch: blocksPerBatch as number,
+    refundDelayBlocks: refundDelayBlocks as number,
     filePriceLimitsBySeedHash,
   };
 }
@@ -567,6 +579,7 @@ export const MSFILE_SELLER_SETTINGS_DEFAULT: Readonly<MsFileSellerSettings> = Ob
   quoteLifetimeSeconds: 300,
   supportedArbiterPublicKeys: [],
   maxConcurrentSales: 1,
+  minRefundDelayBlocks: 4,
 });
 
 /** 卖方设置边界；设置页与 Coordinator DTO 校验共同使用。 */
@@ -597,6 +610,9 @@ export function normalizeMsFileSellerSettings(input: unknown): MsFileSellerSetti
     || (value.maxConcurrentSales as number) > MSFILE_SELLER_LIMITS.maxConcurrentSales) return undefined;
   if (!Array.isArray(value.supportedArbiterPublicKeys)
     || value.supportedArbiterPublicKeys.length > MSFILE_SELLER_LIMITS.supportedArbiters) return undefined;
+  const minRefundDelayBlocks = value.minRefundDelayBlocks === undefined ? MSFILE_SELLER_SETTINGS_DEFAULT.minRefundDelayBlocks : value.minRefundDelayBlocks;
+  if (!Number.isSafeInteger(minRefundDelayBlocks) || (minRefundDelayBlocks as number) < 1
+    || (minRefundDelayBlocks as number) >= 500_000_000) return undefined;
   const supportedArbiterPublicKeys: string[] = [];
   for (const item of value.supportedArbiterPublicKeys) {
     if (!isValidMsFileSupplierPublicKeyHex(item) || supportedArbiterPublicKeys.includes(item)) return undefined;
@@ -609,6 +625,7 @@ export function normalizeMsFileSellerSettings(input: unknown): MsFileSellerSetti
     quoteLifetimeSeconds: value.quoteLifetimeSeconds as number,
     supportedArbiterPublicKeys,
     maxConcurrentSales: value.maxConcurrentSales as number,
+    minRefundDelayBlocks: minRefundDelayBlocks as number,
   };
 }
 

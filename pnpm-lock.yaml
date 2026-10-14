@@ -7,9 +7,6 @@ settings:
 overrides:
   bitcoin-libp2p: 0.3.1
 
-patchedDependencies:
-  go-bitfs@0.3.2: 139242f5c4336bb73687e66f534bbb5804bd7e4bf0f416fecc5ea8cda9a3158f
-
 importers:
 
   .:
@@ -120,8 +117,8 @@ importers:
         specifier: ^6.0.3
         version: 6.0.3
       go-bitfs:
-        specifier: 0.3.2
-        version: 0.3.2(patch_hash=139242f5c4336bb73687e66f534bbb5804bd7e4bf0f416fecc5ea8cda9a3158f)(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+        specifier: 0.3.3
+        version: 0.3.3(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       i18next:
         specifier: ^23.16.8
         version: 23.16.8
@@ -221,8 +218,8 @@ importers:
         specifier: 13.0.3
         version: 13.0.3
       go-bitfs:
-        specifier: 0.3.2
-        version: 0.3.2(patch_hash=139242f5c4336bb73687e66f534bbb5804bd7e4bf0f416fecc5ea8cda9a3158f)(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+        specifier: 0.3.3
+        version: 0.3.3(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
 
   coding/keymaster/vaultlink-sdk:
     dependencies:
@@ -512,8 +509,8 @@ importers:
         specifier: 0.6.0
         version: 0.6.0
       go-bitfs:
-        specifier: 0.3.2
-        version: 0.3.2(patch_hash=139242f5c4336bb73687e66f534bbb5804bd7e4bf0f416fecc5ea8cda9a3158f)(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+        specifier: 0.3.3
+        version: 0.3.3(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       masterseed:
         specifier: 1.1.0
         version: 1.1.0
@@ -2095,8 +2092,8 @@ packages:
     resolution: {integrity: sha512-afP4W205ONCuMoPBqcR6PSXnzX35KTcJygfJfcp+QY+uwm3p20p1YczWXhlICIzGMCxYBQcySEcOgsJcrkyobg==}
     engines: {node: '>=16'}
 
-  go-bitfs@0.3.2:
-    resolution: {integrity: sha512-t4wm0OTRyvN57WHshH/OMdqlVgmS7ZfPAB7DpRHzZW+D2bJg8lC9xL3fm8jIVBGRcVFFXHxLXylzRFuXhjIWbg==}
+  go-bitfs@0.3.3:
+    resolution: {integrity: sha512-YLxtm44jwJRRxpuYdRt1HoNdmUEzkxXUxJYIy8MYIzG6nBXsy/gLIkihmpVX0eyzHcRB89U58Jl8gAJNOMNBUA==}
 
   graceful-fs@4.2.11:
     resolution: {integrity: sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==}
@@ -4489,7 +4486,7 @@ snapshots:
 
   get-port@7.2.0: {}
 
-  go-bitfs@0.3.2(patch_hash=139242f5c4336bb73687e66f534bbb5804bd7e4bf0f416fecc5ea8cda9a3158f)(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)):
+  go-bitfs@0.3.3(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)):
     dependencies:
       '@bsv/sdk': 2.0.5
       '@noble/curves': 2.0.1

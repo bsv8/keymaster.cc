@@ -8,6 +8,7 @@ import {
   inspectSellerDeliveryRequest,
   prepareSellerDelivery,
   prepareSellerPresign,
+  refundTemplateLockTime,
   parsePaymentState,
   verifyAcceptedPayment,
   verifyBuyerCompletedCloseArtifact,
@@ -24,6 +25,7 @@ import type { BitfsSessionJournal, BitfsSessionRecord } from "./sessionJournal.j
 import type { BitfsSellerProtocolPort, BitfsSellerProtocolResult } from "./sellerSession.js";
 import type { MsFileLocalContentSource } from "./localContentSource.js";
 import { bitfsWorkflowFacts } from "./sdk.js";
+import { assertBitfsSellerRefundWindow } from "./poolLockTime.js";
 
 /** Kind 5 验证后的应用可读视图。证据验证必须来自 go-bitfs，不得自行解释 CBOR。 */
 export interface BitfsSellerContentResolution {
@@ -70,6 +72,8 @@ export interface BitfsSellerProtocolDeps {
   nowMs(): number;
   /** 明确区块高度；不可用本地估算。 */
   blockHeight(): Promise<number>;
+  /** 新开池最低剩余区块设置；已保存 Kind 3 的重放不重验。 */
+  minRefundDelayBlocks(): number;
   onPaymentTransaction?(input: { txid: string; rawTxHex: string }): void | Promise<void>;
 }
 
@@ -157,7 +161,20 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
       }
       if (record.phase !== "quoted" && record.phase !== "opening-presigned") return { type: "close", reason: "state_conflict" };
       record = await this.deps.sessions.putEvidence(record.sessionId, record.revision, "kind2-opening-request", input.bytes, this.deps.nowMs());
-      const prepared = await prepareSellerPresign(input.bytes, this.deps.signer);
+      // SDK 先验证 Kind 2 模板、角色和买方签名，再进入钱包签名门禁。
+      // 使用 SDK 的已验证交易原文检查高度锁，不在应用中解释 CBOR。
+      const presignSigner: Signer = {
+        publicKey: () => this.deps.signer.publicKey(),
+        sign: async (request, signal) => {
+          if (request.purpose !== "transaction" || !request.transactionRaw || !request.openingRequestRaw
+            || !equalBytes(request.openingRequestRaw, input.bytes)) throw new Error("BitFS 卖方退款预签缺少已验证开池证据");
+          const height = await this.deps.blockHeight();
+          this.assertCurrent(record);
+          assertBitfsSellerRefundWindow(refundTemplateLockTime(request.transactionRaw), height, this.deps.minRefundDelayBlocks());
+          return this.deps.signer.sign(request, signal);
+        },
+      };
+      const prepared = await prepareSellerPresign(input.bytes, presignSigner);
       record = await this.deps.sessions.putEvidence(record.sessionId, record.revision, "kind3-opening-response", prepared.outbound.bytes(), this.deps.nowMs());
       await this.deps.sessions.update(record.sessionId, record.revision, { phase: "opening-presigned" }, this.deps.nowMs());
       return { type: "send", frames: [prepared.outbound.bytes()] };
@@ -445,7 +462,7 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
     };
   }
 
-  private async facts() { return bitfsWorkflowFacts(this.deps.nowMs()); }
+  private async facts() { return bitfsWorkflowFacts(this.deps.nowMs(), await this.deps.blockHeight()); }
   private async requiredRecord(sessionId: string): Promise<BitfsSessionRecord> { const value = await this.deps.sessions.get(sessionId); if (!value) throw new Error("BitFS 卖方会话不存在"); return value; }
   private async requiredEvidence(sessionId: string, name: import("./sessionJournal.js").BitfsEvidenceName): Promise<Uint8Array> { const value = await this.deps.sessions.getEvidence(sessionId, name); if (!value) throw new Error(`BitFS 卖方证据缺失: ${name}`); return value; }
   private assertCurrent(record: BitfsSessionRecord): void {
@@ -552,7 +569,7 @@ export function createBitfsLocalSellerContentResolver(input: {
     async resolve(request) {
       const seedHashHex = assertSeedHash(request.seedHashHex);
       const summary = await inspectSellerDeliveryRequest(
-        bitfsWorkflowFacts(input.nowMs()),
+        bitfsWorkflowFacts(input.nowMs(), await input.blockHeight()),
         { quoteRaw: request.quoteRaw, pool: request.pool, requestRaw: request.requestRaw },
       );
       const hashes = summary.contentHashes.map(toHex);

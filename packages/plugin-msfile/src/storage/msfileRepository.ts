@@ -245,6 +245,7 @@ function parseSettingFile(bytes: Uint8Array): StoredSettingSnapshot {
       "quoteLifetimeSeconds",
       "supportedArbiterPublicKeys",
       "maxConcurrentSales",
+      "minRefundDelayBlocks",
     ], `${label} seller`);
     const normalized = normalizeMsFileSellerSettings(seller);
     if (!normalized) fail(`${label} seller is invalid`);
