@@ -8,8 +8,7 @@
 //   - 不监听浏览器语言变化事件；mode === "auto" 时按页面刷新时解析。
 //
 // 设计说明：document / navigator 通过 globalThis 访问，
-// 让 runtime 包在浏览器与 node 测试环境下都能跑（vitest.setup.ts 注入了
-// MemoryStorage）。
+// 让 runtime 包在浏览器与 Node 环境下都能跑。
 
 import { DEFAULT_LANGUAGE, type LanguageMode, type SupportedLanguage } from "@keymaster/contracts";
 import { resolveBrowserLanguage } from "./languageMap.js";

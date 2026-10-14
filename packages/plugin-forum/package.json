@@ -21,5 +21,6 @@
     "bitcoin-libp2p": "0.3.1",
     "key-roundtrip": "0.1.0",
     "webloom-framework": "0.6.0"
-  }
+  },
+  "scripts": {}
 }

@@ -1,18 +1,11 @@
-# Keymaster Connect 文档站
+# Keymaster Connect 使用手册
 
-这是 `@keymaster/connect` 的独立文档站。手写说明位于 `site/`；API 页面从
-`packages/connect/src/index.ts` 的真实导出和中文类型注释生成，不能手工修改 `site/api`。
+这是公开 Connect SDK 的使用文档站，供接入 Keymaster 的网页 App 使用。
 
-```bash
-pnpm --filter @keymaster/connect-docs dev
-pnpm --filter @keymaster/connect-docs build
-pnpm --filter @keymaster/connect-docs preview
-```
+- [接入指南](site/guide/getting-started.md)
+- [能力说明](site/guide/capabilities.md)
+- [会话](site/concepts/sessions.md)
+- [错误处理](site/guide/errors.md)
+- [发布说明](site/release-notes.md)
 
-构建结果位于 `site/.vitepress/dist`。部署在子路径时传入公开路径：
-
-```bash
-DOCS_BASE=/connect-docs/ pnpm --filter @keymaster/connect-docs build
-```
-
-可选的 `DOCS_REPOSITORY_URL` 和 `DOCS_REPOSITORY_BRANCH` 用于生成源码与编辑链接。
+API 字段说明由公开 SDK 导出生成。自行部署文档站时，在项目根目录执行 `pnpm docs:connect:build`，静态产物位于 `apps/connect-docs/site/.vitepress/dist`。

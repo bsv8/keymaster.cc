@@ -28,4 +28,4 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Run type, contract and boundary checks
-        run: pnpm test:types
+        run: pnpm check:types

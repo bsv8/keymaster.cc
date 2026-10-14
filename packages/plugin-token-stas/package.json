@@ -13,5 +13,6 @@
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
     "webloom-framework": "0.6.0"
-  }
+  },
+  "scripts": {}
 }

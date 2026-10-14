@@ -16,5 +16,6 @@
     "webloom-framework": "0.6.0",
     "@keymaster/ui": "*",
     "lucide-react": "^0.468.0"
-  }
+  },
+  "scripts": {}
 }

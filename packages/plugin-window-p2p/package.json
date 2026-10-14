@@ -22,5 +22,6 @@
     "@keymaster/p2p-host": "workspace:*",
     "sat-subscription-protocol": "0.3.0",
     "webloom-framework": "0.6.0"
-  }
+  },
+  "scripts": {}
 }

@@ -581,7 +581,7 @@ function validateStorageDeleteParams(raw: unknown): StorageDeleteParams {
   return { connectSessionId, path };
 }
 
-/* ============== msfile.* validation（现行说明：docs/MSFile.md） ============== */
+/* ============== msfile.* validation（现行说明：BSV8_E2E/docs/keymaster.cc/MSFile.md） ============== */
 
 // App 不能通过 params 注入身份、路由或金额语义；出现下列任一字段一律
 // invalid_request。maxPriceSatoshis / blockIndex / fileId 等被明确禁止，

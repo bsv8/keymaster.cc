@@ -13,5 +13,6 @@
     "@keymaster/ui": "*",
     "react": "^18.3.1",
     "webloom-framework": "0.6.0"
-  }
+  },
+  "scripts": {}
 }

@@ -1,46 +1,26 @@
 # Keymaster
 
-Keymaster 是本地优先的 BSV 浏览器钱包。它负责保管私钥，并通过受控的插件和
-Connect 会话提供身份、签名、加密、资产、消息、文件及应用存储能力。
+Keymaster 是本地优先的 BSV 浏览器钱包。它提供钱包身份、签名、加密、资产、消息、文件及外部 App 授权能力。
 
-## 当前能力
+钱包数据保存在当前浏览器、当前站点的本地 IndexedDB 中。同一浏览器配置和站点保存一把钱包 Key；首次使用可创建或导入，日常使用通过密码解锁。
 
-- 多桶存储：浏览器 Local 桶或兼容 S3 的远程桶。
-- 多 Key：私钥密文只存在桶内 Hold 快照，页面和业务插件拿不到私钥。
-- P2PKH：主网/测试网余额、链上历史、本地交易、转账和 UTXO 快照刷新。
-- Channel：消息、联系人在线状态、WebRTC 信令和外部 App 频道。
-- MSFile：多供应商文件查询、读取、下载及原生 Range 媒体播放。
-- Connect：外部 App 的会话、身份、签名、加密、转账、频道和隔离存储。
-- 插件运行时：WebLoom 管理依赖、作用域、撤权和跨页面生命周期。
+## 使用
 
-## 运行结构
+打开交付方提供的 Keymaster 地址，按初始化向导创建或导入钱包。已初始化的钱包启动后进入锁定状态，输入钱包密码解锁。
 
-```text
-浏览器页面：界面、用户操作、浏览器专属网络能力
-       ↓ 受限服务代理
-Coordinator SharedWorker：桶、Key 会话、任务和跨页面唯一运行态
-       ↓
-Local / S3、WOC、MSFile / SatSubscription 等外部服务
-```
+[钱包使用说明](docs/使用说明.md) · [安装与部署](docs/安装与部署.md) · [Connect SDK 接入指南](apps/connect-docs/site/guide/getting-started.md)
 
-所有敏感操作都绑定当前桶、Owner、会话和运行世代。锁定、切 Key、切桶或插件停用
-后，旧句柄和迟到结果必须失效。
+## 自行部署
 
-## 开发
+使用 Node.js 22 和 pnpm 11.5.1，在项目目录执行：
 
 ```bash
-pnpm install
-pnpm typecheck
-pnpm lint:boundaries
-pnpm test
+pnpm install --frozen-lockfile
 pnpm build
-pnpm dev
 ```
 
-集成测试和真实资源测试不是默认单元测试的一部分，运行方法见
-[集成测试说明](docs/集成测试/README.md)。
+应用静态产物位于 `apps/web/dist/`。将它部署到支持单页应用路由的 HTTPS 站点，保留随产物提供的响应头和路由配置。完整步骤见[安装与部署](docs/安装与部署.md)。
 
-## 文档
+## 许可证
 
-从 [文档索引](docs/README.md) 开始阅读。项目不再长期保存施工单；当前行为写入对应
-主题文档，精确字段以带中文注释的契约代码为准，测试结果以覆盖矩阵为准。
+见 [LICENSE](LICENSE)。

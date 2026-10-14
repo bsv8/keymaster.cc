@@ -21,5 +21,6 @@
     "qrcode.react": "^4.2.0",
     "lucide-react": "^0.468.0",
     "@keymaster/vaultlink-integration": "workspace:*"
-  }
+  },
+  "scripts": {}
 }

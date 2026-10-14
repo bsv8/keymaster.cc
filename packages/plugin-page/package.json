@@ -19,5 +19,6 @@
   "devDependencies": {
     "@keymaster/plugin-webrtc": "*",
     "bsv8-channel-protocol": "0.6.0"
-  }
+  },
+  "scripts": {}
 }

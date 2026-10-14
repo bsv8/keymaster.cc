@@ -2,6 +2,7 @@ import react from "@vitejs/plugin-react";
 import appPackage from "../../package.json";
 import { defineConfig, type Plugin } from "vite";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
@@ -11,8 +12,11 @@ const MSFILE_E2E_VIRTUAL_ID = "virtual:keymaster-msfile-e2e-hooks";
 const MSFILE_E2E_RESOLVED_ID = `\0${MSFILE_E2E_VIRTUAL_ID}`;
 const MSFILE_SPIKE_VIRTUAL_ID = "virtual:keymaster-msfile-spike-hooks";
 const MSFILE_SPIKE_RESOLVED_ID = `\0${MSFILE_SPIKE_VIRTUAL_ID}`;
-const MSFILE_E2E_OLD_SW_PATH = fileURLToPath(new URL("../../e2e/integration/fixtures/e2e-old-root-sw.js", import.meta.url));
-const MSFILE_E2E_MISMATCH_SW_PATH = fileURLToPath(new URL("../../e2e/integration/fixtures/e2e-mismatch-sw.js", import.meta.url));
+function e2eFixturePath(name: string): string {
+  const directory = process.env.KEYMASTER_E2E_FIXTURES_DIR;
+  if (!directory) throw new Error("E2E 构建必须设置 KEYMASTER_E2E_FIXTURES_DIR 指向测试夹具目录");
+  return resolve(directory, name);
+}
 
 /** 只在显式 E2E 构建产出旧 SW 模拟器，普通 dist 不包含测试控制器。 */
 function msFileE2EOldServiceWorker(): Plugin {
@@ -24,7 +28,7 @@ function msFileE2EOldServiceWorker(): Plugin {
       this.emitFile({
         type: "asset",
         fileName: "e2e-old-root-sw.js",
-        source: readFileSync(MSFILE_E2E_OLD_SW_PATH, "utf8"),
+        source: readFileSync(e2eFixturePath("e2e-old-root-sw.js"), "utf8"),
       });
     },
   };
@@ -40,7 +44,7 @@ function msFileE2EMismatchServiceWorker(): Plugin {
       this.emitFile({
         type: "asset",
         fileName: "e2e-mismatch-sw.js",
-        source: readFileSync(MSFILE_E2E_MISMATCH_SW_PATH, "utf8"),
+        source: readFileSync(e2eFixturePath("e2e-mismatch-sw.js"), "utf8"),
       });
     },
   };

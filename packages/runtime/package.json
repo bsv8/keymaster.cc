@@ -6,7 +6,6 @@
   "exports": {
     ".": "./src/index.ts",
     "./storage": "./src/storage/index.ts",
-    "./test-support": "./src/testSupport/createFixtureHost.ts",
     "./assembly": "./src/assembly.ts"
   },
   "types": "./src/index.ts",
@@ -16,5 +15,6 @@
   },
   "devDependencies": {
     "@keymaster/platform-storage": "workspace:*"
-  }
+  },
+  "scripts": {}
 }

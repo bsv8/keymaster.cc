@@ -16,5 +16,6 @@
     "cborg": "^5.1.6",
     "webloom-framework": "0.6.0",
     "bitcoin-libp2p": "0.3.1"
-  }
+  },
+  "scripts": {}
 }

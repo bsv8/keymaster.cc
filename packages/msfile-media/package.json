@@ -7,13 +7,11 @@
     ".": "./src/index.ts",
     "./core": "./src/core/index.ts",
     "./range": "./src/range/index.ts",
-    "./browser": "./src/browser/index.ts",
-    "./testing": "./src/testing/index.ts"
+    "./browser": "./src/browser/index.ts"
   },
   "types": "./src/index.ts",
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --root ../.. packages/msfile-media/src"
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@keymaster/contracts": "*",

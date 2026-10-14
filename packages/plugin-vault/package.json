@@ -23,5 +23,6 @@
     "webloom-framework": "0.6.0",
     "bsv8-channel-protocol": "0.6.0",
     "@keymaster/vaultlink-integration": "workspace:*"
-  }
+  },
+  "scripts": {}
 }
