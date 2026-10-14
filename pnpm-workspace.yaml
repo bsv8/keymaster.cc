@@ -1,9 +1,9 @@
 packages:
   - "apps/*"
   - "packages/*"
-  - "Coding/keymaster/vaultlink-integration"
-  - "Coding/keymaster/vaultlink-sdk"
-  - "Coding/keymaster/p2p-host"
+  - "coding/keymaster/vaultlink-integration"
+  - "coding/keymaster/vaultlink-sdk"
+  - "coding/keymaster/p2p-host"
 
 linkWorkspacePackages: true
 

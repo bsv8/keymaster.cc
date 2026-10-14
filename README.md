@@ -8,7 +8,7 @@ Keymaster 是本地优先的 BSV 浏览器钱包。它提供钱包身份、签�
 
 打开交付方提供的 Keymaster 地址，按初始化向导创建或导入钱包。已初始化的钱包启动后进入锁定状态，输入钱包密码解锁。
 
-[钱包使用说明](docs/使用说明.md) · [安装与部署](docs/安装与部署.md) · [Connect SDK 接入指南](apps/connect-docs/site/guide/getting-started.md)
+[钱包使用说明](docs/使用说明.md) · [安装与部署](docs/安装与部署.md)
 
 ## 自行部署
 

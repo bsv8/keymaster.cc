@@ -29,8 +29,6 @@
     "lint:webloom-release": "node scripts/check-webloom-release-boundary.mjs",
     "verify:webloom-registry": "node scripts/check-webloom-registry-consumer.mjs",
     "lint:react-boundaries": "node scripts/check-react-resource-boundaries.mjs",
-    "docs:connect:dev": "pnpm --filter @keymaster/connect-docs dev",
-    "docs:connect:build": "pnpm --filter @keymaster/connect-docs build",
     "generate:plugin-catalog": "node scripts/materialize-plugin-catalog.mjs --write && node scripts/generate-plugin-function-dependencies.mjs",
     "check:plugin-catalog": "node scripts/materialize-plugin-catalog.mjs && node scripts/generate-plugin-function-dependencies.mjs --check",
     "generate:plugin-dependencies": "node scripts/generate-plugin-function-dependencies.mjs",

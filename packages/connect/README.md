@@ -30,7 +30,7 @@ await keymaster.p2pkhTransfer({
 初始化必须提供钱包的完整 `NetworkIdentity`，公钥是目标钱包公钥。该身份在客户端生命周期内固定；请求、回复、登录/恢复/启动结果及事件均核对网络与公钥。`ready` 只表示传输可用。
 
 SDK 没有默认 Keymaster 地址。直接接入必须提供精确 origin；appView 从启动 URL 获取
-Session Window origin。完整中文指南和自动生成的字段说明位于 `apps/connect-docs`。
+Session Window origin。
 
 注册不授予免确认额度。用户在钱包设置单笔及 App 会话累计额度；超过任一额度时，
 软件弹窗或硬件实体确认。恢复同一连接不会清零累计。旧付款调用必须补充 channelId，
