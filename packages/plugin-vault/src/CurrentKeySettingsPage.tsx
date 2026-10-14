@@ -120,7 +120,7 @@ export function CurrentKeySettingsPage() {
           </h2>
           <p>
             {t("vault.currentKey.export.description", {
-              defaultValue: "导出文件就是本地 key.json 的原样副本，保持既有加密格式。"
+              defaultValue: "导出标准 KeyHold 文件，保留原有加密密钥材料。"
             })}
           </p>
           <div className="current-key-export-card__notice" role="note">
