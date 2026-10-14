@@ -1094,7 +1094,7 @@ async function ensureMsfileBitfsBuyerProtocol(
       try {
         return await vaultSigner.sign(request, signal);
       } catch (error) {
-        await writeBitfsE2eDiagnostic("buyer-signer-error.json", {
+        await writeBitfsDiagnostic("buyer-signer-error.json", {
           message: error instanceof Error ? error.message : String(error),
           name: error instanceof Error ? error.name : typeof error,
         });
@@ -1129,7 +1129,7 @@ async function ensureMsfileBitfsBuyerProtocol(
     nowMs: () => Date.now(),
      minerFeeRateSatoshisPerKilobyte: BigInt(feeRate),
      assertCurrentContext,
-     onSignerError: (error) => writeBitfsE2eDiagnostic("buyer-signer-error.json", {
+     onSignerError: (error) => writeBitfsDiagnostic("buyer-signer-error.json", {
        message: error instanceof Error ? error.message : String(error),
        name: error instanceof Error ? error.name : typeof error,
        stack: error instanceof Error ? error.stack : undefined,
@@ -1143,7 +1143,7 @@ async function ensureMsfileBitfsBuyerProtocol(
     },
     onVerifiedDelivery: persistMsfileBitfsSellerSpeedSample,
     onProgress(progress) {
-      void writeBitfsE2eDiagnostic("buyer-purchase-progress.json", progress);
+      void writeBitfsDiagnostic("buyer-purchase-progress.json", progress);
       const taskEntry = msfileBitfsBuyerTasks.get(msfileBitfsBuyerTaskKey(owner, link.seedHashHex));
       if (!taskEntry || taskEntry.ownerSessionEpoch !== sessionEpoch) return;
       taskEntry.purchase = {
@@ -1181,7 +1181,7 @@ async function startMsfileBitfsBuyerPurchase(input: {
   await previous;
   try {
     const result = await startMsfileBitfsBuyerPurchaseNow(input);
-    await writeBitfsE2eDiagnostic("buyer-purchase-return.json", {
+    await writeBitfsDiagnostic("buyer-purchase-return.json", {
       seedHashHex: input.seedHashHex,
       sessionId: input.sessionId,
       purchase: result.purchase
@@ -1192,7 +1192,7 @@ async function startMsfileBitfsBuyerPurchase(input: {
     const sessions = owner
       ? await createBitfsSessionJournal(deps.files( "bitfs-journal")).list().catch(() => [])
       : [];
-    await writeBitfsE2eDiagnostic("buyer-purchase-error.json", {
+    await writeBitfsDiagnostic("buyer-purchase-error.json", {
        seedHashHex: input.seedHashHex,
        sessionId: input.sessionId,
        message: error instanceof Error ? error.message : String(error),
@@ -1405,7 +1405,7 @@ async function startMsfileBitfsBuyerPurchaseNow(input: {
       }
      } catch (cause) {
        const message = cause instanceof Error ? cause.message : "BitFS 卖家池开池准备失败";
-       await writeBitfsE2eDiagnostic("buyer-purchase-candidate-error.json", {
+       await writeBitfsDiagnostic("buyer-purchase-candidate-error.json", {
          seedHashHex: input.seedHashHex,
          sessionId: candidate.sessionId,
          message,
@@ -1679,7 +1679,7 @@ function createMsfileBitfsBuyerStream(
           operation: { type: "bitfs-seller-send", sessionId: link.transportSessionId, frame },
         });
       } catch (error) {
-        await writeBitfsE2eDiagnostic("buyer-stream-send-error.json", {
+        await writeBitfsDiagnostic("buyer-stream-send-error.json", {
           webrtcSessionId,
           transportSessionId: link.transportSessionId,
           frameBytes: frame.byteLength,
@@ -1694,7 +1694,7 @@ function createMsfileBitfsBuyerStream(
 
 /** 买方传输或协议失败后关闭该会话并保留可见恢复状态。 */
 function msfileBitfsBuyerWebRtcFailure(link: NonNullable<ReturnType<typeof msfileBitfsWebRtcBuyerLinks.get>>, webrtcSessionId: string, transportSessionId: string, reason: string): void {
-  void writeBitfsE2eDiagnostic("buyer-webrtc-failure.json", {
+  void writeBitfsDiagnostic("buyer-webrtc-failure.json", {
     requestMessageId: link.requestMessageId,
     webrtcSessionId,
     transportSessionId,
@@ -2205,7 +2205,7 @@ function createMsfileSellerStreamTransport(): BitfsSellerStreamTransport {
           operation: { type: "bitfs-seller-send", sessionId, frame },
         });
       } catch (error) {
-        await writeBitfsE2eDiagnostic("seller-stream-send-error.json", {
+        await writeBitfsDiagnostic("seller-stream-send-error.json", {
           sessionId,
           frameBytes: frame.byteLength,
           message: error instanceof Error ? error.message : String(error),
@@ -2343,7 +2343,7 @@ async function configureMsfileSellerRuntime(
       blockHeight: () => deps.blockHeight(deps.network()),
       onPaymentTransaction: async ({ txid, rawTxHex }) => {
         const wocConfig = deps.woc()?.getConfig();
-        await writeBitfsE2eDiagnostic("seller-payment-transaction.json", {
+        await writeBitfsDiagnostic("seller-payment-transaction.json", {
           txid,
           rawTxHex,
           network: deps.network(),
@@ -2371,10 +2371,10 @@ async function configureMsfileSellerRuntime(
         && deps.session().activePublicKeyHex === ownerPublicKeyHex
         && deps.service() === service,
       onProtocolError: async ({ sessionId, message, stack }) => {
-        await writeBitfsE2eDiagnostic("seller-protocol-frame-error.json", { sessionId, message, stack });
+        await writeBitfsDiagnostic("seller-protocol-frame-error.json", { sessionId, message, stack });
       },
       onSessionClosed: async ({ sessionId, reason, atMs }) => {
-        await writeBitfsE2eDiagnostic("seller-session-close.json", { sessionId, reason, atMs });
+        await writeBitfsDiagnostic("seller-session-close.json", { sessionId, reason, atMs });
       },
     });
     const sat = await deps.ensureChannel();
@@ -2410,13 +2410,13 @@ async function configureMsfileSellerRuntime(
  * 中文说明：只处理 ChannelProtocol 已验签的 VerifiedHashRequest；未命中保持
  * 静默。报价只在协议端口就绪时产生，且报价字节由 journal 先落盘。
  */
-async function writeBitfsE2eDiagnostic(path: string, value: unknown): Promise<void> {
+async function writeBitfsDiagnostic(path: string, value: unknown): Promise<void> {
   if (!deps.diagnosticsEnabled()) return;
   try {
     const store = deps.files( "");
-    await store.put(`bitfs-e2e-diagnostics/${path}`, new TextEncoder().encode(JSON.stringify(value)));
+    await store.put(`bitfs-diagnostics/${path}`, new TextEncoder().encode(JSON.stringify(value)));
   } catch (error) {
-    console.warn("[msfile] BitFS E2E diagnostic write failed", error instanceof Error ? error.message : String(error));
+    console.warn("[msfile] BitFS diagnostic write failed", error instanceof Error ? error.message : String(error));
   }
 }
 
@@ -2444,7 +2444,7 @@ async function handleMsfileSellerHashRequest(
   const manager = msfileSellerSessionManager;
   const protocolPort = msfileSellerProtocolPort;
   const service = deps.service();
-  await writeBitfsE2eDiagnostic("seller-hash-request-entry.json", {
+  await writeBitfsDiagnostic("seller-hash-request-entry.json", {
     hash: request.body.hash,
     from: request.from_public_key,
     expiresAtMs: request.expires_at_ms,
@@ -2500,7 +2500,7 @@ async function handleMsfileSellerHashRequest(
   } catch (error) {
     indexListError = error instanceof Error ? error.message : String(error);
   }
-  await writeBitfsE2eDiagnostic("seller-hash-request-index.json", {
+  await writeBitfsDiagnostic("seller-hash-request-index.json", {
     hash: request.body.hash,
     availability: indexedSeed?.availability ?? "missing",
     fileName: indexedSeed?.fileName,
@@ -2518,10 +2518,10 @@ async function handleMsfileSellerHashRequest(
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") return;
     console.warn("[msfile] seller hash request match failed", error instanceof Error ? error.message : String(error));
-    await writeBitfsE2eDiagnostic("seller-hash-request-match.json", { hash: request.body.hash, error: error instanceof Error ? error.message : String(error) });
+    await writeBitfsDiagnostic("seller-hash-request-match.json", { hash: request.body.hash, error: error instanceof Error ? error.message : String(error) });
     return;
   }
-  await writeBitfsE2eDiagnostic("seller-hash-request-match.json", { hash: request.body.hash, matched: match !== null });
+  await writeBitfsDiagnostic("seller-hash-request-match.json", { hash: request.body.hash, matched: match !== null });
   if (!match) {
     console.warn("[msfile] seller hash request did not match", request.body.hash);
     return;
@@ -2548,9 +2548,9 @@ async function handleMsfileSellerHashRequest(
       quoteBytes: match.quoteBytes,
       seedHashHex: match.seedHashHex,
     });
-    await writeBitfsE2eDiagnostic("seller-session-start.json", { sessionId, webrtcSessionId, matched: true });
+    await writeBitfsDiagnostic("seller-session-start.json", { sessionId, webrtcSessionId, matched: true });
   } catch (error) {
-    await writeBitfsE2eDiagnostic("seller-session-start.json", { matched: true, error: error instanceof Error ? error.message : String(error) });
+    await writeBitfsDiagnostic("seller-session-start.json", { matched: true, error: error instanceof Error ? error.message : String(error) });
     console.warn("[msfile] seller session start failed", error instanceof Error ? error.message : String(error));
   }
 }
@@ -2564,7 +2564,7 @@ async function acceptMsfileBitfsWebRtcOffer(input: {
   offerSdp: string;
 }): Promise<void> {
   const request = msfileBitfsBuyerRequests.get(input.requestMessageId);
-  await writeBitfsE2eDiagnostic("buyer-webrtc-offer.json", {
+  await writeBitfsDiagnostic("buyer-webrtc-offer.json", {
     requestMessageId: input.requestMessageId,
     webrtcSessionId: input.webrtcSessionId,
     peerPublicKeyHex: input.peerPublicKeyHex,
@@ -2622,9 +2622,9 @@ async function acceptMsfileBitfsWebRtcOffer(input: {
       || deps.session().activePublicKeyHex !== request.ownerPublicKeyHex) {
       throw new Error("BitFS buyer owner changed while accepting an offer");
     }
-    await writeBitfsE2eDiagnostic("buyer-webrtc-answer.json", { requestMessageId: input.requestMessageId, webrtcSessionId: input.webrtcSessionId, answered: true });
+    await writeBitfsDiagnostic("buyer-webrtc-answer.json", { requestMessageId: input.requestMessageId, webrtcSessionId: input.webrtcSessionId, answered: true });
   } catch (error) {
-    await writeBitfsE2eDiagnostic("buyer-webrtc-answer.json", { requestMessageId: input.requestMessageId, webrtcSessionId: input.webrtcSessionId, answered: false, error: error instanceof Error ? error.message : String(error) });
+    await writeBitfsDiagnostic("buyer-webrtc-answer.json", { requestMessageId: input.requestMessageId, webrtcSessionId: input.webrtcSessionId, answered: false, error: error instanceof Error ? error.message : String(error) });
     if (msfileBitfsWebRtcBuyerLinks.get(input.webrtcSessionId) === link) {
       msfileBitfsWebRtcBuyerLinks.delete(input.webrtcSessionId);
     }
@@ -2688,7 +2688,7 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: BitfsExecutorLea
   if (typeof event.sessionId !== "string" || event.sessionId.length === 0) return;
   // 旧 lease/旧 owner 的迟到事件不得进入新会话。
   if (event.ownerSessionEpoch !== lease.sessionEpoch) return;
-  void writeBitfsE2eDiagnostic("webrtc-stream-event.json", {
+  void writeBitfsDiagnostic("webrtc-stream-event.json", {
     type: event.type,
     sessionId: event.sessionId,
     webrtcSessionId: event.webrtcSessionId,
@@ -2743,7 +2743,7 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: BitfsExecutorLea
         laneId: "msfile",
         operation: { type: "bitfs-seller-close", sessionId: event.sessionId as string, reason: "signal_publish_failed" },
       }).catch(() => undefined);
-      await writeBitfsE2eDiagnostic("webrtc-signal-publish-error.json", {
+      await writeBitfsDiagnostic("webrtc-signal-publish-error.json", {
         webrtcSessionId: event.webrtcSessionId,
         sessionId: event.sessionId,
         message: error instanceof Error ? error.message : String(error)
@@ -2752,7 +2752,7 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: BitfsExecutorLea
     return;
   }
   if (event.type === "bitfs-webrtc-runtime-error") {
-    void writeBitfsE2eDiagnostic("webrtc-runtime-error.json", {
+    void writeBitfsDiagnostic("webrtc-runtime-error.json", {
       sessionId: event.sessionId,
       webrtcSessionId: event.webrtcSessionId,
       direction: event.direction,
@@ -2763,7 +2763,7 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: BitfsExecutorLea
     return;
   }
   if (event.type === "bitfs-webrtc-session-closed") {
-    void writeBitfsE2eDiagnostic("webrtc-session-close.json", {
+    void writeBitfsDiagnostic("webrtc-session-close.json", {
       sessionId: event.sessionId,
       webrtcSessionId: event.webrtcSessionId,
       reason: event.reason,
@@ -2793,7 +2793,7 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: BitfsExecutorLea
       && sellerLink.ownerSessionEpoch === deps.session().sessionEpoch) {
        void manager?.handleFrame({ sessionId: event.sessionId, frame: event.frame }).catch(async (error) => {
          const message = error instanceof Error ? error.message : String(error);
-         await writeBitfsE2eDiagnostic("seller-protocol-frame-error.json", {
+         await writeBitfsDiagnostic("seller-protocol-frame-error.json", {
            sessionId: event.sessionId,
            webrtcSessionId: event.webrtcSessionId,
            message,
@@ -2828,13 +2828,13 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: BitfsExecutorLea
        })().catch(async (error) => {
          const message = error instanceof Error ? error.message : String(error);
          console.warn("[msfile] BitFS buyer protocol frame failed", message);
-         await writeBitfsE2eDiagnostic("buyer-protocol-frame-error.json", {
+         await writeBitfsDiagnostic("buyer-protocol-frame-error.json", {
            webrtcSessionId: event.webrtcSessionId,
            sessionId: event.sessionId,
            message,
            stack: error instanceof Error ? error.stack : undefined
          });
-         await writeBitfsE2eDiagnostic(`buyer-protocol-${Date.now()}-error.json`, {
+         await writeBitfsDiagnostic(`buyer-protocol-${Date.now()}-error.json`, {
            webrtcSessionId: event.webrtcSessionId,
            sessionId: event.sessionId,
            message,
@@ -2892,7 +2892,7 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: BitfsExecutorLea
         });
       }
      })().then(() => undefined).catch(async (error) => {
-       void writeBitfsE2eDiagnostic("buyer-webrtc-quote-error.json", {
+       void writeBitfsDiagnostic("buyer-webrtc-quote-error.json", {
          requestMessageId: buyerLink.requestMessageId,
          webrtcSessionId: event.webrtcSessionId,
          message: error instanceof Error ? error.message : String(error)
@@ -2925,7 +2925,7 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: BitfsExecutorLea
      }).catch(async (error) => {
        const message = error instanceof Error ? error.message : String(error);
        console.warn("[msfile] BitFS automatic purchase check failed", message);
-        await writeBitfsE2eDiagnostic("buyer-protocol-auto-error.json", {
+        await writeBitfsDiagnostic("buyer-protocol-auto-error.json", {
           webrtcSessionId: event.webrtcSessionId,
           sessionId: event.sessionId,
           message,
@@ -2943,7 +2943,7 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: BitfsExecutorLea
   if (event.type !== "bitfs-seller-frame" || !(event.frame instanceof Uint8Array)) return;
   void manager.handleFrame({ sessionId: event.sessionId, frame: event.frame }).catch(async (error) => {
     const message = error instanceof Error ? error.message : String(error);
-    await writeBitfsE2eDiagnostic("seller-protocol-frame-error.json", {
+    await writeBitfsDiagnostic("seller-protocol-frame-error.json", {
       sessionId: event.sessionId,
       webrtcSessionId: event.webrtcSessionId,
       message,

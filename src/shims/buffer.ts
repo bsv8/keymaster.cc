@@ -1,4 +1,4 @@
-// apps/web/src/shims/buffer.ts
+// src/shims/buffer.ts
 // 浏览器运行时补 `Buffer` 全局。
 //
 // 设计缘由：

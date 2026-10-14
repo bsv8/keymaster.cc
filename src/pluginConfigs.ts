@@ -1,4 +1,4 @@
-// apps/web/src/pluginConfigs.ts
+// src/pluginConfigs.ts
 // 装配层对各 plugin 的强类型配置注入（施工单 2026-07-08 001）。
 //
 // 设计缘由：

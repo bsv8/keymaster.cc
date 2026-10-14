@@ -9,10 +9,10 @@ import { readFile, readdir } from "node:fs/promises";
 import ts from "typescript";
 import { resolve, relative } from "node:path";
 
-const workerPath = resolve("apps/web/src/assembly/coordinatorWorker.ts");
-const entryPath = resolve("apps/web/src/keymasterSessionCoordinator.worker.ts");
-const auditPath = resolve("apps/web/src/coordinator/finalIoAudit.ts");
-const workerUnitCatalogPath = resolve("apps/web/src/coordinator/workerUnitCatalog.ts");
+const workerPath = resolve("src/assembly/coordinatorWorker.ts");
+const entryPath = resolve("src/keymasterSessionCoordinator.worker.ts");
+const auditPath = resolve("src/coordinator/finalIoAudit.ts");
+const workerUnitCatalogPath = resolve("src/coordinator/workerUnitCatalog.ts");
 const workerSource = await readFile(workerPath, "utf8");
 const auditSource = await readFile(auditPath, "utf8");
 const workerUnitCatalogSource = await readFile(workerUnitCatalogPath, "utf8");

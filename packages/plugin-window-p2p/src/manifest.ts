@@ -41,14 +41,7 @@ const windowP2pPluginDefinition = {
       return { id: lane.laneId, laneId: lane.laneId, start: lane.start.bind(lane), stop: lane.stop.bind(lane), handle: lane.handle.bind(lane),
         ...(lane.rejectEvent ? { rejectEvent: lane.rejectEvent.bind(lane) } : {}), ...(lane.configure ? { configure: lane.configure.bind(lane) } : {}) };
     } }, ctx.scope));
-    // 施工单 001 的旧 executor spike 自己驱动同一条真实 Worker lease；
-    // 只有明确进入 ?msfileSpike 的隔离页面时才停用正式 executor。验证构建
-    // 同时承载正式 MSFile runtime 页面，不能因为构建级标志而误停正式装配。
-    const spikeBuild = (globalThis as typeof globalThis & { __KEYMASTER_MSFILE_SPIKE__?: unknown }).__KEYMASTER_MSFILE_SPIKE__ === true;
-    const legacyExecutorHarness = spikeBuild
-      && typeof window !== "undefined"
-      && new URLSearchParams(window.location.search).has("msfileSpike");
-    const cleanupExecutor = legacyExecutorHarness ? () => undefined : installWindowP2pExecutor(coordinator, registry);
+    const cleanupExecutor = installWindowP2pExecutor(coordinator, registry);
     return () => {
       // Window executor 的 dispose 需要等待 lease 先撤销、再关闭 lane/Host；
       // 把 Promise 传回 ResourceScope，页面销毁时才能纳入统一清理边界。

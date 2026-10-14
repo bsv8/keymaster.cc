@@ -1,5 +1,5 @@
 import { type NetworkIdentity, type BackgroundTaskKeyScope, sameNetworkIdentity } from "@keymaster/contracts";
-// apps/web/src/keymasterSessionCoordinatorClient.ts
+// src/keymasterSessionCoordinatorClient.ts
 // Keymaster Session Coordinator Client Transport
 //
 // 设计缘由（施工单 002）：
@@ -147,49 +147,6 @@ function randomIdentifierSuffix(): string {
     fallbackIdentifierCounter += 1;
     return fallbackIdentifierCounter.toString(36);
   }
-}
-
-/**
- * 真实 Chromium 生命周期回归用的 Window bridge barrier。
- *
- * 它只存在于 E2E 构建会导入的测试 hook 路径：下一次反向 LocalStorage
- * capability 到达页面后先报告 started，再等待测试显式 release。等待故意
- * 不读取 AbortSignal，用来制造“页面已经撤权但旧 Worker 结果仍迟到”的
- * 真实 MessagePort 时序；生产构建不会安装或调用这个 seam。
- */
-export interface CoordinatorTestBridgeBarrier {
-  readonly started: Promise<void>;
-  /** 真实 Window handler 返回后 resolve；用于证明 late response 已完成清理。 */
-  readonly completed: Promise<void>;
-  release(): void;
-}
-
-let coordinatorTestBridgeBarrier: {
-  readonly started: Promise<void>;
-  readonly released: Promise<void>;
-  readonly complete: () => void;
-  readonly start: () => void;
-  readonly release: () => void;
-} | undefined;
-
-/** 仅供 lifecycleE2E hook 使用；普通应用代码不得调用。 */
-export function __testArmCoordinatorBridgeBarrier(): CoordinatorTestBridgeBarrier {
-  if (coordinatorTestBridgeBarrier) throw new Error("Coordinator bridge test barrier is already armed");
-  let start!: () => void;
-  let release!: () => void;
-  let complete!: () => void;
-  const started = new Promise<void>((resolve) => { start = resolve; });
-  const released = new Promise<void>((resolve) => { release = resolve; });
-  const completed = new Promise<void>((resolve) => { complete = resolve; });
-  coordinatorTestBridgeBarrier = { started, released, complete, start, release };
-  return Object.freeze({
-    started,
-    completed,
-    release: () => {
-      coordinatorTestBridgeBarrier = undefined;
-      release();
-    },
-  });
 }
 
 // ============================================================
@@ -1699,25 +1656,8 @@ export function createCoordinatorClient(options?: CoordinatorClientOptions): Key
 
 let singletonClient: KeymasterSessionCoordinatorClient | null = null;
 
-/**
- * 仅隔离生命周期 E2E 使用：给同一构建生成两个不同的 Worker URL，
- * 模拟旧/新发布并存。普通构建不会从页面 query 改写 Coordinator URL。
- */
-function lifecycleE2eWorkerUrl(): string | undefined {
-  const env = (import.meta as ImportMeta & { env?: { VITE_MSFILE_E2E?: string } }).env;
-  if (env?.VITE_MSFILE_E2E !== "1" || typeof window === "undefined") return undefined;
-  const variant = new URLSearchParams(window.location.search).get("coordinatorWorkerVariant");
-  if (!variant || !/^[a-z0-9_-]{1,32}$/iu.test(variant)) return undefined;
-  const url = new URL(coordinatorWorkerUrl, window.location.href);
-  url.searchParams.set("keymaster-worker-variant", variant);
-  return url.toString();
-}
-
 export function getCoordinatorClient(): KeymasterSessionCoordinatorClient {
-  if (!singletonClient) {
-    const workerUrl = lifecycleE2eWorkerUrl();
-    singletonClient = createCoordinatorClient(workerUrl ? { workerUrl } : undefined);
-  }
+  if (!singletonClient) singletonClient = createCoordinatorClient();
   return singletonClient;
 }
 

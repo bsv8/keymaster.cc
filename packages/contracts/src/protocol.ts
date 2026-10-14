@@ -2260,7 +2260,7 @@ export const PROTOCOL_SERVICE_CAPABILITY = defineCapability<ProtocolService>({
 });
 
 /**
- * 协议 service 对外契约。`apps/web` / `ProtocolPopupPage` 通过
+ * 协议 service 对外契约。`主应用` / `ProtocolPopupPage` 通过
  * `useCapability<ProtocolService>(PROTOCOL_SERVICE_CAPABILITY)` 拿到实例。
  *
  * 设计缘由：service 负责 transport + 校验 + 解锁 + 确认流调度 + 调用

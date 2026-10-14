@@ -1,4 +1,4 @@
-// apps/web/src/shims/crypto.ts
+// src/shims/crypto.ts
 // 浏览器侧最小 `crypto` 兼容层。
 //
 // 设计缘由：

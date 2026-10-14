@@ -1,4 +1,4 @@
-// apps/web/src/fatalCrashPage.ts
+// src/fatalCrashPage.ts
 // 统一系统级崩溃页（施工单 2026-06-30 001）。
 //
 // 职责：

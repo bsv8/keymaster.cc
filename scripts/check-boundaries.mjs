@@ -195,14 +195,14 @@ for (const relativePath of removedRuntimeFiles) {
 }
 
 const webLoomConsumerRoots = [
-  join(root, "apps", "web"),
+  root,
   ...readdirSync(packagesDir)
     .filter((name) => existsSync(join(packagesDir, name, "src")))
     .map((name) => join(packagesDir, name)),
 ];
 function packageJsonForSource(file) {
   const relativePath = relative(root, file).split(sep);
-  if (relativePath[0] === "apps" && relativePath[1]) return join(root, "apps", relativePath[1], "package.json");
+  if (relativePath[0] === "src") return join(root, "package.json");
   if (relativePath[0] === "packages" && relativePath[1]) return join(root, "packages", relativePath[1], "package.json");
   return undefined;
 }
@@ -259,13 +259,13 @@ for (const consumerRoot of webLoomConsumerRoots) {
       });
     if (storagePrivateImports.length > 0) {
       const sourcePath = relative(root, file).split(sep).join("/");
-      const trustedStorageAssembly = sourcePath === "apps/web/src/keymasterSessionCoordinator.worker.ts"
-        || sourcePath.startsWith("apps/web/src/assembly/")
-        || sourcePath === "apps/web/src/coordinator/walletKeyRepository.test.ts"
+      const trustedStorageAssembly = sourcePath === "src/keymasterSessionCoordinator.worker.ts"
+        || sourcePath.startsWith("src/assembly/")
+        || sourcePath === "src/coordinator/walletKeyRepository.test.ts"
         || sourcePath === "packages/runtime/src/testSupport/createFixtureHost.ts"
         || sourcePath.startsWith("packages/platform-storage/src/")
-        || ((sourcePath === "apps/web/src/bootstrapPlugins.ts" || sourcePath === "apps/web/src/lifecycleE2E/windowHooks.ts")
-          && storagePrivateImports.every(specifier => specifier === "@keymaster/platform-storage/coordinator/authority" || (sourcePath === "apps/web/src/bootstrapPlugins.ts" && specifier === "@keymaster/platform-storage/assembly")));
+        || ((sourcePath === "src/bootstrapPlugins.ts")
+          && storagePrivateImports.every(specifier => specifier === "@keymaster/platform-storage/coordinator/authority" || (sourcePath === "src/bootstrapPlugins.ts" && specifier === "@keymaster/platform-storage/assembly")));
       if (!trustedStorageAssembly) recordViolation(file, "Storage private assembly is only available to trusted Window/Worker assembly");
     }
     if (legacyWebLoomImport.test(text)) {
@@ -294,8 +294,8 @@ for (const consumerRoot of webLoomConsumerRoots) {
   }
 }
 
-/** 检查 apps/web shell 不 import plugin-background。 */
-const shellDir = join(root, "apps", "web", "src", "shell");
+/** 检查 主应用 shell 不 import plugin-background。 */
+const shellDir = join(root, "src", "shell");
 for (const file of walk(shellDir)) {
   const text = readFileSync(file, "utf8");
   if (/@keymaster\/plugin-background\b/.test(text)) {
@@ -330,7 +330,7 @@ for (const file of pluginNames.flatMap((plugin) => {
  * in-memory 解锁态丢失。规范需要落到"可失败"的检查上，不只是文档约束。
  *
  * 规则：
- *   1. `packages/**` 与 `apps/web/src/**` 禁止出现任何内部 `<a>` 跳转，包括
+ *   1. `packages/**` 与 `src/**` 禁止出现任何内部 `<a>` 跳转，包括
  *      字面量 `<a href="/...">` / `<a href={`/...`}>` 与表达式形式
  *      `<a href={...}>`。内部文本链接必须走 runtime AppLink；如果未来需要
  *      动态外链 URL，请用字面量 `<a href="https://...">` 而不是表达式。
@@ -340,12 +340,12 @@ for (const file of pluginNames.flatMap((plugin) => {
  *   3. 允许外链（`http://` / `https://` / `mailto:` 等）——只对应用内同源 pathname
  *      做强约束。
  *   4. 例外：注释里的描述性引用不应触发；脚本在检查前会先剥离行注释。
- *   5. 例外：apps/web/index.html 里的 favicon / 静态资源链接不在本检查范围内
+ *   5. 例外：index.html 里的 favicon / 静态资源链接不在本检查范围内
  *      （它本来就在白名单外，文件类型也不属于 ts/tsx 扫描路径）。
  */
 const navScanRoots = [
   packagesDir,
-  join(root, "apps", "web", "src")
+  join(root, "src")
 ];
 const navIgnoreFiles = new Set([
   // AppLink / navigate 自身是规则的实现方，注释里会引用 `href="/..."` 作为反例。

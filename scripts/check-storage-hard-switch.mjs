@@ -26,7 +26,7 @@ const forbiddenText = [
   ["旧存储包路径", /(?:^|[\\/])plugin-storage(?:[\\/]|$)/u]
 ];
 const violations = [];
-const productionRoots = /^(?:packages|apps)\//u;
+const productionRoots = /^(?:packages|src)\//u;
 // 正式本地介质只有 IndexedDB，并且只有钱包引擎这一个文件可以直接操作
 // IndexedDB API。localStorage 不再保存任何桶目录、连接凭据或初始化恢复
 // 指针，因此这里没有任何白名单条目。
@@ -39,7 +39,7 @@ const forbiddenS3Dependencies = [
   ["Smithy fetch handler", /@smithy\/fetch-http-handler/u],
 ];
 const repositoryFixtureDirectory = /(?:^|\/)(?:testing|testSupport)(?:\/|$)/u;
-const centralV1Source = /^(?:packages\/contracts\/src\/storage\/|packages\/platform-storage\/src\/(?:kv-engine|snapshot|storage-access|coordinator)\/|apps\/web\/src\/keymasterSessionCoordinator\.worker\.ts$)/u;
+const centralV1Source = /^(?:packages\/contracts\/src\/storage\/|packages\/platform-storage\/src\/(?:kv-engine|snapshot|storage-access|coordinator)\/|src\/keymasterSessionCoordinator\.worker\.ts$)/u;
 
 function withoutComments(content) {
   return content

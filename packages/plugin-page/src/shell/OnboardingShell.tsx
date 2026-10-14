@@ -1,4 +1,4 @@
-// apps/web/src/shell/OnboardingShell.tsx
+// src/shell/OnboardingShell.tsx
 // 首启 onboarding 共享壳层：
 //   - 浅底渐变背景（不是纯白空页）。
 //   - 居中容器，最大宽度收敛。

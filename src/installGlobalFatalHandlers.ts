@@ -1,4 +1,4 @@
-// apps/web/src/installGlobalFatalHandlers.ts
+// src/installGlobalFatalHandlers.ts
 // 全局 window 错误接管（施工单 2026-06-30 001）。
 //
 // 关键不变量（必须写注释,不能"魔法 if"）：

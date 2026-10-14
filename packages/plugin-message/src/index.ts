@@ -10,7 +10,7 @@
 //   - **不**展示传输连接态、在线查询或远端全库统计。
 //
 // 样式入口：本插件自带 `src/styles.css`；装配层在
-// `apps/web/src/styles/plugins.css` 显式 `@import` 引入。
+// `src/styles/plugins.css` 显式 `@import` 引入。
 
 export { messagePlatformPlugin, messageSetup, MESSAGE_PLUGIN_ID } from "./manifest.js";
 export { createMessageService, type MessageService } from "./messageService.js";

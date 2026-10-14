@@ -1,4 +1,4 @@
-// apps/web/src/main.tsx
+// src/main.tsx
 // 应用入口：硬切换为统一 fatal 驱动入口（施工单 2026-06-30 001）。
 //
 // 启动顺序（硬切换后）：
@@ -115,24 +115,6 @@ async function start() {
     if (getFatalError()) {
       return;
     }
-    // 002/003 无头跨仓验收钩子只允许出现在显式 E2E 构建中。普通
-    // `pnpm build` 不设置 VITE_MSFILE_E2E；Vite 配置会把这里引用的
-    // virtual module 替换为空实现，使真实 hooks 不进入生产模块图，避免
-    // 页面通过 query 参数取得 session 写入或 capability 调试能力。
-    // 必须直接访问 import.meta.env 字段，保证普通构建中的条件是编译期常量。
-    const e2eBuild = import.meta.env.VITE_MSFILE_E2E === "1";
-    const query = typeof window === "undefined" ? undefined : new URLSearchParams(window.location.search);
-    // E2E hook 是测试页面用来观察生产链的唯一 readiness barrier。必须在
-    // root render 前完成安装，避免页面已经可见但 hook 仍在异步 chunk 中，
-    // 测试只能靠固定等待猜测安装时机。该分支只在隔离 E2E 构建中存在。
-    if (e2eBuild && query?.has("msfileE2E")) {
-      await import("virtual:keymaster-msfile-e2e-hooks")
-        .then((module) => module.installMsFileProductionE2EHooks(host));
-    }
-    if (e2eBuild && query?.has("lifecycleE2E")) {
-      await import("virtual:keymaster-msfile-e2e-hooks")
-        .then((module) => module.installLifecycleProductionE2EHooks(host));
-    }
     const container = document.getElementById("root");
     if (!container) throw new Error("Missing #root");
     const root = createRoot(container);
@@ -157,14 +139,7 @@ async function start() {
       cause: err
     });
   }
-  // 旧 executor 架构验证钩子只在显式 VITE_MSFILE_SPIKE=1 的隔离构建中存在。
-  // 普通生产构建由 Vite 在编译期删除这一分支和对应模块图。
-  const spikeBuild = import.meta.env.VITE_MSFILE_SPIKE === "1";
-  if (spikeBuild && typeof window !== "undefined" && new URLSearchParams(window.location.search).has("msfileSpike")) {
-    void import("virtual:keymaster-msfile-spike-hooks")
-      .then((module) => module.installMsFileSpikeHooks())
-      .catch(() => undefined);
-  }
+
 }
 
 start();

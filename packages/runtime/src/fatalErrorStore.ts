@@ -11,7 +11,7 @@
 //     不反复重绘。
 //   - 不把 fatal 上报路径耦合进 messageBus:fatal 可能发生在 host 还没
 //     创建之前。
-//   - 不把 fatal 基础设施塞进 apps/web 私有目录:plugin-vault 等包也可
+//   - 不把 fatal 基础设施塞进 主应用 私有目录:plugin-vault 等包也可
 //     以安全 import 本 store。
 //
 // 边界(本文件注释必须说明清楚):
@@ -22,7 +22,7 @@
 //   - 业务页 provider 错误(已有局部 ProviderErrorBoundary):
 //     -> **不**走 fatal store,继续局部展示。
 //   - 浏览器扩展 / 第三方脚本 / analytics 抛错:
-//     -> **不**走 fatal store(在 apps/web 的 global handler 里做来源
+//     -> **不**走 fatal store(在 主应用 的 global handler 里做来源
 //        过滤后再决定是否升级)。
 //   - bootstrap / 顶级 React 渲染 / vault 关键持久化损坏 / invariant 破坏:
 //     -> 走 fatal store,接管页面。

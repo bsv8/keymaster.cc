@@ -1,55 +1,11 @@
 import react from "@vitejs/plugin-react";
-import appPackage from "../../package.json";
+import appPackage from "./package.json";
 import { defineConfig, type Plugin } from "vite";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 const appVersion = appPackage.version;
 const storagePrivateGrant = randomBytes(32).toString("hex");
-const MSFILE_E2E_VIRTUAL_ID = "virtual:keymaster-msfile-e2e-hooks";
-const MSFILE_E2E_RESOLVED_ID = `\0${MSFILE_E2E_VIRTUAL_ID}`;
-const MSFILE_SPIKE_VIRTUAL_ID = "virtual:keymaster-msfile-spike-hooks";
-const MSFILE_SPIKE_RESOLVED_ID = `\0${MSFILE_SPIKE_VIRTUAL_ID}`;
-function e2eFixturePath(name: string): string {
-  const directory = process.env.KEYMASTER_E2E_FIXTURES_DIR;
-  if (!directory) throw new Error("E2E 构建必须设置 KEYMASTER_E2E_FIXTURES_DIR 指向测试夹具目录");
-  return resolve(directory, name);
-}
-
-/** 只在显式 E2E 构建产出旧 SW 模拟器，普通 dist 不包含测试控制器。 */
-function msFileE2EOldServiceWorker(): Plugin {
-  const enabled = process.env.VITE_MSFILE_E2E === "1";
-  return {
-    name: "keymaster-msfile-e2e-old-service-worker",
-    generateBundle() {
-      if (!enabled) return;
-      this.emitFile({
-        type: "asset",
-        fileName: "e2e-old-root-sw.js",
-        source: readFileSync(e2eFixturePath("e2e-old-root-sw.js"), "utf8"),
-      });
-    },
-  };
-}
-
-/** 只在显式 E2E 构建产出协议不匹配模拟器，普通 dist 不包含测试控制器。 */
-function msFileE2EMismatchServiceWorker(): Plugin {
-  const enabled = process.env.VITE_MSFILE_E2E === "1";
-  return {
-    name: "keymaster-msfile-e2e-mismatch-service-worker",
-    generateBundle() {
-      if (!enabled) return;
-      this.emitFile({
-        type: "asset",
-        fileName: "e2e-mismatch-sw.js",
-        source: readFileSync(e2eFixturePath("e2e-mismatch-sw.js"), "utf8"),
-      });
-    },
-  };
-}
-
 /** Vite preview 不读取 Pages 的 `_headers` 文件；仅给真实媒体 SW 补部署响应头。 */
 function msFilePreviewHeaders(): Plugin {
   return {
@@ -64,50 +20,6 @@ function msFilePreviewHeaders(): Plugin {
         }
         next();
       });
-    },
-  };
-}
-
-/**
- * E2E hook 含测试 Vault/session 注入能力，不能仅靠运行时 if 隐藏。
- * 普通构建把 virtual module 解析为空实现，从模块图上就不引用
- * windowHooks.ts；只有显式 VITE_MSFILE_E2E=1 的隔离构建才引入它。
- */
-function msFileE2EVirtualModule(): { name: string; resolveId(id: string): string | undefined; load(id: string): string | undefined } {
-  const enabled = process.env.VITE_MSFILE_E2E === "1";
-  return {
-    name: "keymaster-msfile-e2e-virtual-module",
-    resolveId(id) {
-      return id === MSFILE_E2E_VIRTUAL_ID ? MSFILE_E2E_RESOLVED_ID : undefined;
-    },
-    load(id) {
-      if (id !== MSFILE_E2E_RESOLVED_ID) return undefined;
-      return enabled
-        ? 'export { installMsFileProductionE2EHooks } from "/src/msfileE2E/windowHooks.ts"; export { installLifecycleProductionE2EHooks } from "/src/lifecycleE2E/windowHooks.ts";'
-        : 'export function installMsFileProductionE2EHooks() { throw new Error("MSFile E2E hooks are excluded from this build"); } export function installLifecycleProductionE2EHooks() { throw new Error("Lifecycle E2E hooks are excluded from this build"); }';
-    }
-  };
-}
-
-/**
- * 旧 executor spike 只在显式隔离构建中进入模块图；spikeMode.ts 的查询参数
- * 由下方 compile-time define 关闭，避免普通生产包保留旧控制器路径。
- */
-function msFileSpikeVirtualModule(): Plugin {
-  const enabled = process.env.VITE_MSFILE_SPIKE === "1";
-  return {
-    name: "keymaster-msfile-spike-virtual-module",
-    resolveId(id) {
-      if (id === MSFILE_SPIKE_VIRTUAL_ID) return MSFILE_SPIKE_RESOLVED_ID;
-      return undefined;
-    },
-    load(id) {
-      if (id === MSFILE_SPIKE_RESOLVED_ID) {
-        return enabled
-          ? 'export { installMsFileSpikeHooks } from "/src/msfileSpike/windowHooks.ts";'
-          : "export function installMsFileSpikeHooks() {}";
-      }
-      return undefined;
     },
   };
 }
@@ -127,10 +39,7 @@ function injectAppVersionMeta(): { name: string; transformIndexHtml: (html: stri
 export default defineConfig({
   define: {
     __KEYMASTER_STORAGE_PRIVATE_GRANT__: JSON.stringify(storagePrivateGrant),
-    // 旧 spike 仅由 Playwright 的 VITE_MSFILE_SPIKE=1 隔离构建启用；普通
-    // 生产包把该全局固定为 false，连同查询参数分支一起由构建器删除。
-    __KEYMASTER_MSFILE_SPIKE__: JSON.stringify(process.env.VITE_MSFILE_SPIKE === "1"),
-    "globalThis.__KEYMASTER_MSFILE_SPIKE__": JSON.stringify(process.env.VITE_MSFILE_SPIKE === "1"),
+
   },
   // 应用使用 history 路由。资源必须从站点根路径加载；相对 URL 会在
   // `/settings/system-status` 等深层路由被解析为 `/settings/_static/*`。
@@ -138,10 +47,6 @@ export default defineConfig({
   plugins: [
     react(),
     injectAppVersionMeta(),
-    msFileE2EVirtualModule(),
-    msFileSpikeVirtualModule(),
-    msFileE2EOldServiceWorker(),
-    msFileE2EMismatchServiceWorker(),
     msFilePreviewHeaders(),
   ],
   build: {
@@ -181,7 +86,7 @@ export default defineConfig({
     allowedHosts: true,
     headers: {
       // 开发服务器从 /src 提供 module SW 时也允许根 scope；生产由
-      // apps/web/public/_headers 为 Pages 提供同一响应头。
+      // public/_headers 为 Pages 提供同一响应头。
       "Service-Worker-Allowed": "/",
     },
   },
@@ -189,7 +94,7 @@ export default defineConfig({
     alias: {
       // WebLoom 在开发阶段通过 link 接入；所有 React Hook 必须解析到
       // Keymaster 应用的同一份 React，避免 peer 依赖产生第二份 dispatcher。
-      react: new URL("../../node_modules/react", import.meta.url).pathname,
+      react: new URL("./node_modules/react", import.meta.url).pathname,
       // `keymaster-multisig-pool` 当前发布包直接 import Node `crypto`。
       // 浏览器构建只补它实际用到的 `createHmac` 最小能力，不引入整套 polyfill。
       // 用通用全局 URL 取绝对路径，避免依赖 node:url（本项目不引入 node 类型）。

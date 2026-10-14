@@ -1,4 +1,4 @@
-// apps/web/src/shell/Topbar.tsx
+// src/shell/Topbar.tsx
 // 顶栏：品牌 + 主题切换 + 语言切换 + 锁定按钮 + 通过 topbar.registry 注册的扩展项。
 // 设计缘由：Shell 不 import plugin-background；只渲染 topbar.registry。
 // 主题切换 / 语言切换是 shell 层 UI 增强，与「系统主题」同性质，直接挂在这里。

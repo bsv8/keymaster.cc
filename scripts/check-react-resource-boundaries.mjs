@@ -20,7 +20,7 @@ function walk(dir) {
   });
 }
 
-const scanDirs = [join(root, "apps", "web", "src"), ...readdirSync(join(root, "packages"))
+const scanDirs = [join(root, "src"), ...readdirSync(join(root, "packages"))
   .filter((name) => name.startsWith("plugin-")).map((name) => join(root, "packages", name, "src"))];
 
 function isComponent(node) {
@@ -59,7 +59,7 @@ for (const file of scanDirs.flatMap((dir) => { try { return walk(dir); } catch {
               text.includes("@resource-boundary allow: wallet-session-form-safety"))
           ) && method === "subscribe" && ts.isIdentifier(node.expression.expression)
             && node.expression.expression.text === "walletState";
-          const pageRendererSubscription = relative(root, file) === "apps/web/src/App.tsx" &&
+          const pageRendererSubscription = relative(root, file) === "src/App.tsx" &&
             component.name?.text === "ApplicationFrame" && method === "subscribe" &&
             ts.isIdentifier(node.expression.expression) && node.expression.expression.text === "pages";
           if (!narrowEditorException && !pageRendererSubscription) {

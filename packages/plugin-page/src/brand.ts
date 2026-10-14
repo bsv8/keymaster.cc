@@ -1,4 +1,4 @@
-// apps/web/src/brand.ts
+// src/brand.ts
 // 品牌文案集中定义。
 // 设计缘由：
 //   - `KeyMaster` 仅用于页签标题、logo、商标位等品牌展示；

@@ -1,7 +1,7 @@
 // packages/runtime/src/navigate.ts
 // SPA 导航 helper：唯一允许的"跳到应用内 path"路径。
 // 设计缘由：
-//   - 之前 `apps/web/src/shell/RouteRenderer.tsx` 与
+//   - 之前 `src/shell/RouteRenderer.tsx` 与
 //     `packages/plugin-vault/src/VaultSettingsPage.tsx` 各写了一份
 //     `history.pushState + popstate` 逻辑，重复实现容易再次出现
 //     `<a href>` 绕过 SPA 的问题。

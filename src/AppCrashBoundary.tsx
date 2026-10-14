@@ -1,4 +1,4 @@
-// apps/web/src/AppCrashBoundary.tsx
+// src/AppCrashBoundary.tsx
 // 顶级 React fatal 边界（施工单 2026-06-30 001）。
 //
 // 职责：

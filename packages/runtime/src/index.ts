@@ -18,7 +18,7 @@ export * from "./i18n/createI18nService.js";
 export * from "./storage/inMemoryKeyValueStore.js";
 export * from "./lifecycle/scopedChannelRuntime.js";
 
-// 施工单 2026-06-30 001：全局 fatal store。apps/web 与 plugin-vault 等
+// 施工单 2026-06-30 001：全局 fatal store。主应用 与 plugin-vault 等
 // 都通过本入口上报 / 订阅 fatal 错误。`resetFatalErrorForTest` 作为测试
 // 夹具浅 re-export 暴露，业务代码不依赖。
 export {

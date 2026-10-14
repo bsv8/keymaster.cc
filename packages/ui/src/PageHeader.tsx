@@ -5,7 +5,7 @@
 //
 // 硬切换 013：本组件只负责 markup（title / description / actions 三段），
 // 不再携带「业务页头 vs 表单页头」的视觉差异。所有响应式 grid 收敛都
-// 写在 apps/web 的 global.css 里，作用域限定在 `.app-shell__paged` 内部
+// 写在 主应用 的 global.css 里，作用域限定在 `.app-shell__paged` 内部
 // —— `.app-shell__paged` 是 AppShell 在 renderNormalShell 里挂在
 // `<Breadcrumbs /> + <RouteRenderer />` 上的 wrapper，正是「面包屑
 // 下方业务页」容器。这样：

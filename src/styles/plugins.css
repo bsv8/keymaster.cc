@@ -1,8 +1,8 @@
-/* apps/web/src/styles/plugins.css
+/* src/styles/plugins.css
  * 硬切换 002：装配层样式入口。
  *
  * 设计缘由：
- *   - 每个业务插件自带一份 src/styles.css；apps/web 作为装配层在
+ *   - 每个业务插件自带一份 src/styles.css；主应用 作为装配层在
  *     plugins.css 里显式列出当前启用的插件样式来源。
  *   - 卸载某个插件时，开发者只需：
  *       1) 删 bootstrapPlugins.ts 里的插件 import；

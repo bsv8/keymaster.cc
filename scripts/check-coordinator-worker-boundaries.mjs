@@ -13,8 +13,8 @@ import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, extname, join, relative, resolve } from "node:path";
 
 const root = process.cwd();
-const entry = resolve(root, "apps/web/src/keymasterSessionCoordinator.worker.ts");
-const appRequire = createRequire(resolve(root, "apps/web/package.json"));
+const entry = resolve(root, "src/keymasterSessionCoordinator.worker.ts");
+const appRequire = createRequire(resolve(root, "package.json"));
 const violations = [];
 const unresolvedWorkspaceImports = [];
 const unresolvedLocalImports = [];
@@ -137,7 +137,7 @@ function recordViolation(file, node, message) {
 function inspectImport(file, node, specifier, resolved) {
   if (resolved && /(?:Testing|\.test|\.spec)\.[cm]?[jt]s$/u.test(resolved)) recordViolation(file, node, "Production Worker must not import test hooks or fixtures");
   if (file === entry && specifier.startsWith("@keymaster/plugin-")) recordViolation(file, node, "Worker entry must delegate plugin composition to trusted assembly");
-  if (resolved && file.startsWith(resolve(root, "packages") + "/") && resolved.startsWith(resolve(root, "apps/web") + "/")) {
+  if (resolved && file.startsWith(resolve(root, "packages") + "/") && resolved.startsWith(resolve(root, "src") + "/")) {
     recordViolation(file, node, "Worker plugin must not import the application assembly");
   }
   if (specifier === "@keymaster/runtime") {

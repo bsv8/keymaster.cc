@@ -3,7 +3,7 @@ import { NetworkIdentitySelect } from "../NetworkIdentitySelect.js";
 import type { BsvNetwork } from "@keymaster/contracts";
 import { useInternalVault, useVaultImporters } from "../VaultInternalContext.js";
 // packages/plugin-vault/src/import/KeyImportWizard.tsx
-// Key 导入向导（原 apps/web/src/shell/FirstTimeImportWizard.tsx 迁移）：
+// Key 导入向导（原 src/shell/FirstTimeImportWizard.tsx 迁移）：
 //   业务流程固定为：
 //     1) 选择导入类型（importer）
 //     2) 输入 / 解析导入材料

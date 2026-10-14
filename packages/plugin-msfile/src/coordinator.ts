@@ -168,7 +168,7 @@ export function buildMsFileStateEvent(
 }
 
 /**
- * 打开 K-V 并创建服务。`transport` 由 apps/web 注入：
+ * 打开 K-V 并创建服务。`transport` 由 主应用 注入：
  * 生产 Runtime 就绪前返回 unavailable 实现；之后返回 Window executor proxy。
  */
 export async function startMsFileRuntime(options: {

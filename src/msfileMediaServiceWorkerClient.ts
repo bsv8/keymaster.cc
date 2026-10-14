@@ -1,4 +1,4 @@
-// apps/web 的 Service Worker 配置薄适配层。
+// 主应用 的 Service Worker 配置薄适配层。
 //
 // 媒体包不知道 Vite 开发服务器和生产产物的脚本位置；这里仅把脚本 URL
 // 配置给通用 Range Host。生产脚本固定在站点根路径，才能申请 `/` scope。

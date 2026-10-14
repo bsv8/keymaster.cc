@@ -1,4 +1,4 @@
-// apps/web/src/shell/SiteFooter.tsx
+// src/shell/SiteFooter.tsx
 // 站点级 footer：
 //   - onboarding 与已解锁控制面板共用同一份联系信息。
 //   - 仓库地址与联系邮箱属于站点元信息，不应散落到多个页面各自维护。

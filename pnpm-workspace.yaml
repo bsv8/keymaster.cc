@@ -1,5 +1,4 @@
 packages:
-  - "apps/*"
   - "packages/*"
   - "coding/keymaster/vaultlink-integration"
   - "coding/keymaster/vaultlink-sdk"

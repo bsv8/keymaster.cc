@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { webLoomReleaseVersion as releaseVersion } from "./webloom-release-config.mjs";
 
 const root = process.cwd();
-const packageRoots = [join(root, "apps"), join(root, "packages")];
+const packageRoots = [join(root, "packages")];
 const packageName = "webloom-framework";
 const registry = process.env.WEBLOOM_NPM_REGISTRY ?? process.env.npm_config_registry ?? "https://registry.npmjs.org/";
 const violations = [];
@@ -24,7 +24,7 @@ function packageFiles(directory) {
   });
 }
 
-for (const path of packageRoots.flatMap(packageFiles)) {
+for (const path of [join(root, "package.json"), ...packageRoots.flatMap(packageFiles)]) {
   const packageData = JSON.parse(readFileSync(path, "utf8"));
   const dependencySections = [packageData.dependencies, packageData.devDependencies, packageData.peerDependencies];
   if (dependencySections.some((section) => section && Object.hasOwn(section, "webloom"))) {

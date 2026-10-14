@@ -49,7 +49,7 @@ import { BUILTIN_PLUGIN_DEFINITIONS } from "@keymaster/contracts";
 import { createWalletStateSource } from "@keymaster/plugin-vault/coordinator";
 import { STORAGE_PRIVATE_BROWSE_CAPABILITY, type StorageBrowsePrivateCommand } from "@keymaster/platform-storage/assembly";
 import { storagePrivateCapabilities } from "../assembly/storagePrivateCapabilities.js";
-// apps/web/src/keymasterSessionCoordinator.worker.ts
+// src/keymasterSessionCoordinator.worker.ts
 // Keymaster Session Coordinator SharedWorker
 //
 // 设计缘由（施工单 002）：
@@ -879,7 +879,7 @@ const msfileBitfsRuntime = createBitfsWorkerRuntime({
   deriveAddress: deriveP2pkhAddress,
   addressScript: p2pkhAddressToScriptHex,
   maxFeeSatoshis: bitfsFundingMaxFeeSatoshis,
-  diagnosticsEnabled: () => import.meta.env.VITE_BITFS_E2E === "true",
+  diagnosticsEnabled: () => false,
   bytesToHex,
   hexToBytes: cryptoHexToBytes,
 });
@@ -939,9 +939,9 @@ function bitfsAllowsLoopbackWebsocket(): boolean {
 function bitfsFundingMaxFeeSatoshis(): number {
   const raw = import.meta.env.VITE_BITFS_MAX_FEE_SATOSHIS;
   if (raw === undefined || raw === "") return 10_000;
-  if (!/^[1-9][0-9]{0,6}$/u.test(raw)) throw new Error("BitFS E2E 手续费上限配置无效");
+  if (!/^[1-9][0-9]{0,6}$/u.test(raw)) throw new Error("BitFS 手续费上限配置无效");
   const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value < 1) throw new Error("BitFS E2E 手续费上限配置无效");
+  if (!Number.isSafeInteger(value) || value < 1) throw new Error("BitFS 手续费上限配置无效");
   return value;
 }
 const satWorkerLifecycle = createSatWorkerLifecycle({

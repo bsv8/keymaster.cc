@@ -17,12 +17,117 @@ importers:
       '@bsv/sdk':
         specifier: ^1.10.4
         version: 1.10.4
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:packages/contracts
+      '@keymaster/msfile-media':
+        specifier: '*'
+        version: link:packages/msfile-media
+      '@keymaster/platform-storage':
+        specifier: '*'
+        version: link:packages/platform-storage
+      '@keymaster/plugin-apps':
+        specifier: '*'
+        version: link:packages/plugin-apps
+      '@keymaster/plugin-assets':
+        specifier: workspace:*
+        version: link:packages/plugin-assets
+      '@keymaster/plugin-background':
+        specifier: '*'
+        version: link:packages/plugin-background
+      '@keymaster/plugin-bsv-price':
+        specifier: '*'
+        version: link:packages/plugin-bsv-price
+      '@keymaster/plugin-collectible-1satordinals':
+        specifier: '*'
+        version: link:packages/plugin-collectible-1satordinals
+      '@keymaster/plugin-collectibles':
+        specifier: workspace:*
+        version: link:packages/plugin-collectibles
+      '@keymaster/plugin-contacts':
+        specifier: '*'
+        version: link:packages/plugin-contacts
+      '@keymaster/plugin-forum':
+        specifier: '*'
+        version: link:packages/plugin-forum
+      '@keymaster/plugin-message':
+        specifier: '*'
+        version: link:packages/plugin-message
+      '@keymaster/plugin-msfile':
+        specifier: '*'
+        version: link:packages/plugin-msfile
+      '@keymaster/plugin-p2pkh':
+        specifier: '*'
+        version: link:packages/plugin-p2pkh
+      '@keymaster/plugin-page':
+        specifier: '*'
+        version: link:packages/plugin-page
+      '@keymaster/plugin-protocol':
+        specifier: '*'
+        version: link:packages/plugin-protocol
+      '@keymaster/plugin-sat-subscription':
+        specifier: '*'
+        version: link:packages/plugin-sat-subscription
+      '@keymaster/plugin-scan':
+        specifier: workspace:*
+        version: link:packages/plugin-scan
+      '@keymaster/plugin-token-bsv21':
+        specifier: '*'
+        version: link:packages/plugin-token-bsv21
+      '@keymaster/plugin-token-stas':
+        specifier: '*'
+        version: link:packages/plugin-token-stas
+      '@keymaster/plugin-vault':
+        specifier: '*'
+        version: link:packages/plugin-vault
+      '@keymaster/plugin-webrtc':
+        specifier: '*'
+        version: link:packages/plugin-webrtc
+      '@keymaster/plugin-window-p2p':
+        specifier: '*'
+        version: link:packages/plugin-window-p2p
+      '@keymaster/plugin-woc':
+        specifier: '*'
+        version: link:packages/plugin-woc
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:packages/runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:packages/ui
+      '@libp2p/webrtc':
+        specifier: 6.0.30
+        version: 6.0.30(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+      '@libp2p/websockets':
+        specifier: 10.1.20
+        version: 10.1.20
+      '@multiformats/multiaddr':
+        specifier: 13.0.3
+        version: 13.0.3
       '@noble/curves':
         specifier: ^2.2.0
         version: 2.2.0
+      '@noble/hashes':
+        specifier: ^1.8.0
+        version: 1.8.0
+      bitcoin-libp2p:
+        specifier: 0.3.1
+        version: 0.3.1(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+      bsv8-channel-protocol:
+        specifier: 0.6.0
+        version: 0.6.0
+      buffer:
+        specifier: ^6.0.3
+        version: 6.0.3
+      go-bitfs:
+        specifier: 0.3.2
+        version: 0.3.2(patch_hash=139242f5c4336bb73687e66f534bbb5804bd7e4bf0f416fecc5ea8cda9a3158f)(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       i18next:
         specifier: ^23.16.8
         version: 23.16.8
+      keyhold:
+        specifier: 2.1.0
+        version: 2.1.0
       keymaster-multisig-pool:
         specifier: ^1.5.0
         version: 1.5.0
@@ -41,13 +146,13 @@ importers:
       react-router:
         specifier: ^7.17.0
         version: 7.18.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+      sat-subscription-protocol:
+        specifier: 0.3.0
+        version: 0.3.0
+      webloom-framework:
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
     devDependencies:
-      '@keymaster/contracts':
-        specifier: workspace:*
-        version: link:packages/contracts
-      '@noble/hashes':
-        specifier: ^1.8.0
-        version: 1.8.0
       '@noble/secp256k1':
         specifier: ^2.2.0
         version: 2.3.0
@@ -63,18 +168,12 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^4.3.1
         version: 4.7.0(vite@5.4.21(@types/node@24.13.3)(terser@5.51.2))
-      bitcoin-libp2p:
-        specifier: 0.3.1
-        version: 0.3.1(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       typescript:
         specifier: ^5.5.4
         version: 5.9.3
       vite:
         specifier: ^5.4.2
         version: 5.4.21(@types/node@24.13.3)(terser@5.51.2)
-      webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
 
   coding/keymaster/p2p-host:
     dependencies:
@@ -133,120 +232,6 @@ importers:
       '@noble/hashes':
         specifier: 1.8.0
         version: 1.8.0
-
-  apps/web:
-    dependencies:
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../../packages/contracts
-      '@keymaster/msfile-media':
-        specifier: '*'
-        version: link:../../packages/msfile-media
-      '@keymaster/platform-storage':
-        specifier: '*'
-        version: link:../../packages/platform-storage
-      '@keymaster/plugin-apps':
-        specifier: '*'
-        version: link:../../packages/plugin-apps
-      '@keymaster/plugin-assets':
-        specifier: workspace:*
-        version: link:../../packages/plugin-assets
-      '@keymaster/plugin-background':
-        specifier: '*'
-        version: link:../../packages/plugin-background
-      '@keymaster/plugin-bsv-price':
-        specifier: '*'
-        version: link:../../packages/plugin-bsv-price
-      '@keymaster/plugin-collectible-1satordinals':
-        specifier: '*'
-        version: link:../../packages/plugin-collectible-1satordinals
-      '@keymaster/plugin-collectibles':
-        specifier: workspace:*
-        version: link:../../packages/plugin-collectibles
-      '@keymaster/plugin-contacts':
-        specifier: '*'
-        version: link:../../packages/plugin-contacts
-      '@keymaster/plugin-forum':
-        specifier: '*'
-        version: link:../../packages/plugin-forum
-      '@keymaster/plugin-message':
-        specifier: '*'
-        version: link:../../packages/plugin-message
-      '@keymaster/plugin-msfile':
-        specifier: '*'
-        version: link:../../packages/plugin-msfile
-      '@keymaster/plugin-p2pkh':
-        specifier: '*'
-        version: link:../../packages/plugin-p2pkh
-      '@keymaster/plugin-page':
-        specifier: '*'
-        version: link:../../packages/plugin-page
-      '@keymaster/plugin-protocol':
-        specifier: '*'
-        version: link:../../packages/plugin-protocol
-      '@keymaster/plugin-sat-subscription':
-        specifier: '*'
-        version: link:../../packages/plugin-sat-subscription
-      '@keymaster/plugin-scan':
-        specifier: workspace:*
-        version: link:../../packages/plugin-scan
-      '@keymaster/plugin-token-bsv21':
-        specifier: '*'
-        version: link:../../packages/plugin-token-bsv21
-      '@keymaster/plugin-token-stas':
-        specifier: '*'
-        version: link:../../packages/plugin-token-stas
-      '@keymaster/plugin-vault':
-        specifier: '*'
-        version: link:../../packages/plugin-vault
-      '@keymaster/plugin-webrtc':
-        specifier: '*'
-        version: link:../../packages/plugin-webrtc
-      '@keymaster/plugin-window-p2p':
-        specifier: '*'
-        version: link:../../packages/plugin-window-p2p
-      '@keymaster/plugin-woc':
-        specifier: '*'
-        version: link:../../packages/plugin-woc
-      '@keymaster/runtime':
-        specifier: '*'
-        version: link:../../packages/runtime
-      '@keymaster/ui':
-        specifier: '*'
-        version: link:../../packages/ui
-      '@libp2p/webrtc':
-        specifier: 6.0.30
-        version: 6.0.30(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
-      '@libp2p/websockets':
-        specifier: 10.1.20
-        version: 10.1.20
-      '@multiformats/multiaddr':
-        specifier: 13.0.3
-        version: 13.0.3
-      '@noble/hashes':
-        specifier: ^1.8.0
-        version: 1.8.0
-      bitcoin-libp2p:
-        specifier: 0.3.1
-        version: 0.3.1(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
-      bsv8-channel-protocol:
-        specifier: 0.6.0
-        version: 0.6.0
-      buffer:
-        specifier: ^6.0.3
-        version: 6.0.3
-      go-bitfs:
-        specifier: 0.3.2
-        version: 0.3.2(patch_hash=139242f5c4336bb73687e66f534bbb5804bd7e4bf0f416fecc5ea8cda9a3158f)(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
-      keyhold:
-        specifier: 2.1.0
-        version: 2.1.0
-      sat-subscription-protocol:
-        specifier: 0.3.0
-        version: 0.3.0
-      webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
 
   packages/connect:
     devDependencies:
@@ -1316,9 +1301,6 @@ packages:
   '@libp2p/identify@4.1.13':
     resolution: {integrity: sha512-5UhxJ773UMJLdERtggPw31PwVgzQqofG1uyzD7aE4OKFC1SMG8nbUk3PS4m3B+fZm2v0J8gzbhEoeVNa4xEdQg==}
 
-  '@libp2p/interface-internal@3.1.12':
-    resolution: {integrity: sha512-TIAUDopj73j0p5pfvCHKRwVBLx51UaNQ2zFk/Iskn89jcPjoQnpDnXjeqzvT9GZJSCwuqkE/eQ4sGiQ5xyXZNw==}
-
   '@libp2p/interface-internal@3.1.13':
     resolution: {integrity: sha512-+vjQzpQl+0uoWCyNwV5NDnv1RAK9LDeWGeMbx/Fl2ZWrndtuFUPa9LxwqHXrTly6YOhgUatSzVqZBWnrQ1PxGg==}
 
@@ -1337,9 +1319,6 @@ packages:
   '@libp2p/multistream-select@7.0.27':
     resolution: {integrity: sha512-GNTk4gd0U0tDz7pKK9tpOswcthXeN1CxitlBcPXj1NAGv3SMWf4B5vM6Tm103jkFEbiiXn8Wubp029Ys47lTeA==}
 
-  '@libp2p/peer-collections@7.0.27':
-    resolution: {integrity: sha512-+XrNXqzO9eHOf3YGgq+exsALrTzmoBw29Z1uzFovFjeXK/MBWJiIeDmuqSNXq+zxeaC+JeEgOwkX8+guR2T0wQ==}
-
   '@libp2p/peer-collections@7.0.28':
     resolution: {integrity: sha512-+evafZ5oSnGRfB7z+ycf09ehzNhCKoOZaiHgi6TpnDitpRQM5KQeN0H9Ep2uNJtzyW944HOG41BqcSaHbEHv7Q==}
 
@@ -1357,9 +1336,6 @@ packages:
 
   '@libp2p/peer-store@12.0.27':
     resolution: {integrity: sha512-XpLj691+hdYu+Cts2GUD38s+Cb2q2Zw7UqM5Hc+vTpyEP0mYRtC9LtfFnj3UeTkAmATSw5bKUqHqIUalb9OLFA==}
-
-  '@libp2p/utils@7.4.0':
-    resolution: {integrity: sha512-9tHz8kWiFiCG0hVqVKYEduQnt5kMhla/6dsaGsDPckFjO7vYC0Yy24lp88wG3X5Ap3rde/Dj1ErU1xN6Jp3N9Q==}
 
   '@libp2p/utils@7.4.1':
     resolution: {integrity: sha512-e9cZeop+awI0rFczG4DvAwVeHqBhuCZfTyskvgONfKQrsT7L0BSlTlTTzZoFF8Dnb+QrzHsoIpnl0PrCr0h+Hg==}
@@ -3507,13 +3483,6 @@ snapshots:
       uint8arraylist: 3.0.2
       uint8arrays: 6.1.1
 
-  '@libp2p/interface-internal@3.1.12':
-    dependencies:
-      '@libp2p/interface': 3.3.0
-      '@libp2p/peer-collections': 7.0.27
-      '@multiformats/multiaddr': 13.0.3
-      progress-events: 1.1.0
-
   '@libp2p/interface-internal@3.1.13':
     dependencies:
       '@libp2p/interface': 3.3.0
@@ -3565,13 +3534,6 @@ snapshots:
       it-length-prefixed: 11.0.1
       uint8arraylist: 3.0.2
       uint8arrays: 6.1.1
-
-  '@libp2p/peer-collections@7.0.27':
-    dependencies:
-      '@libp2p/interface': 3.3.0
-      '@libp2p/peer-id': 6.0.15
-      '@libp2p/utils': 7.4.1
-      multiformats: 14.0.5
 
   '@libp2p/peer-collections@7.0.28':
     dependencies:
@@ -3631,34 +3593,6 @@ snapshots:
       uint8arraylist: 3.0.2
       uint8arrays: 6.1.1
 
-  '@libp2p/utils@7.4.0':
-    dependencies:
-      '@chainsafe/is-ip': 2.1.0
-      '@chainsafe/netmask': 2.0.0
-      '@libp2p/interface': 3.3.0
-      '@libp2p/logger': 6.2.13
-      '@multiformats/multiaddr': 13.0.3
-      '@multiformats/multiaddr-matcher': 3.0.2
-      '@sindresorhus/fnv1a': 3.1.0
-      any-signal: 4.2.0
-      cborg: 6.1.1
-      delay: 7.0.0
-      is-loopback-addr: 2.1.0
-      it-length-prefixed: 11.0.1
-      it-pipe: 3.0.1
-      it-pushable: 3.2.4
-      it-stream-types: 2.0.4
-      main-event: 1.0.5
-      netmask: 2.1.1
-      p-defer: 4.0.1
-      p-event: 7.1.0
-      progress-events: 1.1.0
-      protons-runtime: 7.0.0
-      race-signal: 2.0.2
-      uint8-varint: 3.0.0
-      uint8arraylist: 3.0.2
-      uint8arrays: 6.1.1
-
   '@libp2p/utils@7.4.1':
     dependencies:
       '@chainsafe/is-ip': 2.1.0
@@ -3693,10 +3627,10 @@ snapshots:
       '@chainsafe/libp2p-noise': 17.0.0
       '@libp2p/crypto': 5.1.23
       '@libp2p/interface': 3.3.0
-      '@libp2p/interface-internal': 3.1.12
+      '@libp2p/interface-internal': 3.1.13
       '@libp2p/keychain': 6.1.7
       '@libp2p/peer-id': 6.0.15
-      '@libp2p/utils': 7.4.0
+      '@libp2p/utils': 7.4.1
       '@multiformats/multiaddr': 13.0.3
       '@multiformats/multiaddr-matcher': 3.0.2
       '@peculiar/webcrypto': 1.7.1

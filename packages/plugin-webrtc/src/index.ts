@@ -9,7 +9,7 @@
 //   - 不做远端在线查询；通话连接结果由 WebRTC 本身反馈。
 //
 // 样式入口：本插件自带 `src/styles.css`；装配层在
-// `apps/web/src/styles/plugins.css` 显式 `@import` 引入。
+// `src/styles/plugins.css` 显式 `@import` 引入。
 
 export { webrtcPlugin, webrtcSetup } from "./manifest.js";
 export { createWebrtcService, createBrowserWebrtcEnvironment, MAX_WEBRTC_TRANSFER_BYTES, type WebrtcService, type WebrtcSessionSnapshot, type WebrtcSessionPhase, type WebrtcMode, type WebrtcRemoteNotice, type WebrtcRemoteNoticeKind, type WebrtcBlockReason, type WebrtcPeerPresenceState, type WebrtcSubscriber, type WebrtcEnvironment, type RTCPeerConnectionLike, type MediaStreamLike, type StunDiagnosticResult, type StartCallInput } from "./webrtcService.js";

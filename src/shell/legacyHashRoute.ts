@@ -1,4 +1,4 @@
-// apps/web/src/shell/legacyHashRoute.ts
+// src/shell/legacyHashRoute.ts
 // 旧 hash 路由迁移：早期版本以 "#/path" 形式提供内部导航。
 // 应用启动前把这一类站内路径迁移到正式 pathname 路由。
 //

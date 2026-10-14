@@ -3,7 +3,7 @@
  *
  * 设计缘由：
  *   - 仅承载 plugin-webrtc 自己页面 / 卡片样式；
- *   - 不写全局 token；不反向写 apps/web/global.css。
+ *   - 不写全局 token；不反向写 主应用/global.css。
  */
 
 .km-webrtc-page {

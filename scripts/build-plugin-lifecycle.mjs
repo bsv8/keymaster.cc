@@ -48,7 +48,7 @@ async function containsBuildId(directory) {
   return false;
 }
 
-const distPath = resolve("apps/web/dist");
+const distPath = resolve("dist");
 if (!(await containsBuildId(distPath))) {
   throw new Error(`生产产物未包含注入的 buildId：${before.buildId}`);
 }

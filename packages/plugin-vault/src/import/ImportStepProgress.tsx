@@ -8,7 +8,7 @@
 //     UI 必须真实反映状态机，而不是诱导用户绕过验证。
 //   - 文案进入 i18n。
 //
-// 从 apps/web/src/shell/StepProgress.tsx 迁移到本包：初始化的桶/Key 向导与
+// 从 src/shell/StepProgress.tsx 迁移到本包：初始化的桶/Key 向导与
 // 桶管理页的导入步骤共用同一实现，避免两份步骤条行为漂移。
 
 import { Check } from "lucide-react";

@@ -1,5 +1,5 @@
 import { usePageResources } from "../PageResourceContext.js";
-// apps/web/src/shell/Breadcrumbs.tsx
+// src/shell/Breadcrumbs.tsx
 // 面包屑：从 breadcrumb.registry 找到当前 path 对应的 provider。
 // 设计缘由：动态资源名（key 标签、联系人名）必须由 provider resolve，shell 禁止硬拼。
 //

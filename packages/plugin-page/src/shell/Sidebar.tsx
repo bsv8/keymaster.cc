@@ -1,4 +1,4 @@
-// apps/web/src/shell/Sidebar.tsx
+// src/shell/Sidebar.tsx
 // 侧边栏：唯一菜单来源是 business.registry。
 // 设计缘由：所有用户可见入口都通过业务域 / feature 声明，不保留 legacy 菜单投影。
 // 窄屏下作为抽屉式 overlay：AppShell 持有开关状态，

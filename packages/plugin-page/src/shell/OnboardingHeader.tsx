@@ -1,4 +1,4 @@
-// apps/web/src/shell/OnboardingHeader.tsx
+// src/shell/OnboardingHeader.tsx
 // 首启 onboarding 共享 header：
 //   - 左侧：品牌（Keymaster）+ 副标题（"本地私钥保险箱"等）。
 //   - 右侧：ThemeToggle（onboarding 变体）+ LanguageSwitch。

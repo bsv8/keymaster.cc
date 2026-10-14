@@ -1,6 +1,6 @@
 // packages/plugin-protocol/src/index.ts
 // 协议插件统一入口。
-// apps/web 通过 import 这个文件来装配插件，不直接 import 内部模块。
+// 主应用 通过 import 这个文件来装配插件，不直接 import 内部模块。
 
 export { protocolPlugin, protocolSetup, PROTOCOL_PLUGIN_ID } from "./manifest.js";
 export { ProtocolCommandFeed, type ProtocolCommandFeedProps } from "./ProtocolCommandFeed.js";

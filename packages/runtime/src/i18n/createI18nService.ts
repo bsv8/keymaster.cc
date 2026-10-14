@@ -97,7 +97,7 @@ const PLATFORM_RESOURCES: I18nPluginResources = {
 export interface CreateI18nServiceOptions {
   /**
    * 启动前注入的资源。
-   * 设计缘由：apps/web 是装配层，可以在 createPluginHost 时把 shell
+   * 设计缘由：主应用 是装配层，可以在 createPluginHost 时把 shell
    * 自己的 i18n 资源（如 `shell.locked.*`）先注入到 i18n service，
    * 保证 Topbar / LockedShell 的 t() 调用能命中。
    *

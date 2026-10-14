@@ -1,4 +1,4 @@
-// apps/web/src/shell/BrandIcon.tsx
+// src/shell/BrandIcon.tsx
 // 品牌图标：统一承载站点 favicon / 顶栏 / onboarding 头部使用的同一张视觉稿。
 // 设计缘由：
 //   - 当前用户已确认使用盾牌钥匙孔稿作为品牌标记；

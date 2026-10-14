@@ -1,4 +1,4 @@
-// apps/web/src/shell/IndexedDbPersistenceBar.tsx
+// src/shell/IndexedDbPersistenceBar.tsx
 // IndexedDB 永久存储授权条。
 //
 // Local 桶的物理真值是 IndexedDB。在没有 persistent-storage 授权时，浏览器

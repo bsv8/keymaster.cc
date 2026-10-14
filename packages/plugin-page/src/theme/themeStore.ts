@@ -1,4 +1,4 @@
-// apps/web/src/theme/themeStore.ts
+// src/theme/themeStore.ts
 // 主题状态只存在于当前 Tab；跨客户端偏好应由远端设置负责。
 // 设计缘由：
 //   - 用户在 UI 上选择的是「跟随系统 / 黑 / 白」，这是「模式」；

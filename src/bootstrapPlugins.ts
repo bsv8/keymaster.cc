@@ -1,7 +1,7 @@
 import { watchWindowCleanupFailures } from "./coordinator/windowCleanupFailures.js";
 import { createScopedStorageClients } from "@keymaster/platform-storage/assembly";
 import { coordinatorClientBindings } from "./assembly/coordinatorClientBindings.js";
-// apps/web/src/bootstrapPlugins.ts
+// src/bootstrapPlugins.ts
 // 全部插件由依赖图登记和启动；阶段只描述页面可观察的启动状态。
 
 import { storagePrivateCapabilities, storagePrivateSlotBindings } from "./assembly/storagePrivateCapabilities.js";
@@ -714,8 +714,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     }
   }));
 
-  const bitfsE2e = import.meta.env.VITE_BITFS_E2E === "true";
-  const fullCatalog = [...WEB_PLUGIN_CATALOG].filter((plugin) => !(bitfsE2e && plugin.id === "bsv-price"));
+  const fullCatalog = [...WEB_PLUGIN_CATALOG];
   // 施工单 2026-07-08 001 硬切换：装配层对 plugin-bsv-price 的 Window
   // runtime unit 显式注入 `pricePublisherPublicKeyHex` seed；它只在本地配置缺失时作为首次
   // 默认值，运行时真值由 BSV Price owner/App K-V 接管。

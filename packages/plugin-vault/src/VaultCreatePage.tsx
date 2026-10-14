@@ -2,7 +2,7 @@ import { NetworkIdentitySelect } from "./NetworkIdentitySelect.js";
 import type { BsvNetwork } from "@keymaster/contracts";
 import { useInternalVault } from "./VaultInternalContext.js";
 // packages/plugin-vault/src/VaultCreatePage.tsx
-// 首启"新建钱包"页：与 apps/web LockedShell 的"新建钱包"卡片语义保持一致。
+// 首启"新建钱包"页：与 主应用 LockedShell 的"新建钱包"卡片语义保持一致。
 //
 // 单 Key 本地存储（docs/存储.md）之后，创建只有一条路径：一次性生成唯一
 // 钱包 Key，并把 KeyHold、.keymaster/meta 与必要初始系统数据在同一个

@@ -6,7 +6,7 @@
  *   - pm-state badge 配色
  *   - plugin-card 行布局、capability chip、反向依赖 chip、blocker 提示
  *
- * 不再写进 apps/web/src/styles/global.css：插件样式必须跟随插件目录走，
+ * 不再写进 src/styles/global.css：插件样式必须跟随插件目录走，
  * 卸载插件时一并删除对应 CSS 入口。
  */
 

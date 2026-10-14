@@ -1,11 +1,15 @@
 import { promises as fs } from "node:fs";
 import { join, relative, resolve } from "node:path";
 
-const distDirectory = resolve("apps/web/dist");
+const distDirectory = resolve("dist");
 const forbiddenMarkers = [
   "__windowP2pExecutorSpike",
   "msfile-spike-test-password",
   "msfileSpike",
+  "__msfileProductionE2E",
+  "__lifecycleProductionE2E",
+  "msfile-production-e2e-password",
+  "lifecycle-production-e2e-password",
 ];
 
 async function listFiles(directory) {
@@ -32,11 +36,11 @@ try {
     }
   }
   if (matches.length > 0) {
-    console.error("普通生产包包含 MSFile spike 测试控制器标识：");
+    console.error("普通生产包包含 测试控制器标识：");
     for (const match of matches) console.error(`- ${match}`);
     process.exitCode = 1;
   } else {
-    console.log(`生产产物扫描通过：${files.length} 个 HTML/JS/CSS 文件未包含 MSFile spike 控制器。`);
+    console.log(`生产产物扫描通过：${files.length} 个 HTML/JS/CSS 文件未包含测试控制器。`);
   }
 } catch (error) {
   console.error(`无法扫描 ${distDirectory}：${error instanceof Error ? error.message : String(error)}`);

@@ -8,7 +8,7 @@ const check = !process.argv.includes("--write");
 const descriptor = ({ kind, id, version }) => ({ kind, id, version });
 const server = await createServer({ root, configFile: false, server: { middlewareMode: true }, ssr: { noExternal: [/^@keymaster\//] } });
 try {
-  const { WEB_PLUGIN_CATALOG_SOURCE: WEB_PLUGIN_CATALOG } = await server.ssrLoadModule("/apps/web/src/pluginCatalogSource.ts");
+  const { WEB_PLUGIN_CATALOG_SOURCE: WEB_PLUGIN_CATALOG } = await server.ssrLoadModule("/src/pluginCatalogSource.ts");
   const facts = WEB_PLUGIN_CATALOG.map(plugin => ({ id: plugin.id, name: plugin.name,
     units: plugin.units.map(unit => ({ id: unit.id, runtime: unit.runtime, scopeKind: unit.scopeKind,
       provides: (unit.provides ?? []).map(descriptor), privateProvides: (unit.privateProvides ?? []).map(descriptor), dependencies: (unit.dependencies ?? []).map(dependency => ({ ...dependency, capability: descriptor(dependency.capability) })),

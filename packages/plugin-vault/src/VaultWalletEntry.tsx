@@ -3,7 +3,7 @@ import { NetworkIdentitySelect } from "./NetworkIdentitySelect.js";
 import type { BsvNetwork } from "@keymaster/contracts";
 import { KeyImportWizard } from "./import/KeyImportWizard.js";
 import { useInternalVault } from "./VaultInternalContext.js";
-// apps/web/src/shell/LockedShell.tsx
+// src/shell/LockedShell.tsx
 // 未初始化 / 锁定状态界面（单 Key 本地存储，docs/存储.md）。
 //
 // 只有两种模式，共用 OnboardingShell：

@@ -1,4 +1,4 @@
-// apps/web/src/i18n/LanguageSwitch.tsx
+// src/i18n/LanguageSwitch.tsx
 // 顶栏语言切换 widget。
 // 设计缘由：
 //   - shell 层 UI 增强，与 ThemeToggle 同性质，直接挂在 Topbar 而不走 topbar.registry。

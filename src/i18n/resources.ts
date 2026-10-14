@@ -1,6 +1,6 @@
-// apps/web/src/i18n/resources.ts
-// apps/web shell 层的 i18n 资源：app shell 的展示文案（sidebar group / topbar / LockedShell 等）。
-// 设计缘由：apps/web 是装配层，可以提供 shell 专用 namespace `shell`，
+// src/i18n/resources.ts
+// 主应用 shell 层的 i18n 资源：app shell 的展示文案（sidebar group / topbar / LockedShell 等）。
+// 设计缘由：主应用 是装配层，可以提供 shell 专用 namespace `shell`，
 // 在 bootstrap 之前通过 initialResources 注入到 i18n service，
 // 让 Topbar / LockedShell 的 t() 调用能命中。
 

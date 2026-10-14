@@ -27,5 +27,5 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
-      - name: Run type, contract and boundary checks
+      - name: Run type, contract and source checks
         run: pnpm check:types

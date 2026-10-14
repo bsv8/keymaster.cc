@@ -189,7 +189,7 @@ export interface PluginManifest extends Omit<
    * 显式配置面（施工单 2026-07-08 001 硬切换；仅无 units 的兼容插件）。
    *
    * 设计缘由：
-   *   - 装配层（`apps/web/src/bootstrapPlugins.ts`）按依赖顺序对每个
+   *   - 装配层（`src/bootstrapPlugins.ts`）按依赖顺序对每个
    *     plugin 注入一份强类型配置真值；
    *   - 插件自己的 `setup` 通过 `ctx.config` 直接读；
    *   - **不**走 `globalThis.__XXX__` 隐式注入路径；

@@ -1,4 +1,4 @@
-// apps/web/src/theme/useTheme.ts
+// src/theme/useTheme.ts
 // 订阅 themeStore 的 React hook。
 // 设计缘由：store 在 React 外部维护（避免双实例），用 useSyncExternalStore 订阅。
 

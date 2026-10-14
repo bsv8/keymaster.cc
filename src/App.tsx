@@ -1,5 +1,5 @@
 import { useRuntimeStatus } from "@keymaster/runtime/assembly";
-// apps/web/src/App.tsx
+// src/App.tsx
 // 根组件：根据当前 path 决定渲染协议 popup / LockedShell / UnlockedShell。
 // 设计缘由：Booting/Locked/Unlocked 三态由 runtime 决定，App 只负责调度。
 //

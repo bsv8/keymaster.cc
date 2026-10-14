@@ -1,4 +1,4 @@
-// apps/web/src/theme/ThemeToggle.tsx
+// src/theme/ThemeToggle.tsx
 // 顶栏 / onboarding header 主题切换 widget：三档（跟随系统 / 黑 / 白）。
 // 设计缘由：
 //   - shell 层 UI 增强，与「系统主题」同性质，直接挂在 Topbar /

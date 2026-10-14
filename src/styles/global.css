@@ -1,4 +1,4 @@
-/* apps/web/src/styles/global.css
+/* src/styles/global.css
  * 极简全局样式。所有 class 都带前缀以避免污染。
  * 设计缘由：避免依赖 UI 框架样式，shell 自身能自洽。
  */
