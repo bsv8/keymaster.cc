@@ -30,3 +30,11 @@ pnpm build
 ## 许可证
 
 见 [LICENSE](LICENSE)。
+
+### 仲裁服务缺省配置
+
+产品在钱包解锁后按钱包记录的 BSV 网络配置固定仲裁服务：`main` 使用 `wss://arbitration.bsv8.com/`，`test` 使用 `wss://arbitration-test.bsv8.com/`。新建、导入和重新解锁已有私钥共用这一路径。WIF 的网络由导入解析识别，hex 私钥使用用户选择的网络。
+
+MSFile 设置页显示不可修改、不可删除的服务身份和完整连接地址；卖方还可以增加接受的仲裁公钥。保存设置不能移除固定仲裁方。当前两环境共用公钥与 PeerID，连接地址必须按网络选择。
+
+底层 MSFile service 默认没有仲裁服务；测试通过 `arbitrationServices` 显式注入本地服务运行时的公钥和地址，外置 E2E 构建关闭产品内置服务。默认配置不代表完整 Kind 8–11 仲裁、广播与取回流程已经接通。

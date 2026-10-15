@@ -53,6 +53,8 @@ export function createMsfileWorkerPlugin(ports: {
   });
 }
 
+export { productArbitrationServices } from "./builtinArbitration.js";
+
 export { createMsFileWorkerLifecycle, type MsFileWorkerStores } from "./workerLifecycle.js";
 
 export { createMsFileWorkerRequests } from "./workerRequests.js";

@@ -11,6 +11,7 @@ export interface MsFileWorkerStores {
 }
 
 export interface MsFileWorkerLifecyclePorts {
+  arbitrationServices?(): readonly import("@keymaster/contracts").MsFileArbitrationService[];
   assertAvailable(): void;
   session(): { unlocked: boolean; owner?: string; epoch: string };
   fixtureTransport?(): Parameters<typeof createMsFileWorkerService>[0]["transport"] | undefined;
@@ -73,6 +74,7 @@ export function createMsFileWorkerLifecycle(ports: MsFileWorkerLifecyclePorts) {
       let candidate: MsFileServiceImpl | undefined;
       try {
         candidate = await createMsFileWorkerService({
+          arbitrationServices: ports.arbitrationServices?.(),
           stores: boundStores, transport: ports.fixtureTransport?.() ?? createWindowP2pMsFileTransport({ get available() { return bridge?.()?.available ?? false; }, request: executor }), assertFresh,
           onSellerSettingsChanged: settings => ports.configureSeller(candidate!, owner, settings), notifyStateChange: ports.changed,
         });

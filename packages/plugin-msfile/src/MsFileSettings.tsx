@@ -200,7 +200,8 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
   useEffect(() => {
     if (!snapshot) return;
     setSellerDraft({ ...snapshot.sellerSettings, supportedArbiterPublicKeys: [...snapshot.sellerSettings.supportedArbiterPublicKeys] });
-    setSellerArbitersDraft(snapshot.sellerSettings.supportedArbiterPublicKeys.join("\n"));
+    const fixed = new Set(snapshot.arbitrationServices.map(service => service.publicKeyHex));
+    setSellerArbitersDraft(snapshot.sellerSettings.supportedArbiterPublicKeys.filter(key => !fixed.has(key)).join("\n"));
   }, [snapshot?.sellerSettings]);
 
   async function saveSellerSettings() {
@@ -722,7 +723,14 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
             <p>{t("msfile.settings.seller.minRefundDelayBlocksHint", { defaultValue: "收到开池请求时检查。剩余区块数低于此值就拒绝开池；已签出的开池响应仍按原证据恢复。" })}</p>
           </div>
           <div className="msfile-settings__field is-wide">
-            <label htmlFor="msfile-seller-arbiters">{t("msfile.settings.seller.arbiters", { defaultValue: "接受的仲裁方压缩公钥（每行一个）" })}</label>
+            <strong>固定仲裁服务（不可删除或修改）</strong>
+            {(snapshot?.arbitrationServices ?? []).map(service => <div key={service.address}>
+              <p>{service.name}</p><p><code>{service.publicKeyHex}</code></p><p><code>{service.address}</code></p>
+            </div>)}
+            {snapshot?.arbitrationServices.length === 0 && <p>尚未配置仲裁服务。</p>}
+          </div>
+          <div className="msfile-settings__field is-wide">
+            <label htmlFor="msfile-seller-arbiters">{t("msfile.settings.seller.arbiters", { defaultValue: "额外接受的仲裁方压缩公钥（每行一个）" })}</label>
             <textarea
               id="msfile-seller-arbiters"
               className="msfile-settings__control"

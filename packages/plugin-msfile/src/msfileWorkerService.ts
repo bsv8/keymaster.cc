@@ -11,7 +11,7 @@ export interface MsFileWorkerServiceDependencies extends Omit<MsFileServiceImplD
 export async function createMsFileWorkerService(deps: MsFileWorkerServiceDependencies) {
   const repository = await openMsFileRepository(deps.stores);
   deps.assertFresh();
-  const service = createMsFileService({ repository, transport: deps.transport, localSource: createMsFileLocalContentSource(deps.stores.settings), onSellerSettingsChanged: deps.onSellerSettingsChanged, notifyStateChange: deps.notifyStateChange });
+  const service = createMsFileService({ repository, transport: deps.transport, arbitrationServices: deps.arbitrationServices, localSource: createMsFileLocalContentSource(deps.stores.settings), onSellerSettingsChanged: deps.onSellerSettingsChanged, notifyStateChange: deps.notifyStateChange });
   try {
     await service.waitUntilInitialized();
     deps.assertFresh();

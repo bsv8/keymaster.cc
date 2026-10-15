@@ -2228,6 +2228,15 @@ function parseMsFileSettingsSnapshot(value: unknown, field: string): MsFileSetti
   return {
     globalSettings,
     ...parseMsFileReadConcurrency(result),
+    arbitrationServices: (() => {
+      if (!Array.isArray(result.arbitrationServices) || result.arbitrationServices.length > 64) throw new TypeError(`Coordinator ${field}.arbitrationServices is invalid`);
+      return result.arbitrationServices.map((item, index) => {
+        const entry = expectRecord(item, `${field}.arbitrationServices[${index}]`);
+        const publicKeyHex = text(entry.publicKeyHex, "arbitration.publicKeyHex", 66);
+        if (!isValidMsFileSupplierPublicKeyHex(publicKeyHex)) throw new TypeError("Invalid arbitration public key");
+        return { name: text(entry.name, "arbitration.name", 200), publicKeyHex, address: text(entry.address, "arbitration.address", 2048) };
+      });
+    })(),
     suppliers: result.suppliers.map((item, index) => parseMsFileSupplier(item)),
     supplierGeneration: boundedNumber(result.supplierGeneration, field + ".supplierGeneration"),
     sellerSettings: parseMsFileSellerSettings(result.sellerSettings, field + ".sellerSettings"),

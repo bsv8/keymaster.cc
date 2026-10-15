@@ -663,7 +663,15 @@ export interface MsFileSupplierProbeResult {
 
 /* ============== 设置与授权 ============== */
 
+/** 当前 owner-session 注入的固定仲裁服务；不能通过卖方设置修改其身份或地址。 */
+export interface MsFileArbitrationService {
+  name: string;
+  publicKeyHex: string;
+  address: string;
+}
+
 export interface MsFileSettingsSnapshot {
+  arbitrationServices: MsFileArbitrationService[];
   /** 用户尚未显式保存全局设置时为 null；Read 此时 fail closed。 */
   globalSettings: MsFileGlobalPriceSettings | null;
   /** 单个媒体 Session 的 Block 读取并发数。 */

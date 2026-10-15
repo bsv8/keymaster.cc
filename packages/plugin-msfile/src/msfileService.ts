@@ -62,7 +62,11 @@ import {
   mergeBuiltinMsFileSuppliers,
 } from "./builtinSuppliers.js";
 
+import { withRequiredArbitrators } from "./builtinArbitration.js";
+
 export interface MsFileServiceImplDeps {
+  /** 产品由装配入口提供；未注入时没有任何默认仲裁服务。 */
+  arbitrationServices?: readonly import("@keymaster/contracts").MsFileArbitrationService[];
   repository: MsFileRepository | Promise<MsFileRepository>;
   transport?: MsFileTransport;
   now?(): number;
@@ -202,6 +206,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
   private disposed = false;
 
   constructor(deps: MsFileServiceImplDeps) {
+    this.arbitrationServices = (deps.arbitrationServices ?? []).map(service => Object.freeze({ ...service }));
     this.repository = Promise.resolve(deps.repository);
     this.transport = deps.transport ?? createUnavailableMsFileTransport();
     this.localSource = deps.localSource;
@@ -219,6 +224,8 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
   private readonly validatorLoader: () => Promise<Pick<typeof import("./supplierConfig.js"), "validatePersistedSupplier">>;
 
   private readonly builtinSuppliers: readonly MsFileSupplierConfig[];
+
+  private readonly arbitrationServices: readonly import("@keymaster/contracts").MsFileArbitrationService[];
 
   private readonly ready: Promise<void>;
 
@@ -321,7 +328,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
       this.cachedSettings = settingsRow
         ? canonicalSettingsRow(settingsRow)
         : { settings: null, ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
-      this.cachedSellerSettings = cloneSellerSettings(settingsRow?.sellerSettings ?? MSFILE_SELLER_SETTINGS_DEFAULT);
+      this.cachedSellerSettings = withRequiredArbitrators(settingsRow?.sellerSettings ?? MSFILE_SELLER_SETTINGS_DEFAULT, this.arbitrationServices);
       this.sellerStatus = sellerRuntimeStatus(this.cachedSellerSettings, Boolean(this.localSource));
       this.supplierSnapshot = { generation: generationAtStart, suppliers };
       this.cachedSuppliers = suppliers;
@@ -343,7 +350,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     this.cachedSettings = row
       ? canonicalSettingsRow(row)
       : { settings: null, ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
-    this.cachedSellerSettings = cloneSellerSettings(row?.sellerSettings ?? MSFILE_SELLER_SETTINGS_DEFAULT);
+    this.cachedSellerSettings = withRequiredArbitrators(row?.sellerSettings ?? MSFILE_SELLER_SETTINGS_DEFAULT, this.arbitrationServices);
     // 配置读取也是状态同步：新建的 Coordinator runtime 可能没有经历
     // 首次 refresh 的 topic 发布，读取到的权威快照必须立即广播给页面
     // 代理，否则页面会长期停留在旧的 unconfigured baseline。
@@ -351,6 +358,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     this.cachedSuppliers = suppliers;
     this.emit();
     return {
+      arbitrationServices: this.arbitrationServices.map(service => ({ ...service })),
       globalSettings: row?.settings ?? null,
       ...readConcurrencyFromRow(row),
       suppliers,
@@ -416,8 +424,9 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
 
   async updateSellerSettings(input: MsFileSellerSettings): Promise<void> {
     await this.ensureReady();
-    const settings = normalizeMsFileSellerSettings(input);
-    if (!settings) throw new Error("MSFile 卖方设置不合法");
+    const normalized = normalizeMsFileSellerSettings(input);
+    const settings = normalized && normalizeMsFileSellerSettings(withRequiredArbitrators(normalized, this.arbitrationServices));
+    if (!settings) throw new Error("MSFile 卖方设置不合法（包含固定仲裁方的总数也须在限制内）");
     await (await this.repository).putSellerSettings(settings, this.now());
     this.cachedSellerSettings = cloneSellerSettings(settings);
     this.sellerStatus = this.onSellerSettingsChanged

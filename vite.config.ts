@@ -38,6 +38,7 @@ function injectAppVersionMeta(): { name: string; transformIndexHtml: (html: stri
 
 export default defineConfig({
   define: {
+    __KEYMASTER_PRODUCT_SERVICES__: "true",
     __KEYMASTER_STORAGE_PRIVATE_GRANT__: JSON.stringify(storagePrivateGrant),
 
   },

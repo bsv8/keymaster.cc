@@ -15,7 +15,7 @@ import { createVaultWorkerRuntime } from "@keymaster/plugin-vault/worker";
 import { createStorageWorkerPlugin } from "@keymaster/platform-storage/worker";
 import { createWindowP2pWorkerPlugin } from "@keymaster/plugin-window-p2p/worker";
 import { createSatSubscriptionWorkerPlugin, createSatWorkerLifecycle, type SatWorkerRuntimeState } from "@keymaster/plugin-sat-subscription/worker";
-import { createMsfileWorkerPlugin, createMsFileWorkerLifecycle } from "@keymaster/plugin-msfile/worker";
+import { createMsfileWorkerPlugin, createMsFileWorkerLifecycle, productArbitrationServices } from "@keymaster/plugin-msfile/worker";
 import { createP2pkhWorkerRuntime, createP2pkhWorkerOperations } from "@keymaster/plugin-p2pkh/worker";
 import { createContactsWorkerRuntime } from "@keymaster/plugin-contacts/worker";
 import { createWocWorkerRuntime } from "@keymaster/plugin-woc/worker";
@@ -797,6 +797,10 @@ const msfileWorkerRequests = createMsFileWorkerRequests({
 });
 
 const msfileWorkerLifecycle = createMsFileWorkerLifecycle({
+  // 只有产品 Vite 装配启用内置目录；单测和外置 E2E 构建不携带公网缺省值。
+  // 钱包网络来自已解锁身份，新建/导入/重新解锁共享同一路径。
+  arbitrationServices: () => typeof __KEYMASTER_PRODUCT_SERVICES__ !== "undefined" && __KEYMASTER_PRODUCT_SERVICES__
+    ? productArbitrationServices(vaultWorkerKeys.requireCoordinatorNetworkIdentity().bsvNetwork) : [],
   assertAvailable() { assertCoordinatorUnitConstructible("msfile.coordinator-worker"); assertStorageDataAvailable(); },
   session: () => ({ unlocked: coordinatorState.vaultStatus === "unlocked", owner: coordinatorState.activePublicKeyHex, epoch: coordinatorState.sessionEpoch }),
   fixtureTransport: () => testDomainUnitReadiness ? windowP2pExecutorTransport : undefined,
