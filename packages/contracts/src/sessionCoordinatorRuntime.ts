@@ -250,6 +250,8 @@ export type CoordinatorMsFileControlResultFor<C extends CoordinatorMsFileControl
   C extends { type: "settings.readConcurrency.update" | "settings.readConcurrency.reset" | "settings.mediaBlockReadConcurrency.update" | "settings.global.update" | "settings.seller.update" | "settings.bitfsBuyer.update" | "bitfs.buyerPriceLimit.update" | "supplier.upsert" | "supplier.delete" | "app-policy.update" | "app-policy.clear" | "approval.resolve" } ? null :
   C extends { type: "settings.mediaBlockReadConcurrency.get" } ? number :
   C extends { type: "bitfs.demand.publish" | "bitfs.demand.snapshot" | "bitfs.purchase.start" | "bitfs.purchase.cancel" } ? MsFileBitfsDemandSnapshot :
+  C extends { type: "bitfs.arbitration.list" } ? import("./msfile.js").MsFileArbitrationTask[] :
+  C extends { type: "bitfs.arbitration.operate" } ? null :
   C extends { type: "bitfs.purchase.tasks.list" } ? MsFileBitfsTaskSnapshot[] :
   C extends { type: "bitfs.demand.cancel" } ? null :
   C extends { type: "supplier.probe" } ? MsFileSupplierProbeResult :
@@ -1147,7 +1149,7 @@ function parseMsFileControl(value: unknown): CoordinatorMsFileControl {
   if (type === "settings.get" || type === "settings.readConcurrency.get" || type === "settings.readConcurrency.reset"
     || type === "settings.bitfsBuyer.get"
     || type === "settings.mediaBlockReadConcurrency.get" || type === "app-authorizations.list" || type === "approvals.pending"
-    || type === "bitfs.purchase.tasks.list") {
+    || type === "bitfs.purchase.tasks.list" || type === "bitfs.arbitration.list") {
     return { type };
   }
   if (type === "bitfs.demand.publish" || type === "bitfs.demand.snapshot" || type === "bitfs.demand.cancel") {
@@ -1182,6 +1184,11 @@ function parseMsFileControl(value: unknown): CoordinatorMsFileControl {
   }
   if (type === "settings.readConcurrency.update") return { type, input: parseMsFileReadConcurrency(control.input) };
   if (type === "settings.global.update") return { type, input: parseMsFileGlobalPriceSettings(control.input) };
+  if (type === "bitfs.arbitration.operate") {
+    const sessionId = text(control.sessionId, "MSFile arbitration.sessionId", 128);
+    if (!/^[0-9a-z][0-9a-z._-]{0,127}$/u.test(sessionId)) throw new TypeError("仲裁会话编号不合法");
+    return { type, sessionId, action: enumValue(control.action, ["submit", "retrieve", "check"] as const, "MSFile arbitration.action") };
+  }
   if (type === "settings.seller.update") return { type, input: parseMsFileSellerSettings(control.input) };
   if (type === "settings.bitfsBuyer.update") return { type, input: parseMsFileBitfsBuyerSettings(control.input) };
   if (type === "settings.mediaBlockReadConcurrency.update") {
@@ -2702,6 +2709,17 @@ function parseMsFileControlResultFor(control: CoordinatorMsFileControl, value: u
     case "bitfs.demand.snapshot":
     case "bitfs.purchase.start":
     case "bitfs.purchase.cancel": return parseMsFileBitfsDemandSnapshot(value, field);
+    case "bitfs.arbitration.operate": return null;
+    case "bitfs.arbitration.list": {
+      if (!Array.isArray(value) || value.length > 1000) throw new TypeError("仲裁记录列表不合法");
+      return value.map(item => {
+        const entry = expectRecord(item, "arbitration task");
+        return { sessionId: text(entry.sessionId, "arbitration.sessionId", 128), seedHashHex: text(entry.seedHashHex, "arbitration.seedHashHex", 64),
+          role: enumValue(entry.role, ["buyer", "seller"] as const, "arbitration.role"), state: text(entry.state, "arbitration.state", 128),
+          message: text(entry.message, "arbitration.message", 4096), txid: entry.txid === null ? null : text(entry.txid, "arbitration.txid", 64),
+          action: enumValue(entry.action, ["submit", "retrieve", "check"] as const, "arbitration.action") };
+      });
+    }
     case "bitfs.purchase.tasks.list": {
       if (!Array.isArray(value) || value.length > 1_000) throw new TypeError(`Coordinator ${field} must be a bounded array`);
       return value.map((item, index) => parseMsFileBitfsTaskSnapshot(item, `${field}[${index}]`));

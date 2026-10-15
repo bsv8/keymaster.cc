@@ -11,6 +11,8 @@ export function createPublicMsFileService(service: MsFileService, assertActive: 
   return Object.freeze(Object.assign(Object.create(null), {
     status: (...args: Parameters<MsFileService["status"]>) => call(() => service.status(...args)),
     subscribe: (...args: Parameters<MsFileService["subscribe"]>) => call(() => service.subscribe(...args)),
+    ...(service.listBitfsArbitrations ? { listBitfsArbitrations: () => call(() => service.listBitfsArbitrations!()) } : {}),
+    ...(service.operateBitfsArbitration ? { operateBitfsArbitration: (sessionId: string, action: "submit" | "retrieve" | "check") => call(() => service.operateBitfsArbitration!(sessionId, action)) } : {}),
     getSettingsSnapshot: (...args: Parameters<MsFileService["getSettingsSnapshot"]>) => call(() => service.getSettingsSnapshot(...args)),
     getReadConcurrencySettings: (...args: Parameters<MsFileService["getReadConcurrencySettings"]>) => call(() => service.getReadConcurrencySettings(...args)),
     updateReadConcurrencySettings: (...args: Parameters<MsFileService["updateReadConcurrencySettings"]>) => call(() => service.updateReadConcurrencySettings(...args)),

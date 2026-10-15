@@ -62,6 +62,7 @@ export type BitfsSellerPhase =
 
 /** 独立保存的 exact 报文/交易/证据字节的稳定名称。 */
 type BitfsFixedEvidenceName =
+  | "arbitration-endpoint" | "arbitration-fee" | "arbitration-sign-digest" | "arbitration-signature"
   | "kind1-quote"
   | "kind2-opening-request"
   | "kind3-opening-response"
@@ -117,7 +118,8 @@ export type BitfsEvidenceName = BitfsFixedEvidenceName
   | `kind7-payment-signature-${string}`
   | `latest-payment-transaction-${string}`
   /** 按付款授权 ID 保存已付款 Block 的传输速度样本。 */
-  | `seller-speed-sample-${string}`;
+  | `seller-speed-sample-${string}`
+  | `kind10-retrieval-request-${string}` | `kind11-retrieval-response-${string}`;
 
 export interface BitfsSessionRecord {
   /** 应用会话编号，不是 SDK 对象 ID。 */
@@ -282,6 +284,7 @@ const allPhases = new Set<BitfsBuyerPhase | BitfsSellerPhase>([
 ]);
 
 const evidenceNames = new Set<BitfsFixedEvidenceName>([
+  "arbitration-endpoint", "arbitration-fee", "arbitration-sign-digest", "arbitration-signature",
   "kind1-quote", "kind2-opening-request", "kind3-opening-response", "kind4-funding-delivery",
   "kind5-content-request", "kind6-content-delivery", "kind7-payment-update", "kind8-arbitration-request",
   "kind9-arbitration-response", "kind10-retrieval-request", "kind11-retrieval-response", "kind12-close-request",
@@ -297,7 +300,7 @@ const evidenceNames = new Set<BitfsFixedEvidenceName>([
 function assertSessionId(value: string): string { if (!SESSION_ID.test(value)) throw new TypeError("BitFS 会话 ID 不合法"); return value; }
 function assertEvidenceName(value: BitfsEvidenceName): BitfsEvidenceName {
   if (evidenceNames.has(value as BitfsFixedEvidenceName)
-    || /^(kind2-sign-digest|kind2-signature|kind5-sign-digest|kind5-signature|kind5-content-request|kind6-content-delivery|kind7-payment-update|kind7-payment-sign-digest|kind7-payment-signature|kind12-close-sign-digest|kind12-close-signature|latest-payment-transaction|seller-speed-sample)-[0-9a-f]{64}$/u.test(value)) return value;
+    || /^(kind2-sign-digest|kind2-signature|kind5-sign-digest|kind5-signature|kind5-content-request|kind6-content-delivery|kind7-payment-update|kind7-payment-sign-digest|kind7-payment-signature|kind12-close-sign-digest|kind12-close-signature|latest-payment-transaction|seller-speed-sample|kind10-retrieval-request|kind11-retrieval-response)-[0-9a-f]{64}$/u.test(value)) return value;
   throw new TypeError("BitFS 证据名不合法");
 }
 function uniqueEvidence(values: readonly BitfsEvidenceName[]): BitfsEvidenceName[] { return [...new Set(values.map(assertEvidenceName))].sort(); }

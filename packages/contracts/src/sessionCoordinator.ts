@@ -280,6 +280,10 @@ export type CoordinatorMsFileControl =
   | { type: "bitfs.purchase.cancel"; seedHashHex: string; sessionId: string }
   /** 读取当前 Key 下已经持久化的买方任务及其资金恢复摘要。 */
   | { type: "bitfs.purchase.tasks.list" }
+  /** 只读历史仲裁进度；不自动续跑。 */
+  | { type: "bitfs.arbitration.list" }
+  /** 用户显式申请、取回或查询结算。 */
+  | { type: "bitfs.arbitration.operate"; sessionId: string; action: "submit" | "retrieve" | "check" }
   /** 停止本地接收该需求的新报价并关闭其待处理 WebRTC 连接。 */
   | { type: "bitfs.demand.cancel"; seedHashHex: string }
   | { type: "supplier.upsert"; supplier: MsFileSupplierConfig; expectedGeneration: number | null }

@@ -152,6 +152,9 @@ export interface BitfsBuyerStream {
 
 /** 买方协议会话的 Worker 依赖。 */
 export interface BitfsBuyerProtocolDeps {
+  serialize?(id: string, run: () => Promise<void>): Promise<void>;
+  arbitrationServices?(): Promise<readonly import("@keymaster/contracts").MsFileArbitrationService[]>;
+  arbitrationReserveSatoshis?: bigint;
   /** 共用的买方需求、报价与开池任务。 */
   task: BitfsBuyerTask;
   /** 保存买方会话与 exact Artifact 的本地 journal。 */
@@ -472,11 +475,11 @@ export class BitfsBuyerProtocol {
     // 真正付款仍由 SDK 根据 exact Seed 和 Block 长度逐批计算。
     const defaultOpeningAmount = quote.terms.seedPriceSatoshis
       + quote.terms.fullBlockPriceSatoshis * blockCount
-      + this.deps.minerFeeRateSatoshisPerKilobyte * POOL_FEE_RESERVE_MULTIPLIER;
+      + this.deps.minerFeeRateSatoshisPerKilobyte * POOL_FEE_RESERVE_MULTIPLIER + (this.deps.arbitrationReserveSatoshis ?? 0n);
     const openingAmount = input.openingAmountSatoshis === undefined
       ? defaultOpeningAmount
       : parseSatoshiAmount(input.openingAmountSatoshis);
-    const feeReserve = this.deps.minerFeeRateSatoshisPerKilobyte * POOL_FEE_RESERVE_MULTIPLIER;
+    const feeReserve = this.deps.minerFeeRateSatoshisPerKilobyte * POOL_FEE_RESERVE_MULTIPLIER + (this.deps.arbitrationReserveSatoshis ?? 0n);
     const contentBudget = input.contentBudgetSatoshis === undefined
       ? openingAmount - feeReserve
       : parseSatoshiAmount(input.contentBudgetSatoshis);
@@ -516,9 +519,14 @@ export class BitfsBuyerProtocol {
     const totalBlockCount = Number(blockCount);
     this.progress(record.sessionId, "opening", openingAmountSatoshis, 0, totalBlockCount, "正在准备开池交易；资金尚未广播");
     try {
-      const arbiterPublicKeyHex = quote.terms.supportedArbiterPublicKeys[0]
-        ? bytesToHex(quote.terms.supportedArbiterPublicKeys[0])
-        : "";
+      const configured = await this.deps.arbitrationServices?.();
+      const selected = configured?.find(service => quote.terms.supportedArbiterPublicKeys.some(key => bytesToHex(key) === service.publicKeyHex));
+      const arbiterPublicKeyHex = configured ? selected?.publicKeyHex ?? "" : quote.terms.supportedArbiterPublicKeys[0] ? bytesToHex(quote.terms.supportedArbiterPublicKeys[0]) : "";
+      if (configured && !selected) throw new Error("报价没有本网络已配置的可信仲裁服务");
+      if (selected) {
+        const current = await this.requiredSession(record.sessionId);
+        await this.deps.sessions.putEvidence(record.sessionId, current.revision, "arbitration-endpoint", new TextEncoder().encode(JSON.stringify({ publicKeyHex: selected.publicKeyHex, address: selected.address })), this.deps.nowMs());
+      }
       if (!arbiterPublicKeyHex) throw new Error("签名报价没有支持的仲裁方，不能安全开池");
       const currentBlockHeight = await this.deps.blockHeight();
       this.deps.assertCurrentContext();
@@ -1423,7 +1431,7 @@ export class BitfsBuyerProtocol {
     const contentBudget = BigInt(row.contentBudgetSatoshis);
     const seedBudget = BigInt(row.seedBudgetSatoshis);
     const blockBudget = BigInt(row.blockBudgetSatoshis);
-    const feeReserve = this.deps.minerFeeRateSatoshisPerKilobyte * POOL_FEE_RESERVE_MULTIPLIER;
+    const feeReserve = this.deps.minerFeeRateSatoshisPerKilobyte * POOL_FEE_RESERVE_MULTIPLIER + (this.deps.arbitrationReserveSatoshis ?? 0n);
     if (seedBudget + blockBudget !== contentBudget
       || (row.seedBudgetReserved && seedBudget < quote.terms.seedPriceSatoshis)
       || (!row.seedBudgetReserved && seedBudget !== 0n)
@@ -1526,6 +1534,7 @@ export class BitfsBuyerProtocol {
   }
 
   private async serial(sessionId: string, action: () => Promise<void>): Promise<void> {
+    if (this.deps.serialize) return this.deps.serialize(sessionId, action);
     const prior = this.locks.get(sessionId) ?? Promise.resolve();
     const next = prior.catch(() => undefined).then(action);
     this.locks.set(sessionId, next);

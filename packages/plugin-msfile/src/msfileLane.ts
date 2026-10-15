@@ -96,6 +96,10 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
   async handle(operation: unknown, signal: AbortSignal): Promise<unknown> {
     const runtime = this.runtime;
     const value = operation as MsFileP2pLaneOperation;
+    if (value.type === "bitfs-arbitration-info") {
+      if (!this.arbitration?.info) throw new Error("仲裁网络未就绪");
+      return this.arbitration.info({ endpoint: value.endpoint, signal });
+    }
     if (value.type === "bitfs-arbitration-exchange") {
       if (!this.arbitration) throw new Error("MSFile 仲裁传输未挂载");
       return this.arbitration.exchange({ endpoint: value.endpoint, request: value.request, signal });

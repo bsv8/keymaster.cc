@@ -340,6 +340,8 @@ export interface MsFileSellerSettings {
   fullBlockPriceSatoshis: MsFileSatoshiAmount;
   /** 报价有效时间（秒）。 */
   quoteLifetimeSeconds: number;
+  /** 在线交付后等待付款的秒数；重登不恢复倒计时。 */
+  paymentTimeoutSeconds: number;
   /** 卖方接受的仲裁方压缩公钥列表。 */
   supportedArbiterPublicKeys: string[];
   /** 当前 Key 同时处理的销售会话上限。 */
@@ -577,6 +579,7 @@ export const MSFILE_SELLER_SETTINGS_DEFAULT: Readonly<MsFileSellerSettings> = Ob
   seedPriceSatoshis: "0",
   fullBlockPriceSatoshis: "0",
   quoteLifetimeSeconds: 300,
+  paymentTimeoutSeconds: 60,
   supportedArbiterPublicKeys: [],
   maxConcurrentSales: 1,
   minRefundDelayBlocks: 4,
@@ -613,6 +616,8 @@ export function normalizeMsFileSellerSettings(input: unknown): MsFileSellerSetti
   const minRefundDelayBlocks = value.minRefundDelayBlocks === undefined ? MSFILE_SELLER_SETTINGS_DEFAULT.minRefundDelayBlocks : value.minRefundDelayBlocks;
   if (!Number.isSafeInteger(minRefundDelayBlocks) || (minRefundDelayBlocks as number) < 1
     || (minRefundDelayBlocks as number) >= 500_000_000) return undefined;
+  const paymentTimeoutSeconds = value.paymentTimeoutSeconds ?? 60;
+  if (!Number.isSafeInteger(paymentTimeoutSeconds) || (paymentTimeoutSeconds as number) < 1 || (paymentTimeoutSeconds as number) > 86400) return undefined;
   const supportedArbiterPublicKeys: string[] = [];
   for (const item of value.supportedArbiterPublicKeys) {
     if (!isValidMsFileSupplierPublicKeyHex(item) || supportedArbiterPublicKeys.includes(item)) return undefined;
@@ -623,6 +628,7 @@ export function normalizeMsFileSellerSettings(input: unknown): MsFileSellerSetti
     seedPriceSatoshis,
     fullBlockPriceSatoshis,
     quoteLifetimeSeconds: value.quoteLifetimeSeconds as number,
+    paymentTimeoutSeconds: paymentTimeoutSeconds as number,
     supportedArbiterPublicKeys,
     maxConcurrentSales: value.maxConcurrentSales as number,
     minRefundDelayBlocks: minRefundDelayBlocks as number,
@@ -662,6 +668,17 @@ export interface MsFileSupplierProbeResult {
 }
 
 /* ============== 设置与授权 ============== */
+
+/** 仲裁操作记录摘要，不携带签名与文件内容。 */
+export interface MsFileArbitrationTask {
+  sessionId: string;
+  seedHashHex: string;
+  role: "buyer" | "seller";
+  state: string;
+  message: string;
+  txid: string | null;
+  action: "submit" | "retrieve" | "check";
+}
 
 /** 当前 owner-session 注入的固定仲裁服务；不能通过卖方设置修改其身份或地址。 */
 export interface MsFileArbitrationService {
@@ -785,6 +802,8 @@ export interface MsFileConnectGateway {
 /* ============== Service ============== */
 
 export interface MsFileService {
+  listBitfsArbitrations?(): Promise<MsFileArbitrationTask[]>;
+  operateBitfsArbitration?(sessionId: string, action: "submit" | "retrieve" | "check"): Promise<void>;
   status(): MsFileServiceStatus;
   subscribe(listener: () => void): () => void;
 

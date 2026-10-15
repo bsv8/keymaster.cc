@@ -56,6 +56,7 @@ export interface BitfsSellerProtocolPort {
    * 与交付承诺，端口未就绪时只能保持静默。
    */
   readonly ready: boolean;
+  onFrameSent?(sessionId: string, kind: number): Promise<void>;
   /** 拨号前先建立应用会话并持久化 exact 报价。 */
   openSession?(input: {
     /** 本次销售会话编号。 */
@@ -269,6 +270,7 @@ export class BitfsSellerSessionManager {
       }
       try {
         await this.deps.transport.send(event.sessionId, frame.slice());
+        await this.deps.protocol.onFrameSent?.(event.sessionId, parse(frame).kind);
       } catch {
         await this.close(event.sessionId, "transport_error");
         return;

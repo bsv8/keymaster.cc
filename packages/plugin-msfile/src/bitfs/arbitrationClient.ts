@@ -13,7 +13,10 @@ export interface BitfsArbitrationEndpoint {
   address: string;
 }
 
+export interface BitfsArbitrationInfo { baseSat: number; perKiBSat: number; retentionSeconds: number }
+
 export interface BitfsArbitrationTransport {
+  info?(input: { endpoint: BitfsArbitrationEndpoint; signal?: AbortSignal }): Promise<BitfsArbitrationInfo>;
   /** 只接受已经持久化的 exact Kind 8/10，返回 exact Kind 9/11。 */
   exchange(input: { endpoint: BitfsArbitrationEndpoint; request: Uint8Array; signal?: AbortSignal }): Promise<Uint8Array>;
 }
@@ -30,7 +33,7 @@ export class BitfsArbitrationRemoteError extends Error {
 }
 
 /** 响应外壳仅负责 transport；业务报文必须交回 SDK 验证签名、金额和内容。 */
-export function decodeArbitrationEnvelope(raw: Uint8Array, expectedKind: 9 | 11): Uint8Array {
+export function decodeArbitrationEnvelope(raw: Uint8Array, expectedKind: 0 | 9 | 11): Uint8Array {
   const value: unknown = decode(raw, { strict: true, allowIndefinite: false, allowUndefined: false, allowNaN: false, allowInfinity: false });
   if (!Array.isArray(value) || value[0] !== 1) throw new Error("仲裁响应外壳版本错误");
   // 外壳同样要求确定性编码，不能接受尾部数据或替代 CBOR 形式。
@@ -44,7 +47,7 @@ export function decodeArbitrationEnvelope(raw: Uint8Array, expectedKind: 9 | 11)
     throw new BitfsArbitrationRemoteError(code, retryable, delay);
   }
   if (value[1] !== 0 || value.length !== 4 || value[2] !== expectedKind || !(value[3] instanceof Uint8Array)) throw new Error("仲裁成功外壳 Kind 或格式错误");
-  return parseAs(expectedKind, value[3]).bytes();
+  return expectedKind === 0 ? value[3].slice() : parseAs(expectedKind, value[3]).bytes();
 }
 
 export function createBitfsArbitrationClient(input: {
@@ -57,12 +60,8 @@ export function createBitfsArbitrationClient(input: {
 }): BitfsArbitrationTransport {
   const timeoutMs = input.timeoutMs ?? 120_000;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new Error("仲裁超时必须是正整数毫秒");
-  return {
-    async exchange({ endpoint, request, signal }) {
-      const artifact = parse(request);
-      if (artifact.kind !== 8 && artifact.kind !== 10) throw new Error("仲裁客户端只接受 Kind 8 或 Kind 10");
-      const kind = artifact.kind;
-      const expectedKind = kind === 8 ? 9 : 11;
+  const roundTrip = async (endpoint: BitfsArbitrationEndpoint, request: Uint8Array, kind: 0 | 8 | 10, signal?: AbortSignal): Promise<Uint8Array> => {
+      const expectedKind = kind === 0 ? 0 : kind === 8 ? 9 : 11;
       const peer = deriveSupplierPeerId(endpoint.publicKeyHex);
       const address = normalizeSupplierAddress(endpoint.address, peer, { allowLoopbackWs: input.allowLoopbackWs === true });
       if (!address.ok) throw new Error(`仲裁地址无效：${address.message}`);
@@ -77,7 +76,7 @@ export function createBitfsArbitrationClient(input: {
       controller.signal.addEventListener("abort", abort, { once: true });
       try {
         const connection = await dialAuthenticatedAddress({ host: input.host, address: address.value.normalized, publicKeyHex: endpoint.publicKeyHex, signal: controller.signal });
-        stream = await connection.newStream(`/bitfs/arbitration/${kind === 8 ? "submit" : "retrieve"}/1.0.0`, { signal: controller.signal });
+        stream = await connection.newStream(`/bitfs/arbitration/${kind === 0 ? "info" : kind === 8 ? "submit" : "retrieve"}/1.0.0`, { signal: controller.signal });
         // 注册 reader 后再发请求，避免快速响应在 listener 安装前到达。
         const max = MAX_WIRE_FRAME_BYTES + 4096;
         frames = readUvarintFrames(stream, { signal: controller.signal, maxInboundFrameBytes: max, maxBufferedBytes: max + 10, maxBufferedFrames: 1 });
@@ -97,6 +96,18 @@ export function createBitfsArbitrationClient(input: {
         // 不关闭共享 Host/Connection，避免影响同 owner 的其他业务。
         if (stream) await stream.close().catch(() => undefined);
       }
+  };
+  return {
+    async info({ endpoint, signal }) {
+      const data = decode(await roundTrip(endpoint, new Uint8Array([1]), 0, signal));
+      if (!Array.isArray(data) || data.length !== 8 || data[0] !== 1 || data[1] !== deriveSupplierPeerId(endpoint.publicKeyHex)
+        || ![data[3], data[4], data[5]].every(value => Number.isSafeInteger(value) && value >= 0) || data[3] <= 0) throw new Error("仲裁服务费率信息不合法");
+      return { baseSat: data[3], perKiBSat: data[4], retentionSeconds: data[5] };
+    },
+    async exchange({ endpoint, request, signal }) {
+      const kind = parse(request).kind;
+      if (kind !== 8 && kind !== 10) throw new Error("仲裁客户端只接受 Kind 8 或 Kind 10");
+      return roundTrip(endpoint, request, kind, signal);
     },
   };
 }

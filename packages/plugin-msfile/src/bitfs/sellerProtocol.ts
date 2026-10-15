@@ -54,6 +54,9 @@ export interface BitfsSellerContentResolver {
 }
 
 export interface BitfsSellerProtocolDeps {
+  serialize?(id: string, run: () => Promise<void>): Promise<void>;
+  onDelivered?(id: string): Promise<void>;
+  onPaid?(id: string): void;
   /** 当前 Key 的受限签名器。 */
   signer: Signer;
   /** Keymaster 应用会话 journal。 */
@@ -142,15 +145,18 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
     });
   }
 
+  async onFrameSent(sessionId: string, kind: number): Promise<void> { if (kind === 6) await this.deps.onDelivered?.(sessionId); }
+
   async onFrame(input: { sessionId: string; kind: import("go-bitfs").WireKind; bytes: Uint8Array }): Promise<BitfsSellerProtocolResult> {
     let result: BitfsSellerProtocolResult = { type: "none" };
-    await this.serial(input.sessionId, async () => { result = await this.handle(input); });
+    await this.serial(input.sessionId, async () => { result = await this.handle(input); if ((await this.deps.sessions.get(input.sessionId))?.phase === "paid") this.deps.onPaid?.(input.sessionId); });
     return result;
   }
 
   private async handle(input: { sessionId: string; kind: import("go-bitfs").WireKind; bytes: Uint8Array }): Promise<BitfsSellerProtocolResult> {
     let record = await this.requiredRecord(input.sessionId);
     this.assertCurrent(record);
+    if (record.evidence.includes("kind8-arbitration-request")) return { type: "close", reason: "arbitration_pending" };
     if (input.kind === 2) {
       const savedKind2 = await this.deps.sessions.getEvidence(record.sessionId, "kind2-opening-request");
       const savedKind3 = await this.deps.sessions.getEvidence(record.sessionId, "kind3-opening-response");
@@ -475,6 +481,7 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
     }
   }
   private async serial(sessionId: string, action: () => Promise<void>): Promise<void> {
+    if (this.deps.serialize) return this.deps.serialize(sessionId, action);
     const prior = this.locks.get(sessionId) ?? Promise.resolve();
     const next = prior.catch(() => undefined).then(action);
     this.locks.set(sessionId, next);

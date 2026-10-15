@@ -29,7 +29,7 @@ export type BitfsDedicatedUtxoState =
   | "released";
 
 /** 专款相关交易的用途。 */
-export type BitfsFundingTransactionPurpose = "split" | "opening" | "close" | "refund";
+export type BitfsFundingTransactionPurpose = "split" | "opening" | "close" | "refund" | "arbitration";
 
 /** 专款相关交易等待恢复时的索引状态。 */
 export type BitfsFundingTransactionState = "prepared" | "result-unknown" | "observed" | "failed";
@@ -202,7 +202,7 @@ export interface BitfsFundingLedger {
     network: BsvNetwork;
     expectedRevision: number;
     poolId: string;
-    purpose: "close" | "refund";
+    purpose: "close" | "refund" | "arbitration";
     txid: string;
     /** 关池/退款交易实际花费的池状态 outpoint；必须从经 go-bitfs 验证的交易原文解析。 */
     spendingOutpoint: string;
@@ -1449,7 +1449,7 @@ function validateUtxo(value: BitfsDedicatedUtxo): BitfsDedicatedUtxo {
 }
 
 function validateFundingTransaction(value: BitfsFundingTransaction): BitfsFundingTransaction {
-  if (!["split", "opening", "close", "refund"].includes(value.purpose)) throw new BitfsFundingError("integrity", "BitFS 专款交易用途无效");
+  if (!["split", "opening", "close", "refund", "arbitration"].includes(value.purpose)) throw new BitfsFundingError("integrity", "BitFS 专款交易用途无效");
   if (!["prepared", "result-unknown", "observed", "failed"].includes(value.state)) throw new BitfsFundingError("integrity", "BitFS 专款交易状态无效");
   if (value.purpose === "opening" && (value.maxFeeSatoshis === undefined || value.changeSatoshis === undefined || value.changeScriptHex === undefined)) {
     throw new BitfsFundingError("integrity", "开池交易账本缺少手续费或找零校验字段");

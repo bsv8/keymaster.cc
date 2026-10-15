@@ -1,3 +1,4 @@
+import { observedPropagation } from "./transactionObservation.js";
 // packages/plugin-woc/src/wocActor.ts
 // WOC actor mailbox：注册 target="woc" 的 handler 统一处理 WOC 消息。
 //
@@ -766,20 +767,24 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
           if (isConfirmedTransactionDetail(detail)) {
             return { canonicalTxid: txid, observation: "confirmed" as const };
           }
+          if (detail && typeof detail === "object" && "txid" in detail && detail.txid === txid
+            && "vin" in detail && Array.isArray(detail.vin) && "vout" in detail && Array.isArray(detail.vout)) {
+            return { canonicalTxid: txid, observation: "unconfirmed" as const };
+          }
         } catch (err) {
           if (!isWocNotFoundError(err)) {
             throw err;
           }
         }
         try {
-          await fetchJson(
+          const propagation = await fetchJson(
             network,
             `/tx/hash/${encodeURIComponent(txid)}/propagation`,
             { method: "GET" },
             signal,
             opts.timeoutMs
           );
-          return { canonicalTxid: txid, observation: "unconfirmed" as const };
+          return { canonicalTxid: txid, observation: observedPropagation(propagation) };
         } catch (err) {
           if (isWocNotFoundError(err)) {
             return { canonicalTxid: txid, observation: undefined };

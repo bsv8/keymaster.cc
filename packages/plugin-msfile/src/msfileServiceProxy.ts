@@ -226,6 +226,9 @@ export class MsFileServiceProxy implements MsFileService {
     return this.#coordinator.msfileData(build(grantId), transfer, signal).then((result) => unwrap<T>(result));
   }
 
+  listBitfsArbitrations(): Promise<import("@keymaster/contracts").MsFileArbitrationTask[]> { return this.#control({ type: "bitfs.arbitration.list" }); }
+  operateBitfsArbitration(sessionId: string, action: "submit" | "retrieve" | "check"): Promise<void> { return this.#control({ type: "bitfs.arbitration.operate", sessionId, action }).then(() => undefined); }
+
   async getSettingsSnapshot(): Promise<MsFileSettingsSnapshot> {
     const snapshot = await this.#control<MsFileSettingsSnapshot>({ type: "settings.get" });
     this.#applySettingsSnapshot(snapshot);

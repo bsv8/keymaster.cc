@@ -1,3 +1,4 @@
+import { ArbitrationPanel } from "./ArbitrationPanel.js";
 import { useMsFileResources } from "./MsFileResourceContext.js";
 // packages/plugin-msfile/src/MsFileSettings.tsx
 // /settings/local-files 的本地文件页：价格限制 / 供应商配置 / Connect App 授权。
@@ -722,6 +723,12 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
             />
             <p>{t("msfile.settings.seller.minRefundDelayBlocksHint", { defaultValue: "收到开池请求时检查。剩余区块数低于此值就拒绝开池；已签出的开池响应仍按原证据恢复。" })}</p>
           </div>
+          <div className="msfile-settings__field">
+            <label htmlFor="msfile-payment-timeout">付款等待超时（秒）</label>
+            <input id="msfile-payment-timeout" type="number" min={1} max={86400} value={sellerDraft.paymentTimeoutSeconds}
+              onChange={event => setSellerDraft(current => ({ ...current, paymentTimeoutSeconds: Number(event.target.value) }))} />
+            <p>缺省 60 秒。仅本次在线交付计时；重新登录后请在仲裁记录中手动操作。</p>
+          </div>
           <div className="msfile-settings__field is-wide">
             <strong>固定仲裁服务（不可删除或修改）</strong>
             {(snapshot?.arbitrationServices ?? []).map(service => <div key={service.address}>
@@ -744,6 +751,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
           <Button onClick={() => void saveSellerSettings()}>{t("msfile.settings.seller.save", { defaultValue: "保存卖方设置" })}</Button>
         </div>
       </section>
+      <ArbitrationPanel service={service} />
 
       <section className="msfile-settings__section" id="msfile-buying" aria-labelledby="msfile-buying-title">
         <header className="msfile-settings__section-header">

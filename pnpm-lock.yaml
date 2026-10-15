@@ -7,6 +7,9 @@ settings:
 overrides:
   bitcoin-libp2p: 0.3.1
 
+patchedDependencies:
+  go-bitfs@0.3.3: 6effa616f29e1c2c1495caf2a4adff8b35ce89b6124002e8e9fe4339e9f750ea
+
 importers:
 
   .:
@@ -118,7 +121,7 @@ importers:
         version: 6.0.3
       go-bitfs:
         specifier: 0.3.3
-        version: 0.3.3(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+        version: 0.3.3(patch_hash=6effa616f29e1c2c1495caf2a4adff8b35ce89b6124002e8e9fe4339e9f750ea)(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       i18next:
         specifier: ^23.16.8
         version: 23.16.8
@@ -219,7 +222,7 @@ importers:
         version: 13.0.3
       go-bitfs:
         specifier: 0.3.3
-        version: 0.3.3(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+        version: 0.3.3(patch_hash=6effa616f29e1c2c1495caf2a4adff8b35ce89b6124002e8e9fe4339e9f750ea)(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
 
   coding/keymaster/vaultlink-sdk:
     dependencies:
@@ -513,7 +516,7 @@ importers:
         version: 5.1.6
       go-bitfs:
         specifier: 0.3.3
-        version: 0.3.3(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+        version: 0.3.3(patch_hash=6effa616f29e1c2c1495caf2a4adff8b35ce89b6124002e8e9fe4339e9f750ea)(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       masterseed:
         specifier: 1.1.0
         version: 1.1.0
@@ -4489,7 +4492,7 @@ snapshots:
 
   get-port@7.2.0: {}
 
-  go-bitfs@0.3.3(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)):
+  go-bitfs@0.3.3(patch_hash=6effa616f29e1c2c1495caf2a4adff8b35ce89b6124002e8e9fe4339e9f750ea)(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)):
     dependencies:
       '@bsv/sdk': 2.0.5
       '@noble/curves': 2.0.1
