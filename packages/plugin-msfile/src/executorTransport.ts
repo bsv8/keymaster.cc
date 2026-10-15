@@ -32,6 +32,7 @@ import type {
 
 /** MSFile lane 的受限操作；顶层公共 executor 只接受 lane operation。 */
 export type MsFileP2pLaneOperation =
+  | { type: "bitfs-arbitration-exchange"; /** 报价选定的仲裁服务身份与地址。 */ endpoint: import("./bitfs/arbitrationClient.js").BitfsArbitrationEndpoint; /** 已持久化的 exact Kind 8/10。 */ request: Uint8Array }
   | { type: "stat"; /** 供应商配置。 */ supplier: MsFileSupplierConfig; /** Seed 的 64 位 hex 哈希。 */ seedHashHex: string; /** 发起时的供应商配置世代。 */ supplierGeneration: number }
   | { type: "read"; /** 供应商配置。 */ supplier: MsFileSupplierConfig; /** 内容种类：seed 或 block。 */ kind: MsFileTransportReadInput["kind"]; /** 内容的 64 位 hex 哈希。 */ hashHex: string; /** 十进制聪上限。 */ maxPriceSatoshis: string; /** 发起时的供应商配置世代。 */ supplierGeneration: number }
   | { type: "probe"; /** 供应商配置。 */ supplier: MsFileSupplierConfig; /** 发起时的供应商配置世代。 */ supplierGeneration: number }

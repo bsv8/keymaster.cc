@@ -25,7 +25,8 @@
     "bitcoin-libp2p": "0.3.1",
     "bsv8-channel-protocol": "0.6.0",
     "go-bitfs": "0.3.3",
-    "@keymaster/vaultlink-integration": "workspace:*"
+    "@keymaster/vaultlink-integration": "workspace:*",
+    "cborg": "5.1.6"
   },
   "scripts": {}
 }

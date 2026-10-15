@@ -508,6 +508,9 @@ importers:
       bsv8-channel-protocol:
         specifier: 0.6.0
         version: 0.6.0
+      cborg:
+        specifier: 5.1.6
+        version: 5.1.6
       go-bitfs:
         specifier: 0.3.3
         version: 0.3.3(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))

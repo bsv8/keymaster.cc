@@ -9,6 +9,7 @@ import type {
   WindowP2pExecutorLaneContext,
   ProtocolSpendService,
 } from "@keymaster/contracts";
+import { createBitfsArbitrationClient, type BitfsArbitrationTransport } from "./bitfs/arbitrationClient.js";
 import { BitfsStreamRuntime } from "./bitfs/sellerStreamRuntime.js";
 import type { WindowWebRtcInterconnectContext } from "@keymaster/contracts/window-p2p";
 import { BitfsWebRtcStreamRuntime, type BitfsWebRtcHost } from "./bitfs/webrtcStreamRuntime.js";
@@ -23,6 +24,7 @@ type MsFileHost = ConstructorParameters<typeof MsFileSupplierRuntime>[0];
 export class MsFileP2pLane implements WindowP2pExecutorLane {
   readonly laneId = "msfile";
   private runtime?: MsFileSupplierRuntime;
+  private arbitration?: BitfsArbitrationTransport;
   private bitfs?: BitfsStreamRuntime;
   private bitfsWebRtc?: BitfsWebRtcStreamRuntime;
   private ownerSessionEpoch = "";
@@ -37,6 +39,10 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
   start(context: WindowP2pExecutorLaneContext): void {
     this.ownerSessionEpoch = context.ownerSessionEpoch ?? "";
     this.runtime = new MsFileSupplierRuntime(context.host as MsFileHost);
+    this.arbitration = createBitfsArbitrationClient({
+      host: context.host as MsFileHost,
+      allowLoopbackWs: (import.meta as ImportMeta & { env?: { VITE_BITFS_ALLOW_LOOPBACK_WS?: string } }).env?.VITE_BITFS_ALLOW_LOOPBACK_WS === "true",
+    });
     this.bitfs = new BitfsStreamRuntime({
       host: context.host as MsFileHost,
       emit: (event, transfer) => context.emit(event, transfer),
@@ -73,6 +79,7 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
     const bitfs = this.bitfs;
     const bitfsWebRtc = this.bitfsWebRtc;
     this.runtime = undefined;
+    this.arbitration = undefined;
     this.bitfs = undefined;
     this.bitfsWebRtc = undefined;
     this.ownerSessionEpoch = "";
@@ -89,6 +96,10 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
   async handle(operation: unknown, signal: AbortSignal): Promise<unknown> {
     const runtime = this.runtime;
     const value = operation as MsFileP2pLaneOperation;
+    if (value.type === "bitfs-arbitration-exchange") {
+      if (!this.arbitration) throw new Error("MSFile 仲裁传输未挂载");
+      return this.arbitration.exchange({ endpoint: value.endpoint, request: value.request, signal });
+    }
     if (value.type === "bitfs-funding-prepare") {
       const protocolSpend = this.getProtocolSpend();
       if (!protocolSpend) throw new Error("P2PKH protocol spend capability is unavailable");
