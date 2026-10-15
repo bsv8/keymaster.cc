@@ -63,7 +63,7 @@
   },
   "sourceOverrides": {
     "reason": "渠道授权增量，sourceCommit 为网络身份基线；实际消费副本由 files 的 SHA256 固定；BitFS 普通付款锁定值必须延续退款模板，拒绝提前清零，同源修复已提交",
-    "sourceDirectory": "/Users/david/Workspaces/BSV8_VaultLinkProtocol/Coding/BSV8_VaultLinkProtocol",
+    "sourceDirectory": "/Users/david/Workspaces/VaultLinkProtocol/Coding/BSV8_VaultLinkProtocol",
     "snapshotSha256": "d3696a25eb2eac104bc6d87c21650213f4dc09c20c49bc2301088798d7568435",
     "files": {
       "dist/bsv.d.ts": {

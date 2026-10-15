@@ -11,7 +11,7 @@ export const forumResources: I18nPluginResources = {
   resources: {
     en: {
       "forum.page.title": "Forum",
-      "forum.page.subtitle": "BSV8 Forum client",
+      "forum.page.subtitle": "RivetForum client",
       "forum.config.title": "Forum connections",
       "forum.config.add": "Add forum",
       "forum.config.label": "Label",
@@ -68,7 +68,7 @@ export const forumResources: I18nPluginResources = {
     },
     "zh-CN": {
       "forum.page.title": "论坛",
-      "forum.page.subtitle": "BSV8 Forum 客户端",
+      "forum.page.subtitle": "RivetForum 客户端",
       "forum.config.title": "论坛连接",
       "forum.config.add": "添加论坛",
       "forum.config.label": "显示别名",

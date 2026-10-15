@@ -1,6 +1,6 @@
 // Forum 协议互操作黄金向量。
 //
-// 这些 hex 全部来自服务端工作区 `/home/david/Workspaces/BSV8_Forum`
+// 这些 hex 全部来自同级服务端工作区 `RivetForum`
 // 的 `internal/protocol/messages_test.go` 与 `internal/protocol/layout_test.go`，
 // 不是本实现自己算出来的。作用是让「TS 编码 ↔ Go 编码」成为一条可执行的
 // 断言，而不是靠两边各自签自己验。

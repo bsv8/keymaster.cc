@@ -23,7 +23,7 @@ export const FORUM_PLUGIN_ID = "forum";
 const forumPluginDefinition = {
   id: FORUM_PLUGIN_ID,
   name: "Forum",
-  description: "BSV8 Forum 客户端：索引浏览、MSFile 正文阅读与符合协议的签名发布。",
+  description: "RivetForum 客户端：索引浏览、MSFile 正文阅读与符合协议的签名发布。",
   units: [
     {
       id: "forum.window",
