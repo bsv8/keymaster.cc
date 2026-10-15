@@ -22,6 +22,7 @@ import type {
   MsFileSupplierConfig,
 } from "@keymaster/contracts";
 import {
+  msFileDefaultPriceSettings,
   MSFILE_READ_CONCURRENCY_RECOMMENDED,
   MSFILE_BITFS_BUYER_SETTINGS_DEFAULT,
   MSFILE_SELLER_SETTINGS_DEFAULT,
@@ -51,6 +52,8 @@ const MAX_APP_NAME_LENGTH = 256;
 const APP_ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$/u;
 
 export interface MsFileRepository {
+  /** 已绑定钱包网络的缺省价格；没有网络时不猜测。 */
+  defaultPriceSettings?(): MsFileGlobalPriceSettings;
   getGlobalSettings(): Promise<MsFileGlobalSettingsSnapshot | null>;
   putGlobalSettings(settings: MsFileGlobalPriceSettings, updatedAt: number): Promise<void>;
   putReadConcurrencySettings(settings: MsFileReadConcurrencySettings, updatedAt: number): Promise<void>;
@@ -109,6 +112,8 @@ export interface MsFileGlobalSettingsSnapshot {
  * 按钱包 Owner 前缀分目录。
  */
 export interface MsFileRepositoryStores {
+  /** 由钱包权威身份注入；文件句柄已按该身份的网络隔离。 */
+  network?: "main" | "test";
   /** 当前 active owner；用于生成 App 授权行的稳定身份键。 */
   ownerPublicKeyHex: string;
   settings: BorrowedOwnerFileStore;
@@ -385,20 +390,20 @@ export async function openMsFileRepository(stores: MsFileRepositoryStores): Prom
   if (typeof ownerPublicKeyHex !== "string" || !isValidMsFileSupplierPublicKeyHex(ownerPublicKeyHex)) {
     throw new Error("MSFile owner public key is invalid");
   }
+  // 生命周期绑定后网络不再变化；价格与文件句柄必须属于同一钱包身份。
+  const defaultPrices = stores.network === undefined ? undefined : msFileDefaultPriceSettings(stores.network);
   let closed = false;
   const assertOpen = () => { if (closed) throw new Error("MSFile storage is closed"); };
 
+  const emptySetting = (): StoredSettingSnapshot => ({
+    priceLimits: null,
+    readConcurrency: { ...MSFILE_READ_CONCURRENCY_RECOMMENDED },
+    suppliers: [],
+    sellerSettings: { ...MSFILE_SELLER_SETTINGS_DEFAULT, supportedArbiterPublicKeys: [] },
+  });
   const readSetting = async (): Promise<StoredSettingSnapshot> => {
     const file = await stores.settings.get(SETTING_FILE);
-    if (!file) {
-      return {
-        priceLimits: null,
-        readConcurrency: { ...MSFILE_READ_CONCURRENCY_RECOMMENDED },
-        suppliers: [],
-        sellerSettings: { ...MSFILE_SELLER_SETTINGS_DEFAULT, supportedArbiterPublicKeys: [] },
-      };
-    }
-    return parseSettingFile(file.bytes);
+    return file ? parseSettingFile(file.bytes) : emptySetting();
   };
   const writeSetting = async (snapshot: StoredSettingSnapshot): Promise<void> => {
     await stores.settings.put(SETTING_FILE, serializeSettingFile(snapshot));
@@ -435,13 +440,14 @@ export async function openMsFileRepository(stores: MsFileRepositoryStores): Prom
   };
 
   return {
+    ...(defaultPrices === undefined ? {} : { defaultPriceSettings: () => ({ ...defaultPrices }) }),
     async getGlobalSettings() {
       assertOpen();
       const file = await stores.settings.get(SETTING_FILE);
-      if (!file) return null;
-      const snapshot = parseSettingFile(file.bytes);
+      if (!file && defaultPrices === undefined) return null;
+      const snapshot = file ? parseSettingFile(file.bytes) : emptySetting();
       return {
-        settings: snapshot.priceLimits,
+        settings: snapshot.priceLimits ?? (defaultPrices === undefined ? null : { ...defaultPrices }),
         ...snapshot.readConcurrency,
         updatedAt: null,
         sellerSettings: { ...snapshot.sellerSettings, supportedArbiterPublicKeys: [...snapshot.sellerSettings.supportedArbiterPublicKeys] },

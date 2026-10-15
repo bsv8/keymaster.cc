@@ -305,6 +305,16 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
     }
   }
 
+  async function restorePriceDefaults() {
+    if (!snapshot?.defaultPriceSettings) return;
+    setError(null); setStatusMessage(null);
+    try {
+      await service.updateGlobalPriceSettings({ ...snapshot.defaultPriceSettings });
+      await reload();
+      setStatusMessage(t("msfile.settings.defaults.restored", { defaultValue: "已恢复当前网络的缺省价格上限。" }));
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+  }
+
   async function saveConcurrencySettings() {
     setError(null);
     setStatusMessage(null);
@@ -567,6 +577,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
             </div>
             <div className="msfile-settings__section-actions">
               <Button onClick={() => void savePriceLimits()}>{t("msfile.settings.save", { defaultValue: "Save price limits" })}</Button>
+              {snapshot?.defaultPriceSettings && <Button variant="ghost" onClick={() => void restorePriceDefaults()}>{t("msfile.settings.defaults.restore", { defaultValue: "恢复缺省值" })}</Button>}
             </div>
           </section>
 

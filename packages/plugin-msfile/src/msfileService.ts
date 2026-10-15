@@ -358,6 +358,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     this.cachedSuppliers = suppliers;
     this.emit();
     return {
+      ...(repository.defaultPriceSettings ? { defaultPriceSettings: repository.defaultPriceSettings() } : {}),
       arbitrationServices: this.arbitrationServices.map(service => ({ ...service })),
       globalSettings: row?.settings ?? null,
       ...readConcurrencyFromRow(row),

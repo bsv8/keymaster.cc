@@ -797,6 +797,7 @@ const msfileWorkerRequests = createMsFileWorkerRequests({
 });
 
 const msfileWorkerLifecycle = createMsFileWorkerLifecycle({
+  network: () => vaultWorkerKeys.requireCoordinatorNetworkIdentity().bsvNetwork,
   // 只有产品 Vite 装配启用内置目录；单测和外置 E2E 构建不携带公网缺省值。
   // 钱包网络来自已解锁身份，新建/导入/重新解锁共享同一路径。
   arbitrationServices: () => typeof __KEYMASTER_PRODUCT_SERVICES__ !== "undefined" && __KEYMASTER_PRODUCT_SERVICES__

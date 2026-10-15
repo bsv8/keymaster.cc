@@ -84,6 +84,13 @@ export interface MsFileReadConcurrencySettings {
 /** 单个内容对象的最高金额。规范十进制字符串："0" 表示显式不限。 */
 export type MsFileSatoshiAmount = string;
 
+/** 单个 Seed/Block 的网络缺省价格上限；返回副本，防止调用方改写全局值。 */
+export function msFileDefaultPriceSettings(network: "main" | "test"): MsFileGlobalPriceSettings {
+  if (network === "test") return { seedMaxPriceSatoshis: "20", blockMaxPriceSatoshis: "30" };
+  if (network === "main") return { seedMaxPriceSatoshis: "200", blockMaxPriceSatoshis: "300" };
+  throw new TypeError("MSFile price defaults require a valid wallet network");
+}
+
 export interface MsFileGlobalPriceSettings {
   seedMaxPriceSatoshis: MsFileSatoshiAmount;
   blockMaxPriceSatoshis: MsFileSatoshiAmount;
@@ -689,7 +696,9 @@ export interface MsFileArbitrationService {
 
 export interface MsFileSettingsSnapshot {
   arbitrationServices: MsFileArbitrationService[];
-  /** 用户尚未显式保存全局设置时为 null；Read 此时 fail closed。 */
+  /** 当前网络的缺省价格；未注入钱包网络的独立测试服务可省略。 */
+  defaultPriceSettings?: MsFileGlobalPriceSettings;
+  /** 已保存价格或当前网络缺省值；无网络且未配置时为 null。 */
   globalSettings: MsFileGlobalPriceSettings | null;
   /** 单个媒体 Session 的 Block 读取并发数。 */
   mediaBlockReadConcurrency: number;
