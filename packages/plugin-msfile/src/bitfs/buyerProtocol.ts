@@ -32,6 +32,7 @@ import {
 } from "./buyerPoolState.js";
 import { bitfsWorkflowFacts } from "./sdk.js";
 import { deriveBitfsPoolRefundLockHeight } from "./poolLockTime.js";
+import { bitfsPoolSettlementFee } from "./poolBudget.js";
 import { bitfsTxidHex } from "./txid.js";
 import { commitPurchasedMsFileContent, inspectPurchasedMsFileSeed } from "../storage/msfileSeedStore.js";
 
@@ -39,7 +40,7 @@ const MAX_CHAIN_WAIT_MS = 120_000;
 const MAX_FUNDING_RECONCILIATION_MS = 15 * 60_000;
 const CHAIN_POLL_INTERVAL_MS = 10_000;
 const KEEP_ALIVE_INTERVAL_MS = 30_000;
-const POOL_FEE_RESERVE_MULTIPLIER = 2n;
+
 const PURCHASE_MANIFEST_FORMAT = "keymaster.bitfs-purchase-manifest";
 
 /** 报价验签后固定的文件入库信息；重启后不需要重新接受可能已过期的报价。 */
@@ -209,6 +210,7 @@ export interface BitfsBuyerProtocolDeps {
 export class BitfsBuyerProtocol {
   private readonly locks = new Map<string, Promise<void>>();
   private readonly fundingReconciliations = new Map<string, Promise<void>>();
+  private readonly poolFeeReserves = new Map<string, bigint>();
   private readonly purchaseConfigs = new Map<string, { openingAmountSatoshis: string }>();
   /** 当前 Worker 进程内各买方会话的 Kind 5 发送时刻；重启后不伪造速度样本。 */
   private readonly contentRequestStartedAtMs = new Map<string, number>();
@@ -237,17 +239,24 @@ export class BitfsBuyerProtocol {
         if (!planRaw) throw new Error("已固定费用池缺少原始下载预算证据");
         const content = BigInt((JSON.parse(new TextDecoder().decode(planRaw)) as { contentBudgetSatoshis: string }).contentBudgetSatoshis);
         reserve = BigInt(saved.openingAmountSatoshis) - content;
-        if (rate < 1n || reserve < rate * POOL_FEE_RESERVE_MULTIPLIER) throw new Error("已固定费用池的费率或预算无效");
+        if (rate < 1n || reserve < 0n) throw new Error("已固定费用池的费率或预算无效");
         this.deps.minerFeeRateSatoshisPerKilobyte = rate;
-        this.deps.arbitrationReserveSatoshis = reserve - rate * POOL_FEE_RESERVE_MULTIPLIER;
       } else {
         if (input.feeRate !== undefined) {
           if (input.feeRate < 1n) throw new Error("开池费率必须为正数");
           this.deps.minerFeeRateSatoshisPerKilobyte = input.feeRate;
         }
         if (input.arbitrationReserve !== undefined) this.deps.arbitrationReserveSatoshis = input.arbitrationReserve;
-        reserve = this.deps.minerFeeRateSatoshisPerKilobyte * POOL_FEE_RESERVE_MULTIPLIER + (this.deps.arbitrationReserveSatoshis ?? 0n);
+        const quote = acceptBuyerQuote(bitfsWorkflowFacts(this.deps.nowMs()), await this.requiredEvidence(input.sessionId, "kind1-quote"));
+        const services = await this.deps.arbitrationServices?.();
+        const arbiter = services
+          ? quote.terms.supportedArbiterPublicKeys.find(key => services.some(service => service.publicKeyHex === bytesToHex(key)))
+          : quote.terms.supportedArbiterPublicKeys[0];
+        if (!arbiter) throw new Error("报价没有可用仲裁方");
+        const minerFee = await bitfsPoolSettlementFee({ buyerPublicKey: this.deps.signer.publicKey(), sellerPublicKey: quote.sellerPublicKey, arbiterPublicKey: arbiter }, this.deps.minerFeeRateSatoshisPerKilobyte);
+        reserve = minerFee + (this.deps.arbitrationReserveSatoshis ?? 0n);
       }
+      this.poolFeeReserves.set(input.sessionId, reserve);
     });
     return reserve;
   }
@@ -509,29 +518,27 @@ export class BitfsBuyerProtocol {
     });
     record = await this.requiredSession(record.sessionId);
     const blockCount = (quote.terms.fileSizeBytes + 262_143n) / 262_144n;
-    // 预算按 Seed 价 + 每块完整价的上界计算，另预留两笔池内交易手续费。
-    // 真正付款仍由 SDK 根据 exact Seed 和 Block 长度逐批计算。
-    const defaultOpeningAmount = quote.terms.seedPriceSatoshis
-      + quote.terms.fullBlockPriceSatoshis * blockCount
-      + this.deps.minerFeeRateSatoshisPerKilobyte * POOL_FEE_RESERVE_MULTIPLIER + (this.deps.arbitrationReserveSatoshis ?? 0n);
+    // 直接调用协议的缺省预算同样沿用整份文件内容上界；Worker 显式按卖家分配预算。
+    const feeReserve = this.poolFeeReserves.get(record.sessionId);
+    if (feeReserve === undefined) throw new Error("费用池结算预算尚未配置");
+    const defaultOpeningAmount = quote.terms.seedPriceSatoshis + quote.terms.fullBlockPriceSatoshis * blockCount + feeReserve;
     const openingAmount = input.openingAmountSatoshis === undefined
       ? defaultOpeningAmount
       : parseSatoshiAmount(input.openingAmountSatoshis);
-    const feeReserve = this.deps.minerFeeRateSatoshisPerKilobyte * POOL_FEE_RESERVE_MULTIPLIER + (this.deps.arbitrationReserveSatoshis ?? 0n);
     const contentBudget = input.contentBudgetSatoshis === undefined
       ? openingAmount - feeReserve
       : parseSatoshiAmount(input.contentBudgetSatoshis);
     const seedBudget = parseSatoshiAmount(input.seedBudgetSatoshis ?? quote.terms.seedPriceSatoshis.toString(10));
     const seedBudgetReserved = input.seedBudgetReserved ?? true;
     const blockBudget = parseSatoshiAmount(input.blockBudgetSatoshis ?? (contentBudget - seedBudget).toString(10));
-    if (contentBudget < quote.terms.fullBlockPriceSatoshis || openingAmount !== contentBudget + feeReserve) {
+    if (contentBudget < 0n || openingAmount !== contentBudget + feeReserve) {
       throw new Error("本卖家池的固定预算不足或与手续费预留不匹配；未派发资金");
     }
     if (seedBudget + blockBudget !== contentBudget
       || (seedBudgetReserved && seedBudget < quote.terms.seedPriceSatoshis)
       || (!seedBudgetReserved && seedBudget !== 0n)
-      || blockBudget < quote.terms.fullBlockPriceSatoshis) {
-      throw new Error("本卖家池的 Seed/Block 专用预算无效；未派发资金");
+      || (!seedBudgetReserved && blockBudget < quote.terms.fullBlockPriceSatoshis)) {
+      throw new Error("本卖家池的 Seed/Block 预算无效；未派发资金");
     }
     if (openingAmount <= 0n || openingAmount > BigInt(Number.MAX_SAFE_INTEGER)) {
       throw new Error("BitFS 最高开池预算超出当前钱包安全金额范围");
@@ -750,7 +757,7 @@ export class BitfsBuyerProtocol {
         return;
       }
       if (result?.outcome.status === "failed") {
-        this.progress(sessionId, "failed", this.readOpeningAmount(sessionId), 0, totalBlocks, "开池资金交易未广播；请检查专款状态");
+        this.progress(sessionId, "failed", this.readOpeningAmount(sessionId), 0, totalBlocks, "开池资金交易未广播；请检查钱包交易状态");
         return;
       }
       this.progress(sessionId, "funding-unknown", this.readOpeningAmount(sessionId), 0, totalBlocks, "资金交易结果仍在核对；不会创建第二笔交易");
@@ -1472,12 +1479,11 @@ export class BitfsBuyerProtocol {
     const contentBudget = BigInt(row.contentBudgetSatoshis);
     const seedBudget = BigInt(row.seedBudgetSatoshis);
     const blockBudget = BigInt(row.blockBudgetSatoshis);
-    const feeReserve = this.deps.minerFeeRateSatoshisPerKilobyte * POOL_FEE_RESERVE_MULTIPLIER + (this.deps.arbitrationReserveSatoshis ?? 0n);
     if (seedBudget + blockBudget !== contentBudget
       || (row.seedBudgetReserved && seedBudget < quote.terms.seedPriceSatoshis)
       || (!row.seedBudgetReserved && seedBudget !== 0n)
-      || blockBudget < quote.terms.fullBlockPriceSatoshis
-      || BigInt(openingAmountSatoshis) !== contentBudget + feeReserve) {
+      || (!row.seedBudgetReserved && blockBudget < quote.terms.fullBlockPriceSatoshis)
+      || BigInt(openingAmountSatoshis) !== contentBudget + (this.poolFeeReserves.get(sessionId) ?? -1n)) {
       throw new Error("BitFS 下载计划预算与固定开池金额不一致");
     }
     const record = await this.requiredSession(sessionId);

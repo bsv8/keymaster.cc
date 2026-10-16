@@ -517,6 +517,15 @@ export interface MsFileBitfsPurchaseSnapshot {
   phase: MsFileBitfsPurchasePhase;
   /** 本次计划的开池金额；尚未准备时为 null。 */
   openingAmountSatoshis: string | null;
+  /** 购买准备已经计算出的费用分项，仅供展示；缺省表示尚未计算或历史记录未保存。 */
+  feeBreakdown?: {
+    contentBudgetSatoshis: string;
+    arbitrationBaseSatoshis: string;
+    arbitrationPerItemSatoshis: string;
+    arbitrationItemCount: number;
+    arbitrationReserveSatoshis: string;
+    settlementReserveSatoshis: string;
+  };
   /** 用户为本文件选择的完整 Block 最高价；未使用文件专属上限时为 null。 */
   currentMaxFullBlockPriceSatoshis?: MsFileSatoshiAmount | null;
   /** 已验证并暂存的不同 Block 数量。 */
@@ -529,8 +538,29 @@ export interface MsFileBitfsPurchaseSnapshot {
   message: string | null;
 }
 
+/** 任务执行时资金账本的独立读模型；删除采购历史不会创建或搬迁费用池。 */
+export interface MsFileBitfsFundingPoolSnapshot {
+  poolId: string;
+  seedHashHex: string;
+  network: "main" | "test";
+  state: "opening-presign" | "funding-pending" | "funding-failed" | "open" | "recovery-pending" | "closed";
+  fundingTxid: string | null;
+  openingOutpoint: string | null;
+  recoveryTxid: string | null;
+  sellerPublicKeyHex: string | null;
+  recommendedFilename: string | null;
+  poolAmountSatoshis: string | null;
+  lockedSatoshis: string | null;
+  pendingReturnSatoshis: string | null;
+  needsRecovery: boolean;
+  historyDeleted: boolean;
+  canManage: boolean;
+}
+
 /** `/msfile/storage` 显示的可恢复 BitFS 购买任务；不含 Artifact、签名或交易原文。 */
 export interface MsFileBitfsTaskSnapshot extends MsFileBitfsPurchaseSnapshot {
+  /** 用户已删除该次采购历史；必要恢复证据保留，只在资金管理中显示。 */
+  historyDeleted?: boolean;
   /** 所属文件采购任务；多卖家会话共享该编号。 */
   taskId?: string;
   /** 独立任务生命周期，与购买阶段和资金状态无关。 */

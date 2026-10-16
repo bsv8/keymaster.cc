@@ -1,3 +1,4 @@
+import { MsFilePurchasePanel } from "./MsFilePurchasePanel.js";
 import { sameWalletSession } from "@keymaster/contracts";
 import { useMsFileResources } from "./MsFileResourceContext.js";
 import { msfileErrorMessage } from "./msfileErrors.js";
@@ -179,17 +180,6 @@ function errorCodeOf(error: unknown): string | undefined {
 
 function shortHex(value: string): string {
   return `${value.slice(0, 10)}…${value.slice(-6)}`;
-}
-
-function bitfsOpeningBudgetEstimate(quote: MsFileBitfsDemandSnapshot["quotes"][number]): string {
-  try {
-    const size = BigInt(quote.fileSizeBytes);
-    const blocks = (size + 262_143n) / 262_144n;
-    // 这是内容价上限估算，不含 Worker 按当前设置计算的链上手续费余量。
-    return (BigInt(quote.seedPriceSatoshis) + BigInt(quote.fullBlockPriceSatoshis) * blocks).toString(10);
-  } catch {
-    return "未知";
-  }
 }
 
 interface BitfsPriceRange {
@@ -377,7 +367,7 @@ export function MsFileHomeFileWidget({ initialSeedHash = "" }: { initialSeedHash
   if (!service) {
     return (
       <section className="msfile-home-file msfile-home-file--unavailable" data-msfile-home-widget="unavailable">
-        <h3>{t("msfile.home.title", { defaultValue: "通过 Seed 获取文件" })}</h3>
+        <h3>{t("msfile.home.title", { defaultValue: "获取文件" })}</h3>
         <p className="msfile-home-file__hint">
           {t("msfile.home.errors.unavailable", { defaultValue: "MSFile 当前不可用，请稍后重试。" })}
         </p>
@@ -801,19 +791,18 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
     void publish();
   }, [isCurrent, makeError, service, t]);
 
-  const startBitfsPurchase = useCallback(async (task: FetchTask, sessionId: string, maxFullBlockPriceSatoshis?: string) => {
-    if (!service.startBitfsPurchase || !isCurrent(task)) return;
-    setState((previous) => ({ ...previous, bitfsPurchaseError: undefined }));
+  const startBitfsPurchase = useCallback(async (sessionId: string) => {
+    const task = taskRef.current;
+    if (!service.startBitfsPurchase || !task || !isCurrent(task)) return;
+    setState(previous => ({ ...previous, bitfsPurchaseError: undefined }));
     try {
-      const snapshot = await service.startBitfsPurchase(task.hash, sessionId, maxFullBlockPriceSatoshis);
-      if (isCurrent(task)) setState((previous) => ({ ...previous, bitfsDemand: snapshot, bitfsDemandError: undefined }));
+      const snapshot = await service.startBitfsPurchase(task.hash, sessionId, forcedPriceLimit ?? undefined);
+      if (isCurrent(task)) setState(previous => ({ ...previous, bitfsDemand: snapshot, bitfsDemandError: undefined }));
     } catch (cause) {
-      // Coordinator 已保留准入、恢复、预算或存储失败原因；这里不能再按
-      // msfile_unavailable 抹成通用提示，否则无法区分未开池与待恢复资金。
       const error = makeError(cause);
-      if (isCurrent(task)) setState((previous) => ({ ...previous, bitfsPurchaseError: error }));
+      if (isCurrent(task)) setState(previous => ({ ...previous, bitfsPurchaseError: error }));
     }
-  }, [isCurrent, makeError, service]);
+  }, [isCurrent, makeError, service, forcedPriceLimit]);
 
   const submitQuery = useCallback(async () => {
     // 无论新输入是否合法，先取消并释放旧文件，保证“新查询覆盖旧查询”。
@@ -983,13 +972,17 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
   const hasTaskResult = Boolean(taskRef.current) && state.phase !== "failed" && state.phase !== "cancelled";
   const candidateCount = state.stats.filter((view) => Boolean(view.selection)).length;
   const hasRetryableStat = state.stats.some((view) => view.entry.status === "discovering" || view.entry.status === "network-error");
+  const fileSummary = state.selected ?? state.stats.find(view => view.selection)?.selection;
+  const summaryQuote = state.bitfsDemand?.quotes[0];
+  const localResult = state.stats.find(view => view.entry.sourceKind === "local-bitfs")?.entry;
+
 
   return (
     <section className="msfile-home-file" aria-labelledby="msfile-home-file-title">
       <header className="msfile-home-file__header">
         <div>
-          <h3 id="msfile-home-file-title">{t("msfile.home.title", { defaultValue: "通过 Seed 获取文件" })}</h3>
-          <p>{t("msfile.home.description", { defaultValue: "输入 Seed Hash，查询供应商并安全预览或下载原文件。" })}</p>
+          <h3 id="msfile-home-file-title">{t("msfile.home.title", { defaultValue: "获取文件" })}</h3>
+          <p>{t("msfile.home.description", { defaultValue: "查询文件，比较卖家，核对本次费用后获取内容。" })}</p>
         </div>
         {hasTaskResult ? <Button variant="ghost" size="sm" onClick={cancel}>{t("msfile.home.cancel", { defaultValue: "取消" })}</Button> : null}
       </header>
@@ -1046,153 +1039,31 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
       ) : null}
       {state.notice ? <p className="msfile-home-file__notice" role="status">{state.notice}</p> : null}
 
-      {state.bitfsDemand || state.bitfsDemandError ? (
-        <section className="msfile-home-file__bitfs-demand" aria-labelledby="msfile-home-bitfs-demand-title">
-          <h4 id="msfile-home-bitfs-demand-title">{t("msfile.home.bitfs.title", { defaultValue: "BitFS 需求与报价" })}</h4>
-          {state.bitfsDemand?.requestMessageId ? (
-            <p>
-              {t("msfile.home.bitfs.requestId", { defaultValue: "需求编号" })}: <code title={state.bitfsDemand.requestMessageId}>{shortHex(state.bitfsDemand.requestMessageId)}</code>
-              {state.bitfsDemand.expiresAtMs ? ` · ${t("msfile.home.bitfs.expires", { defaultValue: "有效至" })} ${new Date(state.bitfsDemand.expiresAtMs).toLocaleTimeString()}` : ""}
-            </p>
-          ) : null}
-          {state.bitfsDemandError ? <p className="msfile-home-file__supplier-detail" role="status">{state.bitfsDemandError}</p> : null}
-          {state.bitfsPurchaseError ? (
-            <p className="msfile-home-file__error" role="alert">
-              {state.bitfsPurchaseError.message} <span className="msfile-home-file__diagnostic">{t("msfile.home.diagnostic", { defaultValue: "诊断代码" })}: <code>{state.bitfsPurchaseError.code}</code></span>
-            </p>
-          ) : null}
-          {state.bitfsDemand && !state.bitfsDemand.existingPurchaseSessionId && state.bitfsDemand.quotes.length === 0 ? (
-            <p className="msfile-home-file__supplier-detail" role="status">{t("msfile.home.bitfs.noQuotes", { defaultValue: "需求已发出，尚未收到有效报价；页面会继续刷新报价。" })}</p>
-          ) : null}
-          <AppLink to="/msfile/purchases">{t("msfile.purchases.title", { defaultValue: "购买历史" })}</AppLink>
-          {state.bitfsDemand?.existingPurchaseSessionId ? <p role="status">
-            {t("msfile.purchases.existing", { defaultValue: "该文件已有进行中采购任务，请前往购买详情管理。" })}{" "}
-            <AppLink to={`/msfile/purchases/${encodeURIComponent(state.bitfsDemand.existingPurchaseSessionId)}`}>
-              {t("msfile.purchases.details", { defaultValue: "查看购买详情" })}
-            </AppLink>
-          </p> : null}
-          {state.bitfsDemand?.purchase ? (
-            <div className="msfile-home-file__supplier-detail" role="status">
-              <strong>{t("msfile.home.bitfs.purchaseProgress", { defaultValue: "BitFS 购买进度" })}</strong>
-              <p>{state.bitfsDemand.purchase.message ?? t("msfile.home.bitfs.purchaseWorking", { defaultValue: "购买流程正在进行。" })}</p>
-              <AppLink to={`/msfile/purchases/${encodeURIComponent(state.bitfsDemand.purchase.sessionId)}`}>
-                {t("msfile.purchases.details", { defaultValue: "查看购买详情" })}
-              </AppLink>
-              {state.bitfsDemand.purchase.openingAmountSatoshis !== null ? (
-                <p>{t("msfile.home.bitfs.openingAmount", { defaultValue: "开池金额上限" })}: {state.bitfsDemand.purchase.openingAmountSatoshis} sats</p>
-              ) : null}
-              {state.bitfsDemand.purchase.totalBlockCount !== null ? (
-                <p>{t("msfile.home.bitfs.verifiedBlocks", { defaultValue: "已验收 Block" })}: {state.bitfsDemand.purchase.verifiedBlockCount} / {state.bitfsDemand.purchase.totalBlockCount}</p>
-              ) : null}
-            </div>
-          ) : null}
-          {state.bitfsDemand && priceRange && forcedPriceLimit !== null ? (
-            <div className="msfile-home-file__bitfs-price-limit">
-              <label htmlFor="msfile-home-bitfs-price-limit">
-                {t("msfile.home.bitfs.forcePrice", { defaultValue: "本文件完整 Block 最高价" })}: {forcedPriceLimit} sats
-              </label>
-              <input
-                id="msfile-home-bitfs-price-limit"
-                type="range"
-                min={0}
-                max={1_000}
-                step={1}
-                value={bitfsSliderTickForPrice(priceRange, BigInt(forcedPriceLimit))}
-                aria-label={t("msfile.home.bitfs.forcePrice", { defaultValue: "本文件完整 Block 最高价" })}
-                onChange={(event) => setForcedPriceDraft({
-                  seedHashHex: state.hash,
-                  value: bitfsPriceAtSliderTick(priceRange, Number(event.target.value)).toString(10),
-                  dirty: true,
-                })}
-              />
-              <p className="msfile-home-file__supplier-detail">
-                {t("msfile.home.bitfs.forcePriceRange", { defaultValue: "可选范围 {{min}}–{{max}} sats；报价变化不会自动提高已选上限。", min: priceRange.min.toString(10), max: priceRange.max.toString(10) })}
-              </p>
-              {BigInt(forcedPriceLimit) < priceRange.min ? (
-                <p className="msfile-home-file__supplier-detail" role="status">
-                  {t("msfile.home.bitfs.forcePriceBelowQuotes", { defaultValue: "当前上限低于所有报价；提高上限后才能选择报价。" })}
-                </p>
-              ) : null}
-            </div>
-          ) : null}
-          {state.bitfsDemand && state.bitfsDemand.quotes.length > 0 ? (
-            <ul>
-              {state.bitfsDemand.quotes.map((quote) => (
-                <li key={quote.sessionId}>
-                  <strong>{quote.recommendedFilename}</strong>
-                  <span> · {t("msfile.home.bitfs.seller", { defaultValue: "卖家" })} <code title={quote.sellerPublicKeyHex}>{shortHex(quote.sellerPublicKeyHex)}</code></span>
-                  <span> · Seed {quote.seedPriceSatoshis} sats · Block {quote.fullBlockPriceSatoshis} sats · 每批最多 {quote.maxBlocksPerBatch} 块</span>
-                  <span> · {t("msfile.home.fileSize", { defaultValue: "文件大小" })} {formatBytes(BigInt(quote.fileSizeBytes))}</span>
-                  <span> · {t("msfile.home.bitfs.arbiters", { defaultValue: "可选仲裁方" })} {quote.supportedArbiterPublicKeys.length}</span>
-                  <p className="msfile-home-file__supplier-detail">
-                    {t("msfile.home.bitfs.contentBudget", { defaultValue: "内容费上限估算" })}: {bitfsOpeningBudgetEstimate(quote)} sats；{t("msfile.home.bitfs.feeExcluded", { defaultValue: "另计链上手续费" })}。
-                  </p>
-                  <p className="msfile-home-file__supplier-detail">
-                    {t("msfile.home.bitfs.refundLock", { defaultValue: "点击购买后按设置的区块等待期建立费用池；当前批次付款签名前可取消并协商关池，文件交付付款后也会协商关池，余款退回当前 Key。" })}
-                  </p>
-                  {(() => {
-                    const purchase = state.bitfsDemand?.purchase;
-                    const samePurchase = purchase?.sessionId === quote.sessionId;
-                    const emptyFile = BigInt(quote.fileSizeBytes) === 0n;
-                    const aboveForcedLimit = forcedPriceLimit === null || BigInt(quote.fullBlockPriceSatoshis) > BigInt(forcedPriceLimit);
-                    const hasArbiter = quote.supportedArbiterPublicKeys.length > 0;
-                    const purchaseFinished = samePurchase && (purchase.phase === "completed" || purchase.phase === "cancelled" || purchase.phase === "refunded" || purchase.phase === "failed" || purchase.phase === "connection-closed");
-                    const blockedByOtherPurchase = Boolean(purchase && !samePurchase
-                      && purchase.phase !== "cancelled" && purchase.phase !== "refunded" && purchase.phase !== "failed" && purchase.phase !== "connection-closed");
-                    const disabled = !service.startBitfsPurchase || emptyFile || !hasArbiter || aboveForcedLimit || blockedByOtherPurchase || purchaseFinished || samePurchase;
-                    let label = t("msfile.home.bitfs.buyQuote", { defaultValue: "购买此报价" });
-                    if (emptyFile) {
-                      label = t("msfile.home.bitfs.emptyFileUnsupported", { defaultValue: "暂不支持购买空文件" });
-                    } else if (aboveForcedLimit) {
-                      label = t("msfile.home.bitfs.quoteAboveLimit", { defaultValue: "超过本文件已选上限" });
-                    } else if (!hasArbiter) {
-                      label = t("msfile.home.bitfs.arbiterMissing", { defaultValue: "此报价没有可用仲裁方" });
-                    } else if (samePurchase && purchase) {
-                      if (purchase.phase === "completed") label = t("msfile.home.bitfs.purchaseCompleted", { defaultValue: "购买完成" });
-                      else if (purchase.phase === "closing-pool") label = t("msfile.home.bitfs.closingPool", { defaultValue: "正在协商关池" });
-                      else if (purchase.phase === "close-unknown") label = t("msfile.home.bitfs.closeUnknown", { defaultValue: "正在核对关池交易" });
-                      else if (purchase.phase === "cancelling-pool") label = t("msfile.home.bitfs.cancellingPool", { defaultValue: "正在取消并回收余款" });
-                      else if (purchase.phase === "cancel-unknown") label = t("msfile.home.bitfs.cancelUnknown", { defaultValue: "取消结果待核对，资金仍受保护" });
-                      else if (purchase.phase === "cancelled") label = t("msfile.home.bitfs.purchaseCancelled", { defaultValue: "购买已取消，余款已收回" });
-                      else if (purchase.phase === "refund-ready") label = t("msfile.home.bitfs.refundReady", { defaultValue: "退款锁已到期，正在收回资金" });
-                      else if (purchase.phase === "refund-unknown") label = t("msfile.home.bitfs.refundUnknown", { defaultValue: "退款结果待核对，资金仍受保护" });
-                      else if (purchase.phase === "refunded") label = t("msfile.home.bitfs.refunded", { defaultValue: "退款已确认，余款已收回" });
-                      else if (purchase.phase === "failed") label = t("msfile.home.bitfs.purchaseUnavailable", { defaultValue: "此报价需要重新连接后再买" });
-                      else if (purchase.phase === "connection-closed") label = t("msfile.home.bitfs.connectionClosed", { defaultValue: "数据连接已断开" });
-                      else label = t("msfile.home.bitfs.purchaseWorking", { defaultValue: "购买进行中" });
-                    } else if (blockedByOtherPurchase) {
-                      label = purchase?.phase === "completed"
-                        ? t("msfile.home.bitfs.seedAlreadyPurchased", { defaultValue: "该 Seed 已购买" })
-                        : t("msfile.home.bitfs.otherPurchaseActive", { defaultValue: "请先完成当前购买" });
-                    }
-                    return (
-                      <>
-                        <button
-                          type="button"
-                          disabled={disabled}
-                          onClick={() => {
-                            const task = taskRef.current;
-                            if (task && forcedPriceLimit !== null) void startBitfsPurchase(task, quote.sessionId, forcedPriceLimit);
-                          }}
-                        >
-                          {label}
-                        </button>
-                        {samePurchase ? <AppLink to={`/msfile/purchases/${encodeURIComponent(purchase!.sessionId)}`}>
-                          {t("msfile.purchases.details", { defaultValue: "查看购买详情" })}
-                        </AppLink> : null}
-                      </>
-                    );
-                  })()}
-                </li>
-              ))}
-            </ul>
-          ) : null}
+      {state.bitfsDemand || fileSummary ? (
+        <section className="msfile-file-summary" aria-label="文件摘要">
+          <header className="msfile-section-heading"><div><span className="msfile-file-summary__eyebrow">文件</span><h3>{summaryQuote?.recommendedFilename ?? fileSummary?.filename ?? "正在查询文件"}</h3></div><AppLink to="/msfile/purchases">购买历史</AppLink></header>
+          <dl><div><dt>大小</dt><dd>{summaryQuote ? formatBytes(BigInt(summaryQuote.fileSizeBytes)) : fileSummary ? formatBytes(fileSummary.fileSizeBytes) : "待确认"}</dd></div><div><dt>文件块数</dt><dd>{summaryQuote ? String((BigInt(summaryQuote.fileSizeBytes) + 262143n) / 262144n) : fileSummary ? String((fileSummary.fileSizeBytes + 262143n) / 262144n) : "待确认"}</dd></div><div><dt>本地状态</dt><dd>{localResult?.status === "available" ? "完整文件可用" : !localResult ? "尚未查询" : localResult.status === "discovering" ? "查询中" : "尚未发现完整文件"}</dd></div></dl>
+          <details><summary>文件标识</summary><code>{state.hash}</code></details>
         </section>
       ) : null}
+      {state.bitfsDemandError ? <p role="status" className="msfile-home-file__error">{state.bitfsDemandError}</p> : null}
+      {state.bitfsDemand && priceRange && forcedPriceLimit !== null ? (
+        <section className="msfile-price-filter" aria-label="卖家价格筛选">
+          <label htmlFor="msfile-home-bitfs-price-limit">完整 Block 最高价 <strong>{forcedPriceLimit} sats</strong></label>
+          <input id="msfile-home-bitfs-price-limit" aria-label="本文件完整 Block 最高价" type="range" min={0} max={1000} step={1}
+            value={bitfsSliderTickForPrice(priceRange, BigInt(forcedPriceLimit))}
+            onChange={event => setForcedPriceDraft({ seedHashHex: state.hash, value: bitfsPriceAtSliderTick(priceRange, Number(event.target.value)).toString(), dirty: true })} />
+          <span>{priceRange.min.toString()}–{priceRange.max.toString()} sats / 完整块</span>
+          <p>单价筛选条件，实际按卖家报价结算；报价变化不会自动提高已选上限。</p>
+        </section>
+      ) : null}
+      {state.bitfsPurchaseError ? <p className="msfile-home-file__error" role="alert">{state.bitfsPurchaseError.message} <span className="msfile-home-file__diagnostic">诊断代码：<code>{state.bitfsPurchaseError.code}</code></span></p> : null}
+      {state.bitfsDemand ? <MsFilePurchasePanel key={JSON.stringify([state.hash, lifecycle.sessionEpoch, lifecycle.runGeneration, lifecycle.activePublicKeyHex])}
+        service={service} demand={state.bitfsDemand} maximumPrice={forcedPriceLimit} onPurchase={startBitfsPurchase} /> : null}
 
       {state.stats.length > 0 ? (
-        <section className="msfile-home-file__suppliers" aria-labelledby="msfile-home-suppliers-title">
-          <h4 id="msfile-home-suppliers-title">{t("msfile.home.suppliers", { defaultValue: "供应商结果" })}</h4>
+        <details className="msfile-home-file__suppliers" open={state.phase === "supplier-selection" && candidateCount > 1}>
+          <summary>{t("msfile.home.suppliers", { defaultValue: "文件来源与查询状态" })}</summary>
           <ul>
             {state.stats.map((view) => (
               <li key={view.entry.sourceId} className={view.selection ? "is-candidate" : ""}>
@@ -1237,14 +1108,14 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
               </li>
             ))}
           </ul>
-        </section>
+        </details>
       ) : null}
 
       {state.selected ? (
         <section className="msfile-home-file__selected" aria-label={t("msfile.home.selectedFile", { defaultValue: "已选择文件" })}>
           <div className="msfile-home-file__selected-head">
-            <strong>{state.selected.filename}</strong>
-            <span>{state.selected.supplierName}</span>
+            <strong>预览与保存</strong>
+            <span>{state.selected.filename} · {state.selected.supplierName}</span>
           </div>
           {(state.selected.previewDecision.kind === "audio" || state.selected.previewDecision.kind === "video") &&
           mediaTaskToken !== undefined &&

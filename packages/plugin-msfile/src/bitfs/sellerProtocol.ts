@@ -1,7 +1,10 @@
+import { inspectBitfsPresignCapacity, assertBitfsDeliveryCapacity } from "./sellerFundingPolicy.js";
 // Keymaster 自有的 BitFS 卖方状态机。
 // SDK 只负责每一步的协议验证/签名；本文件负责进度、证据、I/O 与恢复。
 
 import {
+  acceptBuyerQuote,
+  buildArbitrationPaymentFromClaim,
   completeSellerCloseArtifact,
   completeSellerPayment,
   buildRefundSubmission,
@@ -57,6 +60,8 @@ export interface BitfsSellerProtocolDeps {
   serialize?(id: string, run: () => Promise<void>): Promise<void>;
   onDelivered?(id: string): Promise<void>;
   onPaid?(id: string): void;
+  /** 所选仲裁服务的认证费率，按当前实际内容条目数计算。 */
+  arbitrationFee(arbiterPublicKeyHex: string, itemCount: number): Promise<bigint>;
   /** 当前 Key 的受限签名器。 */
   signer: Signer;
   /** Keymaster 应用会话 journal。 */
@@ -207,18 +212,30 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
       record = await this.deps.sessions.putEvidence(record.sessionId, record.revision, "kind2-opening-request", input.bytes, this.deps.nowMs());
       // SDK 先验证 Kind 2 模板、角色和买方签名，再进入钱包签名门禁。
       // 使用 SDK 的已验证交易原文检查高度锁，不在应用中解释 CBOR。
+      let presignFailure: unknown;
       const presignSigner: Signer = {
         publicKey: () => this.deps.signer.publicKey(),
         sign: async (request, signal) => {
-          if (request.purpose !== "transaction" || !request.transactionRaw || !request.openingRequestRaw
-            || !equalBytes(request.openingRequestRaw, input.bytes)) throw new Error("BitFS 卖方退款预签缺少已验证开池证据");
-          const height = await this.deps.blockHeight();
-          this.assertCurrent(record);
-          assertBitfsSellerRefundWindow(refundTemplateLockTime(request.transactionRaw), height, this.deps.minRefundDelayBlocks());
-          return this.deps.signer.sign(request, signal);
+          try {
+            if (request.purpose !== "transaction" || !request.transactionRaw || !request.openingRequestRaw
+              || !equalBytes(request.openingRequestRaw, input.bytes)) throw new Error("BitFS 卖方退款预签缺少已验证开池证据");
+            const height = await this.deps.blockHeight();
+            this.assertCurrent(record);
+            assertBitfsSellerRefundWindow(refundTemplateLockTime(request.transactionRaw), height, this.deps.minRefundDelayBlocks());
+            const capacity = await inspectBitfsPresignCapacity(input.bytes);
+            const quote = acceptBuyerQuote(bitfsWorkflowFacts(this.deps.nowMs()), await this.requiredEvidence(record.sessionId, "kind1-quote"));
+            if (!quote.allowsArbiter(capacity.arbiterPublicKey)) throw new Error("费用池仲裁方不在本报价允许列表");
+            const fee = await this.deps.arbitrationFee(toHex(capacity.arbiterPublicKey), 1);
+            // 只审核一个计费单元；文件块数、卖家数量和批次上限均不提高最低额度。
+            const minimumPrice = quote.terms.seedPriceSatoshis < quote.terms.fullBlockPriceSatoshis
+              ? quote.terms.seedPriceSatoshis : quote.terms.fullBlockPriceSatoshis;
+            buildArbitrationPaymentFromClaim(capacity.poolAmount, capacity.script, capacity.refundTemplateRaw, capacity.firstPaymentSequence, minimumPrice, fee);
+            this.assertCurrent(record);
+            return await this.deps.signer.sign(request, signal);
+          } catch (error) { presignFailure = error; throw error; }
         },
       };
-      const prepared = await prepareSellerPresign(input.bytes, presignSigner);
+      const prepared = await prepareSellerPresign(input.bytes, presignSigner).catch(error => { throw presignFailure ?? error; });
       record = await this.deps.sessions.putEvidence(record.sessionId, record.revision, "kind3-opening-response", prepared.outbound.bytes(), this.deps.nowMs());
       await this.deps.sessions.update(record.sessionId, record.revision, { phase: "opening-presigned" }, this.deps.nowMs());
       return { type: "send", frames: [prepared.outbound.bytes()] };
@@ -248,6 +265,10 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
       if (record.phase !== "funded" && record.phase !== "paid") return { type: "close", reason: "state_conflict" };
       const quoteRaw = await this.requiredEvidence(record.sessionId, "kind1-quote");
       const pool = await this.poolEvidence(record);
+      const summary = await inspectSellerDeliveryRequest(await this.facts(), { quoteRaw, pool, requestRaw: input.bytes });
+      const fee = await this.deps.arbitrationFee(toHex(pool.opening.arbiterPublicKey), summary.contentHashes.length);
+      await assertBitfsDeliveryCapacity(pool, summary, fee);
+      this.assertCurrent(record);
       const content = await this.deps.content.resolve({ quoteRaw, pool, requestRaw: input.bytes, seedHashHex: record.seedHashHex });
       assertHash(content.authorizationIdHex);
       const requestName = `kind5-content-request-${content.authorizationIdHex}` as const;

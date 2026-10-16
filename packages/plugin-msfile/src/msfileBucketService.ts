@@ -8,7 +8,6 @@ import { defineCapability } from "webloom-framework";
 import type { MsFileBitfsTaskSnapshot, MsFileCoordinatorControl, BorrowedOwnerFileStore } from "@keymaster/contracts";
 import {
   MsFileSeedStoreError,
-  deleteMsFileSeed,
   listMsFileSeeds,
   readMsFileSeed,
   storeMsFileSeed,
@@ -35,6 +34,8 @@ export interface MsFileBucketService {
   /** 读取 Worker 持久化的买方任务摘要；报价、交易和签名原文不会返回页面。 */
   readDemandMonitor?(): Promise<import("@keymaster/contracts").MsFileDemandMonitorSnapshot>;
   listBitfsTasks?(): Promise<MsFileBitfsTaskSnapshot[]>;
+  listBitfsFundingPools?(): Promise<import("@keymaster/contracts").MsFileBitfsFundingPoolSnapshot[]>;
+  deleteBitfsHistory?(seedHashHex: string, sessionId: string): Promise<void>;
   /** 对仍有在线卖方会话的任务发起取消；Worker 负责写日志与关池。 */
   cancelBitfsTask?(seedHashHex: string, sessionId: string): Promise<void>;
   /** 为已断线的开池会话发布新需求；Worker 会把报价关联回原资金会话。 */
@@ -155,6 +156,15 @@ export function createMsFileBucketService(deps: MsFileBucketServiceDeps): MsFile
       if (!Array.isArray(result.value)) throw new MsFileSeedStoreError("storage", "BitFS 购买任务摘要格式无效");
       return result.value as MsFileBitfsTaskSnapshot[];
     },
+    async listBitfsFundingPools() {
+      const result = await coordinator.msfileControl({ type: "bitfs.funding.pools.list" });
+      if (result.status !== "ok") throw new MsFileSeedStoreError("storage", "无法读取费用池账本");
+      return result.value as import("@keymaster/contracts").MsFileBitfsFundingPoolSnapshot[];
+    },
+    async deleteBitfsHistory(seedHashHex, sessionId) {
+      const result = await coordinator.msfileControl({ type: "bitfs.purchase.history.delete", seedHashHex, sessionId });
+      if (result.status !== "ok") throw new MsFileSeedStoreError("storage", "message" in result ? String(result.message) : "采购历史删除失败");
+    },
     async cancelBitfsTask(seedHashHex, sessionId) {
       if (!canUseWorkerBlocks) throw new MsFileSeedStoreError("storage", "当前 MSFile 连接不支持 BitFS 购买任务");
       const result = await coordinator.msfileControl({ type: "bitfs.purchase.cancel", seedHashHex, sessionId });
@@ -235,7 +245,9 @@ export function createMsFileBucketService(deps: MsFileBucketServiceDeps): MsFile
       ...(verifyOptions.onProgress === undefined ? {} : { onProgress: verifyOptions.onProgress }),
     }),
     remove: async (seedHashHex, removeOptions = {}) => {
-      await deleteMsFileSeed({ store, seedHashHex, ...withSignal(removeOptions.signal) });
+      if (removeOptions.signal?.aborted) throw new MsFileSeedStoreError("cancelled", "删除已取消");
+      const result = await coordinator.msfileControl({ type: "bucket.delete-file", seedHashHex });
+      if (result.status !== "ok") throw new MsFileSeedStoreError("storage", "message" in result ? String(result.message) : "文件与采购历史删除失败");
     },
   };
 }

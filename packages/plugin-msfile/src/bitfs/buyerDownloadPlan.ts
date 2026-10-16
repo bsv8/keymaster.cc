@@ -212,7 +212,7 @@ export function createBitfsBuyerDownloadPlan(input: {
       const seedPrice = assertAmount(value.seedPriceSatoshis, false);
       const budget = assertAmount(value.contentBudgetSatoshis, true);
       const seedBudget = assertAmount(value.seedBudgetSatoshis, false);
-      const blockBudget = assertAmount(value.blockBudgetSatoshis, true);
+      const blockBudget = assertAmount(value.blockBudgetSatoshis, false);
       if (typeof value.seedBudgetReserved !== "boolean") throw new Error("BitFS Seed 预算授权状态无效");
       if (BigInt(seedBudget) + BigInt(blockBudget) !== BigInt(budget)
         || (value.seedBudgetReserved && BigInt(seedBudget) < BigInt(seedPrice))
@@ -478,7 +478,7 @@ function parsePool(value: unknown, id: string): BitfsBuyerDownloadPool {
     contentBudgetSatoshis: assertAmount(value.contentBudgetSatoshis, true),
     seedBudgetSatoshis: assertAmount(value.seedBudgetSatoshis, false),
     seedBudgetReserved: value.seedBudgetReserved,
-    blockBudgetSatoshis: assertAmount(value.blockBudgetSatoshis, true),
+    blockBudgetSatoshis: assertAmount(value.blockBudgetSatoshis, false),
     committedSatoshis: assertAmount(value.committedSatoshis, false),
     seedCommittedSatoshis: assertAmount(value.seedCommittedSatoshis, false),
     blockCommittedSatoshis: assertAmount(value.blockCommittedSatoshis, false),

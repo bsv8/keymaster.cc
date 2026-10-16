@@ -26,8 +26,6 @@ export { createMsFileLocalContentSource, type MsFileLocalContentSource } from ".
 export { createBitfsVaultSigner, deriveBitfsPoolLockingScript, bitfsWorkflowFacts, mapBitfsErrorCode } from "./bitfs/sdk.js";
 export {
   createBitfsFundingLedger,
-  calculateBitfsTopUp,
-  prepareBitfsFundingSplit,
   recoverBitfsFundingSplits,
   prepareBitfsFunding,
   BitfsFundingError,
@@ -38,14 +36,12 @@ export {
   type BitfsFundingLedger,
   type BitfsFundingPool,
   type BitfsFundingPrepareDeps,
-  type BitfsFundingSplitPrepareDeps,
   type BitfsFundingInputReservation,
   type BitfsFundingTransaction,
   type BitfsFundingTransactionPurpose,
   type BitfsFundingTransactionState,
   type BitfsFundingTransactionView,
   type PreparedBitfsFunding,
-  type PreparedBitfsFundingSplit,
 } from "./bitfs/funding.js";
 export { createBitfsJournal, type BitfsJournal, type BitfsJournalRecord } from "./bitfs/journal.js";
 export {

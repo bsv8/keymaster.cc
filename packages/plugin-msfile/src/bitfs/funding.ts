@@ -1,5 +1,5 @@
 import { selectBitfsFundingInputs } from "./fundingFee.js";
-// BitFS 买方专款账本与开池资金交易准备端口。
+// BitFS 买方资金账本与开池资金交易准备端口。
 //
 // 本文件只准备交易，不广播。调用方必须先把 exact bytes 写入 BitFS outbox；
 // 只有 Worker 的交易广播器可以把已保存交易交给节点。
@@ -21,7 +21,7 @@ const OWNER_KEY_HEX = /^(02|03)[0-9a-f]{64}$/u;
 const HASH_HEX = /^[0-9a-f]{64}$/u;
 const SCRIPT_HEX = /^(?:[0-9a-f]{2})+$/u;
 
-/** 专款输出的持久化状态；只有状态来自链上观察后才能变为 available。 */
+/** 资金输出的历史持久化状态；available 仅用于历史记录，不构成普通余额保护。 */
 export type BitfsDedicatedUtxoState =
   | "split-pending"
   | "available"
@@ -29,13 +29,13 @@ export type BitfsDedicatedUtxoState =
   | "recovery-pending"
   | "released";
 
-/** 专款相关交易的用途。 */
+/** 资金相关交易的用途。 */
 export type BitfsFundingTransactionPurpose = "split" | "opening" | "close" | "refund" | "arbitration";
 
-/** 专款相关交易等待恢复时的索引状态。 */
+/** 资金相关交易等待恢复时的索引状态。 */
 export type BitfsFundingTransactionState = "prepared" | "result-unknown" | "observed" | "failed";
 
-/** 已通过交易解析器核验的本地专款输出。 */
+/** 已通过交易解析器核验的本地资金输出。 */
 export interface BitfsDedicatedUtxo {
   /** 交易哈希；与 vout 合起来唯一标识输出。 */
   txid: string;
@@ -45,9 +45,9 @@ export interface BitfsDedicatedUtxo {
   valueSatoshis: string;
   /** 输出锁定脚本的小写十六进制。 */
   scriptHex: string;
-  /** 当前专款状态。 */
+  /** 历史输出状态。 */
   state: BitfsDedicatedUtxoState;
-  /** 产生此专款的拆分或开池交易哈希。 */
+  /** 历史拆分或开池交易哈希。 */
   splitTxid?: string;
   /** 占用该输出的 BitFS 池编号。 */
   poolId?: string;
@@ -55,7 +55,7 @@ export interface BitfsDedicatedUtxo {
   spendingTxid?: string;
 }
 
-/** 持久化的专款交易索引；交易原文单独保存在 BitFS transaction outbox。 */
+/** 持久化的资金交易索引；交易原文单独保存在 BitFS transaction outbox。 */
 export interface BitfsFundingTransaction {
   /** canonical 交易哈希。 */
   txid: string;
@@ -89,7 +89,7 @@ export interface BitfsFundingPool {
   fundingTxid: string;
   /** 开池交易创建的首个池输出。 */
   openingOutpoint: string;
-  /** 开池时占用的本文件专款输入。 */
+  /** 开池时占用的钱包输入。 */
   inputOutpoints: string[];
   /** 池当前状态。 */
   state: "funding-pending" | "funding-failed" | "open" | "recovery-pending" | "closed";
@@ -97,13 +97,13 @@ export interface BitfsFundingPool {
   recoveryTxid?: string;
 }
 
-/** 一个 Seed 的专款账本；账本根位于独立的 `bitfs-journal` storage purpose。 */
+/** 一个 Seed 的资金账本；账本根位于独立的 `bitfs-journal` storage purpose。 */
 export interface BitfsFundingAccount {
   /** 账本所属的当前 Key 压缩公钥。 */
   ownerPublicKeyHex: string;
   /** 本账本专属的 Seed Hash。 */
   seedHashHex: string;
-  /** 专款所属公链网络。 */
+  /** 资金所属公链网络。 */
   network: BsvNetwork;
   /** schema 版本；升级时不能误读旧资金记录。 */
   version: 1;
@@ -111,7 +111,7 @@ export interface BitfsFundingAccount {
   revision: number;
   /** 最后一次更新的 UTC ISO-8601 时间。 */
   updatedAt: string;
-  /** 已登记的专款输出，包括尚未观察到的预期输出。 */
+  /** 已登记的资金输出，包括交易核对所需的预期输出。 */
   utxos: BitfsDedicatedUtxo[];
   /** 该 Seed 的资金交易索引。 */
   transactions: BitfsFundingTransaction[];
@@ -119,11 +119,11 @@ export interface BitfsFundingAccount {
   pools: BitfsFundingPool[];
 }
 
-/** 专款账本的持久化操作。 */
+/** 资金账本的持久化操作。 */
 export interface BitfsFundingLedger {
   /** 读取或创建当前 Key + Seed + 网络对应的账本。 */
   getAccount(input: { ownerPublicKeyHex: string; seedHashHex: string; network: BsvNetwork; nowMs: number }): Promise<BitfsFundingAccount>;
-  /** 登记拆分交易计划并先保护其输入、输出；随后必须把原文写入交易 outbox。 */
+  /** 登记历史拆分交易计划及输入、输出证据；随后必须把原文写入交易 outbox。 */
   prepareSplit(input: {
     ownerPublicKeyHex: string;
     seedHashHex: string;
@@ -164,7 +164,7 @@ export interface BitfsFundingLedger {
     txid: string;
     nowMs: number;
   }): Promise<BitfsFundingAccount>;
-  /** 原子占用本文件专款，并登记固定开池首输出。 */
+  /** 登记钱包输入证据与固定池输出；只有交易输入 claim 参与执行协调。 */
   reservePoolFunding(input: {
     ownerPublicKeyHex: string;
     seedHashHex: string;
@@ -175,8 +175,10 @@ export interface BitfsFundingLedger {
     /** P2PKH 持久化预签提交编号。 */
     p2pkhSubmissionId: string;
     inputs: string[];
+    /** 从新鲜钱包快照选出的实际输入，持久化仅为恢复手续费和交易证据。 */
+    walletInputs?: Array<Pick<BitfsDedicatedUtxo, "txid" | "vout" | "valueSatoshis" | "scriptHex">>;
     openingOutput: Pick<BitfsDedicatedUtxo, "txid" | "vout" | "valueSatoshis" | "scriptHex">;
-    /** 开池交易的当前 Key 找零输出；确认前也必须受专款保护。 */
+    /** 开池交易的当前 Key 普通找零输出；只记录证据，不隔离余额。 */
     changeOutput?: Pick<BitfsDedicatedUtxo, "txid" | "vout" | "valueSatoshis" | "scriptHex">;
     /** FundingTx 的最高手续费，恢复时重新核对。 */
     maxFeeSatoshis: string;
@@ -210,7 +212,7 @@ export interface BitfsFundingLedger {
     outputs: Array<Pick<BitfsDedicatedUtxo, "txid" | "vout" | "valueSatoshis" | "scriptHex">>;
     nowMs: number;
   }): Promise<BitfsFundingAccount>;
-  /** 只在关池/退款交易被观察后恢复专款可用性。 */
+  /** 核对关池/退款交易；回到钱包的输出直接属于普通余额。 */
   observePoolRecovery(input: {
     ownerPublicKeyHex: string;
     seedHashHex: string;
@@ -220,15 +222,6 @@ export interface BitfsFundingLedger {
     actualOutputs: Array<Pick<BitfsDedicatedUtxo, "txid" | "vout" | "valueSatoshis" | "scriptHex">>;
     nowMs: number;
   }): Promise<BitfsFundingAccount>;
-  /** 已确认不再需要的未开池输出可以解除保护。 */
-  releaseAvailable(input: {
-    ownerPublicKeyHex: string;
-    seedHashHex: string;
-    network: BsvNetwork;
-    expectedRevision: number;
-    outpoints: string[];
-    nowMs: number;
-  }): Promise<BitfsFundingAccount>;
   /** 新鲜 UTXO 快照确认链上已观察交易的输入不再可花后，解除旧输入保护。 */
   reconcileObservedTransactionInputs(input: {
     ownerPublicKeyHex: string;
@@ -236,7 +229,9 @@ export interface BitfsFundingLedger {
     unspentOutpoints: string[];
     nowMs: number;
   }): Promise<void>;
-  /** 列出仍受保护的全部专款输出，供普通钱包选币与签名前做拦截。 */
+  /** 删除已结清采购的资金历史；未终态交易与其它池保持不变。 */
+  forgetClosedPools(input: { ownerPublicKeyHex: string; seedHashHex: string; network: BsvNetwork; poolIds: string[]; nowMs: number }): Promise<void>;
+  /** 列出未结束池输出与具体交易输入，供选币和签名前避免双花。 */
   listProtectedOutpoints(filter?: { ownerPublicKeyHex?: string; network?: BsvNetwork }): Promise<ProtectedOutpoint[]>;
 }
 
@@ -262,9 +257,9 @@ export async function prepareBitfsPoolRecoveryWithCurrentRevision(
   throw new Error("BitFS recovery registration did not settle");
 }
 
-/** 创建使用条件写与 Worker 内串行队列的专款账本。 */
+/** 创建使用条件写与 Worker 内串行队列的资金账本。 */
 export function createBitfsFundingLedger(store: BorrowedOwnerFileStore): BitfsFundingLedger {
-  if (!store) throw new TypeError("BitFS 专款账本需要文件存储");
+  if (!store) throw new TypeError("BitFS 资金账本需要文件存储");
   const queuedMutations = new Map<string, Promise<void>>();
   const accountPath = (seedHashHex: string, network: BsvNetwork) => `funding/accounts/${assertNetwork(network)}/${assertHash(seedHashHex)}.json`;
 
@@ -273,7 +268,7 @@ export function createBitfsFundingLedger(store: BorrowedOwnerFileStore): BitfsFu
     if (!object) return undefined;
     let value: unknown;
     try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(object.bytes)); }
-    catch { throw new BitfsFundingError("integrity", "BitFS 专款账本格式损坏"); }
+    catch { throw new BitfsFundingError("integrity", "BitFS 资金账本格式损坏"); }
     return { account: parseAccount(value, owner, seed, network), ...(object.revision === undefined ? {} : { revision: object.revision }) };
   }
 
@@ -307,7 +302,7 @@ export function createBitfsFundingLedger(store: BorrowedOwnerFileStore): BitfsFu
       const existing = await readAccount(path, owner, seed, network);
       const current = existing?.account ?? emptyAccount(owner, seed, network, input.nowMs);
       if (input.expectedRevision !== undefined && current.revision !== input.expectedRevision) {
-        throw new BitfsFundingError("revision_conflict", "BitFS 专款账本已被另一个操作更新，请重新读取");
+        throw new BitfsFundingError("revision_conflict", "BitFS 资金账本已被另一个操作更新，请重新读取");
       }
       const candidate = input.change(current);
       const next = validateAccount({
@@ -322,13 +317,25 @@ export function createBitfsFundingLedger(store: BorrowedOwnerFileStore): BitfsFu
       await store.put(path, bytes, condition);
       const committed = await readAccount(path, owner, seed, network);
       if (!committed || committed.account.revision !== next.revision || !equal(encodeAccount(committed.account), bytes)) {
-        throw new BitfsFundingError("storage", "BitFS 专款账本写入后回读校验失败");
+        throw new BitfsFundingError("storage", "BitFS 资金账本写入后回读校验失败");
       }
       return committed.account;
     });
   }
 
   return {
+    async forgetClosedPools(input) {
+      await mutate({ ...input, change(current) {
+        const ids = new Set(input.poolIds);
+        for (const pool of current.pools) if (ids.has(pool.poolId) && pool.state !== "closed" && !(pool.state === "funding-failed" && current.transactions.filter(t => t.poolId === pool.poolId).every(t => t.state === "failed"))) throw new Error("未结清费用池不可删除");
+        const removable = (tx: BitfsFundingAccount["transactions"][number]) => (tx.poolId ? ids.has(tx.poolId) : true)
+          && (tx.state === "failed" || (tx.state === "observed" && tx.inputsReconciled === true));
+        const transactions = current.transactions.filter(tx => !removable(tx));
+        const pools = current.pools.filter(pool => !ids.has(pool.poolId));
+        const needed = new Set([...transactions.flatMap(tx => [...tx.inputOutpoints, ...tx.expectedOutputs.map(o => `${o.txid}:${o.vout}`)]), ...pools.map(p => p.openingOutpoint)]);
+        return { ...current, pools, transactions, utxos: current.utxos.filter(u => needed.has(`${u.txid}:${u.vout}`)) };
+      } });
+    },
     async getAccount(input) {
       const owner = assertOwner(input.ownerPublicKeyHex);
       const seed = assertHash(input.seedHashHex);
@@ -359,7 +366,7 @@ export function createBitfsFundingLedger(store: BorrowedOwnerFileStore): BitfsFu
             && !(transaction.state === "observed" && transaction.inputsReconciled === true))
           .flatMap((transaction) => transaction.inputOutpoints));
         const heldInput = inputs.find((outpoint) => heldInputs.has(outpoint));
-        if (heldInput) throw new BitfsFundingError("input_unavailable", `专款账本已占用输入 ${heldInput}`);
+        if (heldInput) throw new BitfsFundingError("input_unavailable", `资金账本已占用输入 ${heldInput}`);
         assertNewOutpoints(current, outputs);
         return {
           ...current,
@@ -478,11 +485,13 @@ export function createBitfsFundingLedger(store: BorrowedOwnerFileStore): BitfsFu
           }
         }
         const selected = inputs.map((key) => {
-          const utxo = current.utxos.find((item) => outpointKey(item) === key);
-          if (!utxo || utxo.state !== "available") throw new BitfsFundingError("input_unavailable", `专款输入 ${key} 不可用于开池`);
+          const supplied = input.walletInputs?.find(item => outpointKey(item) === key);
+          const historical = current.utxos.find(item => outpointKey(item) === key);
+          const utxo = supplied ? validateUtxo({ ...supplied, state: "released" }) : historical;
+          if (!utxo) throw new BitfsFundingError("input_unavailable", `开池输入 ${key} 缺少钱包证据`);
           return utxo;
         });
-        if (current.utxos.some((item) => outpointKey(item) === outpointKey(openingOutput))) throw new BitfsFundingError("integrity", "开池输出已存在于专款账本");
+        if (current.utxos.some((item) => outpointKey(item) === outpointKey(openingOutput))) throw new BitfsFundingError("integrity", "开池输出已存在于资金账本");
         const transaction: BitfsFundingTransaction = {
           txid,
           purpose: "opening",
@@ -500,11 +509,10 @@ export function createBitfsFundingLedger(store: BorrowedOwnerFileStore): BitfsFu
           ...current,
           transactions: [...current.transactions, transaction],
           utxos: [
-            ...current.utxos.map((utxo) => selected.some((item) => outpointKey(item) === outpointKey(utxo))
-              ? { ...utxo, state: "pool-occupied" as const, poolId, spendingTxid: txid }
-              : utxo),
+            ...current.utxos.filter(utxo => !inputs.includes(outpointKey(utxo))),
+            ...selected.map(utxo => ({ ...utxo, state: "released" as const, poolId: undefined, spendingTxid: txid })),
             { ...openingOutput, state: "pool-occupied", poolId },
-            ...(changeOutput ? [{ ...changeOutput, state: "split-pending" as const, splitTxid: txid }] : []),
+            ...(changeOutput ? [{ ...changeOutput, state: "released" as const }] : []),
           ],
           pools: priorPool ? replacePool(current.pools, {
             poolId,
@@ -607,26 +615,11 @@ export function createBitfsFundingLedger(store: BorrowedOwnerFileStore): BitfsFu
           utxos: current.utxos.map((utxo) => {
             if (outpointKey(utxo) === pool.openingOutpoint) return { ...utxo, state: "released", spendingTxid: undefined };
             if (utxo.spendingTxid === pool.recoveryTxid && utxo.poolId === poolId) {
-              return { ...utxo, state: "available", poolId: undefined, spendingTxid: undefined };
+              return { ...utxo, state: "released", poolId: undefined, spendingTxid: undefined };
             }
             return utxo;
           }),
           pools: replacePool(current.pools, { ...pool, state: "closed" }),
-        };
-      } });
-    },
-
-    releaseAvailable(input) {
-      const outpoints = uniqueOutpoints(input.outpoints);
-      return mutate({ ...input, change(current) {
-        const requested = new Set(outpoints);
-        for (const key of requested) {
-          const utxo = current.utxos.find((item) => outpointKey(item) === key);
-          if (!utxo || utxo.state !== "available") throw new BitfsFundingError("input_unavailable", `不能解除非空闲专款 ${key}`);
-        }
-        return {
-          ...current,
-          utxos: current.utxos.map((utxo) => requested.has(outpointKey(utxo)) ? { ...utxo, state: "released" } : utxo),
         };
       } });
     },
@@ -683,7 +676,7 @@ export function createBitfsFundingLedger(store: BorrowedOwnerFileStore): BitfsFu
           if (!object) continue;
           let value: unknown;
           try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(object.bytes)); }
-          catch { throw new BitfsFundingError("integrity", `BitFS 专款账本损坏：${file.path}`); }
+          catch { throw new BitfsFundingError("integrity", `BitFS 资金账本损坏：${file.path}`); }
           const row = value as Partial<BitfsFundingAccount>;
           const owner = assertOwner(String(row.ownerPublicKeyHex ?? ""));
           const seed = assertHash(match[2]!);
@@ -692,15 +685,16 @@ export function createBitfsFundingLedger(store: BorrowedOwnerFileStore): BitfsFu
           if (ownerFilter && account.ownerPublicKeyHex !== ownerFilter) continue;
           if (networkFilter && account.network !== networkFilter) continue;
           for (const utxo of account.utxos) {
-            if (utxo.state === "released") continue;
+            // 历史拆分、找零和回收输出均是普通余额；仅真实池输出属于池资金。
+            if (!account.pools.some(pool => pool.openingOutpoint === outpointKey(utxo) && !["closed", "funding-failed"].includes(pool.state))) continue;
             protectedItems.push({
               txid: utxo.txid,
               vout: utxo.vout,
               network: account.network,
               ownerPluginId: "msfile",
               publicKeyHex: account.ownerPublicKeyHex,
-              kind: "bitfs-dedicated-funds",
-              reason: `BitFS 专款 ${utxo.state}`,
+              kind: "bitfs-pool",
+              reason: `BitFS 费用池 ${utxo.state}`,
             });
           }
           // 资金交易的原输入先保护到确定未派发，或链上观察后被新鲜 P2PKH
@@ -728,249 +722,10 @@ export function createBitfsFundingLedger(store: BorrowedOwnerFileStore): BitfsFu
   };
 }
 
-/** 根据下一段预估采购额补足 120%；全部运算使用整数聪。 */
-export function calculateBitfsTopUp(requiredSatoshis: bigint): { targetSatoshis: bigint; reserveSatoshis: bigint } {
-  if (requiredSatoshis <= 0n) throw new BitfsFundingError("invalid_amount", "下一段预估采购金额必须大于 0 聪");
-  const targetSatoshis = (requiredSatoshis * 120n + 99n) / 100n;
-  return { targetSatoshis, reserveSatoshis: targetSatoshis - requiredSatoshis };
-}
-
 /** 已被 Coordinator P2PKH 快照序号门禁占用的输入集合。 */
 export interface BitfsFundingInputReservation {
   /** 只有确定未派发且 ledger/outbox 均未留存时才回滚快照占用。 */
   rollback(): void;
-}
-
-/** 单文件专款拆分准备器的 Worker 依赖。 */
-export interface BitfsFundingSplitPrepareDeps {
-  /** P2PKH 受限签名端口；此处只调用 prepare，不调用 submit。 */
-  protocolSpend: ProtocolSpendService;
-  /** 读取当前 Key 的新鲜普通余额快照；返回值必须已经过滤 BitFS 专款。 */
-  getAvailableSnapshot(input: { ownerPublicKeyHex: string; network: BsvNetwork }): Promise<P2pkhUtxoSnapshotResult>;
-  /** 解析当前 Key 地址与其锁定脚本；调用方不能传任意收款脚本。 */
-  resolveOwnerAddress(input: { ownerPublicKeyHex: string; network: BsvNetwork }): Promise<{ address: string; scriptHex: string }>;
-  /** 在签名完成后原子消费普通 P2PKH 快照序号，防止普通转账抢用相同输入。 */
-  reserveP2pkhInputs(input: { ownerPublicKeyHex: string; network: BsvNetwork; preview: ProtocolSpendPreview; inputOutpoints: string[] }): BitfsFundingInputReservation | Promise<BitfsFundingInputReservation>;
-  /** 从共识解析器取得交易输入、输出和 canonical txid。 */
-  parseTransaction(rawTransactionHex: string, expectedTxid?: string): BitfsFundingTransactionView;
-  /** 交易 exact bytes 的持久 outbox。 */
-  transactions: BitfsTransactionJournal;
-  /** 当前 Key + Seed 的专款账本。 */
-  ledger: BitfsFundingLedger;
-  /** 检查当前 Key、网络和 Worker generation。 */
-  assertCurrentContext(input: { ownerPublicKeyHex: string; network: BsvNetwork; generation: number }): void;
-  /** 确定未进入 BitFS outbox 时释放 P2PKH 侧的输入 claim。 */
-  releasePrepared(preview: ProtocolSpendPreview): Promise<void>;
-  /** Worker 提供的 UTC 毫秒。 */
-  nowMs(): number;
-}
-
-/** 已准备且持久化的单文件专款拆分交易；调用者仍须经 BitFS outbox 广播。 */
-export interface PreparedBitfsFundingSplit {
-  /** 对应的当前 Key。 */
-  ownerPublicKeyHex: string;
-  /** 本次采购文件的 Seed Hash。 */
-  seedHashHex: string;
-  /** 拆分交易 canonical txid。 */
-  txid: string;
-  /** 必须原样提交给 BitFS 广播器的交易字节。 */
-  rawTransaction: Uint8Array;
-  /** 本交易占用的普通 P2PKH 输入 outpoint。 */
-  inputOutpoints: string[];
-  /** 等待节点观察后才可用于开池的专款输出。 */
-  dedicatedOutpoints: string[];
-  /** 下一段预计采购金额，单位聪。 */
-  requiredSatoshis: string;
-  /** 含 20% 余量的专款目标金额，单位聪。 */
-  targetSatoshis: string;
-  /** 目标中未分配给预计采购额的余量，单位聪。 */
-  reserveSatoshis: string;
-  /** 从输入总额扣除全部輸出后得到的实际手续费，单位聪。 */
-  feeSatoshis: string;
-}
-
-/**
- * 聚合当前 Key 的普通余额并拆为本文件专款。
- *
- * 输出策略固定为“下一段预计金额 + 20% 余量”两笔回到当前 Key 的输出；
- * 余量小于网络尘额门槛时合并为一笔。输入先由 P2PKH 快照序号占用，再写
- * 专款 ledger，最后写 exact outbox；此函数不广播，也不接收页面脚本。
- */
-export async function prepareBitfsFundingSplit(input: {
-  /** 当前 Vault Key 的压缩公钥。 */
-  ownerPublicKeyHex: string;
-  /** 当前采购文件的 Seed Hash。 */
-  seedHashHex: string;
-  /** 当前账户的公链网络。 */
-  network: BsvNetwork;
-  /** 当前 Worker generation。 */
-  generation: number;
-  /** 下一段预计采购总额，十进制聪字符串。 */
-  requiredSatoshis: string;
-  /** 网络及钱包策略要求的最小普通输出金额，十进制聪字符串。 */
-  minimumOutputSatoshis: string;
-  /** 交易费率，单位聪/千字节。 */
-  feeRateSatoshisPerKb: number;
-  /** 本次交易允许的最高手续费，单位聪。 */
-  maxFeeSatoshis: number;
-}, deps: BitfsFundingSplitPrepareDeps): Promise<PreparedBitfsFundingSplit> {
-  const owner = assertOwner(input.ownerPublicKeyHex);
-  const seed = assertHash(input.seedHashHex);
-  const network = assertNetwork(input.network);
-  if (!Number.isSafeInteger(input.generation) || input.generation < 0) throw new BitfsFundingError("stale_session", "BitFS 会话世代无效");
-  const requiredSatoshis = BigInt(assertSatoshiString(input.requiredSatoshis, false));
-  const minimumOutputSatoshis = BigInt(assertSatoshiString(input.minimumOutputSatoshis, false));
-  if (!Number.isSafeInteger(input.feeRateSatoshisPerKb) || input.feeRateSatoshisPerKb < 1
-    || !Number.isSafeInteger(input.maxFeeSatoshis) || input.maxFeeSatoshis < 1) {
-    throw new BitfsFundingError("invalid_amount", "BitFS 拆分交易费率或手续费上限无效");
-  }
-  const topUp = calculateBitfsTopUp(requiredSatoshis);
-  if (topUp.targetSatoshis < minimumOutputSatoshis) throw new BitfsFundingError("invalid_amount", "专款目标金额低于网络最小输出金额");
-  deps.assertCurrentContext({ ownerPublicKeyHex: owner, network, generation: input.generation });
-
-  const snapshot = await deps.getAvailableSnapshot({ ownerPublicKeyHex: owner, network });
-  deps.assertCurrentContext({ ownerPublicKeyHex: owner, network, generation: input.generation });
-  if (!snapshot.available || snapshot.state !== "fresh") throw new BitfsFundingError("insufficient_funds", "普通 P2PKH 余额快照尚未就绪，请刷新余额后重试");
-  const spendableItems = snapshot.items.filter((item) => !item.isSpentInMempoolTx);
-  if (spendableItems.length === 0) throw new BitfsFundingError("insufficient_funds", "普通 P2PKH 余额没有可花费输入，请刷新余额后重试");
-
-  const ownerAddress = await deps.resolveOwnerAddress({ ownerPublicKeyHex: owner, network });
-  const ownerScript = assertScript(ownerAddress.scriptHex);
-  const candidates = spendableItems.map((item) => {
-    if (!Number.isSafeInteger(item.value) || item.value <= 0 || !Number.isSafeInteger(item.vout) || item.vout < 0) {
-      throw new BitfsFundingError("integrity", "P2PKH 普通余额快照包含无效 UTXO");
-    }
-    return {
-      txid: assertHash(item.txid),
-      vout: item.vout,
-      valueSatoshis: String(item.value),
-      address: ownerAddress.address,
-    };
-  });
-  if (new Set(candidates.map(outpointKey)).size !== candidates.length) throw new BitfsFundingError("integrity", "P2PKH 普通余额快照包含重复 outpoint");
-  const explicitOutputValues = topUp.reserveSatoshis >= minimumOutputSatoshis
-    ? [requiredSatoshis, topUp.reserveSatoshis]
-    : [topUp.targetSatoshis];
-  const selection = selectBitfsFundingInputs(candidates, topUp.targetSatoshis,
-    [...explicitOutputValues.map(() => ownerScript.length / 2), ownerScript.length / 2], input.feeRateSatoshisPerKb, input.maxFeeSatoshis);
-  if (!selection) throw new BitfsFundingError("insufficient_funds", "普通 P2PKH 可用余额不足以覆盖本段采购金额、20% 余量和预计手续费");
-  const selected = selection.selected;
-  const selectedTotal = selected.reduce((total, item) => total + BigInt(item.valueSatoshis), 0n);
-  const outputs = explicitOutputValues.map((value, index) => ({
-    value: safeSatoshiNumber(value.toString(10)),
-    scriptHex: ownerScript,
-    label: index === 0 ? "BitFS 文件采购专款" : "BitFS 20% 余量专款",
-  }));
-
-  let preview: ProtocolSpendPreview | undefined;
-  let inputReservation: BitfsFundingInputReservation | undefined;
-  let txid: string | undefined;
-  try {
-    preview = await deps.protocolSpend.presign({
-      ownerPublicKeyHex: owner,
-      requestingPluginId: "msfile",
-      network,
-      inputs: selected.map((item) => ({ txid: item.txid, vout: item.vout, value: safeSatoshiNumber(item.valueSatoshis), address: item.address })),
-      outputs,
-      feeRateSatoshisPerKb: input.feeRateSatoshisPerKb,
-      changeAddress: ownerAddress.address,
-    });
-    deps.assertCurrentContext({ ownerPublicKeyHex: owner, network, generation: input.generation });
-    const parsed = deps.parseTransaction(preview.rawTxHex, preview.txid);
-    const canonicalTxid = assertHash(parsed.canonicalTxid);
-    txid = canonicalTxid;
-    const expectedInputs = selected.map(outpointKey).sort();
-    const actualInputs = parsed.inputs.map(normalizeOutpoint).sort();
-    if (txid !== preview.txid || !sameStrings(expectedInputs, actualInputs)) throw new BitfsFundingError("integrity", "拆分交易原文与选中输入或 canonical txid 不一致");
-    if (preview.ownerPublicKeyHex !== owner || preview.network !== network || preview.inputs.length !== selected.length
-      || preview.inputs.some((item) => {
-        const source = selected.find((candidate) => candidate.txid === item.txid && candidate.vout === item.vout);
-        return !source || item.value !== Number(source.valueSatoshis) || item.address !== ownerAddress.address;
-      })) throw new BitfsFundingError("integrity", "P2PKH 拆分预览输入与普通余额快照不一致");
-    if (preview.outputs.length !== outputs.length || preview.outputs.some((item, index) =>
-      item.value !== outputs[index]!.value || assertScript(item.scriptHex) !== ownerScript)) {
-      throw new BitfsFundingError("integrity", "P2PKH 拆分预览改写了当前 Key 的专款输出");
-    }
-    const expectedOutputCount = outputs.length + (preview.changeSatoshis > 0 ? 1 : 0);
-    if (parsed.outputs.length !== expectedOutputCount) throw new BitfsFundingError("integrity", "拆分交易包含未声明的额外输出");
-    const expectedValues = [...outputs.map((item) => BigInt(item.value)), ...(preview.changeSatoshis > 0 ? [BigInt(preview.changeSatoshis)] : [])];
-    const expectedOutputRecords = parsed.outputs.map((item, index) => {
-      if (item.vout !== index || BigInt(item.valueSatoshis) !== expectedValues[index] || assertScript(item.scriptHex) !== ownerScript) {
-        throw new BitfsFundingError("integrity", "拆分交易的专款或找零输出不属于当前 Key");
-      }
-      return { txid: canonicalTxid, vout: item.vout, valueSatoshis: String(item.valueSatoshis), scriptHex: ownerScript };
-    });
-    const actualFee = selectedTotal - parsed.outputs.reduce((total, item) => total + BigInt(item.valueSatoshis), 0n);
-    if (actualFee < 0n || actualFee !== BigInt(preview.estimatedFeeSatoshis) || actualFee > BigInt(input.maxFeeSatoshis)) {
-      throw new BitfsFundingError("invalid_amount", "拆分交易手续费超出上限或与 P2PKH 预览不一致");
-    }
-    if (!preview.utxoBinding) throw new BitfsFundingError("input_unavailable", "P2PKH 拆分缺少新鲜余额快照序号绑定");
-    inputReservation = await deps.reserveP2pkhInputs({ ownerPublicKeyHex: owner, network, preview, inputOutpoints: expectedInputs });
-
-    const account = await deps.ledger.getAccount({ ownerPublicKeyHex: owner, seedHashHex: seed, network, nowMs: deps.nowMs() });
-    deps.assertCurrentContext({ ownerPublicKeyHex: owner, network, generation: input.generation });
-    if (!preview.submissionId) throw new BitfsFundingError("input_unavailable", "P2PKH 拆分预签缺少持久化提交编号");
-    await deps.ledger.prepareSplit({
-      ownerPublicKeyHex: owner,
-      seedHashHex: seed,
-      network,
-      expectedRevision: account.revision,
-      txid,
-      p2pkhSubmissionId: preview.submissionId,
-      inputs: expectedInputs,
-      outputs: expectedOutputRecords,
-      nowMs: deps.nowMs(),
-    });
-    const rawTransaction = fromHex(preview.rawTxHex);
-    await deps.transactions.putTransaction(txid, rawTransaction, deps.nowMs());
-    const saved = await deps.transactions.getTransaction(txid);
-    if (!saved || !equal(saved, rawTransaction)) throw new BitfsFundingError("storage", "拆分交易 exact bytes 写入 outbox 后回读失败");
-    deps.assertCurrentContext({ ownerPublicKeyHex: owner, network, generation: input.generation });
-    return {
-      ownerPublicKeyHex: owner,
-      seedHashHex: seed,
-      txid,
-      rawTransaction: rawTransaction.slice(),
-      inputOutpoints: expectedInputs,
-      dedicatedOutpoints: expectedOutputRecords.map(outpointKey),
-      requiredSatoshis: requiredSatoshis.toString(10),
-      targetSatoshis: topUp.targetSatoshis.toString(10),
-      reserveSatoshis: topUp.reserveSatoshis.toString(10),
-      feeSatoshis: actualFee.toString(10),
-    };
-  } catch (error) {
-    let outboxRead = false;
-    let saved: Uint8Array | undefined;
-    if (txid) {
-      try { saved = await deps.transactions.getTransaction(txid); outboxRead = true; }
-      catch { /* outbox 读取失败时保留快照与专款占用，避免错误释放 */ }
-    }
-    let safeToRelease = !txid;
-    if (txid && outboxRead && !saved) {
-      try {
-        let account = await deps.ledger.getAccount({ ownerPublicKeyHex: owner, seedHashHex: seed, network, nowMs: deps.nowMs() });
-        const transaction = account.transactions.find((item) => item.txid === txid && item.purpose === "split");
-        if (!transaction) {
-          safeToRelease = true;
-        } else if (transaction.state === "prepared") {
-          account = await deps.ledger.releaseDefinitelyUndispatchedTransaction({
-            ownerPublicKeyHex: owner,
-            seedHashHex: seed,
-            network,
-            expectedRevision: account.revision,
-            txid,
-            nowMs: deps.nowMs(),
-          });
-          safeToRelease = account.transactions.some((item) => item.txid === txid && item.state === "failed");
-        }
-      } catch { /* 无法证明 ledger 已释放时继续保持输入占用 */ }
-    }
-    if (safeToRelease) {
-      inputReservation?.rollback();
-      if (preview) await deps.releasePrepared(preview).catch(() => undefined);
-    }
-    throw error;
-  }
 }
 
 /**
@@ -986,7 +741,7 @@ export async function recoverBitfsFundingSplits(input: {
   seedHashHex: string;
   /** 当前公链网络。 */
   network: BsvNetwork;
-}, deps: Pick<BitfsFundingSplitPrepareDeps, "ledger" | "transactions" | "parseTransaction" | "nowMs"> & {
+}, deps: Pick<BitfsFundingPrepareDeps, "ledger" | "transactions" | "parseTransaction" | "nowMs"> & {
   /** ledger 确认交易无 outbox 时，释放对应 P2PKH 预签 claim。 */
   releasePreparedSubmission(input: { ownerPublicKeyHex: string; network: BsvNetwork; txid: string; submissionId: string }): Promise<void>;
 }): Promise<BitfsFundingAccount> {
@@ -1071,9 +826,11 @@ export interface PreparedBitfsFunding {
 export interface BitfsFundingPrepareDeps {
   /** 每次都必须提供已绑定当前 Key 的受限协议交易准备器。 */
   protocolSpend: ProtocolSpendService;
+  /** 普通钱包快照是选币真值，历史资金账本不能限制池外余额。 */
+  getAvailableSnapshot(): Promise<P2pkhUtxoSnapshotResult>;
   /** 当前 Key 与网络对应的唯一找零地址和锁定脚本。 */
   resolveOwnerAddress(input: { ownerPublicKeyHex: string; network: BsvNetwork }): Promise<{ address: string; scriptHex: string }>;
-  /** 签名后消费 P2PKH 快照序号，阻止普通转账选中相同专款输入。 */
+  /** 签名后消费 P2PKH 快照序号，避免并发交易选择相同输入。 */
   reserveP2pkhInputs(input: { ownerPublicKeyHex: string; network: BsvNetwork; preview: ProtocolSpendPreview; inputOutpoints: string[] }): BitfsFundingInputReservation | Promise<BitfsFundingInputReservation>;
   /** 共识交易解析器；必须从 raw transaction 计算 txid 与 outputs。 */
   parseTransaction(rawTransactionHex: string, expectedTxid?: string): BitfsFundingTransactionView;
@@ -1081,7 +838,7 @@ export interface BitfsFundingPrepareDeps {
   transactions: BitfsTransactionJournal;
   /** 买卖状态与 exact 证据存储。 */
   sessions: BitfsSessionJournal;
-  /** 当前 owner 的专款账本。 */
+  /** 当前 owner 的资金账本。 */
   ledger: BitfsFundingLedger;
   /** 每个持久化边界前核验当前 Key、网络和 Worker generation 仍匹配。 */
   assertCurrentContext(input: { ownerPublicKeyHex: string; network: BsvNetwork; generation: number }): void;
@@ -1092,7 +849,7 @@ export interface BitfsFundingPrepareDeps {
 }
 
 /**
- * 只用当前 Seed 的专款构造 FundingTx。
+ * 直接使用普通钱包的新鲜快照构造 FundingTx，不预先拆分专款。
  *
  * 中文说明：此函数不会调用 protocolSpend.submit、广播器或节点；成功返回前，
  * exact raw、outbox 索引、专款占用和会话证据均已先写入并回读校验。
@@ -1160,7 +917,7 @@ export async function prepareBitfsFunding(input: {
     const inputOutpoints = uniqueOutpoints(recoveredView.inputs);
     const inputTotal = inputOutpoints.reduce((sum, key) => {
       const utxo = account.utxos.find((item) => outpointKey(item) === key);
-      if (!utxo) throw new BitfsFundingError("integrity", `恢复的 FundingTx 输入 ${key} 不在专款账本中`);
+      if (!utxo) throw new BitfsFundingError("integrity", `恢复的 FundingTx 输入 ${key} 不在资金账本中`);
       return sum + BigInt(utxo.valueSatoshis);
     }, 0n);
     const outputTotal = recoveredView.outputs.reduce((sum, item) => sum + BigInt(item.valueSatoshis), 0n);
@@ -1214,9 +971,6 @@ export async function prepareBitfsFunding(input: {
       || recoveredPlan.changeScriptHex !== ownerChangeScript) {
       throw new BitfsFundingError("integrity", "FundingTx 恢复账本缺少完整开池或找零保护记录");
     }
-    if (recoveredChange && !account.utxos.some((utxo) => outpointKey(utxo) === `${txid}:${recoveredChange.vout}` && utxo.state !== "released")) {
-      throw new BitfsFundingError("integrity", "FundingTx 恢复账本未保护当前 Key 找零输出");
-    }
     if (session.phase === "quote-selected") {
       deps.assertCurrentContext({ ownerPublicKeyHex: owner, network, generation: input.generation });
       await deps.sessions.update(input.sessionId, session.revision, { phase: "funding-prepared", pendingTxid: txid }, deps.nowMs());
@@ -1226,12 +980,16 @@ export async function prepareBitfsFunding(input: {
     return reconstructPreparedFunding(input.sessionId, txid, priorEvidence, recoveredView, account);
   }
   if (session.phase !== "quote-selected") throw new BitfsFundingError("invalid_transition", "只能在报价固定后、Kind 2 签署前准备 FundingTx");
-  const account = await deps.ledger.getAccount({ ownerPublicKeyHex: owner, seedHashHex: seed, network, nowMs: deps.nowMs() });
-  const candidates = account.utxos.filter((utxo) => utxo.state === "available");
+  const snapshot = await deps.getAvailableSnapshot();
+  deps.assertCurrentContext({ ownerPublicKeyHex: owner, network, generation: input.generation });
+  if (!snapshot.available || snapshot.state !== "fresh") throw new BitfsFundingError("input_unavailable", "开池需要新鲜钱包余额快照");
+  const candidates = snapshot.items.filter(utxo => !utxo.isSpentInMempoolTx).map(utxo => ({
+    txid: utxo.txid, vout: utxo.vout, valueSatoshis: String(utxo.value),
+  }));
   const change = await deps.resolveOwnerAddress({ ownerPublicKeyHex: owner, network });
   const changeScript = assertScript(change.scriptHex);
   const selection = selectBitfsFundingInputs(candidates, BigInt(outputAmount), [outputScript.length / 2, changeScript.length / 2], input.feeRateSatoshisPerKb, input.maxFeeSatoshis);
-  if (!selection) throw new BitfsFundingError("insufficient_funds", "本文件的专款余额不足以覆盖开池金额和预计手续费");
+  if (!selection) throw new BitfsFundingError("insufficient_funds", "普通钱包余额不足以覆盖开池金额和预计手续费");
   const selected = selection.selected;
   const selectedInputs = selected.map((utxo) => ({
     txid: utxo.txid,
@@ -1286,8 +1044,8 @@ export async function prepareBitfsFunding(input: {
     const opening = { txid: preview.txid, vout: 0, valueSatoshis: outputAmount, scriptHex: outputScript } as const;
     const poolId = input.sessionId;
 
-    // 先在专款账本原子保护输入和预期输出，再保存交易证据。
-    // Worker 若在后续写盘期间重启，普通余额视图仍会过滤这些 outpoint。
+    // 输入 claim 只属于这笔开池交易。钱包找零始终为普通余额，
+    // 不得根据文件任务、池是否关闭或旧专款状态延长保护。
     const freshAccount = await deps.ledger.getAccount({ ownerPublicKeyHex: owner, seedHashHex: seed, network, nowMs: deps.nowMs() });
     await deps.ledger.reservePoolFunding({
       ownerPublicKeyHex: owner,
@@ -1298,6 +1056,7 @@ export async function prepareBitfsFunding(input: {
       txid: preview.txid,
       p2pkhSubmissionId: preview.submissionId,
       inputs: inputOutpoints,
+      walletInputs: selected.map(utxo => ({ ...utxo, scriptHex: changeScript })),
       openingOutput: opening,
       ...(parsed.outputs[1] ? {
         changeOutput: {
@@ -1337,7 +1096,7 @@ export async function prepareBitfsFunding(input: {
     };
   } catch (error) {
     // exact bytes 进入 evidence/outbox 后输入必须保留占用；尚未持久化时才可以
-    // 释放 P2PKH claim、专款计划与余额快照序号。
+    // 释放 P2PKH claim、交易计划与余额快照序号。
     let evidenceSaved = false;
     try { evidenceSaved = (await deps.sessions.getEvidence(input.sessionId, "funding-transaction")) !== undefined; }
     catch { evidenceSaved = true; }
@@ -1402,9 +1161,9 @@ function emptyAccount(owner: string, seed: string, network: BsvNetwork, nowMs: n
 }
 
 function parseAccount(value: unknown, owner: string, seed: string, network: BsvNetwork): BitfsFundingAccount {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new BitfsFundingError("integrity", "BitFS 专款账本不是对象");
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new BitfsFundingError("integrity", "BitFS 资金账本不是对象");
   const row = value as Record<string, unknown>;
-  if (row.format !== ACCOUNT_FORMAT || row.version !== ACCOUNT_VERSION) throw new BitfsFundingError("integrity", "BitFS 专款账本版本不支持");
+  if (row.format !== ACCOUNT_FORMAT || row.version !== ACCOUNT_VERSION) throw new BitfsFundingError("integrity", "BitFS 资金账本版本不支持");
   const account = validateAccount({
     ownerPublicKeyHex: row.ownerPublicKeyHex as string,
     seedHashHex: row.seedHashHex as string,
@@ -1421,18 +1180,18 @@ function parseAccount(value: unknown, owner: string, seed: string, network: BsvN
 
 function validateAccount(account: BitfsFundingAccount, owner: string, seed: string, network: BsvNetwork): BitfsFundingAccount {
   if (account.ownerPublicKeyHex !== owner || account.seedHashHex !== seed || account.network !== network) {
-    throw new BitfsFundingError("network_mismatch", "BitFS 专款账本与当前 Key、Seed 或网络不一致");
+    throw new BitfsFundingError("network_mismatch", "BitFS 资金账本与当前 Key、Seed 或网络不一致");
   }
-  if (account.version !== 1 || !Number.isSafeInteger(account.revision) || account.revision < 0) throw new BitfsFundingError("integrity", "BitFS 专款账本版本或修订号无效");
-  if (!Array.isArray(account.utxos) || !Array.isArray(account.transactions) || !Array.isArray(account.pools)) throw new BitfsFundingError("integrity", "BitFS 专款账本列表字段损坏");
+  if (account.version !== 1 || !Number.isSafeInteger(account.revision) || account.revision < 0) throw new BitfsFundingError("integrity", "BitFS 资金账本版本或修订号无效");
+  if (!Array.isArray(account.utxos) || !Array.isArray(account.transactions) || !Array.isArray(account.pools)) throw new BitfsFundingError("integrity", "BitFS 资金账本列表字段损坏");
   const updatedAt = new Date(account.updatedAt);
-  if (!Number.isFinite(updatedAt.getTime()) || updatedAt.toISOString() !== account.updatedAt) throw new BitfsFundingError("integrity", "BitFS 专款账本时间无效");
+  if (!Number.isFinite(updatedAt.getTime()) || updatedAt.toISOString() !== account.updatedAt) throw new BitfsFundingError("integrity", "BitFS 资金账本时间无效");
   const utxos = account.utxos.map(validateUtxo);
   const txs = account.transactions.map(validateFundingTransaction);
   const pools = account.pools.map(validatePool);
-  if (new Set(utxos.map(outpointKey)).size !== utxos.length) throw new BitfsFundingError("integrity", "BitFS 专款账本包含重复 outpoint");
-  if (new Set(txs.map((item) => item.txid)).size !== txs.length) throw new BitfsFundingError("integrity", "BitFS 专款账本包含重复交易哈希");
-  if (new Set(pools.map((item) => item.poolId)).size !== pools.length) throw new BitfsFundingError("integrity", "BitFS 专款账本包含重复池编号");
+  if (new Set(utxos.map(outpointKey)).size !== utxos.length) throw new BitfsFundingError("integrity", "BitFS 资金账本包含重复 outpoint");
+  if (new Set(txs.map((item) => item.txid)).size !== txs.length) throw new BitfsFundingError("integrity", "BitFS 资金账本包含重复交易哈希");
+  if (new Set(pools.map((item) => item.poolId)).size !== pools.length) throw new BitfsFundingError("integrity", "BitFS 资金账本包含重复池编号");
   return { ...account, utxos, transactions: txs, pools };
 }
 
@@ -1514,7 +1273,7 @@ function validatePreparedTransaction(input: {
     || input.preview.inputs.some((item, index) => {
       const expected = input.expectedInputs.find((candidate) => candidate.txid === item.txid && candidate.vout === item.vout);
       return !expected || expected.value !== item.value || expected.address !== item.address;
-    })) throw new BitfsFundingError("integrity", "P2PKH 预览输入与本文件专款选择不一致");
+    })) throw new BitfsFundingError("integrity", "P2PKH 预览输入与钱包输入选择不一致");
   if (input.preview.outputs.length !== 1
     || input.preview.outputs[0]?.value !== Number(input.openingOutput.valueSatoshis)
     || assertScript(input.preview.outputs[0]?.scriptHex ?? "") !== input.openingOutput.scriptHex
@@ -1552,7 +1311,7 @@ function reconstructPreparedFunding(
   if (!pool || !opening || !transaction || view.canonicalTxid !== txid) throw new BitfsFundingError("integrity", "FundingTx 恢复索引不完整");
   const inputTotal = transaction.inputOutpoints.reduce((sum, key) => {
     const utxo = account.utxos.find((item) => outpointKey(item) === key);
-    if (!utxo) throw new BitfsFundingError("integrity", `FundingTx 输入 ${key} 不在专款账本中`);
+    if (!utxo) throw new BitfsFundingError("integrity", `FundingTx 输入 ${key} 不在资金账本中`);
     return sum + BigInt(utxo.valueSatoshis);
   }, 0n);
   const outputTotal = view.outputs.reduce((sum, item) => sum + BigInt(item.valueSatoshis), 0n);

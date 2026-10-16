@@ -941,7 +941,6 @@ const cancelMsfileBitfsBuyerPurchase = msfileBitfsRuntime.cancelMsfileBitfsBuyer
 const listMsfileBitfsBuyerTaskSnapshots = msfileBitfsRuntime.listMsfileBitfsBuyerTaskSnapshots;
 const currentMsfileBitfsFundingLedger = msfileBitfsRuntime.currentMsfileBitfsFundingLedger;
 const sellerKeepsVaultUnlocked = msfileBitfsRuntime.sellerKeepsVaultUnlocked;
-export const prepareMsfileBitfsFundingSplit = msfileFundingRuntime.prepareSplit;
 export const recoverMsfileBitfsFundingSplit = msfileFundingRuntime.recoverSplit;
 
 /* ---------- SatSubscription runtime（唯一 owner：SharedWorker） ---------- */
@@ -3723,7 +3722,6 @@ export function coordinatorTestingPorts(): CoordinatorTestingPorts {
     set p2pkhWocService(value: typeof p2pkhWocService) { p2pkhWocService = value; },
     get p2pkhWorkerRuntime() { return p2pkhWorkerRuntime; },
     get persistCoordinatorSettings() { return persistCoordinatorSettings; },
-    get prepareMsfileBitfsFundingSplit() { return prepareMsfileBitfsFundingSplit; },
     get processRequest() { return processRequest; },
     get readCoordinatorBitfsBlockHeight() { return readCoordinatorBitfsBlockHeight; },
     get recoverMsfileBitfsFundingSplit() { return recoverMsfileBitfsFundingSplit; },
@@ -3875,7 +3873,6 @@ export interface CoordinatorTestingPorts {
   p2pkhWocService: ReturnType<typeof createWocService> | undefined;
   p2pkhWorkerRuntime: ReturnType<typeof createP2pkhWorkerRuntime>;
   persistCoordinatorSettings: typeof persistCoordinatorSettings;
-  prepareMsfileBitfsFundingSplit: typeof prepareMsfileBitfsFundingSplit;
   processRequest: typeof processRequest;
   readCoordinatorBitfsBlockHeight: typeof readCoordinatorBitfsBlockHeight;
   recoverMsfileBitfsFundingSplit: typeof recoverMsfileBitfsFundingSplit;

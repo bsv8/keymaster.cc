@@ -281,6 +281,12 @@ export type CoordinatorMsFileControl =
   | { type: "bitfs.purchase.cancel"; seedHashHex: string; sessionId: string }
   /** 读取当前 Key 下已经持久化的买方任务及其资金恢复摘要。 */
   | { type: "bitfs.purchase.tasks.list" }
+  /** 直接读取执行期间维护的资金账本，不从删除记录生成。 */
+  | { type: "bitfs.funding.pools.list" }
+  /** 删除一个采购任务历史；未结池保留资金恢复证据。 */
+  | { type: "bitfs.purchase.history.delete"; seedHashHex: string; sessionId: string }
+  /** 删除文件、暂存副本与采购历史，未结池独立保留。 */
+  | { type: "bucket.delete-file"; seedHashHex: string }
   | { type: "bitfs.demands.monitor" }
   | { type: "bitfs.purchase.reconcile"; seedHashHex: string; sessionId: string }
   | { type: "bitfs.purchase.reconnect"; seedHashHex: string; sessionId: string }

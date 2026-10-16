@@ -255,6 +255,8 @@ export type CoordinatorMsFileControlResultFor<C extends CoordinatorMsFileControl
   C extends { type: "bitfs.arbitration.operate" | "bitfs.purchase.reconcile" } ? null :
   C extends { type: "bitfs.demands.monitor" } ? import("./msfile.js").MsFileDemandMonitorSnapshot :
   C extends { type: "bitfs.purchase.tasks.list" } ? MsFileBitfsTaskSnapshot[] :
+  C extends { type: "bitfs.funding.pools.list" } ? import("./msfile.js").MsFileBitfsFundingPoolSnapshot[] :
+  C extends { type: "bitfs.purchase.history.delete" | "bucket.delete-file" } ? null :
   C extends { type: "bitfs.demand.cancel" } ? null :
   C extends { type: "supplier.probe" } ? MsFileSupplierProbeResult :
   C extends { type: "app-authorizations.list" } ? MsFileAppAuthorizationView[] :
@@ -1151,10 +1153,10 @@ function parseMsFileControl(value: unknown): CoordinatorMsFileControl {
   if (type === "settings.get" || type === "settings.readConcurrency.get" || type === "settings.readConcurrency.reset"
     || type === "settings.bitfsBuyer.get"
     || type === "settings.mediaBlockReadConcurrency.get" || type === "app-authorizations.list" || type === "approvals.pending"
-    || type === "bitfs.purchase.tasks.list" || type === "bitfs.demands.monitor" || type === "bitfs.arbitration.list") {
+    || type === "bitfs.purchase.tasks.list" || type === "bitfs.funding.pools.list" || type === "bitfs.demands.monitor" || type === "bitfs.arbitration.list") {
     return { type };
   }
-  if (type === "bitfs.demand.publish" || type === "bitfs.demand.snapshot" || type === "bitfs.demand.cancel") {
+  if (type === "bitfs.demand.publish" || type === "bitfs.demand.snapshot" || type === "bitfs.demand.cancel" || type === "bucket.delete-file") {
     const seedHashHex = text(control.seedHashHex, `MSFile control.${type}.seedHashHex`, 64);
     if (!isValidMsFileHashHex(seedHashHex)) throw new TypeError(`Coordinator MSFile control ${type} Seed Hash is invalid`);
     return { type, seedHashHex };
@@ -1170,7 +1172,7 @@ function parseMsFileControl(value: unknown): CoordinatorMsFileControl {
       ...(maxFullBlockPriceSatoshis === undefined ? {} : { maxFullBlockPriceSatoshis: parseMsFileSatoshiAmount(maxFullBlockPriceSatoshis, `MSFile control.${type}.maxFullBlockPriceSatoshis`) }),
     };
   }
-  if (type === "bitfs.purchase.cancel" || type === "bitfs.purchase.reconcile" || type === "bitfs.purchase.reconnect") {
+  if (type === "bitfs.purchase.cancel" || type === "bitfs.purchase.reconcile" || type === "bitfs.purchase.reconnect" || type === "bitfs.purchase.history.delete") {
     const seedHashHex = text(control.seedHashHex, `MSFile control.${type}.seedHashHex`, 64);
     if (!isValidMsFileHashHex(seedHashHex)) throw new TypeError("Coordinator MSFile purchase Seed Hash is invalid");
     return { type, seedHashHex, sessionId: text(control.sessionId, `MSFile control.${type}.sessionId`, 128) };
@@ -2731,6 +2733,25 @@ function parseMsFileControlResultFor(control: CoordinatorMsFileControl, value: u
             supplierId: text(supplier.supplierId, "supplier id", 128), name: text(supplier.name, "supplier name", 256), connectionState: text(supplier.connectionState, "connection state", 64),
             receiving: booleanValue(supplier.receiving, "receiving"), subscribed: booleanValue(supplier.subscribed, "subscribed"), error: supplier.error === null ? null : text(supplier.error, "supplier error", 4096) }; }) } };
     }
+    case "bitfs.funding.pools.list": {
+      if (!Array.isArray(value) || value.length > 1000) throw new TypeError(`Coordinator ${field} must be a bounded array`);
+      return value.map((item, index) => {
+        const row = expectRecord(item, `${field}[${index}]`);
+        const seedHashHex = text(row.seedHashHex, "funding seed", 64);
+        if (!isValidMsFileHashHex(seedHashHex)) throw new TypeError("Invalid funding Seed Hash");
+        const amount = (name: string) => row[name] === null ? null : parseMsFileSatoshiAmount(row[name], `funding.${name}`);
+        return { poolId: text(row.poolId, "pool id", 128), seedHashHex,
+          network: enumValue(row.network, ["main", "test"] as const, "pool network"),
+          state: enumValue(row.state, ["opening-presign", "funding-pending", "funding-failed", "open", "recovery-pending", "closed"] as const, "pool state"),
+          fundingTxid: row.fundingTxid === null ? null : text(row.fundingTxid, "funding txid", 64), openingOutpoint: row.openingOutpoint === null ? null : text(row.openingOutpoint, "opening outpoint", 80),
+          recoveryTxid: row.recoveryTxid === null ? null : text(row.recoveryTxid, "recovery txid", 64),
+          sellerPublicKeyHex: row.sellerPublicKeyHex === null ? null : text(row.sellerPublicKeyHex, "seller key", 66),
+          recommendedFilename: row.recommendedFilename === null ? null : text(row.recommendedFilename, "filename", 512),
+          poolAmountSatoshis: amount("poolAmountSatoshis"), lockedSatoshis: amount("lockedSatoshis"), pendingReturnSatoshis: amount("pendingReturnSatoshis"),
+          needsRecovery: booleanValue(row.needsRecovery, "needs recovery"), historyDeleted: booleanValue(row.historyDeleted, "history deleted"), canManage: booleanValue(row.canManage, "can manage"),
+        };
+      });
+    }
     case "bitfs.purchase.tasks.list": {
       if (!Array.isArray(value) || value.length > 1_000) throw new TypeError(`Coordinator ${field} must be a bounded array`);
       return value.map((item, index) => parseMsFileBitfsTaskSnapshot(item, `${field}[${index}]`));
@@ -2757,6 +2778,8 @@ function parseMsFileControlResultFor(control: CoordinatorMsFileControl, value: u
     case "settings.bitfsBuyer.update":
     case "bitfs.buyerPriceLimit.update":
     case "bitfs.demand.cancel":
+    case "bucket.delete-file":
+    case "bitfs.purchase.history.delete":
     case "supplier.upsert":
     case "supplier.delete":
     case "app-policy.update":
@@ -2879,6 +2902,7 @@ function parseMsFileBitfsTaskSnapshot(value: unknown, field: string): MsFileBitf
   const canReconnect = row.canReconnect === undefined ? undefined : booleanValue(row.canReconnect, `${field}.canReconnect`);
   return {
     ...progress,
+    ...(row.historyDeleted === undefined ? {} : { historyDeleted: booleanValue(row.historyDeleted, `${field}.historyDeleted`) }),
     ...(row.taskId === undefined ? {} : { taskId: text(row.taskId, `${field}.taskId`, 128) }),
     ...(row.taskState === undefined ? {} : { taskState: enumValue(row.taskState, ["active", "ended"] as const, `${field}.taskState`) }),
     ...(row.taskEndReason === undefined ? {} : { taskEndReason: enumValue(row.taskEndReason, ["completed", "cancelled", "failed", "replaced"] as const, `${field}.taskEndReason`) }),

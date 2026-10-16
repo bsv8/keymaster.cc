@@ -23,6 +23,7 @@ export interface BitfsArbitrationWorkflowDeps {
   sessions: BitfsSessionJournal;
   store: BorrowedModuleFileStore;
   content: BorrowedModuleFileStore;
+  contentForSession?(record: BitfsSessionRecord): BorrowedModuleFileStore;
   signer: Signer;
   transport: BitfsArbitrationTransport;
   broadcaster: BitfsTransactionBroadcaster;
@@ -195,8 +196,9 @@ export class BitfsArbitrationWorkflow {
         const responseName = requestName!.replace("kind10-retrieval-request-", "kind11-retrieval-response-") as BitfsEvidenceName;
         const response = await this.deps.sessions.getEvidence(id, responseName) ?? await this.deps.transport.exchange({ endpoint, request, signal: this.deps.signal });
         this.deps.assertActive();
+        const content = this.deps.contentForSession?.(record) ?? this.deps.content;
         const staging = record.evidence.includes("download-plan") ? `bitfs-staging/by-seed/${record.seedHashHex}` : `bitfs-staging/${id}`;
-        const seed = (await this.deps.content.get(`${staging}/seed.bin`))?.bytes;
+        const seed = (await content.get(`${staging}/seed.bin`))?.bytes;
         const verified = await verifyBuyerArbitratedContent({ pool, authorization, retrievalRequestRaw: request, retrievalResponseRaw: response, ...(seed ? { seed } : {}) });
         this.deps.assertActive();
         await this.save(id, responseName, response);
@@ -207,7 +209,7 @@ export class BitfsArbitrationWorkflow {
         for (const payload of verified.payloads) {
           this.deps.assertActive();
           const hash = hex(await sha256(payload));
-          await this.deps.content.put(hash === record.seedHashHex ? `${staging}/seed.bin` : `${staging}/blocks/${hash}.bin`, payload);
+          await content.put(hash === record.seedHashHex ? `${staging}/seed.bin` : `${staging}/blocks/${hash}.bin`, payload);
         }
         const retrieved = await this.record(id);
         await this.deps.sessions.update(id, retrieved.revision, { phase: "arbitration-retrieval" }, this.deps.now());
@@ -226,15 +228,16 @@ export class BitfsArbitrationWorkflow {
     });
   }
   private async commitIfComplete(record: BitfsSessionRecord, staging: string): Promise<boolean> {
-    const seed = await this.deps.content.get(`${staging}/seed.bin`);
+    const content = this.deps.contentForSession?.(record) ?? this.deps.content;
+    const seed = await content.get(`${staging}/seed.bin`);
     const raw = await this.deps.sessions.getEvidence(record.sessionId, "purchase-manifest");
     if (!seed || !raw) return false;
     const manifest = parseBitfsBuyerPurchaseManifest(raw, record.seedHashHex);
     const info = await inspectPurchasedMsFileSeed({ seedHashHex: record.seedHashHex, seedBytes: seed.bytes, fileSizeBytes: manifest.fileSizeBytes });
     const blocks: Uint8Array[] = [];
-    for (const hash of info.blockHashesHex) { const block = await this.deps.content.get(`${staging}/blocks/${hash}.bin`); if (!block) return false; blocks.push(block.bytes); }
+    for (const hash of info.blockHashesHex) { const block = await content.get(`${staging}/blocks/${hash}.bin`); if (!block) return false; blocks.push(block.bytes); }
     this.deps.assertActive();
-    await commitPurchasedMsFileContent({ store: this.deps.content, seedHashHex: record.seedHashHex, seedBytes: seed.bytes, blocks, fileSizeBytes: manifest.fileSizeBytes, fileName: manifest.recommendedFilename, mediaType: manifest.mediaType ?? "application/octet-stream", signal: this.deps.signal });
+    await commitPurchasedMsFileContent({ store: content, seedHashHex: record.seedHashHex, seedBytes: seed.bytes, blocks, fileSizeBytes: manifest.fileSizeBytes, fileName: manifest.recommendedFilename, mediaType: manifest.mediaType ?? "application/octet-stream", signal: this.deps.signal });
     return true;
   }
   private async sellerPool(record: BitfsSessionRecord): Promise<SellerPoolEvidence> {

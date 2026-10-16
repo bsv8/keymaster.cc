@@ -80,6 +80,11 @@ export function createBitfsPurchaseTasks(store: BorrowedOwnerFileStore, owner: s
       if (row.tasks.some(t => t.taskId !== taskId && t.sessionIds.includes(sessionId))) throw new Error("卖家会话已有采购归属");
       if (!task.sessionIds.includes(sessionId)) task.sessionIds.push(sessionId);
     }); },
+    /** 删除历史后只留未结资金所需的成员关系；空索引保留迁移完成标记。 */
+    async forgetSessions(ids: readonly string[]) { await mutate(row => {
+      const forgotten = new Set(ids);
+      row.tasks = row.tasks.map(task => ({ ...task, sessionIds: task.sessionIds.filter(id => !forgotten.has(id)) })).filter(task => task.sessionIds.length > 0);
+    }); },
     /** 准入失败保留独立的已结束尝试；不接管或改变已有 active 任务。 */
     async recordFailedAttempt(sessionId: string, demandId: string, now: number) { await mutate(row => {
       if (row.tasks.some(t => t.sessionIds.includes(sessionId))) return;

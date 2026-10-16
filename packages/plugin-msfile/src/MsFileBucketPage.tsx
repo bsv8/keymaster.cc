@@ -495,7 +495,7 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
       await service.remove(entry.seedHashHex, { signal: controller.signal });
       if (controller.signal.aborted) return;
       if (preview?.seedHashHex === entry.seedHashHex) releasePreview();
-      setNotice({ kind: "ok", text: t("msfile.bucket.notice.deleteDone", { defaultValue: "条目已删除：种子、元数据和文件块。" }) });
+      setNotice({ kind: "ok", text: t("msfile.bucket.notice.deleteDone", { defaultValue: "文件、暂存副本和可清理采购记录已删除；遗留费用池请到“待处理费用池”管理。" }) });
       await reload();
     } catch (cause) {
       if (!controller.signal.aborted && !isCancellation(cause)) setNotice({ kind: "error", text: bucketError(cause).message });
@@ -529,6 +529,7 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
         </div>
       </header>
 
+      <AppLink to="/msfile/purchases#pending-pools">待处理费用池</AppLink>
       <AppLink to="/msfile/purchases">{t("msfile.purchases.title", { defaultValue: "购买历史" })}</AppLink>
 
       <div className="msfile-bucket__upload">
@@ -696,7 +697,7 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
 
       <Modal
         open={deleteTarget !== null}
-        title={t("msfile.bucket.action.deleteConfirmTitle", { defaultValue: "删除这个条目？" })}
+        title={t("msfile.bucket.action.deleteConfirmTitle", { defaultValue: "删除文件及采购记录？" })}
         onClose={() => setDeleteTarget(null)}
         closeButtonLabel={t("msfile.bucket.action.cancel", { defaultValue: "取消" })}
         footer={(
@@ -706,7 +707,7 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
           </div>
         )}
       >
-        <p>{t("msfile.bucket.action.deleteConfirmBody", { defaultValue: "将删除种子、元数据以及该种子目录下的全部文件块；其它种子不受影响。" })}</p>
+        <p>{t("msfile.bucket.action.deleteConfirmBody", { defaultValue: "将删除该文件的种子、元数据、全部文件块、采购暂存副本及可清理采购日志。进行中内容任务将停止；未结清费用池和必要恢复证据独立保留，不会自动关池或退款。" })}</p>
         {deleteTarget ? (
           <p className="msfile-bucket__hint">
             {deleteTarget.meta?.fileName ?? t("msfile.bucket.metaMissing", { defaultValue: "元数据缺失" })} · <code title={deleteTarget.seedHashHex}>{shortHex(deleteTarget.seedHashHex)}</code>

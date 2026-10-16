@@ -90,6 +90,8 @@ type BitfsFixedEvidenceName =
   | "hash-request-message-id"
   /** 从已验签 Kind 1 导出的静态报价摘要，供旧任务视图显示。 */
   | "quote-summary"
+  /** 旧版本误加的采购上限；只保留历史读取兼容，不参与新采购或调度。 */
+  | "pool-content-limit"
   /** 用户启动购买时固定的本文件完整 Block 价格上限（聪）。 */
   | "file-price-limit"
   | "latest-payment-transaction"
@@ -300,7 +302,7 @@ const evidenceNames = new Set<BitfsFixedEvidenceName>([
   "kind9-arbitration-response", "kind10-retrieval-request", "kind11-retrieval-response", "kind12-close-request",
   "kind13-close-response", "funding-transaction",
   "kind12-close-sign-digest", "kind12-close-signature", "kind12-close-binding",
-  "opening-configuration", "hash-request-message-id", "quote-summary", "file-price-limit", "latest-payment-transaction", "close-transaction",
+  "opening-configuration", "hash-request-message-id", "quote-summary", "pool-content-limit", "file-price-limit", "latest-payment-transaction", "close-transaction",
   "refund-transaction", "arbitrated-payment-transaction",
   "purchase-manifest",
   "download-plan",
