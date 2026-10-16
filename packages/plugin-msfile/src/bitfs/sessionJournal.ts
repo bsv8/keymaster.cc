@@ -85,6 +85,7 @@ type BitfsFixedEvidenceName =
   | "funding-transaction"
   /** 开池前固定金额、仲裁方与退款规则，恢复时禁止改绑。 */
   | "opening-configuration"
+  | "replacement-configuration"
   /** ChannelProtocol 中需求的真实 message_id，用于恢复报价关联。 */
   | "hash-request-message-id"
   /** 从已验签 Kind 1 导出的静态报价摘要，供旧任务视图显示。 */
@@ -150,10 +151,16 @@ export interface BitfsSessionRecord {
   refundLockTime?: number;
   /** 记录修订号；每次 CAS 更新加一。 */
   revision: number;
+  /** 首次创建时间；历史记录未知时不伪造。 */
+  createdAt?: string;
   /** 最后更新时间，UTC ISO-8601。 */
   updatedAt: string;
   /** 稳定失败分类；不包含协议字节。 */
   failureCode?: string;
+  /** 失败时可向用户展示的具体原因，保留在该次购买详情中。 */
+  failureMessage?: string;
+  /** 被新采购接替后仅允许旧资金恢复，不能继续请求内容。 */
+  replacedBySessionId?: string;
 }
 
 export interface BitfsSessionJournal {
@@ -162,7 +169,7 @@ export interface BitfsSessionJournal {
   /** 读取会话记录。 */
   get(sessionId: string): Promise<BitfsSessionRecord | undefined>;
   /** 按 revision + Provider ETag 原子推进阶段。 */
-  update(sessionId: string, expectedRevision: number, patch: Partial<Pick<BitfsSessionRecord, "phase" | "pendingTxid" | "pendingAuthorizationId" | "deadlineUnixSeconds" | "refundLockTime" | "failureCode" | "generation" | "runtimeInstanceId">>, nowMs: number): Promise<BitfsSessionRecord>;
+  update(sessionId: string, expectedRevision: number, patch: Partial<Pick<BitfsSessionRecord, "phase" | "pendingTxid" | "pendingAuthorizationId" | "deadlineUnixSeconds" | "refundLockTime" | "failureCode" | "failureMessage" | "replacedBySessionId" | "generation" | "runtimeInstanceId">>, nowMs: number): Promise<BitfsSessionRecord>;
   /** 先以 create-only 保存 exact bytes，回读一致后再把引用加入会话。 */
   putEvidence(sessionId: string, expectedRevision: number, name: BitfsEvidenceName, bytes: Uint8Array, nowMs: number): Promise<BitfsSessionRecord>;
   /** 读取 exact evidence 防御性副本。 */
@@ -197,7 +204,7 @@ export function createBitfsSessionJournal(store: BorrowedOwnerFileStore): BitfsS
   };
   return {
     async create(input, nowMs) {
-      const record = validateRecord({ ...input, evidence: uniqueEvidence(input.evidence ?? []), revision: 1, updatedAt: iso(nowMs) });
+      const record = validateRecord({ ...input, evidence: uniqueEvidence(input.evidence ?? []), revision: 1, createdAt: iso(nowMs), updatedAt: iso(nowMs) });
       await write(record, { ifNoneMatch: true });
       return (await read(record.sessionId))!.record;
     },
@@ -265,10 +272,13 @@ function validateRecord(record: BitfsSessionRecord): BitfsSessionRecord {
   if (!allPhases.has(record.phase)) throw new Error("BitFS 会话阶段错误");
   if (!Number.isSafeInteger(record.revision) || record.revision < 1) throw new Error("BitFS 会话修订号错误");
   if (!Number.isFinite(Date.parse(record.updatedAt)) || new Date(Date.parse(record.updatedAt)).toISOString() !== record.updatedAt) throw new Error("BitFS 会话时间错误");
+  if (record.createdAt !== undefined && (!Number.isFinite(Date.parse(record.createdAt)) || new Date(Date.parse(record.createdAt)).toISOString() !== record.createdAt)) throw new Error("BitFS 会话创建时间错误");
   if (record.pendingTxid !== undefined && !HASH_HEX.test(record.pendingTxid)) throw new Error("BitFS 会话 txid 错误");
   if (record.pendingAuthorizationId !== undefined && !HASH_HEX.test(record.pendingAuthorizationId)) throw new Error("BitFS 待处理付款授权编号错误");
   if (record.deadlineUnixSeconds !== undefined && !/^[1-9][0-9]*$/u.test(record.deadlineUnixSeconds)) throw new Error("BitFS 会话截止时间错误");
   if (record.refundLockTime !== undefined && (!Number.isSafeInteger(record.refundLockTime) || record.refundLockTime < 0 || record.refundLockTime > 0xffffffff)) throw new Error("BitFS 会话退款锁错误");
+  if (record.replacedBySessionId !== undefined && !SESSION_ID.test(record.replacedBySessionId)) throw new Error("BitFS 替换任务编号无效");
+  if (record.failureMessage !== undefined && (typeof record.failureMessage !== "string" || record.failureMessage.length > 2048)) throw new Error("BitFS 会话失败原因错误");
   if (record.failureCode !== undefined && !/^[a-z0-9._-]{1,64}$/u.test(record.failureCode)) throw new Error("BitFS 会话失败码错误");
   return {
     ...record,

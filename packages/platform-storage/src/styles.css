@@ -168,20 +168,26 @@
 .storage-browse__tree-row.is-selected { background: var(--surface-2); }
 .storage-browse__tree-row.is-selected .storage-browse__tree-name { color: var(--primary); }
 
+/* 目录展开箭头：热区固定 22px，图标是 14px 的 SVG chevron。
+   字形用 SVG 而不是 ▸/▾：文本三角的宽高与粗细由系统字体决定，放大后在
+   macOS / Windows / Linux 上形态不一，切换展开态还会让行首左右跳动。 */
 .storage-browse__tree-toggle {
   flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
+  width: 22px;
+  height: 22px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   background: none;
   border: 0;
   color: var(--text-dim);
-  font-size: 10px;
   cursor: pointer;
   padding: 0;
 }
+
+/* 展开只旋转同一枚 chevron：字形与占位宽度都不变，行首因此不会跳动。 */
+.storage-browse__tree-caret { transition: transform .15s ease; }
+.storage-browse__tree-caret.is-expanded { transform: rotate(90deg); }
 
 .storage-browse__tree-label {
   flex: 1 1 auto;
@@ -310,7 +316,10 @@
   min-width: 0;
 }
 
-.storage-browse__json-caret { color: var(--text-dim); font-size: 10px; flex: 0 0 auto; }
+/* 行里是 baseline 对齐的文本，图标要自己居中：SVG 没有文本基线，
+   留在 baseline 上会被压到行底并撑高行距。 */
+.storage-browse__json-caret { align-self: center; color: var(--text-dim); flex: 0 0 auto; transition: transform .15s ease; }
+.storage-browse__json-caret.is-expanded { transform: rotate(90deg); }
 
 .storage-browse__json-label {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

@@ -186,7 +186,7 @@ function bindCoordinatorMethods<T>(
 /** 公开给业务插件的 Coordinator 视图：冻结普通对象，不继承真实 client 原型。 */
 export function createPublicCoordinatorClient(client: SessionCoordinatorClient): SessionCoordinatorClient {
   return bindCoordinatorMethods<SessionCoordinatorClient>(client, [
-    "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainHeightSnapshot", "subscribeTopic", "sendActivity",
+    "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainFeeSnapshots", "getChainHeightSnapshot", "subscribeTopic", "sendActivity",
     "storageGrant", "storageData", "storageCancel", "storageSessionAbort",
     "msfileControl", "msfileGrant", "msfileData", "msfileCancel", "msfileSessionAbort",
     "windowP2pExecutorAcquire", "windowP2pExecutorRelease", "windowP2pExecutorSpikeTransfer", "windowP2pExecutorSignNoiseStaticKey", "windowP2pExecutorSignPeerRecord",
@@ -226,29 +226,29 @@ export function createPluginCoordinatorFacade(client: SessionCoordinatorClient, 
       "backgroundCancel", "backgroundCancelByKey", "backgroundSettingsUpdate", "reportRecoverableCoordinatorFailure"
     ]);
     case "p2pkh": return bindCoordinatorMethods<P2pkhCoordinatorControl & Pick<SessionCoordinatorClient, "p2pkhBroadcast">>(client, [
-      "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainHeightSnapshot", "subscribeTopic", "sendActivity",
+      "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainFeeSnapshots", "getChainHeightSnapshot", "subscribeTopic", "sendActivity",
       "p2pkhSettingsUpdate", "p2pkhProviderConfigGet", "p2pkhProviderConfigUpdate",
       "p2pkhUtxosGet", "p2pkhUtxosRefresh", "p2pkhBroadcast"
     ]);
     case "woc": return bindCoordinatorMethods<import("@keymaster/contracts").P2pkhCoordinatorControl>(client, [
-      "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainHeightSnapshot", "subscribeTopic", "sendActivity",
+      "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainFeeSnapshots", "getChainHeightSnapshot", "subscribeTopic", "sendActivity",
       "p2pkhSettingsUpdate", "p2pkhProviderConfigGet", "p2pkhProviderConfigUpdate", "p2pkhUtxosGet", "p2pkhUtxosRefresh"
     ]);
     case "msfile": return bindCoordinatorMethods<MsFileCoordinatorControl>(client, [
-      "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainHeightSnapshot", "subscribeTopic", "sendActivity",
+      "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainFeeSnapshots", "getChainHeightSnapshot", "subscribeTopic", "sendActivity",
       "msfileControl", "msfileGrant", "msfileData", "msfileCancel", "msfileSessionAbort"
     ]);
     case "sat-subscription": return bindCoordinatorMethods<SatCoordinatorControl>(client, [
-      "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainHeightSnapshot", "subscribeTopic", "sendActivity",
+      "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainFeeSnapshots", "getChainHeightSnapshot", "subscribeTopic", "sendActivity",
       "satOperation", "channelOperation"
     ]);
     case "window-p2p": return bindCoordinatorMethods<WindowP2pCoordinatorControl>(client, [
-      "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainHeightSnapshot", "subscribeTopic", "sendActivity",
+      "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainFeeSnapshots", "getChainHeightSnapshot", "subscribeTopic", "sendActivity",
       "windowP2pExecutorAcquire", "windowP2pExecutorRelease", "windowP2pExecutorSpikeTransfer",
       "windowP2pExecutorSignNoiseStaticKey", "windowP2pExecutorSignPeerRecord"
     ]);
     case "protocol": return bindCoordinatorMethods<ProtocolCoordinatorControl>(client, [
-      "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainHeightSnapshot", "subscribeTopic", "sendActivity", "channelOperation"
+      "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainFeeSnapshots", "getChainHeightSnapshot", "subscribeTopic", "sendActivity", "channelOperation"
     ]);
     case "contacts": return bindCoordinatorMethods<ContactsCoordinatorControl>(client, [
       "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "subscribeTopic", "contactsPresenceSnapshot"

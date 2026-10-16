@@ -51,7 +51,7 @@ const webrtcResources: I18nPluginResources = {
       "webrtc.breadcrumb.settings": "WebRTC",
       "webrtc.page.workbench.title": "WebRTC",
       "webrtc.page.workbench.desc":
-        "Audio/video calls and file transfer over ChannelProtocol (Hash rendezvous + webrtc-signal). Only online contacts can be dialed.",
+        "Audio/video calls and file transfer over encrypted private messages. Only online contacts can be dialed.",
       "webrtc.page.workbench.target.label": "Recipient publicKeyHex",
       "webrtc.page.workbench.target.placeholder":
         "02... (66 hex chars)",
@@ -141,7 +141,7 @@ const webrtcResources: I18nPluginResources = {
       "webrtc.breadcrumb.settings": "WebRTC",
       "webrtc.page.workbench.title": "WebRTC",
       "webrtc.page.workbench.desc":
-        "基于 ChannelProtocol 的音视频通话与文件传输（Hash 会合 + webrtc-signal）。仅在线联系人可拨号。",
+        "通过加密私信协商音视频通话与文件传输。仅在线联系人可拨号。",
       "webrtc.page.workbench.target.label": "对方 publicKeyHex",
       "webrtc.page.workbench.target.placeholder": "02...（66 个 hex）",
       "webrtc.page.workbench.target.mode.audio": "音频聊天",
@@ -225,7 +225,7 @@ const webrtcPluginDefinition = {
   id: WEBRTC_PLUGIN_ID,
   name: "WebRTC",
   description:
-    "Keymaster WebRTC business plugin: audio/video calls and file transfer over ChannelProtocol (Hash rendezvous + webrtc-signal + APP control), gated by contacts presence.",
+    "Keymaster WebRTC business plugin: audio/video calls and file transfer over encrypted APP private messages, gated by contacts presence.",
 
   units: [{
     id: "webrtc.window",
@@ -265,7 +265,8 @@ const webrtcPluginDefinition = {
     const historyService = createWebrtcHistoryService({
       walletState,
       ownerPublicKeyHex: () => walletState.snapshot().activePublicKeyHex ?? null,
-      storage: historyStorage
+      storage: historyStorage,
+      files: ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, "")
     });
     const isContactAllowed = async (publicKeyHex: string, signal?: AbortSignal) => {
       if (signal?.aborted) return false;

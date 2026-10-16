@@ -48,7 +48,7 @@
     "dist/jcs.js": "5a23df83f284bed5ffb1edd4713800791fa9a64b7cbf99a1e270d23d354c1ac7",
     "dist/channel.d.ts": "6d83169a0de52d537cabaf2ac9299b783f780492d6367b70a10ecbb14694bf90",
     "dist/jcs.d.ts": "7b67deea09ff9c9c45355a2fb825efe0969a73ab5788025a8a6198f8074117d4",
-    "dist/bitfs-wire.js": "68164853f7802998b9a900b3f795de250cc5e589ef814b763b5a02cbdfc1110f",
+    "dist/bitfs-wire.js": "9caa9735ac2c6e14388bdfd6d1cc68f1abd1fc85a1cb546b3def764d0292d7db",
     "dist/bitfs-wire.d.ts": "64d75023e4df920d79b5c49f341ce08111ea3b7d940b18ae166eac0079d6d815",
     "dist/network-identity.d.ts": "406064dc9adb0c8ae900f3ec9af98e032366d8add6a218211818f98df775e5b4",
     "dist/network-identity.js": "6e8e34baaa40d2d9d5c229b57c039d6488c078c1dafb6cdd3897e34dfb849354",
@@ -62,9 +62,9 @@
     "dist/signing-channel.d.ts": "29b45b4477b5fadc938036fb52c5323675029db7472f515bb402605d756b0302"
   },
   "sourceOverrides": {
-    "reason": "渠道授权增量，sourceCommit 为网络身份基线；实际消费副本由 files 的 SHA256 固定；BitFS 普通付款锁定值必须延续退款模板，拒绝提前清零，同源修复已提交",
+    "reason": "渠道授权增量，sourceCommit 为网络身份基线；实际消费副本由 files 的 SHA256 固定；BitFS 普通付款锁定值必须延续退款模板，拒绝提前清零，同源修复已提交；工作区源码同步 go-bitfs 0.4.0 九字段报价审查，签名域和协议版本保持不变；Kind 1 软件钱包审查保留字段、预期约束与安全实际值，错误码及签名规则不变；同步含 MIME 的十字段报价审查",
     "sourceDirectory": "/Users/david/Workspaces/VaultLinkProtocol/Coding/BSV8_VaultLinkProtocol",
-    "snapshotSha256": "d3696a25eb2eac104bc6d87c21650213f4dc09c20c49bc2301088798d7568435",
+    "snapshotSha256": "bf469f209533a1ff6f6f62a69729a727e2e819e320b1258ff9e1dbd9e90e41ec",
     "files": {
       "dist/bsv.d.ts": {
         "sha256": "d96eae3f00801faa12299afa57c4472d04179bf8109373eaca5d61a7bcece2fc"
@@ -193,7 +193,7 @@
         "sha256": "7b67deea09ff9c9c45355a2fb825efe0969a73ab5788025a8a6198f8074117d4"
       },
       "dist/bitfs-wire.js": {
-        "sha256": "68164853f7802998b9a900b3f795de250cc5e589ef814b763b5a02cbdfc1110f"
+        "sha256": "9caa9735ac2c6e14388bdfd6d1cc68f1abd1fc85a1cb546b3def764d0292d7db"
       },
       "dist/bitfs-wire.d.ts": {
         "sha256": "64d75023e4df920d79b5c49f341ce08111ea3b7d940b18ae166eac0079d6d815"

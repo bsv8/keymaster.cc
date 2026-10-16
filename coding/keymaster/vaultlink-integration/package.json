@@ -32,7 +32,7 @@
     "bsv8-channel-protocol": "0.6.0"
   },
   "devDependencies": {
-    "go-bitfs": "0.3.3",
+    "go-bitfs": "0.5.0",
     "@libp2p/websockets": "10.1.20",
     "@keymaster/p2p-host": "workspace:*",
     "@multiformats/multiaddr": "13.0.3"

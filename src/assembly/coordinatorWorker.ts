@@ -1,3 +1,4 @@
+import { defaultChainFeePolicies, parseChainFeePolicy, type ChainFeePolicies } from "@keymaster/contracts";
 import { createCoordinatorWorkerAuthority, type CoordinatorAuthorityRecord } from "../coordinator/workerAuthority.js";
 import { VAULT_WORKER_WALLET_CONTROL_CAPABILITY, type VaultWorkerWalletControl } from "@keymaster/contracts";
 import { createMsFileWorkerProjection } from "@keymaster/plugin-msfile/worker";
@@ -108,7 +109,7 @@ import {
 } from "../coordinator/workerUnitAvailability.js";
 import { createWocService, registerWocP2pkhProviders } from "@keymaster/plugin-woc/coordinator";
 import { p2pkhAddressToScriptHex } from "@keymaster/plugin-p2pkh/coordinator";
-import { createP2pkhFileRepository, disposeP2pkhStateRepository, parseP2pkhTransaction } from "@keymaster/plugin-p2pkh/coordinator";
+import { disposeP2pkhStateRepository, parseP2pkhTransaction } from "@keymaster/plugin-p2pkh/coordinator";
 
 import type { BorrowedModuleFileStore, KeyValueStore, PlatformRootStore, WocService, BsvNetwork } from "@keymaster/contracts";
 
@@ -165,9 +166,11 @@ function validateCoordinatorSettingsSnapshot(value: unknown): CoordinatorSetting
   const keys = Object.keys(record);
   const hasSchedule = Object.prototype.hasOwnProperty.call(record, "scheduleSettings");
   const hasAutoLock = Object.prototype.hasOwnProperty.call(record, "autoLockTimeoutMs");
-  if (!hasSchedule || keys.some((k) => k !== "scheduleSettings" && k !== "autoLockTimeoutMs")) {
+  if (!hasSchedule || keys.some((k) => k !== "scheduleSettings" && k !== "autoLockTimeoutMs" && k !== "chainFeePolicies")) {
     throw new StorageRuntimeError("storage_provider_error", "Coordinator settings snapshot value is invalid");
   }
+  const rawFees = record.chainFeePolicies === undefined ? defaultChainFeePolicies() : snapshotRecord(record.chainFeePolicies, "Chain fee policies");
+  const chainFeePolicies: ChainFeePolicies = { main: parseChainFeePolicy(rawFees.main), test: parseChainFeePolicy(rawFees.test) };
   const settings = snapshotRecord(record.scheduleSettings, "Coordinator schedule settings");
   // 兼容 2026-09-20 之前的旧形状（只有 assetHoldingsIntervalMs）：旧周期
   // 选项已废弃，直接回落到同步管理缺省，而不是让整个 Worker 启动失败。
@@ -175,7 +178,7 @@ function validateCoordinatorSettingsSnapshot(value: unknown): CoordinatorSetting
     && !Object.prototype.hasOwnProperty.call(settings, "taskIntervals")) {
     return {
       scheduleSettings: { taskIntervals: {} },
-      autoLockTimeoutMs: parsePersistedAutoLockTimeoutMs(record.autoLockTimeoutMs),
+      autoLockTimeoutMs: parsePersistedAutoLockTimeoutMs(record.autoLockTimeoutMs), chainFeePolicies,
     };
   }
   if (Object.keys(settings).length !== 1 || !Object.prototype.hasOwnProperty.call(settings, "taskIntervals")) {
@@ -190,7 +193,7 @@ function validateCoordinatorSettingsSnapshot(value: unknown): CoordinatorSetting
     }
     taskIntervals[taskId] = interval;
   }
-  return { scheduleSettings: { taskIntervals }, autoLockTimeoutMs: parsePersistedAutoLockTimeoutMs(record.autoLockTimeoutMs) };
+  return { scheduleSettings: { taskIntervals }, autoLockTimeoutMs: parsePersistedAutoLockTimeoutMs(record.autoLockTimeoutMs), chainFeePolicies };
 }
 
 function parsePersistedAutoLockTimeoutMs(value: unknown): number {
@@ -202,15 +205,17 @@ function parsePersistedAutoLockTimeoutMs(value: unknown): number {
 }
 
 interface CoordinatorRuntimeSettings {
+  chainFeePolicies: ChainFeePolicies;
   scheduleSettings: CoordinatorBackgroundSyncSettings;
   autoLockTimeoutMs: number;
   p2pkhProviderConfigs: Record<string, Record<string, unknown>>;
   p2pkhSettings: { bsvNetwork: "main" | "test" };
 }
-/** 桶级 Coordinator snapshot 持久化同步管理 + 自动锁；P2PKH 偏好归 owner 的 setting.json。 */
-type CoordinatorSettingsSnapshot = Pick<CoordinatorRuntimeSettings, "scheduleSettings" | "autoLockTimeoutMs">;
+/** 桶级 Coordinator snapshot 保存同步间隔、自动锁与按网络的费率策略；WoC Provider 配置归 owner。 */
+type CoordinatorSettingsSnapshot = Pick<CoordinatorRuntimeSettings, "scheduleSettings" | "autoLockTimeoutMs" | "chainFeePolicies">;
 function defaultCoordinatorRuntimeSettings(): CoordinatorRuntimeSettings {
   return {
+    chainFeePolicies: defaultChainFeePolicies(),
     scheduleSettings: { taskIntervals: {} },
     autoLockTimeoutMs: AUTO_LOCK_DEFAULT_TIMEOUT_MS,
     p2pkhProviderConfigs: {},
@@ -253,6 +258,8 @@ const wocWorkerRuntime = createWocWorkerRuntime({
   tasks: coordinatorTaskRegistrar,
   settings: () => coordinatorMeta.p2pkhProviderConfigs?.woc,
   queueChanged: snapshot => onWocQueueChanged(snapshot),
+  feePolicies: () => coordinatorMeta.chainFeePolicies,
+  publishFees: chainFees => { publishTopicEvent("chain.fees", { type: "chain.fees.changed", sessionEpoch: coordinatorState.sessionEpoch, chainFees }); },
   publishHeight: chainHeight => { publishTopicEvent("chain.height", { type: "chain.height.changed", sessionEpoch: coordinatorState.sessionEpoch, chainHeight }); },
 });
 let testP2pkhBroadcastProvider: P2pkhTransactionBroadcastProvider | undefined;
@@ -305,6 +312,7 @@ const storageWorkerRoot = createStorageWorkerRoot({
     coldStart: () => vaultWalletWorker.storageColdStartState, lifecycleReady: () => Boolean(vaultWalletWorker.walletLifecycle),
   },
   async artifacts(root) {
+    const binding = { walletGeneration: coordinatorState.walletGeneration, sessionEpoch: coordinatorState.sessionEpoch, runGeneration: coordinatorState.runGeneration };
     let settings: SnapshotStore<CoordinatorSettingsSnapshot> | undefined;
     let protocol: CoordinatorProtocolStorageStores | undefined;
     try {
@@ -313,9 +321,11 @@ const storageWorkerRoot = createStorageWorkerRoot({
       const ownedSettings = settings; const ownedProtocol = protocol;
       return {
         commit() {
+          if (!platformArtifactsMatch(binding)) throw storageUnavailableError("Platform storage candidate became stale");
           coordinatorSettingsSnapshot?.close(); configureProtocolStorageRepository(ownedProtocol);
           registerCoordinatorProtocolMaintenanceStores(ownedProtocol);
           coordinatorSettingsSnapshot = ownedSettings; coordinatorProtocolStores = ownedProtocol;
+          coordinatorPlatformArtifactsBinding = binding;
         },
         dispose() { closeCoordinatorProtocolStorageStores(ownedProtocol); ownedSettings.close(); },
       };
@@ -362,6 +372,12 @@ const vaultWorkerKeys = createVaultWorkerKeys({
 /** Root 安装令牌；不能用 walletGeneration 代替，因为重置后可能复用世代值。 */
 
 let coordinatorSettingsSnapshot: SnapshotStore<CoordinatorSettingsSnapshot> | undefined;
+/** 平台缓存句柄与模块句柄一样受会话代际约束；不能跨锁定/解锁复用。 */
+let coordinatorPlatformArtifactsBinding: { walletGeneration: string; sessionEpoch: string; runGeneration: string } | undefined;
+function platformArtifactsMatch(binding = coordinatorPlatformArtifactsBinding): boolean {
+  return Boolean(binding && binding.walletGeneration === coordinatorState.walletGeneration
+    && binding.sessionEpoch === coordinatorState.sessionEpoch && binding.runGeneration === coordinatorState.runGeneration);
+}
 /** Protocol 的三个 platform-only purpose K-V。 */
 interface CoordinatorProtocolStorageStores {
   durablePolicy: KeyValueStore;
@@ -515,6 +531,7 @@ function discardCurrentPlatformStorageBinding(): void {
   storageWorkerRoot.root = undefined;
   storageWorkerRoot.token = undefined;
   coordinatorSettingsSnapshot = undefined;
+  coordinatorPlatformArtifactsBinding = undefined;
   coordinatorProtocolStores = undefined;
   storageWorkerRoot.controller = undefined;
   storageWorkerRoot.ready = false;
@@ -559,6 +576,7 @@ async function writeCoordinatorSnapshot<T>(
 async function persistCoordinatorSettings(settings: CoordinatorSettingsSnapshot = {
   scheduleSettings: coordinatorMeta.scheduleSettings,
   autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs,
+  chainFeePolicies: coordinatorMeta.chainFeePolicies,
 }): Promise<void> {
   await writeCoordinatorSnapshot(coordinatorSettingsSnapshot, structuredClone(settings), "coordinator.settings.persist");
 }
@@ -825,7 +843,7 @@ const msfileFundingRuntime = createWorkerFundingRuntime({
   executor: (operation, signal?: AbortSignal) => testDomainUnitReadiness ? windowP2pWorkerRuntime.requestWindowP2pExecutorOperation(operation, signal) : msfileWorkerLifecycle.executor(operation, signal),
   ensureResources: ensureWorkerP2pkhResources,
   snapshots: () => p2pkhWorkerRuntime.snapshots(),
-  readP2pkhSettings: async () => ({ ...await p2pkhSettingRepository().readSetting(), bsvNetwork: vaultWorkerKeys.requireCoordinatorNetworkIdentity().bsvNetwork }),
+  readP2pkhSettings: async () => currentNetworkFeeSettings(),
   maxFeeSatoshis: bitfsFundingMaxFeeSatoshis,
   deriveAddress: deriveP2pkhAddress,
   addressScript: p2pkhAddressToScriptHex,
@@ -838,7 +856,7 @@ const msfileBitfsRuntime = createBitfsWorkerRuntime({
   ensureService: () => ensureMsfileRuntime(),
   files: (purpose) => createWorkerModuleFileStore("msfile", purpose),
   woc: () => testDomainUnitReadiness ? p2pkhWocService : msfileWorkerLifecycle.chain(),
-  p2pkhSettings: async () => ({ ...await p2pkhSettingRepository().readSetting(), bsvNetwork: vaultWorkerKeys.requireCoordinatorNetworkIdentity().bsvNetwork }),
+  p2pkhSettings: async () => currentNetworkFeeSettings(),
   crypto: (owner) => vaultWorkerKeys.createWorkerActiveKeyCrypto(owner),
   blockHeight: readCoordinatorBitfsBlockHeight,
   executor: (operation, signal?: AbortSignal) => testDomainUnitReadiness ? windowP2pWorkerRuntime.requestWindowP2pExecutorOperation(operation, signal) : msfileWorkerLifecycle.executor(operation, signal),
@@ -853,6 +871,18 @@ const msfileBitfsRuntime = createBitfsWorkerRuntime({
     const current = await ensureSatRuntime();
     if (current !== runtime) throw new Error("BitFS channel runtime changed");
     await channelWorkerRuntime.ensureMsfileBitfsBuyerSubscriptions(current);
+  },
+  stopSellerSubscriptions: () => { void channelWorkerRuntime.clearMsfileBitfsSellerSubscriptions().catch(error => console.warn("[msfile] seller unsubscribe failed", error instanceof Error ? error.message : String(error))); },
+  demandNetworkStatus: async () => {
+    const channel = "bsv8.hash.request.v1";
+    const subscription = channelWorkerRuntime.channelSubscriptionStatusBaseline().find(item => item.channel === channel);
+    const runtime = satWorkerLifecycle.current();
+    // 只观察已存在运行态，不 ensure、不连接、不 set 订阅。
+    const snapshot = runtime ? await runtime.admin.getSettingsSnapshot() : undefined;
+    return { channel, subscriptionPhase: subscription?.phase ?? "idle", error: subscription?.errorMessage ?? null,
+      suppliers: (snapshot?.supplierViews ?? []).map(item => ({ supplierId: item.supplierId, name: item.name,
+        connectionState: item.connectionState, receiving: snapshot?.ownerSettings?.receiveSupplierIds.includes(item.supplierId) ?? false,
+        subscribed: item.observedChannels.includes(channel), error: item.lastErrorCode })) };
   },
   sellerSubscriptions: async (runtime) => {
     const current = await ensureSatRuntime();
@@ -1861,6 +1891,7 @@ const coordinatorTestEventSinks = new Map<string, CoordinatorTestEventSink>();
 
 let sessionRevision = 0;
 let backgroundSnapshotRevision = 0;
+let chainFeeRevision = 0;
 let chainHeightRevision = 0;
 let assetDataRevision = 0;
 let contactsPresenceRevision = 0;
@@ -1872,7 +1903,7 @@ const vaultAutoLock = createWorkerAutoLock({
   deadline: () => coordinatorState.autoLockDeadline,
   commitDeadline: deadline => { coordinatorState.autoLockDeadline = deadline; },
   keepUnlocked: sellerKeepsVaultUnlocked,
-  persistTimeout: autoLockTimeoutMs => persistCoordinatorSettings({ scheduleSettings: coordinatorMeta.scheduleSettings, autoLockTimeoutMs }),
+  persistTimeout: autoLockTimeoutMs => persistCoordinatorSettings({ scheduleSettings: coordinatorMeta.scheduleSettings, autoLockTimeoutMs, chainFeePolicies: coordinatorMeta.chainFeePolicies }),
   publishSettings: () => publishSessionState("autolock-settings"),
   lock: () => performGlobalLock("auto-lock-timeout"),
 });
@@ -1960,7 +1991,7 @@ const backgroundWorkerRuntime = createWorkerBackgroundRuntime({
     if (auditOperation) await withCoordinatorFinalIoLease("write", signal, run, { auditOperation });
     else await run(signal);
   },
-  persistSettings: scheduleSettings => persistCoordinatorSettings({ scheduleSettings, autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs ?? AUTO_LOCK_DEFAULT_TIMEOUT_MS }),
+  persistSettings: scheduleSettings => persistCoordinatorSettings({ scheduleSettings, autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs ?? AUTO_LOCK_DEFAULT_TIMEOUT_MS, chainFeePolicies: coordinatorMeta.chainFeePolicies }),
   commitSettings: settings => { coordinatorMeta.scheduleSettings = settings; coordinatorState.scheduleSettings = settings; },
 });
 const getTaskSnapshots = () => backgroundWorkerRuntime.snapshots();
@@ -2057,7 +2088,7 @@ const p2pkhWorkerRuntime = createP2pkhWorkerRuntime({
     },
     session: () => ({ owner: coordinatorState.activePublicKeyHex, epoch: coordinatorState.sessionEpoch, unlocked: coordinatorState.vaultStatus === "unlocked" }),
     loadSettings: (owner) => loadP2pkhSettingForOwner(owner),
-    settings: () => coordinatorMeta.p2pkhSettings,
+    settings: () => ({ ...coordinatorMeta.p2pkhSettings, feeRateSatoshisPerKb: wocWorkerRuntime.fees.snapshot()[coordinatorMeta.p2pkhSettings.bsvNetwork].effectiveSatoshisPerKb }),
     walletState: () => testDomainUnitReadiness ? createWorkerWalletState() : p2pkhWorkerRuntime.binding()!.walletState,
     storage: () => testDomainUnitReadiness ? createWorkerModuleFileStore("p2pkh", "") : p2pkhWorkerRuntime.binding()!.storage,
     crypto: (owner) => testDomainUnitReadiness ? vaultWorkerKeys.createWorkerActiveKeyCrypto(owner) : p2pkhWorkerRuntime.binding()!.crypto.createActiveKeyCrypto(owner),
@@ -2142,6 +2173,8 @@ async function buildTopicBaselines(
 
   const baselines: CoordinatorTopicBaseline[] = request.topics.flatMap((topic): CoordinatorTopicBaseline[] => {
     if (topic === "asset.data-changed") return [];
+    if (topic === "chain.fees") return [{ topic, baselineRevision: chainFeeRevision, sessionEpoch: coordinatorState.sessionEpoch,
+      snapshot: { topic, type: "chain.fees.changed", chainFeeRevision, sessionEpoch: coordinatorState.sessionEpoch, chainFees: wocWorkerRuntime.fees.snapshot() } }];
     if (topic === "chain.height") {
       // 链高度是公共链状态：新 Tab 拿到的 baseline 就是 Worker 当前读数；
       // 从未成功读取过时携带 available=false，而不是伪造高度 0。
@@ -2460,6 +2493,14 @@ async function completeUnlockedBinding(cause: SessionStateEvent["cause"] = "unlo
   if (!publicKeyHex) throw storageUnavailableError("Unlocked wallet has no active key");
   try {
     await ensureCoordinatorUpgradeSession();
+    // lifecycle.unlock 已推进 sessionEpoch。旧设置快照与 Protocol K-V 的 fence
+    // 必须继续拒绝旧句柄；在恢复业务单元之前按新代际重新装配，不能捕获 stale
+    // 后重试旧句柄，也不能移除底层世代校验。
+    if (!platformArtifactsMatch()) {
+      await installPlatformStorage();
+      await loadCoordinatorMeta();
+      if (coordinatorState.sessionEpoch !== bindingEpoch) throw storageUnavailableError("Wallet unlock was revoked during platform storage binding");
+    }
     bindCoordinatorTaskUnitsToOwner();
     try {
       await ensureMsfileBitfsBuyerRecovery(publicKeyHex);
@@ -2639,8 +2680,10 @@ function performGlobalLock(reason: string): Promise<void> {
 
 let testFailNextP2pkhSettingWrite = false;
 
-function p2pkhSettingRepository(): ReturnType<typeof createP2pkhFileRepository> {
-  return createP2pkhFileRepository(createWorkerModuleFileStore("p2pkh", ""));
+/** 全局费率是纯内存投影；交易消费者无需读取 owner 的 Provider 设置文件。 */
+function currentNetworkFeeSettings() {
+  const bsvNetwork = vaultWorkerKeys.requireCoordinatorNetworkIdentity().bsvNetwork;
+  return { bsvNetwork, feeRateSatoshisPerKb: wocWorkerRuntime.fees.snapshot()[bsvNetwork].effectiveSatoshisPerKb };
 }
 
 const p2pkhWorkerSettings = createWorkerP2pkhSettings({
@@ -2649,6 +2692,16 @@ const p2pkhWorkerSettings = createWorkerP2pkhSettings({
   storage: () => createWorkerModuleFileStore("p2pkh", ""),
   session: () => ({ sessionEpoch: coordinatorState.sessionEpoch, activePublicKeyHex: coordinatorState.activePublicKeyHex }),
   projection: coordinatorMeta,
+  async updateFeePolicy(network, policy) {
+    const sessionEpoch = coordinatorState.sessionEpoch;
+    const settingsStore = coordinatorSettingsSnapshot;
+    const chainFeePolicies = { ...coordinatorMeta.chainFeePolicies, [network]: parseChainFeePolicy(policy) };
+    await persistCoordinatorSettings({ scheduleSettings: coordinatorMeta.scheduleSettings, autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs, chainFeePolicies });
+    // 写入属于原平台根；锁定或切换根后的迟到结果不能覆盖当前运行时镜像。
+    if (sessionEpoch !== coordinatorState.sessionEpoch || settingsStore !== coordinatorSettingsSnapshot) throw new Error("Fee settings write became stale");
+    coordinatorMeta.chainFeePolicies = chainFeePolicies;
+    wocWorkerRuntime.fees.changed();
+  },
   beforeWrite: () => {
     if (testFailNextP2pkhSettingWrite) {
       testFailNextP2pkhSettingWrite = false;
@@ -2786,7 +2839,7 @@ function publishTopicEvent(topic: CoordinatorTopic, event: any): CoordinatorTopi
     ...event,
     ...(vaultWorkerKeys.coordinatorActiveKeySummary() ? { networkIdentity: { bsvNetwork: vaultWorkerKeys.coordinatorActiveKeySummary()!.bsvNetwork, publicKeyHex: vaultWorkerKeys.coordinatorActiveKeySummary()!.publicKeyHex } } : {}),
     topic,
-    ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : topic === "chain.height" ? { chainHeightRevision: ++chainHeightRevision } : topic === "storage.state" ? { storageRevision: event.storageRevision } : topic === "msfile.state" ? { msfileRevision: event.msfileRevision } : topic === "sat.events" ? { satRevision: event.satRevision } : topic === "channel.events" ? { channelRevision: ++channelRevision } : topic === "contacts.presence" ? { presenceRevision: ++contactsPresenceRevision } : topic === "worker.units" ? { workerUnitRevision: event.workerUnitRevision ?? coordinatorRuntimeUnitRevision() } : { assetDataRevision: ++assetDataRevision }),
+    ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : topic === "chain.fees" ? { chainFeeRevision: ++chainFeeRevision } : topic === "chain.height" ? { chainHeightRevision: ++chainHeightRevision } : topic === "storage.state" ? { storageRevision: event.storageRevision } : topic === "msfile.state" ? { msfileRevision: event.msfileRevision } : topic === "sat.events" ? { satRevision: event.satRevision } : topic === "channel.events" ? { channelRevision: ++channelRevision } : topic === "contacts.presence" ? { presenceRevision: ++contactsPresenceRevision } : topic === "worker.units" ? { workerUnitRevision: event.workerUnitRevision ?? coordinatorRuntimeUnitRevision() } : { assetDataRevision: ++assetDataRevision }),
     sessionEpoch: coordinatorState.sessionEpoch,
     ...(topic === "background.snapshot"
       ? {

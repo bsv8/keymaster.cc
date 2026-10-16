@@ -12,7 +12,7 @@
 //
 // 本文件只做格式解析与序列化；文件 I/O 在 p2pkhFileRepository。
 
-import type { P2pkhFeeRateTier } from "../p2pkhContracts.js";
+
 
 /** 设置文件固定名（p2pkh 模块根下）。 */
 export const P2PKH_SETTING_FILE_NAME = "setting.json";
@@ -54,19 +54,13 @@ export const P2PKH_KNOWN_PROVIDER_IDS: ReadonlySet<string> = new Set(["woc"]);
 export interface P2pkhSettingFileV1 {
   format: typeof P2PKH_SETTING_FORMAT;
   version: typeof P2PKH_SETTING_VERSION;
-  feeRateSatoshisPerKb?: Partial<Record<P2pkhFeeRateTier, number>>;
   providerConfigs?: Record<string, Record<string, unknown>>;
 }
 
 /** 运行时视图：缺省已填。 */
 export interface P2pkhResolvedSetting {
-  feeRateSatoshisPerKb: Record<P2pkhFeeRateTier, number>;
   providerConfigs: Record<string, Record<string, unknown>>;
 }
-
-export const P2PKH_SETTING_DEFAULTS = Object.freeze({
-  feeRateSatoshisPerKb: Object.freeze({ low: 60, medium: 120, high: 180 } as Record<P2pkhFeeRateTier, number>),
-});
 
 /** 历史记录条目（与 P2pkhHistoryRecord 的持久化字段一致）。 */
 export interface P2pkhHistoryEntryV1 {
@@ -137,12 +131,6 @@ function cloneJsonObject(value: unknown): Record<string, unknown> | undefined {
   }
 }
 
-function optionalFeeRate(value: unknown): number | undefined {
-  if (value === undefined) return undefined;
-  if (!Number.isSafeInteger(value) || (value as number) <= 0) return undefined;
-  return value as number;
-}
-
 /**
  * 解析设置文件。
  *
@@ -160,17 +148,6 @@ export function parseP2pkhSettingFile(bytes: Uint8Array): P2pkhSettingFileV1 | u
   if (!isRecord(parsed)) return undefined;
   if (parsed.format !== P2PKH_SETTING_FORMAT || parsed.version !== P2PKH_SETTING_VERSION) return undefined;
 
-  let feeRate: Partial<Record<P2pkhFeeRateTier, number>> | undefined;
-  if (parsed.feeRateSatoshisPerKb !== undefined) {
-    if (!isRecord(parsed.feeRateSatoshisPerKb)) return undefined;
-    feeRate = {};
-    for (const tier of ["low", "medium", "high"] as const) {
-      const value = optionalFeeRate(parsed.feeRateSatoshisPerKb[tier]);
-      if (parsed.feeRateSatoshisPerKb[tier] !== undefined && value === undefined) return undefined;
-      if (value !== undefined) feeRate[tier] = value;
-    }
-  }
-
   let providerConfigs: Record<string, Record<string, unknown>> | undefined;
   if (parsed.providerConfigs !== undefined) {
     if (!isRecord(parsed.providerConfigs)) return undefined;
@@ -187,7 +164,6 @@ export function parseP2pkhSettingFile(bytes: Uint8Array): P2pkhSettingFileV1 | u
   return {
     format: P2PKH_SETTING_FORMAT,
     version: P2PKH_SETTING_VERSION,
-    ...(feeRate === undefined ? {} : { feeRateSatoshisPerKb: feeRate }),
     ...(providerConfigs === undefined ? {} : { providerConfigs }),
   };
 }
@@ -195,17 +171,12 @@ export function parseP2pkhSettingFile(bytes: Uint8Array): P2pkhSettingFileV1 | u
 /** 把磁盘文件解析成运行时视图（缺省填默认值）。 */
 export function resolveP2pkhSetting(file?: P2pkhSettingFileV1): P2pkhResolvedSetting {
   return {
-    feeRateSatoshisPerKb: { ...P2PKH_SETTING_DEFAULTS.feeRateSatoshisPerKb, ...(file?.feeRateSatoshisPerKb ?? {}) },
     providerConfigs: file?.providerConfigs === undefined ? {} : structuredClone(file.providerConfigs),
   };
 }
 
-/** 序列化设置文件；默认值不写盘（费率只写与默认不同的档位）。 */
+/** 仅保存 owner 的 Provider 配置；费率策略归全局平台设置。 */
 export function serializeP2pkhSettingFile(setting: P2pkhResolvedSetting): Uint8Array {
-  const feeRate: Partial<Record<P2pkhFeeRateTier, number>> = {};
-  for (const tier of ["low", "medium", "high"] as const) {
-    if (setting.feeRateSatoshisPerKb[tier] !== P2PKH_SETTING_DEFAULTS.feeRateSatoshisPerKb[tier]) feeRate[tier] = setting.feeRateSatoshisPerKb[tier];
-  }
   const providerConfigs: Record<string, Record<string, unknown>> = {};
   for (const [providerId, config] of Object.entries(setting.providerConfigs)) {
     if (P2PKH_KNOWN_PROVIDER_IDS.has(providerId)) providerConfigs[providerId] = config;
@@ -213,7 +184,6 @@ export function serializeP2pkhSettingFile(setting: P2pkhResolvedSetting): Uint8A
   const document = {
     format: P2PKH_SETTING_FORMAT,
     version: P2PKH_SETTING_VERSION,
-    ...(Object.keys(feeRate).length === 0 ? {} : { feeRateSatoshisPerKb: feeRate }),
     ...(Object.keys(providerConfigs).length === 0 ? {} : { providerConfigs }),
   };
   return new TextEncoder().encode(`${JSON.stringify(document, null, 2)}\n`);

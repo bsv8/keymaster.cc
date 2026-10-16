@@ -4,6 +4,7 @@
 // K-V 解码和 1 MiB 截断都已经在 Worker 完成，这里拿到的 format 是可信结论。
 // 唯一在这里发生的解析是「怎么把已知是 JSON / Markdown 的文本画出来」。
 import { useMemo, useState } from "react";
+import { ChevronRight } from "lucide-react";
 import type { StorageBrowsePreview } from "../runtime/storageBrowseTypes.js";
 import { Button } from "@keymaster/ui";
 import {
@@ -305,7 +306,9 @@ function JsonTreeView(props: { node: BrowseJsonNode; depth: number; translate: B
         aria-expanded={isExpanded}
         onClick={() => setOverride((current) => ({ ...current, [props.node.key]: !isExpanded }))}
       >
-        <span className="storage-browse__json-caret" aria-hidden="true">{isExpanded ? "▾" : "▸"}</span>
+        {/* 与文件树同一枚 chevron、同一套旋转规则，两处展开语的图标不再各自一套字形。 */}
+        <ChevronRight className={`storage-browse__json-caret${isExpanded ? " is-expanded" : ""}`}
+          size={14} strokeWidth={2.5} aria-hidden="true" />
         {props.node.label ? <span className="storage-browse__json-label">{props.node.label}</span> : null}
         <span className="storage-browse__json-summary">
           {props.translate("storage.browse.jsonCount", {

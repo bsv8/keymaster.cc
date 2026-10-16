@@ -1,3 +1,5 @@
+import { CHAIN_FEE_READER_CAPABILITY } from "@keymaster/contracts";
+import { createChainFeeReader } from "./chainFeeReader.js";
 import { VAULT_WALLET_STATE_CAPABILITY, WOC_WORKER_BROADCAST_CAPABILITY } from "@keymaster/contracts";
 import { WOC_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
 import { createElement } from "react";
@@ -50,6 +52,7 @@ const wocResources: I18nPluginResources = {
   namespace: "woc",
   resources: {
     en: {
+      "woc.task.fees": "Network fee recommendation",
       "woc.crumb.settings": "Settings",
       "woc.crumb.woc": "WOC",
       "woc.page.title": "WOC settings",
@@ -72,6 +75,7 @@ const wocResources: I18nPluginResources = {
       "woc.status.coordinated.warn": "Multi-tab coordination: disabled. The current browser does not support Web Locks, so cross-tab rate limiting cannot be guaranteed. Open only one wallet tab at a time, or switch to a Web-Locks-capable browser, to avoid triggering WOC rate limits."
     },
     "zh-CN": {
+      "woc.task.fees": "网络建议费率",
       "woc.crumb.settings": "设置",
       "woc.crumb.woc": "WOC",
       "woc.page.title": "WOC 设置",
@@ -105,7 +109,7 @@ const wocPluginDefinition = {
     id: "woc.window",
     runtime: "window-main",
     scopeKind: "owner-session",
-    provides: [
+    provides: [capabilityDescriptor(CHAIN_FEE_READER_CAPABILITY),
       capabilityDescriptor(WOC_CAPABILITY),
       capabilityDescriptor(WOC_BSV21_CAPABILITY),
       capabilityDescriptor(WOC_STAS_CAPABILITY),
@@ -172,6 +176,8 @@ const wocPluginDefinition = {
     // 页面只读内存中的最近一次节点读数。
     const chainHeightReader = createChainHeightReader({ coordinatorClient: coordinator });
     ctx.provide(CHAIN_HEIGHT_READER_CAPABILITY, chainHeightReader);
+    const chainFeeReader = createChainFeeReader(coordinator);
+    ctx.provide(CHAIN_FEE_READER_CAPABILITY, chainFeeReader);
 
     // chain.height：页面用 Resource Store 读链高度；订阅即退订，跨标签
     // 更新由 Coordinator 单点广播驱动。
@@ -206,6 +212,7 @@ const wocPluginDefinition = {
       // actor detach + 取消 messageBus handle 都在 dispose 内。
       service.dispose();
       chainHeightReader.dispose?.();
+      chainFeeReader.dispose();
     };
   }
 } satisfies PluginManifest & { setup: PluginSetup };

@@ -6,6 +6,7 @@ export interface WorkerSettingsDependencies {
   network(): "main" | "test";
   session(): { sessionEpoch: string; activePublicKeyHex?: string };
   projection: { p2pkhSettings: { bsvNetwork: "main" | "test" }; p2pkhProviderConfigs?: Record<string, Record<string, unknown>> };
+  updateFeePolicy(network: "main" | "test", policy: import("@keymaster/contracts").ChainFeePolicy): Promise<void>;
   beforeWrite(): void;
   clearSnapshots(): void;
   reschedule(): Promise<void>;
@@ -54,7 +55,6 @@ export function createWorkerP2pkhSettings(deps: WorkerSettingsDependencies) {
   /** 读-改-写 setting.json；failure 时调用方不得更新内存镜像。 */
   async function writeP2pkhSettingFile(patch: {
     bsvNetwork?: "main" | "test";
-    feeRateSatoshisPerKb?: Partial<Record<"low" | "medium" | "high", number>>;
     providerConfigs?: Record<string, Record<string, unknown>>;
   }): Promise<void> {
     deps.beforeWrite();
@@ -65,10 +65,6 @@ export function createWorkerP2pkhSettings(deps: WorkerSettingsDependencies) {
     const current = await store.readSetting();
     assertFresh();
     await store.writeSetting({
-      feeRateSatoshisPerKb: {
-        ...current.feeRateSatoshisPerKb,
-        ...(patch.feeRateSatoshisPerKb ?? {})
-      },
       providerConfigs: patch.providerConfigs ?? current.providerConfigs,
     });
     assertFresh();
@@ -81,18 +77,7 @@ export function createWorkerP2pkhSettings(deps: WorkerSettingsDependencies) {
     if (request.settings.bsvNetwork !== deps.network()) {
       return { requestId, sessionEpoch: deps.session().sessionEpoch, ack: { status: "validation-error", message: "Identity network is immutable" } };
     }
-    if (request.settings.feeRateSatoshisPerKb !== undefined) {
-      for (const value of Object.values(request.settings.feeRateSatoshisPerKb)) {
-        if (!Number.isSafeInteger(value) || value < 1) {
-          return { requestId, sessionEpoch: deps.session().sessionEpoch, ack: { status: "validation-error", message: "Invalid P2PKH fee settings" } };
-        }
-      }
-    }
-    // 先写 owner 的 setting.json,成功后才更新内存镜像。
-    await writeP2pkhSettingFile({
-      bsvNetwork: request.settings.bsvNetwork,
-      ...(request.settings.feeRateSatoshisPerKb === undefined ? {} : { feeRateSatoshisPerKb: request.settings.feeRateSatoshisPerKb })
-    });
+    if (request.settings.feePolicy !== undefined) await deps.updateFeePolicy(request.settings.bsvNetwork, request.settings.feePolicy);
     deps.projection.p2pkhSettings = { bsvNetwork: request.settings.bsvNetwork };
     await deps.reschedule();
     deps.publishSnapshot({

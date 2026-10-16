@@ -18,7 +18,7 @@ export interface WorkerFundingDependencies {
   executor(operation: WindowP2pExecutorOperation): Promise<unknown>;
   ensureResources(owner: string, bsvNetwork: "main" | "test"): Promise<FundingSnapshotResource[]>;
   snapshots(): FundingSnapshots | undefined;
-  readP2pkhSettings(): Promise<{ bsvNetwork: "main" | "test"; feeRateSatoshisPerKb: { medium: number } }>;
+  readP2pkhSettings(): Promise<{ bsvNetwork: "main" | "test"; feeRateSatoshisPerKb: number }>;
   maxFeeSatoshis(): number;
   deriveAddress(owner: string, network: "main" | "test"): string;
   addressScript(address: string, network: "main" | "test"): string;
@@ -288,7 +288,7 @@ async function prepareMsfileBitfsFundingSplit(input: {
   return prepareBitfsFundingSplit({
     ...input,
     ownerPublicKeyHex: owner,
-    feeRateSatoshisPerKb: settings.feeRateSatoshisPerKb.medium,
+    feeRateSatoshisPerKb: settings.feeRateSatoshisPerKb,
     maxFeeSatoshis: deps.maxFeeSatoshis(),
     minimumOutputSatoshis: String(BITFS_FUNDING_MIN_OUTPUT_SATOSHIS),
   }, createMsfileBitfsFundingSplitDeps({ ...input, ownerPublicKeyHex: owner, ledger, transactions }));

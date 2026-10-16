@@ -1,5 +1,6 @@
 import { sameWalletSession } from "@keymaster/contracts";
 import { useMsFileResources } from "./MsFileResourceContext.js";
+import { msfileErrorMessage } from "./msfileErrors.js";
 // packages/plugin-msfile/src/MsFileHomeFileWidget.tsx
 // 首页「通过 Seed 获取文件」模块。
 //
@@ -77,6 +78,7 @@ type HomePhase =
   | "cancelled";
 
 interface HomeStatusResource {
+  error?: HomeError;
   status: MsFileServiceStatus;
   globalSettings: MsFileGlobalPriceSettings | null;
   supplierGeneration: number;
@@ -139,6 +141,8 @@ interface HomeState {
   bitfsDemand?: MsFileBitfsDemandSnapshot;
   /** 需求发布或报价刷新失败时的中文提示。 */
   bitfsDemandError?: string;
+  /** 用户购买/取消失败独立于报价刷新；读取报价成功不代表资金操作成功。 */
+  bitfsPurchaseError?: HomeError;
 }
 
 interface FetchTask {
@@ -401,6 +405,7 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
       ...MSFILE_READ_CONCURRENCY_RECOMMENDED,
     },
     (a, b) => a.status === b.status && a.supplierGeneration === b.supplierGeneration &&
+      a.error?.code === b.error?.code && a.error?.message === b.error?.message &&
       JSON.stringify(a.globalSettings) === JSON.stringify(b.globalSettings) &&
       a.mediaBlockReadConcurrency === b.mediaBlockReadConcurrency &&
       a.globalSeedReadConcurrency === b.globalSeedReadConcurrency &&
@@ -418,7 +423,7 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
   const [seedHashDraft, setSeedHashDraft] = useState(initialSeedHash);
   const [settingsSnapshot, setSettingsSnapshot] = useState<MsFileSettingsSnapshot | null>(null);
   const [settingsLoading, setSettingsLoading] = useState(false);
-  const [settingsError, setSettingsError] = useState(false);
+  const [settingsError, setSettingsError] = useState<HomeError | null>(null);
   const [state, setState] = useState<HomeState>(INITIAL_STATE);
   const [forcedPriceDraft, setForcedPriceDraft] = useState<{ seedHashHex: string; value: string; dirty: boolean } | null>(null);
   const activeQuotes = state.bitfsDemand?.quotes ?? [];
@@ -509,16 +514,17 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
     }
     let cancelled = false;
     setSettingsLoading(true);
-    setSettingsError(false);
+    setSettingsError(null);
     void service.getSettingsSnapshot()
       .then((snapshot) => {
         if (cancelled) return;
         setSettingsSnapshot(snapshot);
-        setSettingsError(false);
+        setSettingsError(null);
       })
-      .catch(() => {
+      .catch((cause) => {
         if (cancelled) return;
-        setSettingsError(true);
+        const code = errorCodeOf(cause) ?? "msfile_unavailable";
+        setSettingsError({ code, message: msfileErrorMessage(cause, code) });
         setSettingsSnapshot(null);
       })
       .finally(() => {
@@ -565,7 +571,7 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
 
   const makeError = useCallback((cause: unknown): HomeError => {
     const code = cause instanceof FileAssemblyError ? "msfile_integrity_error" : errorCodeOf(cause) ?? "msfile_unavailable";
-    return { code, message: displayErrorMessage(code, t) };
+    return { code, message: msfileErrorMessage(cause, displayErrorMessage(code, t)) };
   }, [t]);
 
   const failTask = useCallback((task: FetchTask, cause: unknown) => {
@@ -797,21 +803,15 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
 
   const startBitfsPurchase = useCallback(async (task: FetchTask, sessionId: string, maxFullBlockPriceSatoshis?: string) => {
     if (!service.startBitfsPurchase || !isCurrent(task)) return;
+    setState((previous) => ({ ...previous, bitfsPurchaseError: undefined }));
     try {
       const snapshot = await service.startBitfsPurchase(task.hash, sessionId, maxFullBlockPriceSatoshis);
       if (isCurrent(task)) setState((previous) => ({ ...previous, bitfsDemand: snapshot, bitfsDemandError: undefined }));
     } catch (cause) {
-      if (isCurrent(task)) setState((previous) => ({ ...previous, bitfsDemandError: makeError(cause).message }));
-    }
-  }, [isCurrent, makeError, service]);
-
-  const cancelBitfsPurchase = useCallback(async (task: FetchTask, sessionId: string) => {
-    if (!service.cancelBitfsPurchase || !isCurrent(task)) return;
-    try {
-      const snapshot = await service.cancelBitfsPurchase(task.hash, sessionId);
-      if (isCurrent(task)) setState((previous) => ({ ...previous, bitfsDemand: snapshot, bitfsDemandError: undefined }));
-    } catch (cause) {
-      if (isCurrent(task)) setState((previous) => ({ ...previous, bitfsDemandError: makeError(cause).message }));
+      // Coordinator 已保留准入、恢复、预算或存储失败原因；这里不能再按
+      // msfile_unavailable 抹成通用提示，否则无法区分未开池与待恢复资金。
+      const error = makeError(cause);
+      if (isCurrent(task)) setState((previous) => ({ ...previous, bitfsPurchaseError: error }));
     }
   }, [isCurrent, makeError, service]);
 
@@ -851,6 +851,12 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
     taskRef.current = task;
     setState({ phase: "stat-loading", hash, stats: [] });
     try {
+      const existing = await service.getBitfsDemand?.(hash);
+      if (!isCurrent(task)) return;
+      if (existing?.existingPurchaseSessionId) {
+        setState({ phase: "supplier-selection", hash, stats: [], bitfsDemand: { ...existing, requestMessageId: null, expiresAtMs: null, quotes: [], purchase: null } });
+        return;
+      }
       const result = await service.stat({ seedHashHex: hash, signal: task.controller.signal });
       if (!isCurrent(task)) return;
       const views = buildStatViews(result, settingsSnapshot, hash);
@@ -1017,6 +1023,9 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
       {configurationState === "unavailable" ? (
         <div className="msfile-home-file__notice" role="status">
           <p>{t("msfile.home.config.unavailable", { defaultValue: "MSFile 当前不可用，请稍后重试。" })}</p>
+          {settingsError || statusResource.error ? (
+            <p>{(settingsError ?? statusResource.error)!.message} · <code>{(settingsError ?? statusResource.error)!.code}</code></p>
+          ) : null}
           <AppLink to="/settings/local-files">{t("msfile.home.settings", { defaultValue: "打开本地文件设置" })}</AppLink>
         </div>
       ) : null}
@@ -1047,13 +1056,28 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
             </p>
           ) : null}
           {state.bitfsDemandError ? <p className="msfile-home-file__supplier-detail" role="status">{state.bitfsDemandError}</p> : null}
-          {state.bitfsDemand && state.bitfsDemand.quotes.length === 0 ? (
+          {state.bitfsPurchaseError ? (
+            <p className="msfile-home-file__error" role="alert">
+              {state.bitfsPurchaseError.message} <span className="msfile-home-file__diagnostic">{t("msfile.home.diagnostic", { defaultValue: "诊断代码" })}: <code>{state.bitfsPurchaseError.code}</code></span>
+            </p>
+          ) : null}
+          {state.bitfsDemand && !state.bitfsDemand.existingPurchaseSessionId && state.bitfsDemand.quotes.length === 0 ? (
             <p className="msfile-home-file__supplier-detail" role="status">{t("msfile.home.bitfs.noQuotes", { defaultValue: "需求已发出，尚未收到有效报价；页面会继续刷新报价。" })}</p>
           ) : null}
+          <AppLink to="/msfile/purchases">{t("msfile.purchases.title", { defaultValue: "购买历史" })}</AppLink>
+          {state.bitfsDemand?.existingPurchaseSessionId ? <p role="status">
+            {t("msfile.purchases.existing", { defaultValue: "该文件已有进行中采购任务，请前往购买详情管理。" })}{" "}
+            <AppLink to={`/msfile/purchases/${encodeURIComponent(state.bitfsDemand.existingPurchaseSessionId)}`}>
+              {t("msfile.purchases.details", { defaultValue: "查看购买详情" })}
+            </AppLink>
+          </p> : null}
           {state.bitfsDemand?.purchase ? (
             <div className="msfile-home-file__supplier-detail" role="status">
               <strong>{t("msfile.home.bitfs.purchaseProgress", { defaultValue: "BitFS 购买进度" })}</strong>
               <p>{state.bitfsDemand.purchase.message ?? t("msfile.home.bitfs.purchaseWorking", { defaultValue: "购买流程正在进行。" })}</p>
+              <AppLink to={`/msfile/purchases/${encodeURIComponent(state.bitfsDemand.purchase.sessionId)}`}>
+                {t("msfile.purchases.details", { defaultValue: "查看购买详情" })}
+              </AppLink>
               {state.bitfsDemand.purchase.openingAmountSatoshis !== null ? (
                 <p>{t("msfile.home.bitfs.openingAmount", { defaultValue: "开池金额上限" })}: {state.bitfsDemand.purchase.openingAmountSatoshis} sats</p>
               ) : null}
@@ -1097,7 +1121,7 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
                 <li key={quote.sessionId}>
                   <strong>{quote.recommendedFilename}</strong>
                   <span> · {t("msfile.home.bitfs.seller", { defaultValue: "卖家" })} <code title={quote.sellerPublicKeyHex}>{shortHex(quote.sellerPublicKeyHex)}</code></span>
-                  <span> · Seed {quote.seedPriceSatoshis} sats · Block {quote.fullBlockPriceSatoshis} sats</span>
+                  <span> · Seed {quote.seedPriceSatoshis} sats · Block {quote.fullBlockPriceSatoshis} sats · 每批最多 {quote.maxBlocksPerBatch} 块</span>
                   <span> · {t("msfile.home.fileSize", { defaultValue: "文件大小" })} {formatBytes(BigInt(quote.fileSizeBytes))}</span>
                   <span> · {t("msfile.home.bitfs.arbiters", { defaultValue: "可选仲裁方" })} {quote.supportedArbiterPublicKeys.length}</span>
                   <p className="msfile-home-file__supplier-detail">
@@ -1141,12 +1165,6 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
                         ? t("msfile.home.bitfs.seedAlreadyPurchased", { defaultValue: "该 Seed 已购买" })
                         : t("msfile.home.bitfs.otherPurchaseActive", { defaultValue: "请先完成当前购买" });
                     }
-                    const canCancelPurchase = samePurchase && purchase && (
-                      purchase.phase === "requesting-seed"
-                      || purchase.phase === "requesting-blocks"
-                      || purchase.phase === "cancelling-pool"
-                      || purchase.phase === "cancel-unknown"
-                    );
                     return (
                       <>
                         <button
@@ -1159,20 +1177,9 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
                         >
                           {label}
                         </button>
-                        {canCancelPurchase ? (
-                          <button
-                            type="button"
-                            disabled={!service.cancelBitfsPurchase}
-                            onClick={() => {
-                              const task = taskRef.current;
-                              if (task) void cancelBitfsPurchase(task, quote.sessionId);
-                            }}
-                          >
-                            {purchase?.phase === "requesting-seed" || purchase?.phase === "requesting-blocks"
-                              ? t("msfile.home.bitfs.cancelPurchase", { defaultValue: "取消整份下载并回收费用池" })
-                              : t("msfile.home.bitfs.retryCancelPurchase", { defaultValue: "继续关池回收" })}
-                          </button>
-                        ) : null}
+                        {samePurchase ? <AppLink to={`/msfile/purchases/${encodeURIComponent(purchase!.sessionId)}`}>
+                          {t("msfile.purchases.details", { defaultValue: "查看购买详情" })}
+                        </AppLink> : null}
                       </>
                     );
                   })()}

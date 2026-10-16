@@ -28,6 +28,7 @@ export const CHAIN_HEIGHT_SYNC_TASK_ID = "chain.chain-height-sync";
  */
 export const BACKGROUND_MANAGED_SYNC_TASK_IDS = [
   CHAIN_HEIGHT_SYNC_TASK_ID,
+  "chain.fee-sync",
   "p2pkh.transactions-sync",
   "token-bsv21.sync",
   "token-stas.sync",

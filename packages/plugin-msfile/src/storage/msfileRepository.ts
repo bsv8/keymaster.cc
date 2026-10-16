@@ -247,6 +247,7 @@ function parseSettingFile(bytes: Uint8Array): StoredSettingSnapshot {
       "sellerEnabled",
       "seedPriceSatoshis",
       "fullBlockPriceSatoshis",
+      "maxBlocksPerBatch",
       "quoteLifetimeSeconds",
       "paymentTimeoutSeconds",
       "supportedArbiterPublicKeys",

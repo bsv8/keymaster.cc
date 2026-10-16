@@ -3,17 +3,10 @@
 import { defineCapability } from "webloom-framework";
 import type { WebrtcService } from "./webrtcService.js";
 
-/** WebRTC owner inbox 私信协议标识。 */
+/** 共享 Hash/offer 协议标识；联系人服务通过 APP 私信发送独立信令。 */
 export const WEBRTC_SIGNAL_PROTOCOL = "bsv8.webrtc.signal.v1";
 
-/**
- * 音视频呼叫开关。呼叫使用与文件传输相同的会合模式：
- *   主叫先经 `bsv8.message.v1` 发送 `keymaster.webrtc.call.request`
- *  （携带 rendezvous hash + mode），被叫确认后发布真实 Hash 请求，
- *   主叫再经 `bsv8.webrtc.signal.v1` 发送媒体 offer。
- * 拒绝 / 忙 / 挂断 / 回退经 `keymaster.webrtc.call.control`（APP 私信）
- * 交换，不占用 webrtc-signal 的 offer/answer/ICE 分支。
- */
+/** 音视频通话通过加密 APP 私信协商：主叫邀请，被叫 offer，主叫 answer。 */
 export const WEBRTC_CALLS_ENABLED = true;
 
 /** plugin-webrtc 公开 service capability key。 */

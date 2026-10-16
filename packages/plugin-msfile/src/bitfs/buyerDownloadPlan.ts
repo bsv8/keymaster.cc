@@ -36,6 +36,8 @@ export interface BitfsBuyerDownloadPool {
   active: boolean;
   /** 费用池已确认关闭或退款时为 true。 */
   closed: boolean;
+  /** 已退出当前采购调度；资金是否关闭独立由账本记录。 */
+  retired?: boolean;
   /** 本池当前批次的首个 Block；其余认领由 blocks 中的 sessionId 归属恢复。 */
   inFlightBlockHashHex?: string;
 }
@@ -66,8 +68,6 @@ export interface BitfsBuyerDownloadPlan {
   claimSeed(sessionId: string, priority: "price" | "recent-speed"): Promise<"assigned" | "waiting" | "completed" | "stopped">;
   /** 文件取消前持久化停止栅栏；已签名付款仍需先完成结算。 */
   requestStop(): Promise<void>;
-  /** 所有费用池确认关闭后，允许显式重新开始未完成的文件下载。 */
-  resumeAfterCancellation(): Promise<void>;
   /** Seed 付款由本地 Kind 5/7 验收后记账。 */
   completeSeed(sessionId: string, paidSatoshis: string): Promise<void>;
   /** 固定由已验收 Seed 算出的不同 Block Hash 列表。 */
@@ -82,6 +82,10 @@ export interface BitfsBuyerDownloadPlan {
   completeBlocks(sessionId: string, blocks: readonly { blockHashHex: string; paidSatoshis: string }[]): Promise<void>;
   /** 池关闭/退款确认后释放该池未完成的认领。 */
   closePool(sessionId: string): Promise<void>;
+  /** 旧任务已签付但结果未知的块不可再次采购。 */
+  reserveUnsettledContent(hashes: readonly string[]): Promise<void>;
+  /** 新任务仅采用已逐块校验的现存内容；不代表本任务发生过付款。 */
+  adoptVerifiedContent(blockHashes: readonly string[], availableHashes: readonly string[]): Promise<void>;
   /** 读取当前计划快照。 */
   snapshot(): Promise<BitfsBuyerDownloadPlanSnapshot>;
 }
@@ -106,7 +110,8 @@ interface StoredPlan {
   /** Seed 检验后得出的不同 Block Hash 顺序。 */
   blockHashesHex?: string[];
   /** 每个 Block 的独占认领或已付款归属。 */
-  blocks: Record<string, { sessionId: string; state: "claimed" | "completed"; paidSatoshis?: string }>;
+  blockedHashes?: string[];
+  blocks: Record<string, { sessionId: string; state: "claimed" | "completed"; paidSatoshis?: string; reused?: true }>;
   /** 全部不同 Block 已验收付款时为 true。 */
   fileComplete: boolean;
   /** 已请求取消整份文件，禁止产生新的 Seed/Block 请求。 */
@@ -129,14 +134,16 @@ export function createBitfsBuyerDownloadPlan(input: {
   fileSizeBytes: string;
   /** 报价绑定的文件名。 */
   recommendedFilename: string;
+  /** 文件采购任务编号；新任务独立保存计划，旧资金恢复不触碰新计划。 */
+  taskId?: string;
   /** 买方 BitFS journal 专用文件存储。 */
   store: BorrowedOwnerFileStore;
 }): BitfsBuyerDownloadPlan {
   const owner = assertKey(input.ownerPublicKeyHex);
   const seed = assertHash(input.seedHashHex);
   const size = assertAmount(input.fileSizeBytes, true);
-  const path = `download-plans/${seed}.json`;
-  const lockKey = `${owner}:${seed}`;
+  const path = input.taskId ? `download-plans/${seed}/${assertSession(input.taskId)}.json` : `download-plans/${seed}.json`;
+  const lockKey = `${owner}:${seed}:${input.taskId ?? "legacy"}`;
 
   const read = async (): Promise<{ plan: StoredPlan; revision?: string } | undefined> => {
     const object = await input.store.get(path);
@@ -183,6 +190,21 @@ export function createBitfsBuyerDownloadPlan(input: {
   const load = async (): Promise<StoredPlan> => (await read())?.plan ?? fresh();
 
   return {
+    async reserveUnsettledContent(hashes) { await mutate(plan => { plan.blockedHashes = [...new Set(hashes.map(assertHash))]; return { plan, result: undefined }; }); },
+    async adoptVerifiedContent(hashes, available) {
+      const all = [...new Set(hashes.map(assertHash))];
+      const present = [...new Set(available.map(assertHash))];
+      if (present.some(hash => !all.includes(hash))) throw new Error("复用内容不属于当前 Seed");
+      await mutate(plan => {
+        if (Object.keys(plan.pools).length || plan.seedCompleted) return { plan, result: undefined };
+        plan.seedOwnerSessionId = "local-content";
+        plan.seedCompleted = true;
+        plan.blockHashesHex = all;
+        for (const hash of present) plan.blocks[hash] = { sessionId: "local-content", state: "completed", paidSatoshis: "0", reused: true };
+        plan.fileComplete = all.every(hash => plan.blocks[hash]?.state === "completed");
+        return { plan, result: undefined };
+      });
+    },
     async registerPool(value) {
       const id = assertSession(value.sessionId);
       const seller = assertKey(value.sellerPublicKeyHex);
@@ -214,7 +236,7 @@ export function createBitfsBuyerDownloadPlan(input: {
           committedSatoshis: previous?.committedSatoshis ?? "0", recentBytesPerSecond: speed,
           seedCommittedSatoshis: previous?.seedCommittedSatoshis ?? "0",
           blockCommittedSatoshis: previous?.blockCommittedSatoshis ?? "0",
-          active: previous?.active ?? false, closed: previous?.closed ?? false,
+          active: previous?.active ?? false, closed: previous?.closed ?? false, retired: previous?.retired ?? false,
           ...(previous?.inFlightBlockHashHex ? { inFlightBlockHashHex: previous.inFlightBlockHashHex } : {}),
         };
         return { plan, result: undefined };
@@ -223,7 +245,7 @@ export function createBitfsBuyerDownloadPlan(input: {
     async activatePool(sessionId) {
       await mutate((plan) => {
         const pool = needPool(plan, sessionId);
-        if (pool.closed) throw new Error("BitFS 已关闭费用池不能重新启用");
+        if (pool.closed || pool.retired) throw new Error("BitFS 已关闭费用池不能重新启用");
         pool.active = true;
         return { plan, result: undefined };
       });
@@ -234,7 +256,7 @@ export function createBitfsBuyerDownloadPlan(input: {
         if (plan.stopRequested) return { plan, result: "stopped" as const };
         if (plan.seedCompleted) return { plan, result: "completed" as const };
         if (plan.seedOwnerSessionId) return { plan, result: plan.seedOwnerSessionId === sessionId ? "assigned" as const : "waiting" as const };
-        const winner = sortedPools(plan).find((pool) => pool.active && !pool.closed
+        const winner = sortedPools(plan).find((pool) => pool.active && !pool.closed && !pool.retired
           && pool.seedBudgetReserved
           && BigInt(pool.seedCommittedSatoshis) === 0n
           && BigInt(pool.seedBudgetSatoshis) >= BigInt(pool.seedPriceSatoshis));
@@ -246,16 +268,6 @@ export function createBitfsBuyerDownloadPlan(input: {
     async requestStop() {
       await mutate((plan) => {
         plan.stopRequested = true;
-        return { plan, result: undefined };
-      });
-    },
-    async resumeAfterCancellation() {
-      await mutate((plan) => {
-        if (Object.values(plan.pools).some((pool) => !pool.closed)) {
-          throw new Error("BitFS 仍有未确认关闭的费用池；不能恢复新的内容请求");
-        }
-        if (plan.fileComplete) throw new Error("BitFS 文件已完整付款；不能重新开始下载");
-        plan.stopRequested = false;
         return { plan, result: undefined };
       });
     },
@@ -295,12 +307,12 @@ export function createBitfsBuyerDownloadPlan(input: {
         if (plan.stopRequested) return { plan, result: undefined };
         if (!plan.seedCompleted || !plan.blockHashesHex || plan.fileComplete) return { plan, result: undefined };
         const pool = needPool(plan, sessionId);
-        if (!pool.active || pool.closed) return { plan, result: undefined };
+        if (!pool.active || pool.closed || pool.retired) return { plan, result: undefined };
         if (pool.inFlightBlockHashHex) return { plan, result: pool.inFlightBlockHashHex };
-        const nextPool = sortedPools(plan).find((item) => item.active && !item.closed && !item.inFlightBlockHashHex
+        const nextPool = sortedPools(plan).find((item) => item.active && !item.closed && !item.retired && !item.inFlightBlockHashHex
           && BigInt(item.blockBudgetSatoshis) - BigInt(item.blockCommittedSatoshis) >= BigInt(item.fullBlockPriceSatoshis));
         if (!nextPool || nextPool.sessionId !== sessionId) return { plan, result: undefined };
-        const hash = plan.blockHashesHex.find((item) => !plan.blocks[item]);
+        const hash = plan.blockHashesHex.find((item) => !plan.blocks[item] && !plan.blockedHashes?.includes(item));
         if (!hash) return { plan, result: undefined };
         plan.blocks[hash] = { sessionId, state: "claimed" };
         pool.inFlightBlockHashHex = hash;
@@ -313,7 +325,7 @@ export function createBitfsBuyerDownloadPlan(input: {
         plan.priority = priority;
         if (plan.stopRequested || !plan.seedCompleted || !plan.blockHashesHex || plan.fileComplete) return { plan, result: [] };
         const pool = needPool(plan, sessionId);
-        if (!pool.active || pool.closed) return { plan, result: [] };
+        if (!pool.active || pool.closed || pool.retired) return { plan, result: [] };
         const claimed = plan.blockHashesHex.filter((hash) => {
           const block = plan.blocks[hash];
           return block?.sessionId === sessionId && block.state === "claimed";
@@ -323,11 +335,11 @@ export function createBitfsBuyerDownloadPlan(input: {
           return { plan, result: claimed };
         }
         if (pool.inFlightBlockHashHex) throw new Error("BitFS 池内首块认领缺失");
-        const nextPool = sortedPools(plan).find((item) => item.active && !item.closed && !item.inFlightBlockHashHex
+        const nextPool = sortedPools(plan).find((item) => item.active && !item.closed && !item.retired && !item.inFlightBlockHashHex
           && BigInt(item.blockBudgetSatoshis) - BigInt(item.blockCommittedSatoshis) >= BigInt(item.fullBlockPriceSatoshis));
         if (!nextPool || nextPool.sessionId !== sessionId) return { plan, result: [] };
         const affordable = Number((BigInt(pool.blockBudgetSatoshis) - BigInt(pool.blockCommittedSatoshis)) / BigInt(pool.fullBlockPriceSatoshis));
-        const hashes = plan.blockHashesHex.filter((hash) => !plan.blocks[hash]).slice(0, Math.min(limit, affordable));
+        const hashes = plan.blockHashesHex.filter((hash) => !plan.blocks[hash] && !plan.blockedHashes?.includes(hash)).slice(0, Math.min(limit, affordable));
         for (const hash of hashes) plan.blocks[hash] = { sessionId, state: "claimed" };
         pool.inFlightBlockHashHex = hashes[0];
         return { plan, result: hashes };
@@ -432,7 +444,11 @@ function validate(value: unknown, owner: string, seed: string, size: string, fil
     assertHash(hash);
     if (!objectRecord(rawBlock)) throw new Error("BitFS Block 归属格式无效");
     const sessionId = assertSession(rawBlock.sessionId);
-    if (rawBlock.state === "completed") blocks[hash] = { sessionId, state: "completed", paidSatoshis: assertAmount(rawBlock.paidSatoshis, true) };
+    if (rawBlock.state === "completed") {
+      const reused = rawBlock.reused === true;
+      if (reused && (sessionId !== "local-content" || rawBlock.paidSatoshis !== "0")) throw new Error("复用内容不能伪造本次付款");
+      blocks[hash] = { sessionId, state: "completed", paidSatoshis: assertAmount(rawBlock.paidSatoshis, !reused), ...(reused ? { reused: true as const } : {}) };
+    }
     else if (rawBlock.state === "claimed") blocks[hash] = { sessionId, state: "claimed" };
     else throw new Error("BitFS Block 归属状态无效");
   }
@@ -443,6 +459,7 @@ function validate(value: unknown, owner: string, seed: string, size: string, fil
     fileSizeBytes: size, recommendedFilename: filename,
     ...(row.seedOwnerSessionId === undefined ? {} : { seedOwnerSessionId: assertSession(row.seedOwnerSessionId) }),
     seedCompleted: row.seedCompleted, ...(hashes === undefined ? {} : { blockHashesHex: hashes }),
+    ...(row.blockedHashes === undefined ? {} : { blockedHashes: Array.isArray(row.blockedHashes) ? row.blockedHashes.map(assertHash) : invalid("未决 Block 清单无效") }),
     blocks, fileComplete: row.fileComplete, stopRequested: row.stopRequested === true, revision: row.revision as number,
     priority: row.priority, pools,
   };
@@ -453,6 +470,7 @@ function parsePool(value: unknown, id: string): BitfsBuyerDownloadPool {
   if (!objectRecord(value) || value.sessionId !== id || typeof value.active !== "boolean" || typeof value.closed !== "boolean") throw new Error("BitFS 下载计划池身份无效");
   if (typeof value.seedBudgetReserved !== "boolean") throw new Error("BitFS Seed 预算授权状态无效");
   if (value.recentBytesPerSecond !== null && typeof value.recentBytesPerSecond !== "string") throw new Error("BitFS 下载计划速度无效");
+  if (value.retired !== undefined && typeof value.retired !== "boolean") throw new Error("BitFS 下载计划退出标记无效");
   const pool: BitfsBuyerDownloadPool = {
     sessionId: id, sellerPublicKeyHex: assertKey(value.sellerPublicKeyHex),
     fullBlockPriceSatoshis: assertAmount(value.fullBlockPriceSatoshis, true),
@@ -465,7 +483,7 @@ function parsePool(value: unknown, id: string): BitfsBuyerDownloadPool {
     seedCommittedSatoshis: assertAmount(value.seedCommittedSatoshis, false),
     blockCommittedSatoshis: assertAmount(value.blockCommittedSatoshis, false),
     recentBytesPerSecond: value.recentBytesPerSecond === null ? null : assertAmount(value.recentBytesPerSecond, false),
-    active: value.active, closed: value.closed,
+    active: value.active, closed: value.closed, retired: value.retired === true,
     ...(value.inFlightBlockHashHex === undefined ? {} : { inFlightBlockHashHex: assertHash(value.inFlightBlockHashHex) }),
   };
   if (BigInt(pool.seedBudgetSatoshis) + BigInt(pool.blockBudgetSatoshis) !== BigInt(pool.contentBudgetSatoshis)

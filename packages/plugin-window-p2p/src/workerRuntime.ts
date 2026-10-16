@@ -344,6 +344,7 @@ export function createWindowP2pWorkerRuntime(ports: WindowP2pWorkerPorts) {
         && ((eventValue as { type?: unknown }).type === "bitfs-seller-frame"
           || (eventValue as { type?: unknown }).type === "bitfs-seller-session-closed"
           || (eventValue as { type?: unknown }).type === "bitfs-webrtc-frame"
+          || (eventValue as { type?: unknown }).type === "bitfs-webrtc-quote-sent"
           || (eventValue as { type?: unknown }).type === "bitfs-webrtc-signal-outbound"
           || (eventValue as { type?: unknown }).type === "bitfs-webrtc-runtime-error"
           || (eventValue as { type?: unknown }).type === "bitfs-webrtc-session-closed")) {

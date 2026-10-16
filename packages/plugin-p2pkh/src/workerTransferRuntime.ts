@@ -11,7 +11,7 @@ export interface WorkerTransferDependencies {
   assertActive(): void;
   session(): { owner?: string; epoch: string; unlocked: boolean };
   loadSettings(owner: string): Promise<void>;
-  settings(): { bsvNetwork: "main" | "test" };
+  settings(): { bsvNetwork: "main" | "test"; feeRateSatoshisPerKb?: number };
   walletState(): VaultWalletState;
   storage(): BorrowedModuleFileStore;
   crypto(owner: string): Promise<ActiveKeyCrypto>;
@@ -108,6 +108,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
       const service = createP2pkhService({
         vault: { status: deps.vaultStatus, createActiveKeyCrypto: deps.crypto, requestPayment: deps.requestPayment },
         woc: deps.query?.(),
+        effectiveFeeRate: () => deps.settings().feeRateSatoshisPerKb ?? 100,
         coordinator, centralBroadcastService: centralService, broadcastWithCoordinator: broadcast,
         walletState: deps.walletState(), storage: deps.storage(), messageBus: createMessageBus(),
       });

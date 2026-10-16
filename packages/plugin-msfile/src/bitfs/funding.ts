@@ -1,3 +1,4 @@
+import { selectBitfsFundingInputs } from "./fundingFee.js";
 // BitFS 买方专款账本与开池资金交易准备端口。
 //
 // 本文件只准备交易，不广播。调用方必须先把 exact bytes 写入 BitFS outbox；
@@ -847,12 +848,14 @@ export async function prepareBitfsFundingSplit(input: {
     };
   });
   if (new Set(candidates.map(outpointKey)).size !== candidates.length) throw new BitfsFundingError("integrity", "P2PKH 普通余额快照包含重复 outpoint");
-  const targetPlusFee = topUp.targetSatoshis + BigInt(input.maxFeeSatoshis);
-  const selected = selectWalletInputs(candidates, targetPlusFee);
-  const selectedTotal = selected.reduce((total, item) => total + BigInt(item.valueSatoshis), 0n);
   const explicitOutputValues = topUp.reserveSatoshis >= minimumOutputSatoshis
     ? [requiredSatoshis, topUp.reserveSatoshis]
     : [topUp.targetSatoshis];
+  const selection = selectBitfsFundingInputs(candidates, topUp.targetSatoshis,
+    [...explicitOutputValues.map(() => ownerScript.length / 2), ownerScript.length / 2], input.feeRateSatoshisPerKb, input.maxFeeSatoshis);
+  if (!selection) throw new BitfsFundingError("insufficient_funds", "普通 P2PKH 可用余额不足以覆盖本段采购金额、20% 余量和预计手续费");
+  const selected = selection.selected;
+  const selectedTotal = selected.reduce((total, item) => total + BigInt(item.valueSatoshis), 0n);
   const outputs = explicitOutputValues.map((value, index) => ({
     value: safeSatoshiNumber(value.toString(10)),
     scriptHex: ownerScript,
@@ -1225,9 +1228,11 @@ export async function prepareBitfsFunding(input: {
   if (session.phase !== "quote-selected") throw new BitfsFundingError("invalid_transition", "只能在报价固定后、Kind 2 签署前准备 FundingTx");
   const account = await deps.ledger.getAccount({ ownerPublicKeyHex: owner, seedHashHex: seed, network, nowMs: deps.nowMs() });
   const candidates = account.utxos.filter((utxo) => utxo.state === "available");
-  const selected = selectDedicatedFunds(candidates, BigInt(outputAmount) + BigInt(input.maxFeeSatoshis));
   const change = await deps.resolveOwnerAddress({ ownerPublicKeyHex: owner, network });
   const changeScript = assertScript(change.scriptHex);
+  const selection = selectBitfsFundingInputs(candidates, BigInt(outputAmount), [outputScript.length / 2, changeScript.length / 2], input.feeRateSatoshisPerKb, input.maxFeeSatoshis);
+  if (!selection) throw new BitfsFundingError("insufficient_funds", "本文件的专款余额不足以覆盖开池金额和预计手续费");
+  const selected = selection.selected;
   const selectedInputs = selected.map((utxo) => ({
     txid: utxo.txid,
     vout: utxo.vout,
@@ -1562,38 +1567,6 @@ function reconstructPreparedFunding(
     ...(changeOutput ? { changeScriptHex: changeOutput.scriptHex } : {}),
     feeSatoshis: (inputTotal - outputTotal).toString(10),
   };
-}
-
-function selectDedicatedFunds(utxos: BitfsDedicatedUtxo[], target: bigint): BitfsDedicatedUtxo[] {
-  const sorted = [...utxos].sort((left, right) => {
-    const a = BigInt(left.valueSatoshis);
-    const b = BigInt(right.valueSatoshis);
-    return a === b ? outpointKey(left).localeCompare(outpointKey(right)) : a > b ? -1 : 1;
-  });
-  const selected: BitfsDedicatedUtxo[] = [];
-  let total = 0n;
-  for (const utxo of sorted) {
-    selected.push(utxo);
-    total += BigInt(utxo.valueSatoshis);
-    if (total >= target) return selected;
-  }
-  throw new BitfsFundingError("insufficient_funds", "本文件的专款余额不足以覆盖开池金额和最高手续费");
-}
-
-function selectWalletInputs<T extends { txid: string; vout: number; valueSatoshis: string; address: string }>(utxos: T[], target: bigint): T[] {
-  const sorted = [...utxos].sort((left, right) => {
-    const a = BigInt(left.valueSatoshis);
-    const b = BigInt(right.valueSatoshis);
-    return a === b ? outpointKey(left).localeCompare(outpointKey(right)) : a > b ? -1 : 1;
-  });
-  const selected: T[] = [];
-  let total = 0n;
-  for (const utxo of sorted) {
-    selected.push(utxo);
-    total += BigInt(utxo.valueSatoshis);
-    if (total >= target) return selected;
-  }
-  throw new BitfsFundingError("insufficient_funds", "普通 P2PKH 可用余额不足以覆盖本段采购金额、20% 余量和手续费");
 }
 
 function requireTransaction(account: BitfsFundingAccount, txid: string, purpose?: BitfsFundingTransactionPurpose): BitfsFundingTransaction {

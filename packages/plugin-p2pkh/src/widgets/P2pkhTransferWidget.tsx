@@ -16,13 +16,12 @@ import { Button, TextInput } from "@keymaster/ui";
 import { useOptionalPluginCapability } from "webloom-framework/react";
 import { usePluginI18n, usePluginLocale, useOptionalResourceSelector } from "@keymaster/runtime";
 import { BALANCE_NETWORK_KEYS, emptyGlobalBalanceSnapshot, type GlobalBalanceSnapshot, type KeyIdentity, type TransferCompletion, type TransferOffer, type TransferWidgetProps } from "@keymaster/contracts";
-import type { P2pkhAssetId, P2pkhFeeRateTier, P2pkhGlobalSettings, P2pkhKeyResource, P2pkhService, P2pkhTransferPreview, P2pkhTransferResult } from "../p2pkhContracts.js";
+import type { P2pkhAssetId, P2pkhGlobalSettings, P2pkhKeyResource, P2pkhService, P2pkhTransferPreview, P2pkhTransferResult } from "../p2pkhContracts.js";
 import { P2PKH_CAPABILITY, assetIdToNetwork, resolveP2pkhFeeRateSatoshisPerKb } from "../p2pkhContracts.js";
 
 interface FormState {
   recipient: string;
   amount: string;
-  feeTier: P2pkhFeeRateTier;
 }
 
 export function P2pkhTransferWidget(props: TransferWidgetProps & { initialAmountSatoshis?: string }) {
@@ -85,13 +84,11 @@ function P2pkhTransferWidgetInner({
   const networkLabel = t(network === "main" ? "p2pkh.network.main" : "p2pkh.network.test", {
     defaultValue: network === "main" ? "主网" : "测试网"
   });
-  const feeRates = resolveP2pkhFeeRateSatoshisPerKb(globalSettings);
-  const feeRateKey = `${feeRates.low}:${feeRates.medium}:${feeRates.high}`;
+  const feeRate = resolveP2pkhFeeRateSatoshisPerKb(globalSettings);
   const [form, setForm] = useState<FormState>(() => {
     return {
       recipient: recipientAddress ?? "",
-      amount: initialAmountSatoshis ?? "0",
-      feeTier: "medium"
+      amount: initialAmountSatoshis ?? "0"
     };
   });
   const [error, setError] = useState<string | null>(null);
@@ -110,7 +107,7 @@ function P2pkhTransferWidgetInner({
     setResult(undefined);
     setCompletion(undefined);
     setError(null);
-  }, [feeRateKey, network, offer.id, recipientAddress, recipientPublicKeyHex]);
+  }, [network, offer.id, recipientAddress, recipientPublicKeyHex]);
 
   // 硬切换 005 收尾：active key 不再有 `mode` 字段。"all 模式"被壳层守卫
   // 拦截，本 widget 顶多在 active 缺失的瞬时态出现，作为 fail-closed 防御
@@ -145,7 +142,7 @@ function P2pkhTransferWidgetInner({
       recipientAddress: form.recipient,
       amountSatoshis: sendAll ? 0 : amount,
       sendAll,
-      feeRateSatoshisPerKb: feeRates[form.feeTier],
+      feeRateSatoshisPerKb: feeRate,
       ownerPublicKeyHex: activeIdentity?.publicKeyHex ?? ""
     };
   }
@@ -291,10 +288,7 @@ function P2pkhTransferWidgetInner({
                 : t("p2pkh.transfer.form.availableBalanceUnknown", { defaultValue: "可用余额未知（{{network}}）", network: networkLabel })}
             </p>
             {/^(all|全部)$/i.test(form.amount.trim()) ? <p className="p2pkh-transfer-widget__amount-hint">{t("p2pkh.transfer.form.sendAllHint", { defaultValue: "最终到账额会自动扣除实际矿工费。" })}</p> : null}
-            <div className="p2pkh-transfer-widget__fee-tier" role="group" aria-label={t("p2pkh.transfer.form.feeRate", { defaultValue: "矿工费率" })}>
-              <span>{t("p2pkh.transfer.form.feeRate", { defaultValue: "矿工费率" })}</span>
-              {(["low", "medium", "high"] as const).map((tier) => <Button key={tier} size="sm" variant={form.feeTier === tier ? "primary" : "secondary"} onClick={() => update("feeTier", tier)}>{t(`p2pkh.transfer.form.feeTier.${tier}`, { defaultValue: tier === "low" ? "低" : tier === "medium" ? "中" : "高" })} · {feeRates[tier]} sats/kB</Button>)}
-            </div>
+            <p className="p2pkh-transfer-widget__fee-rate">{t("p2pkh.transfer.form.feeRate", { defaultValue: "矿工费率" })}: {feeRate} sat/KB</p>
             {error ? <p className="p2pkh-transfer-widget__error">{error}</p> : null}
             <div className="p2pkh-transfer-widget__actions">
               <Button onClick={doPrepare} loading={busy} disabled={!form.recipient || !form.amount}>

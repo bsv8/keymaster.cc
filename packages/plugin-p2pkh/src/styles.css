@@ -447,8 +447,7 @@
 .p2pkh-transfer-widget__amount-input { flex: 1 1 auto; min-width: 0; margin-bottom: 0; }
 .p2pkh-transfer-widget__send-all { flex: 0 0 auto; min-height: 36px; padding: 0 12px; }
 .p2pkh-transfer-widget__amount-hint { margin: -6px 0 0; color: var(--text-dim); font-size: 12px; }
-.p2pkh-transfer-widget__fee-tier { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.p2pkh-transfer-widget__fee-tier > span { color: var(--text-dim); font-size: 12px; }
+.p2pkh-settings__fee-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
 .p2pkh-transfer-widget__preview, .p2pkh-transfer-widget__result { background: var(--surface); }
 .p2pkh-transfer-widget__preview { gap: 8px; font-size: 12px; line-height: 1.35; }
 .p2pkh-transfer-widget__preview > p { margin: 0; }

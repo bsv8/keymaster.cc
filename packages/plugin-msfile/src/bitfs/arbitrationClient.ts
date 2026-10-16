@@ -13,12 +13,32 @@ export interface BitfsArbitrationEndpoint {
   address: string;
 }
 
-export interface BitfsArbitrationInfo { baseSat: number; perKiBSat: number; retentionSeconds: number }
+export interface BitfsArbitrationInfo {
+  /** 计费单位固定为内容条目，Seed、尾块、完整块均计一个。 */
+  unit: "content-item";
+  baseSat: number;
+  perItemSat: number;
+  retentionSeconds: number;
+}
 
 export interface BitfsArbitrationTransport {
   info?(input: { endpoint: BitfsArbitrationEndpoint; signal?: AbortSignal }): Promise<BitfsArbitrationInfo>;
   /** 只接受已经持久化的 exact Kind 8/10，返回 exact Kind 9/11。 */
   exchange(input: { endpoint: BitfsArbitrationEndpoint; request: Uint8Array; signal?: AbortSignal }): Promise<Uint8Array>;
+}
+
+/** 拒绝旧 KiB 价格，明确指出服务格式、单位、身份或数值的哪一项不匹配。 */
+export function decodeArbitrationFeeInfo(raw: Uint8Array, publicKeyHex: string): BitfsArbitrationInfo {
+  const data: unknown = decode(raw);
+  if (!Array.isArray(data)) throw new Error("仲裁 info 必须是 CBOR 数组");
+  if (data[0] === 1) throw new Error(`仲裁服务仍返回旧版按 KiB 计费表（info v1，${data.length} 字段）；需要升级为 info v2、content-item 条目计费后才能购买`);
+  if (data[0] !== 2 || data.length !== 9) throw new Error(`仲裁 info 格式不匹配：需要 v2、9 字段，实际版本 ${String(data[0])}、${data.length} 字段`);
+  if (data[8] !== "content-item") throw new Error(`仲裁计费单位不匹配：需要 content-item，实际 ${String(data[8])}`);
+  if (data[1] !== deriveSupplierPeerId(publicKeyHex)) throw new Error("仲裁 info 身份不匹配：返回的 PeerID 与选定仲裁公钥不一致");
+  for (const [index, field, minimum] of [[3, "base_sat", 1], [4, "per_item_sat", 0], [5, "retention_seconds", 0]] as const) {
+    if (!Number.isSafeInteger(data[index]) || data[index] < minimum) throw new Error(`仲裁 info.${field} 不合法：需要不小于 ${minimum} 的安全整数，实际 ${String(data[index])}`);
+  }
+  return { unit: "content-item", baseSat: data[3], perItemSat: data[4], retentionSeconds: data[5] };
 }
 
 export class BitfsArbitrationRemoteError extends Error {
@@ -99,10 +119,7 @@ export function createBitfsArbitrationClient(input: {
   };
   return {
     async info({ endpoint, signal }) {
-      const data = decode(await roundTrip(endpoint, new Uint8Array([1]), 0, signal));
-      if (!Array.isArray(data) || data.length !== 8 || data[0] !== 1 || data[1] !== deriveSupplierPeerId(endpoint.publicKeyHex)
-        || ![data[3], data[4], data[5]].every(value => Number.isSafeInteger(value) && value >= 0) || data[3] <= 0) throw new Error("仲裁服务费率信息不合法");
-      return { baseSat: data[3], perKiBSat: data[4], retentionSeconds: data[5] };
+      return decodeArbitrationFeeInfo(await roundTrip(endpoint, new Uint8Array([1]), 0, signal), endpoint.publicKeyHex);
     },
     async exchange({ endpoint, request, signal }) {
       const kind = parse(request).kind;

@@ -278,21 +278,26 @@ const storagePlatformPluginDefinition = {
     pages.view.register({ id: "storage.activity", kind: "header", slot: "topbar", order: 5,
       label: "Storage activity", render: () => privateContents(StorageActivityIndicator),
     });
-    ctx.capability(BUSINESS_REGISTRY_CAPABILITY).register(ctx.pluginId, {
-      id: "storage",
+    // 「设置」域由 Page 拥有，各产品把自己的设置页注册成它的 feature；存储浏览器
+    // 同样如此。此前本插件自建 domain，侧边栏因此多出一个与「设置」并列的一级
+    // 分组，而面包屑、本页注释与 docs/存储.md 说的都是「设置 → 存储」。
+    //
+    // 这里只改导航归属，不改权限：全钱包浏览能力仍只在本包的私有跨单元契约里
+    // 声明，普通插件与 Connect App 照样拿不到。
+    //
+    // 注意 `entry.routeId` 指向上方注册的 page id（storage.browse），与这里的
+    // feature id 是两套身份；feature id 用 settings.* 前缀与其它设置项保持一致。
+    const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
+    business.registerFeature(ctx.pluginId, "settings", {
+      id: "settings.storagebrowse",
       label: { key: "storage.browse.business.label", fallback: "Storage browser" },
-      order: 910,
-      features: [{
-        id: "storage.browse",
-        label: { key: "storage.browse.business.label", fallback: "Storage browser" },
-        order: 10,
-        icon: "HardDrive",
-        entry: {
-          path: "/settings/storage",
-          routeId: "storage.browse",
-          visibleWhen: ({ unlocked }) => unlocked,
-        },
-      }],
+      order: 60,
+      icon: "HardDrive",
+      entry: {
+        path: "/settings/storage",
+        routeId: "storage.browse",
+        visibleWhen: ({ unlocked }) => unlocked,
+      },
     });
     ctx.scope.onRevoke(() => browse.dispose());
 

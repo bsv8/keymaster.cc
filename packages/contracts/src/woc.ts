@@ -240,6 +240,8 @@ export interface WocService {
   ): Promise<WocTransactionObservation>;
 
   /** 读取节点当前最佳链高度；用于高度锁，不得由本地时钟估算。 */
+  getFeeRecommendation(network: BsvNetwork, options?: WocRequestOptions): Promise<import("./chainFees.js").WocFeeRecommendation>;
+
   getChainHeight(
     network: BsvNetwork,
     options?: WocRequestOptions

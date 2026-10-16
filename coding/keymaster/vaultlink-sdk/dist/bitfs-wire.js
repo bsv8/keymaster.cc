@@ -20,6 +20,18 @@ const pub = (v) => { const b = bytes(v, 33); if (b[0] !== 2 && b[0] !== 3)
 catch {
     fail('invalid-key');
 } return b; };
+/** Preserve the stable protocol code while locating the failed review field. */
+function reviewField(kind, field, expectation, run) {
+    try {
+        return run();
+    }
+    catch (error) {
+        if (error instanceof Error) {
+            Object.assign(error, { message: `BitFS Kind ${kind} ${field}: ${expectation}; ${error.message}`, field, kind });
+        }
+        throw error;
+    }
+}
 function authorization(raw) {
     const v = child(raw, 6);
     bytes(v[0], 32, true);
@@ -48,30 +60,40 @@ export async function inspectBitfsWire(body, own) {
     const fields = object(body, ['kind', 'document']), kind = Number(uint(fields.kind));
     if (![1, 5, 6, 8, 9, 10, 11].includes(kind))
         fail('unsupported-kind');
-    const document = bytes(fields.document), v = array(decode(document, 16384, 256));
+    const document = reviewField(kind, 'document', '需要 CBOR 文档字节', () => bytes(fields.document)), v = reviewField(kind, 'document', '需要规范 CBOR 数组（最多 16384 bytes / 256 nodes）', () => array(decode(document, 16384, 256)));
     const facts = [];
     const add = (name, value) => facts.push({ name, value: value instanceof Uint8Array ? hex(value) : String(value) });
     if (kind === 1) {
-        array(v, 8);
-        bytes(v[0], 32);
-        pub(v[1]);
-        uint(v[2]);
-        uint(v[3]);
-        const size = uint(v[4]), expiry = uint(v[5]);
-        if (size > 8192n * 262144n || !expiry || expiry > 0x7fffffffffffffffn)
-            fail('invalid-document');
-        if (size === 0n && !equal(bytes(v[0]), await sha256(new Uint8Array())))
-            fail('invalid-document');
-        const arbiters = child(v[6]), seen = new Set();
-        for (const a of arbiters) {
-            const id = hex(pub(a));
-            if (seen.has(id))
-                fail('duplicate-key');
-            seen.add(id);
-        }
+        const check = (field, expectation, run) => reviewField(kind, field, expectation, run);
+        check('quote.fields', `需要 10 个字段，实际 ${v.length} 个（含 MIME 的 BitFS 报价）`, () => array(v, 10));
+        check('seed_hash', '需要 32 字节', () => bytes(v[0], 32));
+        check('buyer_public_key', '需要有效的 33 字节压缩公钥', () => pub(v[1]));
+        check('seed_price_satoshis', `需要 uint64，实际 ${String(v[2])}`, () => uint(v[2]));
+        check('full_block_price_satoshis', `需要 uint64，实际 ${String(v[3])}`, () => uint(v[3]));
+        const size = check('file_size_bytes', `需要 uint64，实际 ${String(v[4])}`, () => uint(v[4]));
+        check('file_size_bytes', `最大 2147483648 bytes，实际 ${size}`, () => { if (size > 8192n * 262144n)
+            fail('invalid-document'); });
+        const expiry = check('quote_expires_at_unix_seconds', `需要 uint64，实际 ${String(v[5])}`, () => uint(v[5]));
+        check('quote_expires_at_unix_seconds', `需要 1–9223372036854775807 Unix 秒，实际 ${expiry}`, () => { if (!expiry || expiry > 0x7fffffffffffffffn)
+            fail('invalid-document'); });
+        const emptySeed = await sha256(new Uint8Array());
+        check('seed_hash', '空文件需要 SHA256(empty) Seed Hash', () => { if (size === 0n && !equal(bytes(v[0]), emptySeed))
+            fail('invalid-document'); });
+        const arbiters = check('supported_arbiter_public_keys', '需要 CBOR 公钥数组字节', () => child(v[6])), seen = new Set();
+        for (const [index, a] of arbiters.entries())
+            check(`supported_arbiter_public_keys[${index}]`, '需要有效且不重复的 33 字节压缩公钥', () => { const id = hex(pub(a)); if (seen.has(id))
+                fail('duplicate-key'); seen.add(id); });
         const name = v[7];
-        if (typeof name !== 'string' || !name || name.trim() !== name || name === '.' || name === '..' || /[\/\\\p{Cc}]/u.test(name))
-            fail('invalid-filename');
+        check('recommended_filename', '需要非空、首尾无空白、无路径分隔符或控制字符的文件名', () => { if (typeof name !== 'string' || !name || name.trim() !== name || name === '.' || name === '..' || /[\/\\\p{Cc}]/u.test(name))
+            fail('invalid-filename'); });
+        const maxBlocks = check('max_blocks_per_batch', `需要 uint64，实际 ${String(v[8])}`, () => uint(v[8]));
+        check('max_blocks_per_batch', `需要 1–64，实际 ${maxBlocks}`, () => { if (maxBlocks < 1n || maxBlocks > 64n)
+            fail('invalid-document'); });
+        const mediaType = v[9];
+        check('media_type', '需要不超过 255 字节的规范小写 MIME type/subtype', () => { if (typeof mediaType !== 'string' || mediaType.length > 255 || !/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(mediaType))
+            fail('invalid-document'); });
+        add('mediaType', v[9]);
+        add('maxBlocksPerBatch', v[8]);
         add('seedHash', v[0]);
         add('peer', v[1]);
         add('seedPrice', v[2]);

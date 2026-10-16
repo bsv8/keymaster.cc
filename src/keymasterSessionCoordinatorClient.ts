@@ -41,6 +41,7 @@ import {
   COORDINATOR_RPC_CAPABILITY,
   COORDINATOR_TOPIC_STREAM_CAPABILITY,
   emptyChainHeightSnapshot,
+  emptyChainFeeSnapshots, type ChainFeeSnapshots, type ChainFeePolicy,
 } from "@keymaster/contracts";
 import type {
   CoordinatorRpcRequest,
@@ -207,6 +208,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private topicCaches = new Map<CoordinatorTopic, CoordinatorTopicEvent>();
   private sessionRevisionCache = -1;
   private backgroundSnapshotRevisionCache = -1;
+  private chainFeeRevisionCache = -1;
+  private chainFeeSnapshotsCache = emptyChainFeeSnapshots();
   private chainHeightRevisionCache = -1;
   private assetDataRevisionCache = -1;
   private storageRevisionCache = -1;
@@ -321,7 +324,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
       this.isConnected = true;
       await this.sendHello();
-      await this.subscribeTopicsAndReadBaselines(["session.state", "background.snapshot", "chain.height", "asset.data-changed", "storage.state", "msfile.state", "sat.events", "channel.events", "contacts.presence", "worker.units"]);
+      await this.subscribeTopicsAndReadBaselines(["session.state", "background.snapshot", "chain.fees", "chain.height", "asset.data-changed", "storage.state", "msfile.state", "sat.events", "channel.events", "contacts.presence", "worker.units"]);
       await this.lockSolePageOnFirstConnect();
 
       if (this.shutdownRequested || attempt !== this.connectionAttempt || this.runtimeHandle !== runtime) {
@@ -539,6 +542,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     // trackers below are reset, so cached data cannot authorize a request.
     this.sessionRevisionCache = -1;
     this.backgroundSnapshotRevisionCache = -1;
+    this.chainFeeRevisionCache = -1;
+    this.chainFeeSnapshotsCache = emptyChainFeeSnapshots();
     this.chainHeightRevisionCache = -1;
     this.assetDataRevisionCache = -1;
     this.storageRevisionCache = -1;
@@ -871,7 +876,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   async msfileControl(control: import("@keymaster/contracts").CoordinatorMsFileControl): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
     const request = { kind: "msfile.control" as const, clientId: this.clientId, requestId: this.generateRequestId(), control, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
     try {
-      const response = await this.sendRequest(request);
+      const response = await this.sendRequest(request, control.type === "bitfs.purchase.start" ? 300_000 : this.requestTimeoutMs);
       if (response.ack.status !== "ok") return response.ack;
       return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
@@ -1056,7 +1061,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
   }
 
-  async p2pkhSettingsUpdate(settings: { bsvNetwork: "main" | "test"; feeRateSatoshisPerKb?: Partial<Record<"low" | "medium" | "high", number>> }): Promise<CoordinatorCommandResult> {
+  async p2pkhSettingsUpdate(settings: { bsvNetwork: "main" | "test"; feePolicy?: ChainFeePolicy }): Promise<CoordinatorCommandResult> {
     return this.requestCommand({ kind: "p2pkh.settings.update", clientId: this.clientId, requestId: this.generateRequestId(), settings, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
   }
 
@@ -1301,6 +1306,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   }
 
   /** 读取 Coordinator 广播的最新链高度快照；不会触发网络请求。 */
+  getChainFeeSnapshots(): ChainFeeSnapshots { return structuredClone(this.chainFeeSnapshotsCache); }
+
   getChainHeightSnapshot(): ChainHeightSnapshot {
     return { ...this.chainHeightSnapshotCache };
   }
@@ -1407,6 +1414,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         ...this.bootstrapSnapshotCache,
         walletGeneration: event.walletGeneration,
       };
+    } else if (event.topic === "chain.fees") {
+      this.chainFeeSnapshotsCache = structuredClone(event.chainFees);
     } else if (event.topic === "chain.height") {
       // 链高度是公共链状态：只缓存读数，不参与 Session 身份推进。
       this.chainHeightSnapshotCache = { ...event.chainHeight };
@@ -1432,6 +1441,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private getCachedTopicRevision(topic: CoordinatorTopic): number {
     if (topic === "session.state") return this.sessionRevisionCache;
     if (topic === "background.snapshot") return this.backgroundSnapshotRevisionCache;
+    if (topic === "chain.fees") return this.chainFeeRevisionCache;
     if (topic === "chain.height") return this.chainHeightRevisionCache;
     if (topic === "storage.state") return this.storageRevisionCache;
     if (topic === "msfile.state") return this.msfileRevisionCache;
@@ -1446,6 +1456,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private getEventRevision(event: CoordinatorTopicEvent): number | undefined {
     if (event.topic === "session.state") return event.sessionRevision;
     if (event.topic === "background.snapshot") return event.backgroundSnapshotRevision;
+    if (event.topic === "chain.fees") return event.chainFeeRevision;
     if (event.topic === "chain.height") return event.chainHeightRevision;
     if (event.topic === "storage.state") return event.storageRevision;
     if (event.topic === "msfile.state") return event.msfileRevision;
@@ -1460,6 +1471,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private setTopicRevision(event: CoordinatorTopicEvent): void {
     if (event.topic === "session.state") this.sessionRevisionCache = event.sessionRevision;
     else if (event.topic === "background.snapshot") this.backgroundSnapshotRevisionCache = event.backgroundSnapshotRevision;
+    else if (event.topic === "chain.fees") this.chainFeeRevisionCache = event.chainFeeRevision;
     else if (event.topic === "chain.height") this.chainHeightRevisionCache = event.chainHeightRevision;
     else if (event.topic === "storage.state") this.storageRevisionCache = event.storageRevision;
     else if (event.topic === "msfile.state") this.msfileRevisionCache = event.msfileRevision;
@@ -1484,6 +1496,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         && (event.authorityRecovery === undefined || this.isValidAuthorityRecovery(event.authorityRecovery));
     }
     if (event.topic === "background.snapshot") return event.type === "background.snapshot.changed" && Number.isSafeInteger(event.backgroundSnapshotRevision) && Array.isArray(event.snapshots);
+    if (event.topic === "chain.fees") return event.type === "chain.fees.changed" && Number.isSafeInteger(event.chainFeeRevision) && event.chainFeeRevision >= 0 && Boolean(event.chainFees?.main && event.chainFees?.test);
     if (event.topic === "chain.height") {
       return event.type === "chain.height.changed"
         && Number.isSafeInteger(event.chainHeightRevision)

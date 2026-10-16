@@ -7,7 +7,7 @@ import { createSellerQuote, type Signer } from "go-bitfs";
 import type { BitfsJournal } from "./journal.js";
 import type { BitfsSessionJournal } from "./sessionJournal.js";
 import type { BitfsSeedIndex } from "./seedIndex.js";
-import { bitfsWorkflowFacts } from "./sdk.js";
+import { bitfsWorkflowFacts, preserveBitfsSignerErrors } from "./sdk.js";
 import { deriveSupplierPeerId, normalizeSupplierAddress } from "../supplierConfig.js";
 
 export interface BitfsSellerMatch {
@@ -46,7 +46,10 @@ export interface BitfsSellerRuntimeDeps {
 
 export class BitfsSellerRuntime {
   private readonly seen = new Map<string, number>();
-  constructor(private readonly deps: BitfsSellerRuntimeDeps) {}
+  private readonly signer: Signer;
+  constructor(private readonly deps: BitfsSellerRuntimeDeps) {
+    this.signer = preserveBitfsSignerErrors(deps.signer);
+  }
 
   /**
    * 命中完整 Seed 且存在兼容 locator 时生成确定报价；未命中保持静默。
@@ -77,44 +80,18 @@ export class BitfsSellerRuntime {
       if (parsed.ok && !addresses.includes(parsed.value.normalized)) addresses.push(parsed.value.normalized);
     }
     if (addresses.length === 0 && !hasWebRtcSdpLocator) return null;
-    // 已开池的卖方会话只能沿用原 Kind 1、Kind 2/3 和池证据。新报价会
-    // 改变买方验签上下文，不能拿来接管旧池；若同一买方有多笔未完成池，
-    // 身份不足以区分目标，保持静默以免把交易路由到错误的池。
-    const ownerPublicKeyHex = Array.from(this.deps.signer.publicKey(), (byte) => byte.toString(16).padStart(2, "0")).join("");
-    const resumable = (await this.deps.sessions?.list() ?? []).filter((record) =>
-      record.role === "seller"
-      && record.ownerPublicKeyHex === ownerPublicKeyHex
-      && record.counterpartyPublicKeyHex === request.from_public_key.toLowerCase()
-      && record.seedHashHex === request.body.hash
-      && record.evidence.includes("kind2-opening-request")
-      && record.phase !== "closed"
-      && record.phase !== "failed"
-      && record.phase !== "arbitration-prepared"
-      && record.phase !== "arbitration-payment-unknown");
-    if (resumable.length > 1) return null;
-    if (resumable.length === 1) {
-      const existing = resumable[0]!;
-      const quoteBytes = await this.deps.sessions?.getEvidence(existing.sessionId, "kind1-quote");
-      if (!quoteBytes) return null;
-      return {
-        requestKey: key,
-        requestMessageId: request.message_id,
-        transport: hasWebRtcSdpLocator ? "webrtc-sdp" : "multiaddr",
-        addresses,
-        quoteBytes,
-        seedHashHex: request.body.hash,
-        resumeSessionId: existing.sessionId,
-      };
-    }
-    const quote = await createSellerQuote(bitfsWorkflowFacts(nowMs), this.deps.signer, {
+    // 每个新 HashRequest 都生成当前设置下的新报价；旧池仅凭原 Kind 2 精确恢复。
+    const quote = await createSellerQuote(bitfsWorkflowFacts(nowMs), this.signer, {
       seedHash: hexToBytes(request.body.hash),
       buyerPublicKey: hexToBytes(request.from_public_key),
       seedPriceSatoshis: BigInt(settings.seedPriceSatoshis),
+      maxBlocksPerBatch: settings.maxBlocksPerBatch,
       fullBlockPriceSatoshis: BigInt(settings.fullBlockPriceSatoshis),
       fileSizeBytes: BigInt(seed.fileSizeBytes),
       quoteExpiresAtUnixSeconds: BigInt(Math.floor((nowMs + settings.quoteLifetimeSeconds * 1_000) / 1_000)),
       supportedArbiterPublicKeys: settings.supportedArbiterPublicKeys.map(hexToBytes),
       recommendedFilename: seed.fileName,
+      mediaType: seed.mediaType,
     });
     const journalId = await requestJournalId(request);
     const quoteBytes = await this.deps.journal.prepareOutbound(journalId, "seller", quote.outbound, nowMs);

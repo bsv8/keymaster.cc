@@ -23,6 +23,27 @@ export function bitfsWorkflowFacts(nowMs: number, blockHeight?: number): PureFun
   };
 }
 
+/** SDK 会保留 WireError；在应用签名边界保留钱包的具体失败原因和稳定错误码。 */
+export function preserveBitfsSignerErrors(signer: Signer): Signer {
+  return {
+    publicKey: () => signer.publicKey().slice(),
+    async sign(request, signal) {
+      try {
+        return await signer.sign(request, signal);
+      } catch (error) {
+        if (error instanceof WireError || (error instanceof DOMException && error.name === "AbortError")) throw error;
+        const message = error instanceof Error ? error.message
+          : typeof error === "string" ? error
+          : error && typeof error === "object" && "message" in error && typeof error.message === "string" ? error.message
+          : "钱包签名未返回具体失败原因";
+        const code = error && typeof error === "object" && "code" in error && typeof error.code === "string"
+          ? ` [${error.code}]` : "";
+        throw new WireError("signer_unavailable", request.wireKind, "signature", `BitFS 签名失败${code}：${message}`);
+      }
+    },
+  };
+}
+
 /** 把当前 Vault 的受限摘要签名能力收敛为 go-bitfs Signer。 */
 export function createBitfsVaultSigner(cryptoPort: ActiveKeyCrypto): Signer {
   const identity = cryptoPort.getIdentity();

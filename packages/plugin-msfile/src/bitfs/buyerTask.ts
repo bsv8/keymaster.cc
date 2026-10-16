@@ -103,10 +103,14 @@ export interface BitfsBuyerQuoteView {
   seedPriceSatoshis: string;
   /** 完整 Block 单价。 */
   fullBlockPriceSatoshis: string;
+  /** 验签后的卖方每批最大 Block 数。 */
+  maxBlocksPerBatch: number;
   /** 报价有效截止 UTC Unix 秒。 */
   quoteExpiresAtUnixSeconds: string;
   /** 卖方建议文件名。 */
   recommendedFilename: string;
+  /** 卖方签名声明的规范 MIME。 */
+  mediaType: string;
   /** 报价允许的仲裁方压缩公钥；买方只能选择列表内公钥。 */
   supportedArbiterPublicKeys: string[];
 }
@@ -179,6 +183,8 @@ export interface BitfsBuyerTask {
   acceptOpeningResponse(input: { sessionId: string; rawKind3: Uint8Array }): Promise<BuyerPoolEvidence>;
   /** 在 Kind 3 到达前完成取消；仅释放可证明未派发的开池占用。 */
   cancelUnfundedOpening(sessionId: string): Promise<void>;
+  /** 失败开池先经过同一账本/outbox 取消核验；返回 false 表示已有卖方预签，仍须保留资金责任。 */
+  recoverFailedOpening(sessionId: string): Promise<boolean>;
   /** 首次提交 FundingTx，或只按 txid 对账未知结果；资金观察后返回 exact Kind 4。 */
   submitOrReconcileFunding(sessionId: string): Promise<{ outcome: BitfsBroadcastOutcome; kind4?: Uint8Array }>;
   /** 从已保存的双签 Kind 13 恢复并继续同一笔关池交易；不重新签名或构造新交易。 */
@@ -377,7 +383,7 @@ export function createBitfsBuyerTask(deps: BitfsBuyerTaskDeps): BitfsBuyerTask {
       if (!currentDemandMessageId) return [];
       const sessions = await deps.sessions.list();
       const quotes: BitfsBuyerQuoteView[] = [];
-      for (const session of sessions) {
+      for (const session of sessions.sort((a, b) => (a.createdAt ?? a.updatedAt).localeCompare(b.createdAt ?? b.updatedAt) || a.sessionId.localeCompare(b.sessionId))) {
         if (session.role !== "buyer" || session.ownerPublicKeyHex !== owner || session.seedHashHex !== seed) continue;
         const requestEvidence = await deps.sessions.getEvidence(session.sessionId, "hash-request-message-id");
         if (!requestEvidence || new TextDecoder("utf-8", { fatal: true }).decode(requestEvidence) !== currentDemandMessageId) continue;
@@ -523,6 +529,23 @@ export function createBitfsBuyerTask(deps: BitfsBuyerTaskDeps): BitfsBuyerTask {
         await deps.sessions.update(latest.sessionId, latest.revision, { phase: "funding-prepared" }, deps.nowMs());
       }
       return completed.pool;
+    },
+
+    async recoverFailedOpening(sessionId) {
+      const session = await readSession(sessionId);
+      if (session.phase !== "failed") return false;
+      // failed 也可能来自付款或交付阶段，不能把它直接视为无资金。
+      if (session.pendingAuthorizationId !== undefined
+        || session.evidence.includes("kind3-opening-response")
+        || session.evidence.includes("kind4-funding-delivery")
+        || await deps.sessions.getEvidence(sessionId, "kind3-opening-response")
+        || await deps.sessions.getEvidence(sessionId, "kind4-funding-delivery")) return false;
+      deps.assertCurrentContext();
+      await deps.sessions.update(sessionId, session.revision, { phase: "cancel-opening" }, deps.nowMs());
+      // opening-configuration 只是固定参数。是否能释放由专款账本、outbox
+      // 和 P2PKH claim 共同决定；中断后按 cancel-opening 继续同一取消流程。
+      await task.cancelUnfundedOpening(sessionId);
+      return true;
     },
 
     async cancelUnfundedOpening(sessionId) {
@@ -999,8 +1022,10 @@ function toQuoteView(sessionId: string, seedHashHex: string, quote: VerifiedQuot
     sellerPublicKeyHex: bytesToHex(quote.sellerPublicKey),
     seedPriceSatoshis: quote.terms.seedPriceSatoshis.toString(10),
     fullBlockPriceSatoshis: quote.terms.fullBlockPriceSatoshis.toString(10),
+    maxBlocksPerBatch: quote.terms.maxBlocksPerBatch,
     quoteExpiresAtUnixSeconds: quote.terms.quoteExpiresAtUnixSeconds.toString(10),
     recommendedFilename: quote.terms.recommendedFilename,
+    mediaType: quote.terms.mediaType,
     supportedArbiterPublicKeys: quote.terms.supportedArbiterPublicKeys.map(bytesToHex),
   };
 }

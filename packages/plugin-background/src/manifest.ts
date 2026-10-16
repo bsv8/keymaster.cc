@@ -1,3 +1,4 @@
+import { CHAIN_FEE_READER_CAPABILITY, emptyChainFeeSnapshots } from "@keymaster/contracts";
 import { BACKGROUND_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
 import { createElement } from "react";
 import { bindBackgroundUi } from "./BackgroundResourceContext.js";
@@ -65,12 +66,18 @@ const backgroundResources: I18nPluginResources = {
       "background.settings.syncManagementDesc": "Each task can have its own sync interval; \"Custom\" accepts any whole-second interval between 10 seconds and 24 hours. \"Off\" disables automatic sync for that task; the tray's \"Sync once now\" still works.",
       "background.settings.smartTitle": "BSV balance snapshot (smart)",
       "background.settings.smartDesc": "The balance comes from the in-memory UTXO snapshot: refreshed right after unlock and every time the WoC queue is idle for 2 seconds. This interval is not configurable.",
+      "background.settings.task.chain.fee-sync": "Network fee recommendation",
       "background.settings.task.chain.chain-height-sync": "Blockchain height",
       "background.settings.task.p2pkh.transactions-sync": "P2PKH on-chain history",
       "background.settings.task.token-bsv21.sync": "BSV-21 token holdings",
       "background.settings.task.token-stas.sync": "STAS token holdings",
       "background.settings.task.collectible-1satordinals.sync": "1Sat collectibles",
       "background.settings.task.contacts.presence-probe": "Contacts presence probe",
+      "background.settings.feeSource.woc": "Automatically following WoC",
+      "background.settings.feeSource.manual": "Custom rate",
+      "background.settings.feeSource.fallback": "Product fallback",
+      "background.settings.feeRefreshFailed": "Refresh failed; retaining the previous recommendation if available.",
+      "background.settings.feeReadout": "Network fee rates (sat/KB)",
       "background.settings.chainHeightTitle": "Current blockchain height",
       "background.settings.chainHeightValue": "Mainnet height {{height}}",
       "background.settings.chainHeightPending": "No height from the node yet: waiting for the background sync task to complete its first read.",
@@ -127,12 +134,18 @@ const backgroundResources: I18nPluginResources = {
       "background.settings.syncManagementDesc": "每个任务可以单独设置同步间隔；「自定义」可输入 10 秒～24 小时之间的任意整秒间隔。选择「关闭」后该任务不再自动同步，托盘的「立即同步一次」仍然可用。",
       "background.settings.smartTitle": "BSV 余额快照（智能）",
       "background.settings.smartDesc": "余额来自内存 UTXO 快照：解锁后立即刷新，之后每次 WoC 队列空闲满 2 秒自动刷新，间隔不可配置。",
+      "background.settings.task.chain.fee-sync": "网络建议费率",
       "background.settings.task.chain.chain-height-sync": "区块链高度",
       "background.settings.task.p2pkh.transactions-sync": "P2PKH 链上交易历史",
       "background.settings.task.token-bsv21.sync": "BSV-21 代币持仓",
       "background.settings.task.token-stas.sync": "STAS 代币持仓",
       "background.settings.task.collectible-1satordinals.sync": "1Sat 收藏品",
       "background.settings.task.contacts.presence-probe": "联系人在线探测",
+      "background.settings.feeSource.woc": "自动跟随 WoC",
+      "background.settings.feeSource.manual": "手动设置",
+      "background.settings.feeSource.fallback": "产品备用值",
+      "background.settings.feeRefreshFailed": "刷新失败；已有建议值保留并标记为过期。",
+      "background.settings.feeReadout": "网络手续费率（sat/KB）",
       "background.settings.chainHeightTitle": "当前区块链高度",
       "background.settings.chainHeightValue": "主网高度 {{height}}",
       "background.settings.chainHeightPending": "尚未取得节点高度：等待后台同步任务完成第一次读取。",
@@ -187,6 +200,7 @@ const backgroundPluginDefinition = {
       { capability: RESOURCE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
       { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
       { capability: OWNED_RESOURCE_ACCESS_CAPABILITY, reason: "读取本实例资源" },
+      { capability: CHAIN_FEE_READER_CAPABILITY, optional: true, reason: "只读公共费率投影" },
       { capability: CHAIN_HEIGHT_READER_CAPABILITY, optional: true, reason: "只读链高度投影" },
       { capability: BUSINESS_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册智能调度设置入口" },
       { capability: BREADCRUMB_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "注册智能调度设置面包屑" },
@@ -251,6 +265,19 @@ const backgroundPluginDefinition = {
       invalidation: "immediate"
     });
 
+    resources.register({ id: "background.chain-fees", scope: "global", key: () => ["background.chain-fees"],
+      load: async () => { const fees = ctx.optionalCapability(CHAIN_FEE_READER_CAPABILITY); return fees ? { main: fees.get("main"), test: fees.get("test") } : emptyChainFeeSnapshots(); },
+      subscribe: (_args, _context, invalidate) => {
+        let current = ctx.optionalCapability(CHAIN_FEE_READER_CAPABILITY);
+        let off = current?.subscribe(invalidate);
+        const scopeOff = ctx.consumer.subscribe(() => {
+          if (ctx.consumer.status !== "active") return;
+          const next = ctx.optionalCapability(CHAIN_FEE_READER_CAPABILITY);
+          if (next === current) return;
+          off?.(); current = next; off = current?.subscribe(invalidate); invalidate();
+        });
+        return () => { off?.(); scopeOff(); };
+      }, invalidation: "immediate" });
     resources.register({ id: "background.chain-height", scope: "global", key: () => ["background.chain-height"],
       load: async () => ctx.optionalCapability(CHAIN_HEIGHT_READER_CAPABILITY)?.get() ?? emptyChainHeightSnapshot(),
       subscribe: (_args, _context, invalidate) => {

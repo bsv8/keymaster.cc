@@ -144,7 +144,7 @@ export function createChannelWorkerRuntime(ports: ChannelWorkerPorts) {
     const mux = await ensureChannelSubscriptionMux(runtime);
     const ownerInbox = inboxChannel(parsePublicKey(runtime.ownerPublicKeyHex));
     const callerId = channelCallerId({ kind: "plugin", pluginId: "msfile" }, "bitfs-buyer-runtime");
-    await mux.set(callerId, [HASH_REQUEST_CHANNEL, ownerInbox], runtime.signal);
+    await mux.set(callerId, [ownerInbox], runtime.signal);
   }
 
   async function ensureMsfileBitfsSellerSubscriptions(runtime: SatWorkerRuntimeState): Promise<void> {
@@ -152,6 +152,13 @@ export function createChannelWorkerRuntime(ports: ChannelWorkerPorts) {
     const ownerInbox = inboxChannel(parsePublicKey(runtime.ownerPublicKeyHex));
     const callerId = channelCallerId({ kind: "plugin", pluginId: "msfile" }, "bitfs-seller-runtime");
     await mux.set(callerId, [HASH_REQUEST_CHANNEL, ownerInbox], runtime.signal);
+  }
+
+  async function clearMsfileBitfsSellerSubscriptions(): Promise<void> {
+    const mux = channelSubscriptionMux;
+    if (!mux || channelMuxOwnerPublicKeyHex !== ports.session().activePublicKeyHex) return;
+    const callerId = channelCallerId({ kind: "plugin", pluginId: "msfile" }, "bitfs-seller-runtime");
+    await mux.set(callerId, []);
   }
 
   async function ensureChannelSubscriptionMux(runtime: SatWorkerRuntimeState): Promise<ChannelSubscriptionMux> {
@@ -528,6 +535,7 @@ export function createChannelWorkerRuntime(ports: ChannelWorkerPorts) {
     channelMonotonicNow,
     ensureMsfileBitfsBuyerSubscriptions,
     ensureMsfileBitfsSellerSubscriptions,
+    clearMsfileBitfsSellerSubscriptions,
     ensureChannelSubscriptionMux,
     channelSeenMessageKey,
     publishChannelHashRequest,

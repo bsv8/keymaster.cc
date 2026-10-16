@@ -1,9 +1,11 @@
+import { parseBitfsBuyerPurchaseManifest } from "./buyerProtocol.js";
+import { arbitrationContentItemCount, arbitrationFeeForItems } from "./arbitrationFees.js";
 import { OnlinePaymentWait } from "./onlinePaymentWait.js";
 // 仲裁应用编排：SDK 验证协议，应用保存进度、调度在线超时并执行显式操作。
 // 构造函数和 list() 没有任务恢复副作用；重登不提交、不取回、不广播。
 import {
   prepareSellerArbitration, completeSellerArbitratedPayment, inspectArbitrationCandidate,
-  arbitrationContentPayloadBytes, verifySellerFunding, completeBuyerOpening,
+   verifySellerFunding, completeBuyerOpening,
   requestBuyerArbitratedContent, verifyBuyerArbitratedContent, parsePaymentState,
   verifyAcceptedPayment, type Signer, type BuyerPoolEvidence, type SellerPoolEvidence,
 } from "go-bitfs";
@@ -120,7 +122,7 @@ export class BitfsArbitrationWorkflow {
           }, this.deps.signer);
           this.deps.assertActive();
           request = prepared.outbound.bytes();
-          const fee = BigInt(info.baseSat) + BigInt(info.perKiBSat) * BigInt(Math.ceil(arbitrationContentPayloadBytes(request) / 1024));
+          const fee = arbitrationFeeForItems(info, arbitrationContentItemCount(request));
           // 验证池容量和费用候选，未通过时不向服务提交托管请求。
           inspectArbitrationCandidate(request, fee);
           await this.save(id, "arbitration-fee", bytes(fee.toString()));
@@ -227,12 +229,12 @@ export class BitfsArbitrationWorkflow {
     const seed = await this.deps.content.get(`${staging}/seed.bin`);
     const raw = await this.deps.sessions.getEvidence(record.sessionId, "purchase-manifest");
     if (!seed || !raw) return false;
-    const manifest = JSON.parse(new TextDecoder().decode(raw));
+    const manifest = parseBitfsBuyerPurchaseManifest(raw, record.seedHashHex);
     const info = await inspectPurchasedMsFileSeed({ seedHashHex: record.seedHashHex, seedBytes: seed.bytes, fileSizeBytes: manifest.fileSizeBytes });
     const blocks: Uint8Array[] = [];
     for (const hash of info.blockHashesHex) { const block = await this.deps.content.get(`${staging}/blocks/${hash}.bin`); if (!block) return false; blocks.push(block.bytes); }
     this.deps.assertActive();
-    await commitPurchasedMsFileContent({ store: this.deps.content, seedHashHex: record.seedHashHex, seedBytes: seed.bytes, blocks, fileSizeBytes: manifest.fileSizeBytes, fileName: manifest.recommendedFilename, mediaType: "application/octet-stream", signal: this.deps.signal });
+    await commitPurchasedMsFileContent({ store: this.deps.content, seedHashHex: record.seedHashHex, seedBytes: seed.bytes, blocks, fileSizeBytes: manifest.fileSizeBytes, fileName: manifest.recommendedFilename, mediaType: manifest.mediaType ?? "application/octet-stream", signal: this.deps.signal });
     return true;
   }
   private async sellerPool(record: BitfsSessionRecord): Promise<SellerPoolEvidence> {

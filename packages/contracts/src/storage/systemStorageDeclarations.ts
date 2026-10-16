@@ -130,7 +130,7 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
   /**
-   * P2P（WebRTC）设置文件根（空 purpose = 模块根）。布局：`p2p/setting.json`。
+   * P2P（WebRTC）文件根（空 purpose = 模块根）：setting.json 与 attachments/。
    */
   p2pFiles: Object.freeze({
     moduleId: "p2p",

@@ -47,13 +47,21 @@ interface BitfsBuyerPurchaseManifest {
   /** 入库清单格式标识。 */
   format: typeof PURCHASE_MANIFEST_FORMAT;
   /** 入库清单版本号。 */
-  version: 1;
+  version: 1 | 2;
   /** 与买方会话绑定的 Seed Hash。 */
   seedHashHex: string;
   /** 报价签名绑定的原文件字节数。 */
   fileSizeBytes: string;
   /** 报价给出的推荐文件名。 */
   recommendedFilename: string;
+  /** 购买时固定的卖方多数票 MIME；旧日志缺失时使用通用类型。 */
+  mediaType?: string;
+}
+
+/** 预检与实际购买必须保存同一份规范清单，避免重复写入不同 exact bytes。 */
+export function encodeBitfsBuyerPurchaseManifest(manifest: Omit<BitfsBuyerPurchaseManifest, "format" | "version">): Uint8Array {
+  return new TextEncoder().encode(`${JSON.stringify({ format: PURCHASE_MANIFEST_FORMAT, version: 2,
+    seedHashHex: manifest.seedHashHex, fileSizeBytes: manifest.fileSizeBytes, recommendedFilename: manifest.recommendedFilename, mediaType: manifest.mediaType ?? "application/octet-stream" })}\n`);
 }
 
 /**
@@ -78,7 +86,7 @@ export async function recoverBitfsBuyerContentCommit(input: {
   const manifestRaw = await input.sessions.getEvidence(record.sessionId, "purchase-manifest");
   // 兼容入库清单加入前创建的会话：保留日志供诊断，不猜测文件名或长度。
   if (!manifestRaw) return false;
-  const manifest = parsePurchaseManifest(manifestRaw, record.seedHashHex);
+  const manifest = parseBitfsBuyerPurchaseManifest(manifestRaw, record.seedHashHex);
   const evidence = record.evidence;
   const paymentIds = evidence
     .filter((name) => name.startsWith("kind7-payment-update-"))
@@ -110,7 +118,7 @@ export async function recoverBitfsBuyerContentCommit(input: {
     blocks,
     fileSizeBytes: manifest.fileSizeBytes,
     fileName: manifest.recommendedFilename,
-    mediaType: "application/octet-stream",
+    mediaType: manifest.mediaType ?? "application/octet-stream",
     now: () => input.nowMs,
   });
   try { await input.onContentCommitted?.(record.seedHashHex); } catch { /* 已保存文件可用；索引刷新不影响资金恢复。 */ }
@@ -167,8 +175,6 @@ export interface BitfsBuyerProtocolDeps {
   downloadPlan: BitfsBuyerDownloadPlan;
   /** 已保存到同 Seed 下载计划的卖家优先策略。 */
   selectionPriority: "price" | "recent-speed";
-  /** 每笔池内付款最多请求的不同文件 Block 数。 */
-  blocksPerBatch: number;
   /** 新池退款等待区块数；当前池开池后不再重新计算。 */
   refundDelayBlocks: number;
   /** 下载计划更新后唤醒其他可接收内容的卖家池。 */
@@ -219,6 +225,33 @@ export class BitfsBuyerProtocol {
 
   constructor(private readonly deps: BitfsBuyerProtocolDeps) {}
 
+  /** 报价连接可以早于购买。点击购买才采用最新费率；已有开池证据始终恢复原费率和预留。 */
+  async configureOpeningBudget(input: { sessionId: string; feeRate?: bigint; arbitrationReserve?: bigint }): Promise<bigint> {
+    let reserve = 0n;
+    await this.serial(input.sessionId, async () => {
+      const configuration = await this.deps.sessions.getEvidence(input.sessionId, "opening-configuration");
+      if (configuration) {
+        const saved = JSON.parse(new TextDecoder().decode(configuration)) as { minerFeeRateSatoshisPerKilobyte: string; openingAmountSatoshis: string };
+        const rate = BigInt(saved.minerFeeRateSatoshisPerKilobyte);
+        const planRaw = await this.deps.sessions.getEvidence(input.sessionId, "download-plan");
+        if (!planRaw) throw new Error("已固定费用池缺少原始下载预算证据");
+        const content = BigInt((JSON.parse(new TextDecoder().decode(planRaw)) as { contentBudgetSatoshis: string }).contentBudgetSatoshis);
+        reserve = BigInt(saved.openingAmountSatoshis) - content;
+        if (rate < 1n || reserve < rate * POOL_FEE_RESERVE_MULTIPLIER) throw new Error("已固定费用池的费率或预算无效");
+        this.deps.minerFeeRateSatoshisPerKilobyte = rate;
+        this.deps.arbitrationReserveSatoshis = reserve - rate * POOL_FEE_RESERVE_MULTIPLIER;
+      } else {
+        if (input.feeRate !== undefined) {
+          if (input.feeRate < 1n) throw new Error("开池费率必须为正数");
+          this.deps.minerFeeRateSatoshisPerKilobyte = input.feeRate;
+        }
+        if (input.arbitrationReserve !== undefined) this.deps.arbitrationReserveSatoshis = input.arbitrationReserve;
+        reserve = this.deps.minerFeeRateSatoshisPerKilobyte * POOL_FEE_RESERVE_MULTIPLIER + (this.deps.arbitrationReserveSatoshis ?? 0n);
+      }
+    });
+    return reserve;
+  }
+
   /** 由用户明确点击购买后准备并发送 Kind 2；尚未广播资金池交易。 */
   async startPurchase(input: {
     sessionId: string;
@@ -235,6 +268,8 @@ export class BitfsBuyerProtocol {
     blockBudgetSatoshis?: string;
     /** 最近已确认速度；未知时为 null。 */
     recentBytesPerSecond?: string | null;
+    /** 本次查询卖方多数票；点击购买后固定。 */
+    mediaType?: string;
   }): Promise<BitfsBuyerPurchaseProgress> {
     let result: BitfsBuyerPurchaseProgress | undefined;
     await this.serial(input.sessionId, async () => { result = await this.startPurchaseNow(input); });
@@ -451,6 +486,8 @@ export class BitfsBuyerProtocol {
     seedBudgetReserved?: boolean;
     blockBudgetSatoshis?: string;
     recentBytesPerSecond?: string | null;
+    /** 本次查询卖方多数票；点击购买后固定。 */
+    mediaType?: string;
   }): Promise<BitfsBuyerPurchaseProgress> {
     this.deps.assertCurrentContext();
     let record = await this.requiredSession(input.sessionId);
@@ -468,6 +505,7 @@ export class BitfsBuyerProtocol {
       seedHashHex: bytesToHex(quote.terms.seedHash),
       fileSizeBytes: quote.terms.fileSizeBytes.toString(10),
       recommendedFilename: quote.terms.recommendedFilename,
+      mediaType: input.mediaType ?? quote.terms.mediaType,
     });
     record = await this.requiredSession(record.sessionId);
     const blockCount = (quote.terms.fileSizeBytes + 262_143n) / 262_144n;
@@ -593,7 +631,7 @@ export class BitfsBuyerProtocol {
   }
 
   private async persistPurchaseManifest(record: BitfsSessionRecord, manifest: Omit<BitfsBuyerPurchaseManifest, "format" | "version">): Promise<void> {
-    const bytes = new TextEncoder().encode(`${JSON.stringify({ format: PURCHASE_MANIFEST_FORMAT, version: 1, ...manifest })}\n`);
+    const bytes = encodeBitfsBuyerPurchaseManifest(manifest);
     const existing = await this.deps.sessions.getEvidence(record.sessionId, "purchase-manifest");
     if (existing) {
       if (!equal(existing, bytes)) throw new Error("已固定 BitFS 入库清单与当前报价不一致");
@@ -733,7 +771,7 @@ export class BitfsBuyerProtocol {
   /** 新下载计划按预算为多个池分配不同 Block，并共用一份已付款 Seed。 */
   private async continueSharedFundedPool(sessionId: string, quote: ReturnType<typeof acceptBuyerQuote>, stream: BitfsBuyerStream): Promise<void> {
     const beforeActivation = await this.deps.downloadPlan.snapshot();
-    if (beforeActivation.stopRequested) {
+    if (beforeActivation.stopRequested || beforeActivation.pools.find(pool => pool.sessionId === sessionId)?.retired) {
       await this.closeStoppedSharedPool(sessionId, quote, stream);
       return;
     }
@@ -786,7 +824,9 @@ export class BitfsBuyerProtocol {
       await this.commitAndCloseSharedFile(sessionId, quote, allBlockHashes, latest.completedBlockCount, stream);
       return;
     }
-    const nextHashes = await this.deps.downloadPlan.claimNextBlocks(sessionId, this.deps.selectionPriority, this.deps.blocksPerBatch);
+    // 当前策略只预留一个内容条目的仲裁费，每个授权只买一个 Block。
+    // 卖方报价是上限，不是买方必须凑满的批次；Seed 已走独立授权。
+    const nextHashes = await this.deps.downloadPlan.claimNextBlocks(sessionId, this.deps.selectionPriority, Math.min(quote.terms.maxBlocksPerBatch, 1));
     if ((await this.deps.downloadPlan.snapshot()).stopRequested) {
       await this.closeStoppedSharedPool(sessionId, quote, stream);
       return;
@@ -808,7 +848,7 @@ export class BitfsBuyerProtocol {
         } catch (error) {
           const message = error instanceof Error ? error.message : "关池请求准备失败";
           this.progress(sessionId, "closing-pool", this.readOpeningAmount(sessionId), latest.completedBlockCount,
-            latest.totalBlockCount, `本池预算已用完；关池回收尚未完成：${message.slice(0, 160)}`);
+            latest.totalBlockCount, `本池预算已用完；关池回收尚未完成：${message}`);
         }
         return;
       }
@@ -855,7 +895,7 @@ export class BitfsBuyerProtocol {
         }
         const message = error instanceof Error ? error.message : "关池请求准备失败";
         this.progress(sessionId, "cancel-unknown", this.readOpeningAmount(sessionId), verifiedBlocks, totalBlocks,
-          `整文件取消已暂停新内容；费用池回收尚未确认：${message.slice(0, 160)}`);
+          `整文件取消已暂停新内容；费用池回收尚未确认：${message}`);
         return;
       }
       throw error;
@@ -1043,7 +1083,7 @@ export class BitfsBuyerProtocol {
         if (record.evidence.includes("download-plan")) this.deps.onDownloadPlanChanged?.();
       } catch (error) {
         const message = error instanceof Error ? error.message : "关池请求准备失败";
-        this.progress(sessionId, "closing-pool", this.readOpeningAmount(sessionId), completedBlockCount, allBlockHashes.length, `文件已保存；关池尚未完成，费用池仍受保护：${message.slice(0, 160)}`);
+        this.progress(sessionId, "closing-pool", this.readOpeningAmount(sessionId), completedBlockCount, allBlockHashes.length, `文件已保存；关池尚未完成，费用池仍受保护：${message}`);
       }
       return;
     }
@@ -1342,6 +1382,7 @@ export class BitfsBuyerProtocol {
       if (!bytes) throw new Error(`已验收的 BitFS 文件块暂存缺失：${hash}`);
       blocks.push(bytes);
     }
+    const manifest = parseBitfsBuyerPurchaseManifest(await this.requiredEvidence(sessionId, "purchase-manifest"), seedHashHex);
     await commitPurchasedMsFileContent({
       store: this.deps.contentStore,
       seedHashHex,
@@ -1349,7 +1390,7 @@ export class BitfsBuyerProtocol {
       blocks,
       fileSizeBytes,
       fileName,
-      mediaType: "application/octet-stream",
+      mediaType: manifest.mediaType ?? "application/octet-stream",
       now: () => this.deps.nowMs(),
     });
   }
@@ -1493,11 +1534,12 @@ export class BitfsBuyerProtocol {
 
   private async markFailed(sessionId: string, amount: string, total: number, error: unknown): Promise<void> {
     const message = error instanceof Error ? error.message : "BitFS 买方流程失败";
-    this.progress(sessionId, "failed", amount, 0, total, message.slice(0, 240));
     const record = await this.deps.sessions.get(sessionId);
     if (record && record.phase !== "failed") {
-      await this.deps.sessions.update(sessionId, record.revision, { phase: "failed", failureCode: "buyer-purchase-failed" }, this.deps.nowMs()).catch(() => undefined);
+      await this.deps.sessions.update(sessionId, record.revision, { phase: "failed", failureCode: "buyer-purchase-failed", failureMessage: message.slice(0, 2048) }, this.deps.nowMs()).catch(() => undefined);
     }
+    // 先提交失败事件，再通知任务生命周期，避免读到旧阶段漏掉结束。
+    this.progress(sessionId, "failed", amount, 0, total, message);
   }
 
   private async facts() {
@@ -1561,7 +1603,7 @@ function phaseFor(record: BitfsSessionRecord): BitfsBuyerPurchasePhase {
   return "opening";
 }
 
-function parsePurchaseManifest(bytes: Uint8Array, expectedSeedHashHex: string): BitfsBuyerPurchaseManifest {
+export function parseBitfsBuyerPurchaseManifest(bytes: Uint8Array, expectedSeedHashHex: string): BitfsBuyerPurchaseManifest {
   if (bytes.byteLength < 2 || bytes.byteLength > 2_048) throw new Error("BitFS 入库恢复清单大小无效");
   let value: unknown;
   try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); }
@@ -1569,8 +1611,9 @@ function parsePurchaseManifest(bytes: Uint8Array, expectedSeedHashHex: string): 
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("BitFS 入库恢复清单格式错误");
   const row = value as Record<string, unknown>;
   const keys = Object.keys(row).sort();
-  if (keys.join(",") !== "fileSizeBytes,format,recommendedFilename,seedHashHex,version"
-    || row.format !== PURCHASE_MANIFEST_FORMAT || row.version !== 1
+  if ((row.version === 1 ? keys.join(",") !== "fileSizeBytes,format,recommendedFilename,seedHashHex,version" : keys.join(",") !== "fileSizeBytes,format,mediaType,recommendedFilename,seedHashHex,version")
+    || row.format !== PURCHASE_MANIFEST_FORMAT || (row.version !== 1 && row.version !== 2)
+    || (row.version === 2 && (typeof row.mediaType !== "string" || row.mediaType.length > 255 || !/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/u.test(row.mediaType)))
     || row.seedHashHex !== expectedSeedHashHex
     || typeof row.fileSizeBytes !== "string" || !/^[1-9][0-9]*$/u.test(row.fileSizeBytes)
     || BigInt(row.fileSizeBytes) > 0xffff_ffff_ffff_ffffn
@@ -1586,7 +1629,8 @@ function parsePurchaseManifest(bytes: Uint8Array, expectedSeedHashHex: string): 
   }
   return {
     format: PURCHASE_MANIFEST_FORMAT,
-    version: 1,
+    version: row.version as 1 | 2,
+    mediaType: row.version === 2 ? row.mediaType as string : "application/octet-stream",
     seedHashHex: expectedSeedHashHex,
     fileSizeBytes: row.fileSizeBytes,
     recommendedFilename: row.recommendedFilename,

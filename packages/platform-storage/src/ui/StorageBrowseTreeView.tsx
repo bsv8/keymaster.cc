@@ -9,6 +9,7 @@
 // 只换下标窗口），未扫完目录还有「继续加载」按钮，失败目录有「重试」。没有这两个
 // 入口，深目录里未加载的对象就不可达了。
 import { useState } from "react";
+import { ChevronRight } from "lucide-react";
 import type { BrowseChildNode } from "./storageBrowseTree.js";
 import { BROWSE_ROOT_DIRECTORY } from "./storageBrowseTree.js";
 import { isDirectoryComplete, type BrowseDirectoryState } from "./storageBrowseState.js";
@@ -82,7 +83,10 @@ function TreeRow(props: TreeRowProps) {
               : t("storage.browse.tree.expand", { defaultValue: "Expand {{name}}", name: node.name })}
             onClick={() => props.onToggle(node)}
           >
-            <span aria-hidden="true">{isExpanded ? "▾" : "▸"}</span>
+            {/* 展开态只旋转同一枚 chevron：▸/▾ 两个字形的宽度与粗细由系统字体决定，
+                放大后会随展开切换让行首左右跳动；SVG 盒尺寸固定，旋转不改变布局。 */}
+            <ChevronRight className={`storage-browse__tree-caret${isExpanded ? " is-expanded" : ""}`}
+              size={14} strokeWidth={2.5} aria-hidden="true" />
           </button>
         ) : (
           <span className="storage-browse__tree-toggle" aria-hidden="true" />

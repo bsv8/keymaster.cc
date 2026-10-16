@@ -16,6 +16,7 @@ const TEARDOWN_TIMEOUT_MS = 250;
 const DEFAULT_SIGNAL_TIMEOUT_MS = 30_000;
 
 export type BitfsWebRtcStreamEvent =
+  | { type: "bitfs-webrtc-quote-sent"; sessionId: string; webrtcSessionId: string; ownerSessionEpoch: string }
   | {
     type: "bitfs-webrtc-frame";
     sessionId: string;
@@ -557,6 +558,10 @@ export class BitfsWebRtcStreamRuntime {
         });
         entry.sendQueue = firstWrite.catch(() => undefined);
         await firstWrite;
+        if (parse(entry.firstFrame).kind === 1 && !entry.closed) {
+          await this.options.emit({ type: "bitfs-webrtc-quote-sent", sessionId: entry.sessionId,
+            webrtcSessionId: entry.webrtcSessionId, ownerSessionEpoch: entry.ownerSessionEpoch });
+        }
       }
       if (entry.closed) throw new Error("BitFS WebRTC session is closed");
       entry.ready.resolve(entry);

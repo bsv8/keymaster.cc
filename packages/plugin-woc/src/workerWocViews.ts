@@ -42,6 +42,7 @@ export function createWorkerWocViews(service: WocServiceHandle, assertActive: ()
     listAddressesHistory: bind("listAddressesHistory"),
     getTransactionObservation: bind("getTransactionObservation"),
     getChainHeight: bind("getChainHeight"),
+    getFeeRecommendation: bind("getFeeRecommendation"),
     getSpentOutput: bind("getSpentOutput"),
     getRawTransaction: bind("getRawTransaction"),
   });

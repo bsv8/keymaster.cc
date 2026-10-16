@@ -5,7 +5,7 @@
 //   - 不管理通话状态机；
 //   - 不持久化临时协商态，只记录终态。
 
-import type { BorrowedKeyValueStore, VaultWalletState } from "@keymaster/contracts";
+import type { BorrowedKeyValueStore, BorrowedOwnerFileStore, VaultWalletState } from "@keymaster/contracts";
 import {
   CALL_PARTITION,
   TRANSFER_PARTITION,
@@ -33,6 +33,7 @@ export function createWebrtcHistoryService(input: {
   walletState: VaultWalletState;
   ownerPublicKeyHex: () => string | null;
   storage: BorrowedKeyValueStore;
+  files: BorrowedOwnerFileStore;
 }): WebrtcHistoryService {
   if (!input.storage) throw new Error("WebRTC history central storage binding is required");
   const repository = createWebrtcHistoryRepository(input.storage);
@@ -69,16 +70,16 @@ export function createWebrtcHistoryService(input: {
     },
     async appendTransfer(inputRow, blob) {
       await withRepository(async (store) => {
-        await putWebrtcRow(store, TRANSFER_PARTITION, inputRow.recordId, inputRow);
         if (blob && inputRow.blobKey) {
-          await putWebrtcBlob(store, inputRow.blobKey, blob);
+          await putWebrtcBlob(input.files, inputRow.blobKey, blob);
         }
+        await putWebrtcRow(store, TRANSFER_PARTITION, inputRow.recordId, inputRow);
       });
     },
     async getBlob(blobKey) {
       const owner = input.ownerPublicKeyHex();
       if (!owner) return null;
-      return getWebrtcBlob(repository.store, blobKey);
+      return getWebrtcBlob(input.files, blobKey);
     }
   };
 }

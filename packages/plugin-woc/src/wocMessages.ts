@@ -39,6 +39,7 @@ export const WOC_MSG = {
   HISTORY_UNCONFIRMED: "woc.history.unconfirmed",
   TX_OBSERVATION: "woc.tx.observation",
   CHAIN_HEIGHT: "woc.chain.height",
+  FEE_RECOMMENDATION: "woc.fee.recommendation",
   TX_SPENT_OUTPUT: "woc.tx.spentOutput",
   TX_RAW: "woc.tx.raw",
   TX_BROADCAST: "woc.tx.broadcast",

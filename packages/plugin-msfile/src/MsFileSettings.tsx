@@ -50,10 +50,9 @@ export interface MsFileStatusResourceSnapshot {
 type AmountDraft = { text: string; unlimited: boolean };
 type ConcurrencyField = keyof MsFileReadConcurrencySettings;
 type ConcurrencyDraft = Record<ConcurrencyField, string>;
-type BitfsBuyerSettingsDraft = Omit<MsFileBitfsBuyerSettings, "maxConcurrentDownloads" | "maxConcurrentSellerSessions" | "blocksPerBatch" | "refundDelayBlocks"> & {
+type BitfsBuyerSettingsDraft = Omit<MsFileBitfsBuyerSettings, "maxConcurrentDownloads" | "maxConcurrentSellerSessions" | "refundDelayBlocks"> & {
   maxConcurrentDownloads: string;
   maxConcurrentSellerSessions: string;
-  blocksPerBatch: string;
   refundDelayBlocks: string;
 };
 
@@ -151,7 +150,6 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
     ...MSFILE_BITFS_BUYER_SETTINGS_DEFAULT,
     maxConcurrentDownloads: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.maxConcurrentDownloads),
     maxConcurrentSellerSessions: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.maxConcurrentSellerSessions),
-    blocksPerBatch: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.blocksPerBatch),
     refundDelayBlocks: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.refundDelayBlocks),
   });
   const [editingKey, setEditingKey] = useState<string | null>(null);
@@ -168,7 +166,6 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
         ...buyerSettings,
         maxConcurrentDownloads: String(buyerSettings.maxConcurrentDownloads),
         maxConcurrentSellerSessions: String(buyerSettings.maxConcurrentSellerSessions),
-        blocksPerBatch: String(buyerSettings.blocksPerBatch),
         refundDelayBlocks: String(buyerSettings.refundDelayBlocks),
       });
       setAuthorizations(await service.listAppAuthorizations());
@@ -232,11 +229,10 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
       ...bitfsBuyerDraft,
       maxConcurrentDownloads: Number(bitfsBuyerDraft.maxConcurrentDownloads),
       maxConcurrentSellerSessions: Number(bitfsBuyerDraft.maxConcurrentSellerSessions),
-      blocksPerBatch: Number(bitfsBuyerDraft.blocksPerBatch),
       refundDelayBlocks: Number(bitfsBuyerDraft.refundDelayBlocks),
     });
     if (!candidate) {
-      setError("BitFS 买方设置不合法：请检查单块自动购买上限、文件任务数、单文件卖家数、每批块数（1–16）及退款等待区块数（正整数）。");
+      setError("BitFS 买方设置不合法：请检查单块自动购买上限、文件任务数、单文件卖家数及退款等待区块数（正整数）。");
       return;
     }
     if (!service.updateBitfsBuyerSettings) {
@@ -249,7 +245,6 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
         ...candidate,
         maxConcurrentDownloads: String(candidate.maxConcurrentDownloads),
         maxConcurrentSellerSessions: String(candidate.maxConcurrentSellerSessions),
-        blocksPerBatch: String(candidate.blocksPerBatch),
         refundDelayBlocks: String(candidate.refundDelayBlocks),
       });
       setStatusMessage("BitFS 买方设置已保存。已开始的购买不会改变开池报价。");
@@ -697,6 +692,12 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
             />
           </div>
           <div className="msfile-settings__field">
+            <label htmlFor="msfile-seller-max-blocks">{t("msfile.settings.seller.maxBlocksPerBatch", { defaultValue: "每批最多接受的 Block 数（1–64）" })}</label>
+            <input id="msfile-seller-max-blocks" className="msfile-settings__control" type="number" min={1} max={64}
+              value={sellerDraft.maxBlocksPerBatch}
+              onChange={(event) => setSellerDraft((current) => ({ ...current, maxBlocksPerBatch: Number(event.target.value) }))} />
+          </div>
+          <div className="msfile-settings__field">
             <label htmlFor="msfile-seller-quote-lifetime">{t("msfile.settings.seller.quoteLifetime", { defaultValue: "报价有效时间（秒，30–86400）" })}</label>
             <input
               id="msfile-seller-quote-lifetime"
@@ -762,7 +763,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
           <Button onClick={() => void saveSellerSettings()}>{t("msfile.settings.seller.save", { defaultValue: "保存卖方设置" })}</Button>
         </div>
       </section>
-      <ArbitrationPanel service={service} />
+      <ArbitrationPanel service={service} role="seller" />
 
       <section className="msfile-settings__section" id="msfile-buying" aria-labelledby="msfile-buying-title">
         <header className="msfile-settings__section-header">
@@ -826,18 +827,6 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
               max={MSFILE_BITFS_BUYER_LIMITS.maxConcurrentSellerSessions}
               value={bitfsBuyerDraft.maxConcurrentSellerSessions}
               onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, maxConcurrentSellerSessions: event.target.value }))}
-            />
-          </div>
-          <div className="msfile-settings__field">
-            <label htmlFor="msfile-buyer-blocksPerBatch">{t("msfile.settings.bitfsBuyer.blocksPerBatch", { defaultValue: "每次请求的文件块数（1–16，默认 10）" })}</label>
-            <input
-              id="msfile-buyer-blocksPerBatch"
-              className="msfile-settings__control"
-              type="number"
-              min={1}
-              max={MSFILE_BITFS_BUYER_LIMITS.blocksPerBatch}
-              value={bitfsBuyerDraft.blocksPerBatch}
-              onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, blocksPerBatch: event.target.value }))}
             />
           </div>
           <div className="msfile-settings__field">

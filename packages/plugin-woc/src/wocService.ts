@@ -237,6 +237,11 @@ export function createWocService(options: CreateWocServiceOptions): WocServiceHa
       );
     },
 
+    async getFeeRecommendation(network: BsvNetwork, opts?: WocRequestOptions) {
+      const payload: WocChainHeightPayload = { network, priority: opts?.priority ?? "background", signal: opts?.signal, timeoutMs: opts?.timeoutMs };
+      return messageBus.request<WocChainHeightPayload, import("@keymaster/contracts").WocFeeRecommendation>(WOC_MSG.FEE_RECOMMENDATION, payload, dispatchOptions(opts));
+    },
+
     async getChainHeight(network: BsvNetwork, opts?: WocRequestOptions): Promise<number> {
       const payload: WocChainHeightPayload = {
         network,

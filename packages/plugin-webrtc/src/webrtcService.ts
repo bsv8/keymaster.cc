@@ -2,25 +2,10 @@ import { sameWalletSession } from "@keymaster/contracts";
 // packages/plugin-webrtc/src/webrtcService.ts
 // WebRTC 业务 service（施工单 2026-07-04 002 硬切换 + 通话恢复）。
 //
-// 设计缘由：
-//   - 单活会话：整个 plugin-webrtc 实例同时只允许一通会话占位；占位期间包括
-//     「拨号中 / 响铃中 / 已接通 / 挂断清理中」；文件传输与音视频通话共享
-//     同一个单活槽，互斥；
-//   - 文件传输信令统一走 Channel 的固定 `bsv8.webrtc.signal.v1` 私信协议；
-//   - 音视频通话使用相同的 Hash 会合模式恢复：主叫先经 `bsv8.message.v1`
-//     发送 `keymaster.webrtc.call.request`（rendezvous hash + mode），被叫
-//     用户确认后才发布真实 Hash 请求，主叫随后发送媒体 offer；
-//     拒绝 / 忙 / 挂断 / 回退经 `keymaster.webrtc.call.control`（APP 私信）
-//     交换，不占用 webrtc-signal 的四个分支；
-//   - 没有前置 call.request 的媒体 offer 直接丢弃，不创建来电、不申请设备权限；
-//   - 拨号前强在线门禁：`getPeerPresence` 非 `online` 一律 fail-closed；
-//     无 presence 提供者时为兼容旧测试放行，由 manifest 注入真实通讯录快照；
-//   - 不持久化任何媒体 / SDP / ICE 累积态；页面刷新 / disable / 挂断都立刻
-//     释放本地 tracks + RTCPeerConnection；
-//   - phase 状态机：idle / inviting / incoming / connecting / connected / ended；
-//     ended 是挂断后短时间存在的过渡态，之后自动回 idle；
-//   - 媒体流真值通过 `attachToVideo(...)` 显式绑给 UI，避免 UI 猜 `_native`；
-//   - 单测友好：所有浏览器 API 走抽象层 `WebrtcEnvironment`，测试可注入 fake。
+// 联系人通话与传文件均经加密 APP 私信协商，不发布或订阅公开 Hash。
+// 通话由主叫邀请、被叫接听并发送 offer、主叫回复 answer；双方私信交换 ICE。
+// 会话同时绑定邀请编号、session_id、双方公钥和钱包代际；仅一条通话或传输可占槽。
+// BitFS 使用独立的公开 Hash/offer 协议，由 MSFile 卖方开关控制 Hash 订阅。
 
 import type {
   ChannelPrivateMessageEvent,
@@ -28,10 +13,8 @@ import type {
   JSONValue
 } from "@keymaster/contracts";
 import type { VaultWalletState, NoticeRegistry, NoticeRecord } from "@keymaster/contracts";
-import { WEBRTC_SIGNAL_PROTOCOL } from "./constants.js";
 import type { WebrtcBlockReason as ContractWebrtcBlockReason } from "@keymaster/contracts";
 import { APP_MESSAGE_PROTOCOL } from "bsv8-channel-protocol/app-message";
-import { HASH_REQUEST_CHANNEL } from "bsv8-channel-protocol/hash-request";
 import type { WebrtcHistoryItem, WebrtcHistoryService } from "./webrtcHistoryService.js";
 import {
   isAcceptableRemoteSession,
@@ -48,7 +31,7 @@ import {
   type WebrtcSignal,
   type WebrtcEndOfCandidatesSignal
 } from "./webrtcSignal.js";
-import { newMessageID, newSessionID, parseSessionID } from "bsv8-channel-protocol";
+import { newMessageID, newSessionID, parseMessageID, parseSessionID } from "bsv8-channel-protocol";
 import {
   DEFAULT_STUN_SERVERS,
   type WebrtcConfig,
@@ -62,7 +45,7 @@ export type WebrtcMode = "audio" | "video";
 /**
  * 会话 phase 真值（内嵌在 snapshot 中）：
  *   - idle：无活动会话；
- *   - inviting：已发 invite，等待对端 answer；
+ *   - inviting：主叫已发邀请，等待被叫接听并发送 offer；
  *   - incoming：收到 invite，等待本地 accept / decline；
  *   - connecting：本地已确认 / 已发 answer，RTC 尚未到 connected；
  *   - connected：RTC connectionState 已 connected 且持有远端流；
@@ -131,7 +114,7 @@ export interface WebrtcService {
   sendFile(input: { targetPublicKeyHex: string; file: Blob | File }): Promise<void>;
   acceptIncoming(): Promise<void>;
   rejectIncoming(): Promise<void>;
-  /** 用户明确确认后，才允许为入站文件请求签名并发布 Hash。 */
+  /** 用户明确确认后，才允许发送联系人传输接受私信。 */
   acceptIncomingTransfer(sessionId: string): Promise<void>;
   /** 拒绝一个尚未建立 WebRTC 连接的入站文件请求。 */
   rejectIncomingTransfer(sessionId: string): Promise<void>;
@@ -452,13 +435,15 @@ const MAX_TRANSFER_MIME_LENGTH = 128;
 const CALL_REQUEST_TYPE = "keymaster.webrtc.call.request";
 /** 音视频呼叫经 APP 私信交换的控制类型（reject/busy/hangup/fallback）。 */
 const CALL_CONTROL_TYPE = "keymaster.webrtc.call.control";
+const CONTACT_SIGNAL_TYPE = "keymaster.webrtc.signal";
+const TRANSFER_ACCEPT_TYPE = "keymaster.webrtc.transfer.accept";
 /** 呼叫请求在本地的最长有效期；过期按拒绝处理，不建 PC。 */
 const CALL_REQUEST_TTL_MS = 2 * 60 * 1000;
 /** 呼叫请求过期检查的对端时钟偏移容差；超过 TTL+容差的远期时间视为非法。 */
 const CALL_REQUEST_CLOCK_SKEW_MS = 60 * 1000;
-/** 主叫发出 call.request 后等待被叫 Hash/answer 的最长_setup_时间。 */
+/** SDP 协商的最长等待时间。 */
 const CALL_SETUP_TIMEOUT_MS = 60 * 1000;
-/** 被叫发布 Hash 后等待主叫 offer 的最长等待时间。 */
+/** 邀请等待接听的最长时间。 */
 const CALL_OFFER_WAIT_TIMEOUT_MS = 60 * 1000;
 
 export type WebrtcPeerPresenceState = "online" | "offline" | "unknown";
@@ -507,62 +492,32 @@ function isMediaOffer(sdp: string): boolean {
   return /(?:^|\r?\n)m=(audio|video)(?:\s|$)/.test(sdp);
 }
 
-function generateCallRendezvousHash(sessionId: string, nowMs: number): string {
-  try {
-    const cryptoObj = (globalThis as { crypto?: { getRandomValues?: (array: Uint8Array) => Uint8Array } }).crypto;
-    if (cryptoObj?.getRandomValues) {
-      const bytes = new Uint8Array(32);
-      cryptoObj.getRandomValues(bytes);
-      return bytesToHex(bytes);
-    }
-  } catch {
-    // ignore，走 fallback。
-  }
-  let fallback = "";
-  const alphabet = "0123456789abcdef";
-  const seed = `${sessionId}-${nowMs}-${Math.random()}`;
-  let hash = 0;
-  for (let i = 0; i < seed.length; i += 1) {
-    hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
-  }
-  let state = hash || 0x9e3779b9;
-  for (let i = 0; i < 64; i += 1) {
-    state = (state * 1664525 + 1013904223) >>> 0;
-    fallback += alphabet[state % 16];
-  }
-  return fallback;
-}
-
-function isValidRendezvousHash(hash: unknown): hash is string {
-  return typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash);
-}
-
 function isJsonRecord(value: JSONValue): value is { [key: string]: JSONValue } {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 interface ParsedCallRequest {
   sessionId: string;
-  hash: string;
+  requestId: string;
   mode: WebrtcMode;
   expiresAtMs: number;
 }
 
 function parseCallRequest(content: JSONValue): ParsedCallRequest | null {
   if (!isJsonRecord(content) || content.type !== CALL_REQUEST_TYPE) return null;
-  if (typeof content.session_id !== "string" || typeof content.hash !== "string") return null;
+  if (typeof content.session_id !== "string" || typeof content.request_id !== "string") return null;
   if (content.mode !== "audio" && content.mode !== "video") return null;
   try {
     parseSessionID(content.session_id);
+    parseMessageID(content.request_id as string);
   } catch {
     return null;
   }
-  if (!isValidRendezvousHash(content.hash)) return null;
   // expires_at_ms 必需：缺失或非法一律丢弃，避免离线积压的旧邀请延迟触发来电。
   if (typeof content.expires_at_ms !== "number" || !Number.isSafeInteger(content.expires_at_ms) || content.expires_at_ms <= 0) {
     return null;
   }
-  return { sessionId: content.session_id, hash: content.hash, mode: content.mode, expiresAtMs: content.expires_at_ms };
+  return { sessionId: content.session_id, requestId: content.request_id, mode: content.mode, expiresAtMs: content.expires_at_ms };
 }
 
 type CallControlAction = "reject" | "busy" | "hangup" | "fallback_required";
@@ -675,25 +630,84 @@ export function createWebrtcService(input: {
     return env.hashSha256 ? env.hashSha256(bytes) : sha256Hex(bytes);
   }
 
-  /** 通过固定 WebRTC 私信协议发布精确 ChannelProtocol body。 */
-  async function publishSignalBody(recipientPublicKeyHex: string, body: WebrtcSignal): Promise<void> {
-    // 先在插件侧走同一个 parser，确保不会把旧 envelope 交给 Coordinator。
-    const parsed = parseSignalValue(body);
-    if (!parsed.ok) throw new Error(`invalid_signal_body: ${parsed.reason}`);
-    await channel.publishPrivate({
-      recipientPublicKeyHex,
-      protocol: WEBRTC_SIGNAL_PROTOCOL,
-      content: parsed.signal as unknown as JSONValue
-    });
+  type NegotiationSession = ActiveSession | ActiveTransfer;
+  interface NegotiationState {
+    localDescriptionSent: boolean;
+    remoteDescriptionReady: boolean;
+    pendingLocal: WebrtcSignal[];
+    pendingRemote: RTCIceCandidateInit[];
+    outbound: Promise<void>;
+  }
+  const negotiations = new WeakMap<NegotiationSession, NegotiationState>();
+  function negotiation(session: NegotiationSession): NegotiationState {
+    let state = negotiations.get(session);
+    if (!state) {
+      state = { localDescriptionSent: false, remoteDescriptionReady: false,
+        pendingLocal: [], pendingRemote: [], outbound: Promise.resolve() };
+      negotiations.set(session, state);
+    }
+    return state;
+  }
+  function negotiationCurrent(session: NegotiationSession): boolean {
+    return session === active ? isCallCurrent(active) : session === activeTransfer && isTransferCurrent(activeTransfer);
+  }
+  function signalSession(remote: string, body: WebrtcSignal): NegotiationSession | null {
+    for (const session of [active, activeTransfer]) {
+      if (session && negotiationCurrent(session) && session.remotePublicKeyHex === remote
+        && session.requestMessageId === body.request_message_id && session.sessionId === body.session_id) return session;
+    }
+    return null;
+  }
+  async function receiveCandidate(session: NegotiationSession, candidate: RTCIceCandidateInit): Promise<void> {
+    if (!negotiationCurrent(session)) return;
+    const state = negotiation(session);
+    if (!state.remoteDescriptionReady) {
+      if (state.pendingRemote.length < 256) state.pendingRemote.push(candidate);
+      return;
+    }
+    await session.pc?.addIceCandidate(candidate);
+  }
+  async function remoteDescriptionReady(session: NegotiationSession): Promise<void> {
+    if (!negotiationCurrent(session)) return;
+    const state = negotiation(session);
+    state.remoteDescriptionReady = true;
+    for (const candidate of state.pendingRemote.splice(0)) {
+      if (!negotiationCurrent(session)) return;
+      await session.pc?.addIceCandidate(candidate);
+    }
   }
 
-  async function publishHashRequest(hash: string): Promise<string> {
-    if (!channel.publishHashRequest) throw new Error("hash_request_required");
-    const result = await channel.publishHashRequest({ hash, locator: "webrtc-sdp" });
-    if (!result || typeof result.messageId !== "string" || result.messageId.length === 0) {
-      throw new Error("invalid_hash_request_result");
+  /** 联系人信令走加密 APP 私信；共享的公开 Hash/offer 协议留给 BitFS。 */
+  async function publishSignalBody(recipientPublicKeyHex: string, body: WebrtcSignal): Promise<void> {
+    const parsed = parseSignalValue(body);
+    if (!parsed.ok) throw new Error(`invalid_signal_body: ${parsed.reason}`);
+    const session = signalSession(recipientPublicKeyHex, body);
+    if (!session) throw new Error("webrtc_session_stale");
+    const state = negotiation(session);
+    const isDescription = body.signal.type === "offer" || body.signal.type === "answer";
+    if (!isDescription && !state.localDescriptionSent) {
+      if (state.pendingLocal.length >= 256) throw new Error("webrtc_candidate_limit");
+      state.pendingLocal.push(body);
+      return;
     }
-    return result.messageId;
+    const send = async (signal: WebrtcSignal): Promise<void> => {
+      if (!negotiationCurrent(session)) throw new Error("webrtc_session_stale");
+      await channel.publishPrivate({
+        recipientPublicKeyHex,
+        protocol: APP_MESSAGE_PROTOCOL,
+        content: { type: CONTACT_SIGNAL_TYPE, request_id: signal.request_message_id,
+          session_id: signal.session_id, signal: signal.signal as unknown as JSONValue }
+      });
+    };
+    const operation = state.outbound.then(async () => {
+      await send(body);
+      if (isDescription) {
+        state.localDescriptionSent = true;
+        for (const pending of state.pendingLocal.splice(0)) await send(pending);
+      }
+    });
+    state.outbound = operation.catch(() => undefined);
+    await operation;
   }
 
   const isCallSenderAllowed = input.isCallSenderAllowed ?? input.isTransferSenderAllowed ?? (() => false);
@@ -710,14 +724,14 @@ export function createWebrtcService(input: {
   }
 
   /** 出站呼叫请求经 APP 私信发送；Coordinator 仅做透传，不审查业务语义。 */
-  async function publishCallRequest(input: { recipientPublicKeyHex: string; sessionId: string; hash: string; mode: WebrtcMode }): Promise<void> {
+  async function publishCallRequest(input: { recipientPublicKeyHex: string; sessionId: string; requestId: string; mode: WebrtcMode }): Promise<void> {
     await channel.publishPrivate({
       recipientPublicKeyHex: input.recipientPublicKeyHex,
       protocol: APP_MESSAGE_PROTOCOL,
       content: {
         type: CALL_REQUEST_TYPE,
         session_id: input.sessionId,
-        hash: input.hash,
+        request_id: input.requestId,
         mode: input.mode,
         expires_at_ms: env.now() + CALL_REQUEST_TTL_MS
       }
@@ -750,7 +764,7 @@ export function createWebrtcService(input: {
   }
 
   interface ActiveSession {
-    /** 对应本次 offer 的真实 Hash 请求编号；握手完成前为空。 */
+    /** 签名 APP 邀请内容中的随机 request_id；与 session_id、双方身份共同绑定。 */
     requestMessageId: string | null;
     /** ChannelProtocol 32-byte base64url session_id。 */
     sessionId: string;
@@ -761,21 +775,18 @@ export function createWebrtcService(input: {
     /** 创建时捕获的 owner generation，防止切换密钥后旧异步操作继续推进。 */
     ownerGeneration: number;
     startedAtMs: number;
-    /** 音视频会合用的 rendezvous hash（64 hex）；文件传输不使用该字段。 */
-    rendezvousHash: string;
+    expiresAtMs: number;
     localStream: MediaStreamLike | null;
     pc: RTCPeerConnectionLike | null;
     remoteStream: MediaStreamLike | null;
     pendingOffer: RTCSessionDescriptionInit | null;
-    /** 收到 call request 后，用户已接受但仍在等待 Hash/offer。 */
+    /** 被叫已明确接听，允许申请媒体权限与生成 offer。 */
     callRequestAccepted: boolean;
-    /** 已为本次 call 发布 Hash 请求，等待对端 offer。 */
-    hashRequestPublished: boolean;
     /** peer connection 已 connected 标志位；用于区分 `connecting` 与 `connected`。 */
     pcConnected: boolean;
     /**
-     * 是否已完成"协商"：呼出端收到 answer 且 setRemoteDescription 成功；接听端已
-     * 发 answer 后。完成协商 → 即使 pc 尚未 connected 也进入 `connecting`，
+     * 是否已完成协商：主叫已回复 answer，被叫已成功安装 answer。
+     * 完成协商后即使 pc 尚未 connected 也进入 `connecting`，
      * 而不是停留在 `inviting` / `incoming`。
      */
     negotiated: boolean;
@@ -809,16 +820,8 @@ export function createWebrtcService(input: {
     dialReservation = null;
     return true;
   }
-  interface KnownHashRequest {
-    publisherPublicKeyHex: string;
-    hash: string;
-    expiresAtMs: number;
-  }
-  /** Coordinator 已验签的 Hash 请求；只保存短期关系证据，不保存文件内容。 */
-  const knownHashRequests = new Map<string, KnownHashRequest>();
-
   interface ActiveTransfer {
-    /** 对应本次 DataChannel offer 的真实 Hash 请求编号；握手完成前为空。 */
+    /** 联系人传输邀请的 request_id。 */
     requestMessageId: string | null;
     /** ChannelProtocol 32-byte base64url session_id。 */
     sessionId: string;
@@ -832,13 +835,11 @@ export function createWebrtcService(input: {
     fileName?: string;
     mimeType?: string;
     byteLength: number;
-    /** 文件字节 Hash；只有目标发布该 Hash 请求后才创建 offer。 */
+    /** 文件字节 Hash，用于接收内容的完整性校验。 */
     contentHash: string;
     pc: RTCPeerConnectionLike | null;
     channel: DataChannelLike | null;
     pendingOffer: RTCSessionDescriptionInit | null;
-    /** 目标 owner 已发布 Hash 请求后才允许创建 offer。 */
-    hashRequestPublished: boolean;
     pendingChunks: Uint8Array[];
     pendingMeta: { kind: "image" | "file"; fileName?: string; mimeType?: string; byteLength: number } | null;
     /** 已按序接收的下一个分片序号。 */
@@ -869,8 +870,8 @@ export function createWebrtcService(input: {
     mimeType?: string;
     /** 只有用户明确确认后才变为 true。 */
     accepted: boolean;
-    hashRequestMessageId?: string;
-    /** Hash Publish 尚未返回时先暂存合法 offer，待真实 message_id 确认后处理。 */
+    requestId: string;
+    /** 用户确认前到达的 offer 不创建连接。 */
     pendingOffer?: WebrtcInviteSignal;
     /** 接受后等待 Offer 的独立超时句柄；Offer 处理/请求移除时清理。 */
     offerWaitTimer?: ReturnType<typeof setTimeout>;
@@ -888,41 +889,13 @@ export function createWebrtcService(input: {
   const transferAdmissionInFlightBySender = new Map<string, number>();
   const transferAdmissionControllers = new Set<AbortController>();
   let transferAdmissionInFlight = 0;
-  /** 同一时刻只允许一个入站请求进入 Hash Publish；用对象身份防止复用 sessionId 误清理。 */
+  /** 同一时刻只允许一个入站请求发送接受私信；按对象身份隔离旧回调。 */
   let transferAcceptanceInFlight: TransferAcceptanceToken | null = null;
   const isTransferSenderAllowed = input.isTransferSenderAllowed ?? (() => false);
   let pendingTransferPruneTimer: ReturnType<typeof setTimeout> | undefined;
   let disposed = false;
   /** 每次 active owner 变化或 service dispose 都递增，作为异步操作的生命周期栅栏。 */
   let ownerGeneration = 0;
-
-  function pruneKnownHashRequests(): void {
-    const now = env.now();
-    for (const [messageId, request] of knownHashRequests) {
-      if (request.expiresAtMs <= now) knownHashRequests.delete(messageId);
-    }
-    while (knownHashRequests.size > 512) {
-      const first = knownHashRequests.keys().next().value as string | undefined;
-      if (first === undefined) break;
-      knownHashRequests.delete(first);
-    }
-  }
-
-  function rememberKnownHashRequest(message: { publisherPublicKeyHex: string; messageId: string; content: JSONValue }): void {
-    if (message.content === null || typeof message.content !== "object" || Array.isArray(message.content)) return;
-    const hash = message.content.hash;
-    const locators = message.content.locators;
-    if (typeof hash !== "string" || !/^[0-9a-f]{64}$/.test(hash)
-      || !Array.isArray(locators)
-      || !locators.some((locator) => locator !== null && typeof locator === "object" && !Array.isArray(locator) && locator.kind === "webrtc-sdp")) return;
-    const publisherPublicKeyHex = message.publisherPublicKeyHex.trim().toLowerCase();
-    knownHashRequests.set(`${publisherPublicKeyHex}\u0000${message.messageId}`, {
-      publisherPublicKeyHex,
-      hash,
-      expiresAtMs: env.now() + 10 * 60 * 1000
-    });
-    pruneKnownHashRequests();
-  }
 
   const TRANSFER_REQUEST_TYPE = "keymaster.webrtc.transfer.request";
 
@@ -938,7 +911,7 @@ export function createWebrtcService(input: {
 
   function parseTransferRequest(content: JSONValue): {
     sessionId: string;
-    hash: string;
+    requestId: string;
     kind: "image" | "file";
     byteLength: number;
     fileName?: string;
@@ -948,17 +921,19 @@ export function createWebrtcService(input: {
       || content.type !== TRANSFER_REQUEST_TYPE
       || typeof content.session_id !== "string"
       || typeof content.hash !== "string"
+      || typeof content.request_id !== "string"
       || (content.kind !== "image" && content.kind !== "file")
       || typeof content.byte_length !== "number"
       || !Number.isSafeInteger(content.byte_length)
       || content.byte_length < 0
       || content.byte_length > MAX_WEBRTC_TRANSFER_BYTES) return null;
     if (!/^[0-9a-f]{64}$/.test(content.hash)) return null;
-    try { parseSessionID(content.session_id); } catch { return null; }
+    try { parseSessionID(content.session_id); parseMessageID(content.request_id as string); } catch { return null; }
     if (content.file_name !== undefined && !isBoundedMetadata(content.file_name, MAX_TRANSFER_METADATA_LENGTH)) return null;
     if (content.mime_type !== undefined && !isBoundedMetadata(content.mime_type, MAX_TRANSFER_MIME_LENGTH)) return null;
     return {
       sessionId: content.session_id,
+      requestId: content.request_id as string,
       hash: content.hash,
       kind: content.kind,
       byteLength: content.byte_length,
@@ -968,7 +943,9 @@ export function createWebrtcService(input: {
   }
 
   function dismissTransferNotice(sessionId: string): void {
-    noticeRegistry.dismiss(`webrtc-transfer-${sessionId}`);
+    const id = `webrtc-transfer-${sessionId}`;
+    // 接受动作已经移除了通知；后续 offer/超时清理不能再次注销已释放的注册项。
+    if (noticeRegistry.list().some(notice => notice.id === id)) noticeRegistry.dismiss(id);
   }
 
   function clearTransferOfferWaitTimeout(request: PendingTransferRequest): void {
@@ -1127,40 +1104,6 @@ export function createWebrtcService(input: {
       && isOwnerFenceCurrent(session.ownerPublicKeyHex, session.ownerGeneration);
   }
 
-  async function handleIncomingHashRequest(message: {
-    channel: string;
-    publisherPublicKeyHex: string;
-    messageId: string;
-    content: JSONValue;
-  }): Promise<void> {
-    if (disposed) return;
-    if (message.channel !== HASH_REQUEST_CHANNEL) return;
-    rememberKnownHashRequest(message);
-    const publisher = message.publisherPublicKeyHex.trim().toLowerCase();
-    const current = currentOwnerPublicKeyHex();
-    if (!current || publisher === current) return;
-
-    if (activeTransfer && isTransferCurrent(activeTransfer) && activeTransfer.direction === "outgoing"
-      && activeTransfer.requestMessageId === null
-      && activeTransfer.remotePublicKeyHex === publisher
-      && activeTransfer.contentHash === (knownHashRequests.get(`${publisher}\u0000${message.messageId}`)?.hash ?? "")) {
-      activeTransfer.requestMessageId = message.messageId;
-      activeTransfer.hashRequestPublished = true;
-      await beginOutgoingTransferOffer(activeTransfer);
-    }
-
-    // 主叫等待被叫发布 rendezvous Hash：hash 一致即绑定 request_message_id 并建 offer。
-    if (active && isCallCurrent(active) && active.direction === "outgoing"
-      && active.requestMessageId === null
-      && active.remotePublicKeyHex === publisher
-      && active.rendezvousHash === (knownHashRequests.get(`${publisher}\u0000${message.messageId}`)?.hash ?? "")) {
-      active.requestMessageId = message.messageId;
-      active.hashRequestPublished = true;
-      emit();
-      await beginOutgoingCallOffer(active);
-    }
-  }
-
   /** `ended` 过渡态：UI 在 ttl 内可见，过了之后清空回 idle。 */
   let endedDeadlineAt: number | null = null;
 
@@ -1249,10 +1192,10 @@ export function createWebrtcService(input: {
         startedAtMs: input.session.startedAtMs,
         endedAtMs: env.now(),
         durationSec: Math.max(0, Math.floor((env.now() - input.session.startedAtMs) / 1000)),
-        fileName: input.session.fileName,
-        mimeType: input.session.mimeType,
+        ...(input.session.fileName === undefined ? {} : { fileName: input.session.fileName }),
+        ...(input.session.mimeType === undefined ? {} : { mimeType: input.session.mimeType }),
         byteLength: input.session.byteLength,
-        blobKey
+        ...(blobKey === undefined ? {} : { blobKey })
       },
       input.blob
     );
@@ -1374,7 +1317,7 @@ export function createWebrtcService(input: {
     let phase: WebrtcSessionPhase = "idle";
     if (active) {
       if (!active.negotiated) {
-        phase = active.direction === "outgoing" ? "inviting" : "incoming";
+        phase = active.direction === "outgoing" ? "inviting" : active.callRequestAccepted ? "connecting" : "incoming";
       } else if (active.pcConnected && active.remoteStream) {
         phase = "connected";
       } else {
@@ -1568,7 +1511,7 @@ export function createWebrtcService(input: {
     transferRequestChecks.set(checkKey, capturedOwnerGeneration);
     try {
       // 联系人准入在用户确认之前执行；即使准入通过，也只建立本地
-      // 有界通知，不调用 publishHashRequest、不签名、不创建 PeerConnection。
+      // 有界通知，不发送接受私信、不创建 PeerConnection。
       if (!isOwnerFenceCurrent(currentOwner, capturedOwnerGeneration)) return;
       if (!await checkTransferSenderAllowed(remotePublicKeyHex)) return;
       if (!isOwnerFenceCurrent(currentOwner, capturedOwnerGeneration)) return;
@@ -1583,6 +1526,7 @@ export function createWebrtcService(input: {
         ownerPublicKeyHex: ownerAfterCheck,
         ownerGeneration: capturedOwnerGeneration,
         hash: transferRequest.hash,
+        requestId: transferRequest.requestId,
         kind: transferRequest.kind,
         byteLength: transferRequest.byteLength,
         fileName: transferRequest.fileName,
@@ -1608,6 +1552,7 @@ export function createWebrtcService(input: {
     if (request.expiresAtMs <= receivedAtMs) return;
     if (request.expiresAtMs - receivedAtMs > CALL_REQUEST_TTL_MS + CALL_REQUEST_CLOCK_SKEW_MS) return;
     const currentOwner = currentOwnerPublicKeyHex();
+    const capturedOwnerGeneration = ownerGeneration;
     if (!currentOwner || currentOwner === remotePublicKeyHex) return;
     if (active || activeTransfer || dialReservation || hasAcceptedTransferAwaitingOffer()) {
       // 单活槽被占（含拨号预留与已接受待 Offer 的传输）：回 busy，不创建来电。
@@ -1622,9 +1567,11 @@ export function createWebrtcService(input: {
     if (request.expiresAtMs - checkedAtMs > CALL_REQUEST_TTL_MS + CALL_REQUEST_CLOCK_SKEW_MS) return;
     if (disposed || active || activeTransfer || dialReservation || hasAcceptedTransferAwaitingOffer()) return;
     const ownerAfterCheck = currentOwnerPublicKeyHex();
-    if (!ownerAfterCheck || ownerAfterCheck !== currentOwner) return;
+    if (!ownerAfterCheck || ownerAfterCheck !== currentOwner
+      || !isOwnerFenceCurrent(currentOwner, capturedOwnerGeneration)) return;
+    if (request.expiresAtMs <= env.now()) return;
     const session: ActiveSession = {
-      requestMessageId: null,
+      requestMessageId: request.requestId,
       sessionId: request.sessionId,
       direction: "incoming",
       mode: request.mode,
@@ -1632,13 +1579,12 @@ export function createWebrtcService(input: {
       ownerPublicKeyHex: ownerAfterCheck,
       ownerGeneration,
       startedAtMs: env.now(),
-      rendezvousHash: request.hash,
+      expiresAtMs: request.expiresAtMs,
       localStream: null,
       pc: null,
       remoteStream: null,
       pendingOffer: null,
       callRequestAccepted: false,
-      hashRequestPublished: false,
       pcConnected: false,
       negotiated: false
     };
@@ -1693,35 +1639,52 @@ export function createWebrtcService(input: {
   }
 
   function handleIncoming(msg: ChannelPrivateMessageEvent): void {
-    if (disposed) return;
+    if (disposed || msg.channel !== `bsv8.inbox.${currentOwnerPublicKeyHex()}`) return;
     const remote = msg.publisherPublicKeyHex.trim().toLowerCase();
-    if (msg.protocol === APP_MESSAGE_PROTOCOL) {
-      const callRequest = parseCallRequest(msg.content);
-      if (callRequest) {
-        void handleIncomingCallRequest(callRequest, remote).catch(() => undefined);
-        return;
-      }
-      const callControl = parseCallControl(msg.content);
-      if (callControl) {
-        handleIncomingCallControl(callControl, remote);
-        return;
-      }
-      const transferRequest = parseTransferRequest(msg.content);
-      if (transferRequest) {
-        void handleIncomingTransferRequest(transferRequest, remote).catch(() => undefined);
-        return;
-      }
+    if (!/^(02|03)[0-9a-f]{64}$/.test(remote) || remote === currentOwnerPublicKeyHex()) return;
+    if (msg.protocol !== APP_MESSAGE_PROTOCOL) return;
+    const callRequest = parseCallRequest(msg.content);
+    if (callRequest) {
+      void handleIncomingCallRequest(callRequest, remote).catch(() => undefined);
       return;
     }
-    if (msg.protocol !== WEBRTC_SIGNAL_PROTOCOL) return;
-    const sig = tryParseSignal(msg.content);
+    const callControl = parseCallControl(msg.content);
+    if (callControl) {
+      handleIncomingCallControl(callControl, remote);
+      return;
+    }
+    const transferRequest = parseTransferRequest(msg.content);
+    if (transferRequest) {
+      void handleIncomingTransferRequest(transferRequest, remote).catch(() => undefined);
+      return;
+    }
+    if (!isJsonRecord(msg.content)) return;
+    if (msg.content.type === TRANSFER_ACCEPT_TYPE) {
+      const session = activeTransfer;
+      if (!session || !isTransferCurrent(session) || session.direction !== "outgoing"
+        || session.remotePublicKeyHex !== remote
+        || session.sessionId !== msg.content.session_id
+        || session.requestMessageId !== msg.content.request_id) return;
+      void beginOutgoingTransferOffer(session).catch(error => {
+        if (isTransferCurrent(session)) finalizeTransferWithFailure(session, error instanceof Error ? error : new Error(String(error)));
+      });
+      return;
+    }
+    if (msg.content.type !== CONTACT_SIGNAL_TYPE) return;
+    const sig = tryParseSignal({
+      request_message_id: msg.content.request_id,
+      session_id: msg.content.session_id,
+      signal: msg.content.signal
+    });
     if (!sig) return;
     if (sig.signal.type === "offer") {
       if (activeTransfer) return;
       if (isDataChannelOffer(sig.signal.sdp)) {
-        void onRemoteTransferOffer(sig as WebrtcInviteSignal, remote).catch(() => undefined);
+        void onRemoteTransferOffer(sig as WebrtcInviteSignal, remote).catch(error => {
+          console.warn("[webrtc] incoming transfer offer failed", error instanceof Error ? error.message : String(error));
+        });
       } else if (isMediaOffer(sig.signal.sdp) || !isDataChannelOffer(sig.signal.sdp)) {
-        // 媒体 offer 必须有前置 call.request；无 active 来电一律丢弃。
+        // 媒体 offer 必须匹配主叫已发出的邀请，不能自行创建来电。
         void onRemoteCallOffer(sig as WebrtcInviteSignal, remote).catch(() => undefined);
       }
       return;
@@ -1773,10 +1736,14 @@ export function createWebrtcService(input: {
     const session = active;
     if (!session || session.direction !== "incoming") throw new Error("invalid_state");
     if (!isCallCurrent(session)) throw new Error("transfer_owner_changed");
-    if (session.callRequestAccepted) return;
     if (session.acceptPromise) {
       await session.acceptPromise;
       return;
+    }
+    if (session.callRequestAccepted) return;
+    if (session.expiresAtMs <= env.now()) {
+      clearActiveIfCurrent(session);
+      throw new Error("call_request_expired");
     }
     const promise = (async () => {
       // 模式协商：video 先试，失败则回退建议；audio 失败直接拒绝。
@@ -1850,54 +1817,29 @@ export function createWebrtcService(input: {
         }
         throw new Error("transfer_owner_changed");
       }
+      if (session.expiresAtMs <= env.now()) {
+        stream?.stop();
+        clearActiveIfCurrent(session);
+        throw new Error("call_request_expired");
+      }
       session.localStream = stream;
       session.callRequestAccepted = true;
-      // 只有用户确认后才发布真实 Hash 请求，建立会合关系。
-      // 发布失败必须回滚：停媒体流、清理会话、尽力通知主叫，避免麦克风常开且无法重试。
-      let hashRequestMessageId: string;
+      // 接听方作为 offerer；邀请编号在签名 APP 内容中绑定双方与本次会话。
       try {
-        hashRequestMessageId = await publishHashRequest(session.rendezvousHash);
+        await beginIncomingCallOffer(session);
       } catch (error) {
-        try {
-          stream?.stop();
-        } catch {
-          // ignore
+        stream?.stop();
+        if (isCallCurrent(session)) {
+          await recordCallEnd(session, "failed").catch(() => undefined);
+          if (clearActiveIfCurrent(session)) {
+            lastError = "send_invite_failed";
+            emit();
+            void publishCallControl({ recipientPublicKeyHex: session.remotePublicKeyHex,
+              sessionId: session.sessionId, action: "reject", reason: "invalid_state" });
+          }
         }
-        if (active !== session) {
-          // 等待期间原会话已结束（对端挂断/身份切换）且可能已有新会话：
-          // 只停孤流，不碰现会话、不改错误态、不发旧会话的控制消息。
-          throw error instanceof Error ? error : new Error(String(error));
-        }
-        const remote = session.remotePublicKeyHex;
-        const sessionId = session.sessionId;
-        await recordCallEnd(session, "failed").catch(() => undefined);
-        // 历史写入期间会话仍可能更替：复核后只清除自己的会话。
-        if (active !== session) {
-          throw error instanceof Error ? error : new Error(String(error));
-        }
-        clearActive();
-        lastError = "send_invite_failed";
-        emit();
-        void publishCallControl({
-          recipientPublicKeyHex: remote,
-          sessionId,
-          action: "reject",
-          reason: "invalid_state"
-        }).catch(() => undefined);
         throw error instanceof Error ? error : new Error(String(error));
       }
-      if (!isCallCurrent(session)) {
-        try {
-          stream?.stop();
-        } catch {
-          // ignore
-        }
-        throw new Error("transfer_owner_changed");
-      }
-      session.requestMessageId = hashRequestMessageId;
-      session.hashRequestPublished = true;
-      armCallSetupTimeout(session, CALL_OFFER_WAIT_TIMEOUT_MS);
-      emit();
     })();
     session.acceptPromise = promise;
     try {
@@ -1958,9 +1900,18 @@ export function createWebrtcService(input: {
     request.accepted = true;
     dismissTransferNotice(sessionId);
     try {
-      // 只有这一条显式用户确认路径可以触发 owner 签名和公开 Hash Publish。
-      const hashRequestMessageId = await publishHashRequest(request.hash);
+      await channel.publishPrivate({
+        recipientPublicKeyHex: request.requesterPublicKeyHex,
+        protocol: APP_MESSAGE_PROTOCOL,
+        content: { type: TRANSFER_ACCEPT_TYPE, session_id: sessionId, request_id: request.requestId }
+      });
       const current = pendingTransferRequests.get(sessionId);
+      // 对端可能已收到接受私信并返回 offer，此时请求已转为实际会话。
+      if (!current && activeTransfer && isTransferCurrent(activeTransfer)
+        && activeTransfer.direction === "incoming" && activeTransfer.sessionId === sessionId
+        && activeTransfer.requestMessageId === request.requestId
+        && activeTransfer.ownerGeneration === request.ownerGeneration
+        && activeTransfer.remotePublicKeyHex === request.requesterPublicKeyHex) return;
       if (!current
         || current !== request
         || current.expiresAtMs <= env.now()
@@ -1970,7 +1921,6 @@ export function createWebrtcService(input: {
         removePendingTransferRequestIfCurrent(sessionId, request);
         throw new Error("transfer_owner_changed");
       }
-      current.hashRequestMessageId = hashRequestMessageId;
       const pendingOffer = current.pendingOffer;
       current.pendingOffer = undefined;
       if (pendingOffer) {
@@ -2094,6 +2044,7 @@ export function createWebrtcService(input: {
 
   function finalizeTransferWithFailure(session: ActiveTransfer, err: Error): void {
     if (session.settled) return;
+    console.warn("[webrtc] transfer failed", err.message);
     session.settled = true;
     // 只释放指定的会话对象：sessionId 唯一故等价于身份比较，显式按身份判断
     // 可避免迟到的旧传输结果清除期间建立的新传输。
@@ -2101,7 +2052,9 @@ export function createWebrtcService(input: {
       activeTransfer = null;
     }
     closeTransferResources(session);
-    void recordTransferEnd({ session, status: "failed" }).catch(() => undefined);
+    void recordTransferEnd({ session, status: "failed" }).then(() => {
+      if (isOwnerFenceCurrent(session.ownerPublicKeyHex, session.ownerGeneration)) emit();
+    }).catch(error => console.warn("[webrtc] transfer history failed", error instanceof Error ? error.message : String(error)));
     session.reject?.(err);
     emit();
   }
@@ -2117,7 +2070,9 @@ export function createWebrtcService(input: {
       session,
       status: "completed",
       blob: completedBlob
-    }).catch(() => undefined);
+    }).then(() => {
+      if (isOwnerFenceCurrent(session.ownerPublicKeyHex, session.ownerGeneration)) emit();
+    }).catch(error => console.warn("[webrtc] transfer history failed", error instanceof Error ? error.message : String(error)));
     closeTransferResources(session);
     session.resolve?.();
     emit();
@@ -2380,7 +2335,7 @@ export function createWebrtcService(input: {
     const capturedOwnerGeneration = ownerGeneration;
     const sessionId = createProtocolSessionId(env);
     const session: ActiveTransfer = {
-      requestMessageId: null,
+      requestMessageId: newMessageID(),
       sessionId,
       direction: "outgoing",
       remotePublicKeyHex: input.targetPublicKeyHex,
@@ -2396,7 +2351,6 @@ export function createWebrtcService(input: {
       pc: null,
       channel: null,
       pendingOffer: null,
-      hashRequestPublished: false,
       pendingChunks: [],
       pendingMeta: null,
       expectedSeq: 0,
@@ -2421,14 +2375,14 @@ export function createWebrtcService(input: {
       const contentHash = await calculateSha256(bytes);
       if (!isTransferCurrent(session)) throw transferFenceError(session);
       session.contentHash = contentHash;
-      // 先请目标 owner 发布 Hash 请求；随后 offer 才能引用真实的
-      // request_message_id，并通过 Coordinator 的关系审查。
+      // 先通过加密私信请求目标确认，收到匹配的接受私信后才创建 offer。
       await channel.publishPrivate({
         recipientPublicKeyHex: input.targetPublicKeyHex,
         protocol: APP_MESSAGE_PROTOCOL,
         content: {
           type: TRANSFER_REQUEST_TYPE,
           session_id: sessionId,
+          request_id: session.requestMessageId,
           hash: contentHash,
           kind: input.kind,
           byte_length: input.file.size,
@@ -2445,7 +2399,7 @@ export function createWebrtcService(input: {
       }
       throw new Error("transfer_request_failed");
     }
-    const timeout = env.delay(15_000).then(() => {
+    const timeout = env.delay(TRANSFER_REQUEST_TTL_MS + TRANSFER_OFFER_WAIT_TIMEOUT_MS).then(() => {
       if (session.settled) return;
       finalizeTransferWithFailure(session, new Error("transfer_timeout"));
       throw new Error("transfer_timeout");
@@ -2463,20 +2417,13 @@ export function createWebrtcService(input: {
       removePendingTransferRequest(sig.session_id);
       return;
     }
-    if (!request || request.requesterPublicKeyHex !== remote || !request.accepted) {
+    if (!request || request.requesterPublicKeyHex !== remote || request.requestId !== sig.request_message_id) return;
+    if (!request.accepted) {
       // 在用户确认前可以暂存至一个已经有界的请求记录，但绝不建立
-      // PeerConnection；未匹配真实 Hash message_id 的 offer 后续仍会被丢弃。
+      // PeerConnection；只有匹配原邀请 request_id 的 offer 才能被处理。
       if (request && !request.accepted && !request.pendingOffer) request.pendingOffer = sig;
       return;
     }
-    if (request.hashRequestMessageId === undefined) {
-      // Coordinator 已经完成 Hash/offer 关系审查，但本地发布 Hash 的
-      // Promise 可能尚未返回真实 message_id。不能丢 offer，也不能用
-      // offer 自带的 request_message_id 冒充本地 Hash 结果。
-      if (!request.pendingOffer) request.pendingOffer = sig;
-      return;
-    }
-    if (request.hashRequestMessageId !== sig.request_message_id) return;
     removePendingTransferRequest(sig.session_id);
     const parsedOffer = decodeDescription(sig.signal.sdp, "offer");
     const pc = env.createPeerConnection(configToRTCConfig(store.snapshot()));
@@ -2498,7 +2445,6 @@ export function createWebrtcService(input: {
       pc,
       channel: null,
       pendingOffer: parsedOffer,
-      hashRequestPublished: true,
       pendingChunks: [],
       pendingMeta: null,
       expectedSeq: 0,
@@ -2530,6 +2476,7 @@ export function createWebrtcService(input: {
     });
     try {
       await pc.setRemoteDescription(parsedOffer);
+      await remoteDescriptionReady(session);
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       if (!isTransferCurrent(session)) {
@@ -2560,6 +2507,7 @@ export function createWebrtcService(input: {
     const parsed = decodeDescription(sig.signal.sdp, "answer");
     try {
       await pc.setRemoteDescription(parsed);
+      await remoteDescriptionReady(session);
     } catch (err) {
       finalizeTransferWithFailure(session, err instanceof Error ? err : new Error(String(err)));
     }
@@ -2570,9 +2518,8 @@ export function createWebrtcService(input: {
       || !isTransferCurrent(activeTransfer)
       || activeTransfer.requestMessageId !== sig.request_message_id
       || activeTransfer.sessionId !== sig.session_id) return;
-    if (!activeTransfer.pc) return;
     try {
-      await activeTransfer.pc.addIceCandidate(fromProtocolCandidate(sig.signal.candidate));
+      await receiveCandidate(activeTransfer, fromProtocolCandidate(sig.signal.candidate));
     } catch {
       // ignore
     }
@@ -2582,9 +2529,8 @@ export function createWebrtcService(input: {
     if (!activeTransfer
       || activeTransfer.requestMessageId !== sig.request_message_id
       || activeTransfer.sessionId !== sig.session_id) return;
-    if (!activeTransfer.pc) return;
     try {
-      await activeTransfer.pc.addIceCandidate({ candidate: "" });
+      await receiveCandidate(activeTransfer, { candidate: "" });
     } catch {
       // ignore
     }
@@ -2820,75 +2766,37 @@ export function createWebrtcService(input: {
       const current = active;
       if (current && current === session) {
         current.remoteStream = stream;
-        current.pcConnected = true;
-        clearCallSetupTimer(current);
         emit();
       }
     });
   }
 
-  async function beginOutgoingCallOffer(session: ActiveSession): Promise<void> {
-    if (!isCallCurrent(session) || session.direction !== "outgoing" || !session.requestMessageId || session.pc) return;
-    const requestMessageId = session.requestMessageId;
-    if (!session.localStream) return;
+  async function beginIncomingCallOffer(session: ActiveSession): Promise<void> {
+    if (!isCallCurrent(session) || session.direction !== "incoming" || !session.callRequestAccepted
+      || !session.requestMessageId || session.pc || !session.localStream) throw new Error("invalid_state");
     const pc = env.createPeerConnection(configToRTCConfig(store.snapshot()));
     session.pc = pc;
-    try {
-      pc.replaceLocalStream(session.localStream);
-    } catch {
-      // ignore，SDP 失败会走统一失败路径。
-    }
+    pc.replaceLocalStream(session.localStream);
     attachCallPeerEvents(session, pc);
-    let offer: RTCSessionDescriptionInit;
-    try {
-      offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-    } catch (err) {
-      if (isCallCurrent(session)) {
-        await recordCallEnd(session, "failed").catch(() => undefined);
-        if (active !== session) {
-          throw err instanceof Error ? err : new Error(String(err));
-        }
-        clearActive();
-        lastError = "create_offer_failed";
-        emit();
-      }
-      throw err instanceof Error ? err : new Error(String(err));
-    }
-    if (!isCallCurrent(session) || session.requestMessageId !== requestMessageId) {
-      return;
-    }
+    const offer = await pc.createOffer();
+    if (!isCallCurrent(session)) throw new Error("webrtc_session_stale");
+    await pc.setLocalDescription(offer);
+    if (!isCallCurrent(session)) throw new Error("webrtc_session_stale");
     session.pendingOffer = offer;
-    try {
-      await publishSignalBody(
-        session.remotePublicKeyHex,
-        newOfferSignal(requestMessageId, session.sessionId, encodeDescription(offer))
-      );
-      if (!isCallCurrent(session)) return;
-      armCallSetupTimeout(session, CALL_SETUP_TIMEOUT_MS);
-      emit();
-    } catch (err) {
-      if (isCallCurrent(session)) {
-        await recordCallEnd(session, "failed").catch(() => undefined);
-        if (active !== session) {
-          throw err instanceof Error ? err : new Error(String(err));
-        }
-        clearActive();
-        lastError = "send_invite_failed";
-        emit();
-      }
-      throw err instanceof Error ? err : new Error(String(err));
-    }
+    await publishSignalBody(session.remotePublicKeyHex,
+      newOfferSignal(session.requestMessageId, session.sessionId, encodeDescription(offer)));
+    if (!isCallCurrent(session)) return;
+    armCallSetupTimeout(session, CALL_SETUP_TIMEOUT_MS);
+    emit();
   }
 
   async function onRemoteCallOffer(sig: WebrtcInviteSignal, remote: string): Promise<void> {
     if (disposed || !active) return;
     const session = active;
-    if (!isCallCurrent(session) || session.direction !== "incoming") return;
+    if (!isCallCurrent(session) || session.direction !== "outgoing") return;
     if (session.remotePublicKeyHex !== remote || session.sessionId !== sig.session_id) return;
-    if (!session.callRequestAccepted || !session.hashRequestPublished) return;
     if (session.requestMessageId !== sig.request_message_id) return;
-    if (session.rendezvousHash === "" || session.pc) return;
+    if (session.pc) return;
     const parsedOffer = decodeDescription(sig.signal.sdp, "offer");
     const pc = env.createPeerConnection(configToRTCConfig(store.snapshot()));
     session.pc = pc;
@@ -2903,6 +2811,7 @@ export function createWebrtcService(input: {
     session.pendingOffer = parsedOffer;
     try {
       await pc.setRemoteDescription(parsedOffer);
+      await remoteDescriptionReady(session);
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       if (!isCallCurrent(session)) return;
@@ -2924,7 +2833,7 @@ export function createWebrtcService(input: {
   }
 
   async function onRemoteCallAnswer(sig: WebrtcAnswerSignal): Promise<void> {
-    if (!active || !isCallCurrent(active) || active.direction !== "outgoing") return;
+    if (!active || !isCallCurrent(active) || active.direction !== "incoming") return;
     if (active.requestMessageId !== sig.request_message_id || active.sessionId !== sig.session_id) return;
     if (!active.pc) return;
     // 捕获原会话：await 期间旧通话可能结束并建立新会话，后续只作用于捕获的对象。
@@ -2933,6 +2842,7 @@ export function createWebrtcService(input: {
     if (!pc) return;
     try {
       await pc.setRemoteDescription(decodeDescription(sig.signal.sdp, "answer"));
+      await remoteDescriptionReady(session);
       if (!isCallCurrent(session)) return;
       session.negotiated = true;
       armCallSetupTimeout(session, CALL_SETUP_TIMEOUT_MS);
@@ -2951,9 +2861,8 @@ export function createWebrtcService(input: {
   async function onRemoteCallIce(sig: WebrtcIceSignal): Promise<void> {
     if (!active || !isCallCurrent(active)) return;
     if (active.requestMessageId !== sig.request_message_id || active.sessionId !== sig.session_id) return;
-    if (!active.pc) return;
     try {
-      await active.pc.addIceCandidate(fromProtocolCandidate(sig.signal.candidate));
+      await receiveCandidate(active, fromProtocolCandidate(sig.signal.candidate));
     } catch {
       // ignore
     }
@@ -2962,9 +2871,8 @@ export function createWebrtcService(input: {
   async function onRemoteCallEndOfCandidates(sig: WebrtcEndOfCandidatesSignal): Promise<void> {
     if (!active || !isCallCurrent(active)) return;
     if (active.requestMessageId !== sig.request_message_id || active.sessionId !== sig.session_id) return;
-    if (!active.pc) return;
     try {
-      await active.pc.addIceCandidate({ candidate: "" });
+      await receiveCandidate(active, { candidate: "" });
     } catch {
       // ignore
     }
@@ -3090,19 +2998,6 @@ export function createWebrtcService(input: {
         throw new Error("transfer_owner_changed");
       }
       const sessionId = createProtocolSessionId(env);
-      const rendezvousHash = generateCallRendezvousHash(sessionId, env.now());
-      if (!isValidRendezvousHash(rendezvousHash)) {
-        try {
-          localStream.stop();
-        } catch {
-          // ignore
-        }
-        if (clearDialReservationIfCurrent(reservation)) {
-          lastError = "create_offer_failed";
-          emit();
-        }
-        throw new Error("create_offer_failed");
-      }
       // 发送邀请前最终复核：预留仍有效且单活槽未被来电/传输占用
       //（含已接受待 Offer 的入站传输）。
       const slotTaken = active || isTransferActive() || hasAcceptedTransferAwaitingOffer();
@@ -3117,7 +3012,7 @@ export function createWebrtcService(input: {
         throw new Error(slotTaken ? "busy_local" : "transfer_owner_changed");
       }
       const session: ActiveSession = {
-        requestMessageId: null,
+        requestMessageId: newMessageID(),
         sessionId,
         direction: "outgoing",
         mode: input.mode,
@@ -3125,13 +3020,12 @@ export function createWebrtcService(input: {
         ownerPublicKeyHex: capturedOwnerPublicKeyHex,
         ownerGeneration: capturedOwnerGeneration,
         startedAtMs: env.now(),
-        rendezvousHash,
+        expiresAtMs: env.now() + CALL_REQUEST_TTL_MS,
         localStream,
         pc: null,
         remoteStream: null,
         pendingOffer: null,
         callRequestAccepted: false,
-        hashRequestPublished: false,
         pcConnected: false,
         negotiated: false
       };
@@ -3141,7 +3035,7 @@ export function createWebrtcService(input: {
       armCallSetupTimeout(session, CALL_SETUP_TIMEOUT_MS + CALL_OFFER_WAIT_TIMEOUT_MS);
       emit();
       try {
-        await publishCallRequest({ recipientPublicKeyHex: target, sessionId, hash: rendezvousHash, mode: input.mode });
+        await publishCallRequest({ recipientPublicKeyHex: target, sessionId, requestId: session.requestMessageId!, mode: input.mode });
       } catch (err) {
         if (active === session) {
           try {
@@ -3289,14 +3183,11 @@ export function createWebrtcService(input: {
   /* ----- 订阅 Channel 私信 + dispose ----- */
 
   const off = channel.subscribePrivate((message) => handleIncoming(message));
-  const offHashRequests = channel.subscribe((message) => {
-    void handleIncomingHashRequest(message).catch(() => undefined);
-  });
   const subscribeOwnerInbox = (): void => {
     if (disposed) return;
     const ownerPublicKeyHex = currentOwnerPublicKeyHex();
     if (!ownerPublicKeyHex) return;
-    void channel.subscriptionSet([`bsv8.inbox.${ownerPublicKeyHex}`, HASH_REQUEST_CHANNEL]).catch(() => undefined);
+    void channel.subscriptionSet([`bsv8.inbox.${ownerPublicKeyHex}`]).catch(() => undefined);
   };
   const offOwnerChanged = walletState.subscribe((state) => {
       const nextOwner = state.activePublicKeyHex?.trim().toLowerCase() ?? null;
@@ -3359,7 +3250,6 @@ export function createWebrtcService(input: {
       pendingTransferPruneTimer = undefined;
     }
     off();
-    offHashRequests();
     offOwnerChanged?.();
     // 释放必须等待 Coordinator 收到；否则页面先关闭 MessagePort，旧
     // caller 会在剩余 Worker 中继续占用物理订阅。远端退订若失败仍由

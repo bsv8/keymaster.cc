@@ -77,12 +77,14 @@ export interface BitfsSellerProtocolDeps {
   blockHeight(): Promise<number>;
   /** 新开池最低剩余区块设置；已保存 Kind 3 的重放不重验。 */
   minRefundDelayBlocks(): number;
+  maxConcurrentSales?(): number;
   onPaymentTransaction?(input: { txid: string; rawTxHex: string }): void | Promise<void>;
 }
 
 /** 生产卖方端口；每条输出字节均在返回前已持久化。 */
 export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
   readonly ready: boolean;
+  private readonly recoverySessions = new Map<string, string>();
   private readonly locks = new Map<string, Promise<void>>();
   private readonly poolStateCache = new Map<string, {
     pool: SellerPoolEvidence;
@@ -145,9 +147,39 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
     });
   }
 
-  async onFrameSent(sessionId: string, kind: number): Promise<void> { if (kind === 6) await this.deps.onDelivered?.(sessionId); }
+  async onFrameSent(sessionId: string, kind: number): Promise<void> { if (kind === 6) await this.deps.onDelivered?.(this.recoverySessions.get(sessionId) ?? sessionId); }
 
   async onFrame(input: { sessionId: string; kind: import("go-bitfs").WireKind; bytes: Uint8Array }): Promise<BitfsSellerProtocolResult> {
+    let result: BitfsSellerProtocolResult = { type: "none" };
+    if (input.kind === 2) {
+      // 各连接可同时到达；开池容量检查与预签必须跨连接串行。
+      await this.serial("seller-opening-capacity", async () => { result = await this.onFrameNow(input); });
+      return result;
+    }
+    return this.onFrameNow(input);
+  }
+
+  private async onFrameNow(input: { sessionId: string; kind: import("go-bitfs").WireKind; bytes: Uint8Array }): Promise<BitfsSellerProtocolResult> {
+    const transportSessionId = input.sessionId;
+    if (input.kind === 2 && !this.recoverySessions.has(transportSessionId)) {
+      const fresh = await this.requiredRecord(transportSessionId);
+      if (fresh.phase === "quoted" && !fresh.evidence.includes("kind2-opening-request")) {
+        for (const old of await this.deps.sessions.list()) {
+          if (old.sessionId === fresh.sessionId || old.role !== "seller"
+            || old.ownerPublicKeyHex !== fresh.ownerPublicKeyHex || old.counterpartyPublicKeyHex !== fresh.counterpartyPublicKeyHex
+            || old.seedHashHex !== fresh.seedHashHex) continue;
+          const original = await this.deps.sessions.getEvidence(old.sessionId, "kind2-opening-request");
+          if (!original || !equalBytes(original, input.bytes)) continue;
+          if (["closed", "failed"].includes(old.phase)) return { type: "close", reason: "pool_closed" };
+          const quoteBytes = await this.requiredEvidence(old.sessionId, "kind1-quote");
+          await this.openSession({ sessionId: old.sessionId, quoteBytes, seedHashHex: old.seedHashHex,
+            counterpartyPublicKeyHex: old.counterpartyPublicKeyHex });
+          this.recoverySessions.set(transportSessionId, old.sessionId);
+          break;
+        }
+      }
+    }
+    input = { ...input, sessionId: this.recoverySessions.get(transportSessionId) ?? transportSessionId };
     let result: BitfsSellerProtocolResult = { type: "none" };
     await this.serial(input.sessionId, async () => { result = await this.handle(input); if ((await this.deps.sessions.get(input.sessionId))?.phase === "paid") this.deps.onPaid?.(input.sessionId); });
     return result;
@@ -166,6 +198,12 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
         return { type: "send", frames: [savedKind3] };
       }
       if (record.phase !== "quoted" && record.phase !== "opening-presigned") return { type: "close", reason: "state_conflict" };
+      if (!savedKind2 && this.deps.maxConcurrentSales) {
+        const active = (await this.deps.sessions.list()).filter(item => item.role === "seller"
+          && item.ownerPublicKeyHex === record.ownerPublicKeyHex && item.evidence.includes("kind2-opening-request")
+          && !["closed", "failed", "arbitration-prepared", "arbitration-payment-unknown"].includes(item.phase));
+        if (active.length >= this.deps.maxConcurrentSales()) return { type: "close", reason: "seller_capacity" };
+      }
       record = await this.deps.sessions.putEvidence(record.sessionId, record.revision, "kind2-opening-request", input.bytes, this.deps.nowMs());
       // SDK 先验证 Kind 2 模板、角色和买方签名，再进入钱包签名门禁。
       // 使用 SDK 的已验证交易原文检查高度锁，不在应用中解释 CBOR。

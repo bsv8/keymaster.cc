@@ -16,6 +16,7 @@ import type { JSONValue, ChannelPrivateMessageEvent, ChannelOperationCaller, Cha
 import type { ContactPresenceMap } from "./contacts.js";
 import type { I18nText } from "./i18n.js";
 import type { BackgroundSyncSettings, BackgroundTaskProgress } from "./background.js";
+import type { ChainFeePolicy, ChainFeeSnapshots } from "./chainFees.js";
 import type { ChainHeightSnapshot } from "./chainHeight.js";
 import type { AutoLockSettings } from "./autolock.js";
 import type { VaultSealedSecret } from "./vault.js";
@@ -280,6 +281,9 @@ export type CoordinatorMsFileControl =
   | { type: "bitfs.purchase.cancel"; seedHashHex: string; sessionId: string }
   /** 读取当前 Key 下已经持久化的买方任务及其资金恢复摘要。 */
   | { type: "bitfs.purchase.tasks.list" }
+  | { type: "bitfs.demands.monitor" }
+  | { type: "bitfs.purchase.reconcile"; seedHashHex: string; sessionId: string }
+  | { type: "bitfs.purchase.reconnect"; seedHashHex: string; sessionId: string }
   /** 只读历史仲裁进度；不自动续跑。 */
   | { type: "bitfs.arbitration.list" }
   /** 用户显式申请、取回或查询结算。 */
@@ -398,7 +402,7 @@ export type CoordinatorClientRequest =
     | { kind: "background.cancel-by-key"; clientId: string; requestId: string; networkIdentity: NetworkIdentity; expectedSessionEpoch: SessionEpoch }
     | { kind: "background.settings.update"; clientId: string; requestId: string; settings: CoordinatorBackgroundSyncSettings; expectedSessionEpoch: SessionEpoch }
     | { kind: "autolock.settings.update"; clientId: string; requestId: string; settings: AutoLockSettings; expectedSessionEpoch: SessionEpoch }
-    | { kind: "p2pkh.settings.update"; clientId: string; requestId: string; settings: { bsvNetwork: "main" | "test"; feeRateSatoshisPerKb?: Partial<Record<"low" | "medium" | "high", number>> }; expectedSessionEpoch: SessionEpoch }
+    | { kind: "p2pkh.settings.update"; clientId: string; requestId: string; settings: { bsvNetwork: "main" | "test"; feePolicy?: ChainFeePolicy }; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.provider-config.get"; clientId: string; requestId: string; providerId: string; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.provider-config.update"; clientId: string; requestId: string; providerId: string; config: P2pkhProviderConfig; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.utxos.get"; clientId: string; requestId: string; ownerPublicKeyHex: string; network: "main" | "test"; expectedSessionEpoch: SessionEpoch }
@@ -407,7 +411,7 @@ export type CoordinatorClientRequest =
     | { kind: "activity"; clientId: string });
 
 /** Coordinator 订阅主题。 */
-export type CoordinatorTopic = "session.state" | "background.snapshot" | "chain.height" | "asset.data-changed" | "storage.state" | "msfile.state" | "sat.events" | "channel.events" | "contacts.presence" | "worker.units";
+export type CoordinatorTopic = "session.state" | "background.snapshot" | "chain.height" | "chain.fees" | "asset.data-changed" | "storage.state" | "msfile.state" | "sat.events" | "channel.events" | "contacts.presence" | "worker.units";
 
 /** MSFile 状态事件：状态、设置摘要与未决超额确认（脱敏视图）。 */
 export interface CoordinatorMsFileStateEvent {
@@ -559,6 +563,7 @@ export type CoordinatorCryptoResult =
 export type CoordinatorTopicEvent = { networkIdentity?: import("./networkIdentity.js").NetworkIdentity } & (
   | SessionStateEvent
   | BackgroundSnapshotEvent
+  | CoordinatorChainFeeEvent
   | CoordinatorChainHeightEvent
   | AssetDataChangedEvent
   | CoordinatorStorageStateEvent
@@ -593,6 +598,14 @@ export interface CoordinatorChannelStateEvent {
  * 设计缘由：链高度是公共链状态，不归属任何 owner，因此没有 activePublicKeyHex，
  * 也不在锁定时被清空。值只由 `chain.chain-height-sync` 后台任务写入；页面只读。
  */
+export interface CoordinatorChainFeeEvent {
+  topic: "chain.fees";
+  type: "chain.fees.changed";
+  chainFeeRevision: number;
+  sessionEpoch: SessionEpoch;
+  chainFees: ChainFeeSnapshots;
+}
+
 export interface CoordinatorChainHeightEvent {
   topic: "chain.height";
   type: "chain.height.changed";
@@ -705,7 +718,7 @@ export interface AssetDataChangedEvent {
 export interface CoordinatorTopicBaseline {
   topic: CoordinatorTopic;
   baselineRevision: number;
-  snapshot: SessionStateEvent | BackgroundSnapshotEvent | CoordinatorChainHeightEvent | AssetDataChangedEvent | CoordinatorStorageStateEvent | CoordinatorMsFileStateEvent | CoordinatorSatStateEvent | CoordinatorChannelStateEvent | CoordinatorContactsPresenceEvent | CoordinatorWorkerUnitStateEvent;
+  snapshot: SessionStateEvent | BackgroundSnapshotEvent | CoordinatorChainFeeEvent | CoordinatorChainHeightEvent | AssetDataChangedEvent | CoordinatorStorageStateEvent | CoordinatorMsFileStateEvent | CoordinatorSatStateEvent | CoordinatorChannelStateEvent | CoordinatorContactsPresenceEvent | CoordinatorWorkerUnitStateEvent;
   sessionEpoch: SessionEpoch;
 }
 
@@ -823,6 +836,7 @@ export interface SessionCoordinatorClient {
   getActivePublicKeyHex(): string | undefined;
   /** 读取 Coordinator 广播的最新链高度快照；纯内存读取，不会发起网络请求。 */
   getChainHeightSnapshot(): ChainHeightSnapshot;
+  getChainFeeSnapshots(): ChainFeeSnapshots;
   subscribeTopic(topic: CoordinatorTopic, listener: (event: any) => void): () => void;
   unlock(password: string): Promise<CoordinatorCommandResult>;
   lock(): Promise<CoordinatorCommandResult>;
@@ -859,7 +873,7 @@ export interface SessionCoordinatorClient {
   contactsPresenceSnapshot(): Promise<CoordinatorValueResult<ContactPresenceMap>>;
   /** 读取 SharedWorker 唯一插件意图快照。 */
   /** 提交绝对启停意图；accepted 只表示 Worker 已持久化。 */
-  p2pkhSettingsUpdate(settings: { bsvNetwork: "main" | "test"; feeRateSatoshisPerKb?: Partial<Record<"low" | "medium" | "high", number>> }): Promise<CoordinatorCommandResult>;
+  p2pkhSettingsUpdate(settings: { bsvNetwork: "main" | "test"; feePolicy?: ChainFeePolicy }): Promise<CoordinatorCommandResult>;
   p2pkhProviderConfigGet(providerId: string): Promise<CoordinatorValueResult<P2pkhProviderConfig>>;
   p2pkhProviderConfigUpdate(providerId: string, config: P2pkhProviderConfig): Promise<CoordinatorCommandResult>;
   /** 读取 Coordinator Worker 内存中的 UTXO 快照；`available=false` 表示尚无可信快照。 */
@@ -876,7 +890,7 @@ export interface SessionCoordinatorClient {
 /** Coordinator 的共同只读/生命周期面。插件只能拿到自己的扩展接口。 */
 export type CoordinatorSessionControl = Pick<SessionCoordinatorClient,
   "connect" | "getIsConnected" | "getConnectionState" | "getBootstrapSnapshot" | "getSessionEpoch" |
-  "getActivePublicKeyHex" | "getChainHeightSnapshot" | "subscribeTopic" | "sendActivity"
+  "getActivePublicKeyHex" | "getChainFeeSnapshots" | "getChainHeightSnapshot" | "subscribeTopic" | "sendActivity"
 >;
 
 /** Storage 插件 Coordinator 面。 */

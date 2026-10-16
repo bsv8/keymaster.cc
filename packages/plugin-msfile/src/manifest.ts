@@ -1,3 +1,4 @@
+import { MsFileDemandsPage } from "./MsFileDemandsPage.js";
 import { WINDOW_P2P_WORKER_BRIDGE_CAPABILITY } from "@keymaster/contracts/window-p2p";
 import { createPublicMsFileService } from "./publicMsFileService.js";
 import { setupMsFileUriActions } from "./setupUriActions.js";
@@ -16,6 +17,7 @@ import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 
 import type { I18nPluginResources, PluginManifest, PluginSetup, PluginContext } from "@keymaster/contracts";
 import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
+import { msfileErrorMessage } from "./msfileErrors.js";
 import {
   BREADCRUMB_REGISTRY_CAPABILITY,
   BUSINESS_REGISTRY_CAPABILITY,
@@ -35,6 +37,7 @@ import {
   type SessionCoordinatorClient,
 } from "@keymaster/contracts";
 import { MsFileServiceProxy } from "./msfileServiceProxy.js";
+import { MsFilePurchasesPage } from "./MsFilePurchasesPage.js";
 import { MsFileHomeFileWidget } from "./MsFileHomeFileWidget.js";
 import { MsFileSettings } from "./MsFileSettings.js";
 import { MsFileBucketHomeWidget, MsFileBucketPage } from "./MsFileBucketPage.js";
@@ -51,6 +54,98 @@ const resources: I18nPluginResources = {
   namespace: "common",
   resources: {
     en: {
+      "msfile.settings.seller.maxBlocksPerBatch": "Maximum Blocks per batch (1–64)",
+      "msfile.purchases.file": "File",
+      "msfile.purchases.status": "Purchase status",
+      "msfile.purchases.taskState": "Task status",
+      "msfile.purchases.taskReason": "End reason",
+      "msfile.purchases.taskId": "File task ID",
+      "msfile.purchases.task.active": "In progress",
+      "msfile.purchases.task.ended": "Ended",
+      "msfile.purchases.task.reason.completed": "Completed",
+      "msfile.purchases.task.reason.cancelled": "Cancelled",
+      "msfile.purchases.task.reason.failed": "Failed",
+      "msfile.purchases.task.reason.replaced": "Replaced",
+      "msfile.purchases.funding": "Funding status",
+      "msfile.purchases.action": "Action",
+      "msfile.purchases.amounts": "Fees and funds",
+      "msfile.purchases.pool": "Fee pool",
+      "msfile.purchases.title": "Purchase history",
+      "msfile.demands.title": "File demands",
+      "msfile.demands.quote": "Quote",
+      "msfile.demands.quote.not-quoted": "Not quoted",
+      "msfile.demands.quote.unmatched": "Not matched",
+      "msfile.demands.quote.preparing": "Preparing quote",
+      "msfile.demands.quote.quoted": "Quoted",
+      "msfile.demands.quote.failed": "Quote failed",
+      "msfile.demands.locked": "Unlock the current Key to view file demands.",
+      "msfile.demands.unavailable": "File demand monitor is unavailable.",
+      "msfile.demands.sellerSettings": "Selling settings",
+      "msfile.demands.memory": "Latest 20 verified demands · session memory only",
+      "msfile.demands.lastReceived": "Last received",
+      "msfile.demands.selling": "Sell files",
+      "msfile.demands.enabled": "Enabled",
+      "msfile.demands.disabled": "Disabled",
+      "msfile.demands.subscription": "Demand subscription",
+      "msfile.demands.offNotice": "Selling is off. This page does not subscribe; earlier session records remain visible.",
+      "msfile.demands.connections": "Broadcast connections",
+      "msfile.demands.supplier": "Supplier",
+      "msfile.demands.connection": "Connection",
+      "msfile.demands.receive": "Receive enabled",
+      "msfile.demands.error": "Error",
+      "msfile.demands.noConnections": "No active broadcast runtime. Opening this page does not connect or subscribe.",
+      "msfile.demands.localFile": "Local file",
+      "msfile.demands.received": "Received",
+      "msfile.demands.requester": "Requester",
+      "msfile.demands.requestId": "Demand ID",
+      "msfile.demands.expires": "Expires",
+      "msfile.demands.copy": "Copy",
+      "msfile.demands.expired": "Expired",
+      "msfile.demands.loading": "Reading session memory…",
+      "msfile.demands.empty": "No file demands received in this session.",
+      "msfile.demands.state.available": "Available",
+      "msfile.demands.state.missing": "Not available",
+      "msfile.demands.state.checking": "Checking",
+      "msfile.demands.state.idle": "Not subscribed",
+      "msfile.demands.state.subscribing": "Subscribing",
+      "msfile.demands.state.subscribed": "Subscribed",
+      "msfile.demands.state.retrying": "Retrying",
+      "msfile.demands.state.blocked": "Blocked",
+      "msfile.demands.state.online": "Online",
+      "msfile.demands.state.offline": "Offline",
+      "msfile.demands.state.disconnected": "Disconnected",
+      "msfile.demands.state.degraded": "Degraded",
+      "msfile.demands.state.connecting": "Connecting",
+      "msfile.demands.state.disabled": "Disabled",
+      "msfile.demands.state.error": "Error",
+      "msfile.purchases.detailTitle": "Purchase details",
+      "msfile.purchases.details": "View purchase details",
+      "msfile.purchases.existing": "This file has an active purchase task. Manage it in purchase details.",
+      "msfile.purchases.locked": "Unlock the current Key to view purchases.",
+      "msfile.purchases.unavailable": "Purchase records are currently unavailable.",
+      "msfile.purchases.backHistory": "Back to purchase history",
+      "msfile.purchases.download": "Download a file",
+      "msfile.purchases.refresh": "Refresh records",
+      "msfile.purchases.loading": "Loading purchase records…",
+      "msfile.purchases.notFound": "This purchase was not found under the current Key.",
+      "msfile.purchases.empty": "No purchases under the current Key.",
+      "msfile.purchases.funding.not-opened": "Pool not opened",
+      "msfile.purchases.funding.unknown": "Funding status needs checking",
+      "msfile.purchases.funding.open": "Pool open",
+      "msfile.purchases.funding.closed": "Pool closed",
+      "msfile.purchases.id": "Purchase ID",
+      "msfile.purchases.seller": "Seller",
+      "msfile.purchases.created": "Purchase time",
+      "msfile.purchases.budget": "Opening budget for this purchase",
+      "msfile.purchases.transaction": "Funding transaction",
+      "msfile.purchases.outpoint": "Pool output",
+      "msfile.purchases.refundLock": "Refund lock value",
+      "msfile.purchases.progress": "Verified Blocks",
+      "msfile.purchases.noPool": "This purchase has not opened a pool. A saved budget does not mean funds are locked in a pool.",
+      "msfile.purchases.reconcile": "Check funds / process due refund",
+      "msfile.purchases.reconnect": "Reconnect to seller",
+      "msfile.purchases.cancel": "Cancel purchase before opening",
+      "msfile.purchases.close": "Cancel download and negotiate pool closure",
       "msfile.settings.group": "Local files",
       "msfile.settings.menu": "Local files",
       "msfile.settings.page.title": "Local files",
@@ -87,7 +182,6 @@ const resources: I18nPluginResources = {
       "msfile.settings.bitfsBuyer.priority.speed": "Recent speed first (falls back to price when unknown)",
       "msfile.settings.bitfsBuyer.concurrency": "Concurrent file purchases (1–16)",
       "msfile.settings.bitfsBuyer.sellerConcurrency": "Concurrent seller pools per file (1–16)",
-      "msfile.settings.bitfsBuyer.blocksPerBatch": "File blocks requested per payment batch (1–16, default 10)",
       "msfile.settings.bitfsBuyer.refundDelayBlocks": "Pool refund waiting blocks",
       "msfile.settings.bitfsBuyer.refundDelayBlocksHint": "Counted from the chain height at opening. Applies to new pools; existing pools retain their signed expiry height.",
       "msfile.settings.bitfsBuyer.save": "Save BitFS buyer settings",
@@ -423,6 +517,98 @@ const resources: I18nPluginResources = {
       "msfile.bucket.error.default": "Bucket storage operation failed. Try again."
     },
     "zh-CN": {
+      "msfile.settings.seller.maxBlocksPerBatch": "每批最多接受的 Block 数（1–64）",
+      "msfile.purchases.file": "文件",
+      "msfile.purchases.status": "购买状态",
+      "msfile.purchases.taskState": "任务状态",
+      "msfile.purchases.taskReason": "结束原因",
+      "msfile.purchases.taskId": "文件任务编号",
+      "msfile.purchases.task.active": "进行中",
+      "msfile.purchases.task.ended": "已结束",
+      "msfile.purchases.task.reason.completed": "完成",
+      "msfile.purchases.task.reason.cancelled": "取消",
+      "msfile.purchases.task.reason.failed": "失败",
+      "msfile.purchases.task.reason.replaced": "被替换",
+      "msfile.purchases.funding": "资金状态",
+      "msfile.purchases.action": "操作",
+      "msfile.purchases.amounts": "费用与资金",
+      "msfile.purchases.pool": "费用池",
+      "msfile.purchases.title": "购买历史",
+      "msfile.demands.title": "文件需求",
+      "msfile.demands.quote": "报价",
+      "msfile.demands.quote.not-quoted": "未报价",
+      "msfile.demands.quote.unmatched": "未匹配",
+      "msfile.demands.quote.preparing": "准备中",
+      "msfile.demands.quote.quoted": "已报价",
+      "msfile.demands.quote.failed": "报价失败",
+      "msfile.demands.locked": "请解锁当前 Key 后查看文件需求。",
+      "msfile.demands.unavailable": "文件需求观察当前不可用。",
+      "msfile.demands.sellerSettings": "出售文件设置",
+      "msfile.demands.memory": "最新 20 条已验签需求 · 仅本次会话内存",
+      "msfile.demands.lastReceived": "最近收到",
+      "msfile.demands.selling": "出售文件",
+      "msfile.demands.enabled": "开启",
+      "msfile.demands.disabled": "关闭",
+      "msfile.demands.subscription": "需求订阅",
+      "msfile.demands.offNotice": "出售已关闭。本页不会订阅，仍保留本次会话先前听到的需求。",
+      "msfile.demands.connections": "广播连接",
+      "msfile.demands.supplier": "广播服务",
+      "msfile.demands.connection": "连接状态",
+      "msfile.demands.receive": "允许接收",
+      "msfile.demands.error": "错误",
+      "msfile.demands.noConnections": "广播运行态尚未就绪；打开本页不会连接或订阅。",
+      "msfile.demands.localFile": "本机文件",
+      "msfile.demands.received": "接收时间",
+      "msfile.demands.requester": "请求方",
+      "msfile.demands.requestId": "需求编号",
+      "msfile.demands.expires": "有效期",
+      "msfile.demands.copy": "复制",
+      "msfile.demands.expired": "已过期",
+      "msfile.demands.loading": "正在读取会话内存…",
+      "msfile.demands.empty": "本次会话尚未收到文件需求。",
+      "msfile.demands.state.available": "完整可用",
+      "msfile.demands.state.missing": "无完整文件",
+      "msfile.demands.state.checking": "核对中",
+      "msfile.demands.state.idle": "未订阅",
+      "msfile.demands.state.subscribing": "订阅中",
+      "msfile.demands.state.subscribed": "已订阅",
+      "msfile.demands.state.retrying": "重试中",
+      "msfile.demands.state.blocked": "受阻",
+      "msfile.demands.state.online": "在线",
+      "msfile.demands.state.offline": "离线",
+      "msfile.demands.state.disconnected": "已断开",
+      "msfile.demands.state.degraded": "连接异常",
+      "msfile.demands.state.connecting": "连接中",
+      "msfile.demands.state.disabled": "已关闭",
+      "msfile.demands.state.error": "错误",
+      "msfile.purchases.detailTitle": "购买详情",
+      "msfile.purchases.details": "查看购买详情",
+      "msfile.purchases.existing": "该文件已有进行中采购任务，请前往购买详情管理。",
+      "msfile.purchases.locked": "请解锁当前 Key 后查看购买记录。",
+      "msfile.purchases.unavailable": "购买记录服务当前不可用。",
+      "msfile.purchases.backHistory": "返回购买历史",
+      "msfile.purchases.download": "下载文件",
+      "msfile.purchases.refresh": "刷新记录",
+      "msfile.purchases.loading": "正在读取购买记录…",
+      "msfile.purchases.notFound": "当前 Key 下没有这条购买记录。",
+      "msfile.purchases.empty": "当前 Key 暂无购买记录。",
+      "msfile.purchases.funding.not-opened": "未开池",
+      "msfile.purchases.funding.unknown": "资金状态待核对",
+      "msfile.purchases.funding.open": "费用池已开立",
+      "msfile.purchases.funding.closed": "费用池已关闭",
+      "msfile.purchases.id": "购买编号",
+      "msfile.purchases.seller": "卖家",
+      "msfile.purchases.created": "购买时间",
+      "msfile.purchases.budget": "该次购买的开池预算",
+      "msfile.purchases.transaction": "开池交易",
+      "msfile.purchases.outpoint": "费用池输出",
+      "msfile.purchases.refundLock": "退款解锁值",
+      "msfile.purchases.progress": "已验收 Block",
+      "msfile.purchases.noPool": "该次购买尚未开成费用池；保存的预算不代表资金已经锁入池中。",
+      "msfile.purchases.reconcile": "核对资金／处理到期退款",
+      "msfile.purchases.reconnect": "重新连接卖家",
+      "msfile.purchases.cancel": "取消未开池购买",
+      "msfile.purchases.close": "取消下载并与卖家协商关池",
       "msfile.settings.group": "本地文件",
       "msfile.settings.menu": "本地文件",
       "msfile.settings.page.title": "本地文件",
@@ -459,7 +645,6 @@ const resources: I18nPluginResources = {
       "msfile.settings.bitfsBuyer.priority.speed": "最近速度优先（无速度记录时按价格）",
       "msfile.settings.bitfsBuyer.concurrency": "同时购买文件任务数（1–16）",
       "msfile.settings.bitfsBuyer.sellerConcurrency": "单个文件同时传输的卖家数（1–16）",
-      "msfile.settings.bitfsBuyer.blocksPerBatch": "每次请求的文件块数（1–16，默认 10）",
       "msfile.settings.bitfsBuyer.refundDelayBlocks": "费用池退款等待区块数",
       "msfile.settings.bitfsBuyer.refundDelayBlocksHint": "从开池时的区块高度起计算。仅影响新费用池，已开池的退款到期高度保持不变。",
       "msfile.settings.bitfsBuyer.save": "保存 BitFS 买方设置",
@@ -899,6 +1084,7 @@ const msfilePluginDefinition = {
         globalBlockReadConcurrency: number;
         globalStatConcurrency: number;
         approvals: import("@keymaster/contracts").MsFilePendingApprovalView[];
+        error?: { code: string; message: string };
       },
       readonly string[]
     >({
@@ -912,6 +1098,7 @@ const msfilePluginDefinition = {
         let globalSeedReadConcurrency = MSFILE_READ_CONCURRENCY_RECOMMENDED.globalSeedReadConcurrency;
         let globalBlockReadConcurrency = MSFILE_READ_CONCURRENCY_RECOMMENDED.globalBlockReadConcurrency;
         let globalStatConcurrency = MSFILE_READ_CONCURRENCY_RECOMMENDED.globalStatConcurrency;
+        let error: { code: string; message: string } | undefined;
         try {
           const snapshot = await service.getSettingsSnapshot();
           globalSettings = snapshot.globalSettings;
@@ -920,8 +1107,12 @@ const msfilePluginDefinition = {
           globalSeedReadConcurrency = snapshot.globalSeedReadConcurrency;
           globalBlockReadConcurrency = snapshot.globalBlockReadConcurrency;
           globalStatConcurrency = snapshot.globalStatConcurrency;
-        } catch {
-          // Coordinator 未就绪时按 null 展示（fail closed）。
+        } catch (cause) {
+          // 仍按 null 阻止继续读取，但保留具体原因，不能让存储或恢复异常
+          // 在资源边界变成只有 unavailable 的空快照。
+          const code = cause && typeof cause === "object" && "code" in cause && typeof cause.code === "string"
+            ? cause.code : "msfile_unavailable";
+          error = { code, message: msfileErrorMessage(cause, code) };
         }
         return {
           status: service.status(),
@@ -932,6 +1123,7 @@ const msfilePluginDefinition = {
           globalBlockReadConcurrency,
           globalStatConcurrency,
           approvals: service.listPendingApprovals(),
+          ...(error ? { error } : {}),
         };
       },
       subscribe: (_args, _context, invalidate) => service.subscribe(invalidate),
@@ -981,6 +1173,20 @@ const msfilePluginDefinition = {
       kind: "page",
       render: () => createElement(MsFileResourceProvider, { reader, children: createElement(MsFileBucketPage) }),
     });
+    pages.view.register({ id: "msfile.demands", path: "/msfile/demands", kind: "page",
+      label: { key: "msfile.demands.title", fallback: "File demands" },
+      render: () => createElement(MsFileResourceProvider, { reader, children: createElement(MsFileDemandsPage) }),
+    });
+    pages.view.register({
+      id: "msfile.purchases", path: "/msfile/purchases", kind: "page",
+      label: { key: "msfile.purchases.title", fallback: "Purchase history" },
+      render: () => createElement(MsFileResourceProvider, { reader, children: createElement(MsFilePurchasesPage) }),
+    });
+    pages.view.register({
+      id: "msfile.purchase.detail", path: "/msfile/purchases/:sessionId", kind: "page",
+      label: { key: "msfile.purchases.detailTitle", fallback: "Purchase details" },
+      render: location => createElement(MsFileResourceProvider, { reader, children: createElement(MsFilePurchasesPage, { sessionId: location.params.sessionId }) }),
+    });
     const settingsRouteId = "msfile.settings";
     pages.view.register({
       id: settingsRouteId,
@@ -1005,6 +1211,15 @@ const msfilePluginDefinition = {
         routeId: entryRouteId,
         visibleWhen: ({ unlocked }) => unlocked
       },
+    });
+    business.registerFeature(MSFILE_PLUGIN_ID, "home", {
+      id: "home.msfile-purchases", label: { key: "msfile.purchases.title", fallback: "Purchase history" }, order: 615,
+      entry: { path: "/msfile/purchases", routeId: "msfile.purchases", visibleWhen: ({ unlocked }) => unlocked,
+        activeWhen: path => path.startsWith("/msfile/purchases/") },
+    });
+    business.registerFeature(MSFILE_PLUGIN_ID, "home", { id: "home.msfile-demands", order: 612,
+      label: { key: "msfile.demands.title", fallback: "File demands" },
+      entry: { path: "/msfile/demands", routeId: "msfile.demands", visibleWhen: ({ unlocked }) => unlocked },
     });
     // 桶存储文件：正式页面入口 `/msfile/storage`，首页 MSFile 空间复用同一组件。
     business.registerFeature(MSFILE_PLUGIN_ID, "home", {

@@ -18,8 +18,5 @@ minimumReleaseAgeExclude:
   - keymaster-hold@0.1.0
   - keyhold@2.1.0
   - sat-subscription-protocol@0.3.0
-  - go-bitfs@0.3.3
+  - go-bitfs@0.5.0
   - webloom-framework@0.6.0
-
-patchedDependencies:
-  go-bitfs@0.3.3: patches/go-bitfs@0.3.3.patch

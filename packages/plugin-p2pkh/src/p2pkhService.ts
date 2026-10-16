@@ -112,7 +112,7 @@ function sameGlobalSettings(left: P2pkhGlobalSettings, right: P2pkhGlobalSetting
   if (left.bsvNetwork !== right.bsvNetwork) return false;
   const a = resolveP2pkhFeeRateSatoshisPerKb(left);
   const b = resolveP2pkhFeeRateSatoshisPerKb(right);
-  return a.low === b.low && a.medium === b.medium && a.high === b.high;
+  return a === b && JSON.stringify(left.feePolicy) === JSON.stringify(right.feePolicy);
 }
 
 /** UTXO 快照项 → service 内部 UTXO 视图（script 由地址确定性生成）。 */
@@ -178,6 +178,8 @@ export interface P2pkhServiceDeps {
   /** SharedWorker 内部兼容面，仅供 sat top-up 装配；页面 manifest 不注入。 */
   broadcastWithCoordinator?: (input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; submission?: P2pkhBroadcastSubmission }) => Promise<CoordinatorValueResult<unknown>>;
   assetDataNotifier?: AssetDataNotifier;
+  chainFees?: Pick<import("@keymaster/contracts").ChainFeeReader, "get" | "subscribe">;
+  effectiveFeeRate?: (network: "main" | "test") => number;
   /**
    * 选币前的门禁：等待受保护输出登记恢复完成。
    *
@@ -453,6 +455,10 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     messageBusUnsubs.push(off);
     return off;
   }
+  const removeFeeListener = deps.chainFees?.subscribe(() => {
+    for (const listener of settingsListeners) { try { listener(getCurrentSettings()); } catch { /* observer isolation */ } }
+  });
+  if (removeFeeListener) messageBusUnsubs.push(removeFeeListener);
   let status: P2pkhSyncStatus = "idle";
 
   function setStatus(next: P2pkhSyncStatus) {
@@ -463,7 +469,9 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
   }
 
   function getCurrentSettings(): P2pkhGlobalSettings {
-    return { ...cachedSettings, bsvNetwork: deps.walletState.snapshot().activeKeyIdentity?.bsvNetwork ?? cachedSettings.bsvNetwork };
+    const bsvNetwork = deps.walletState.snapshot().activeKeyIdentity?.bsvNetwork ?? cachedSettings.bsvNetwork;
+    const fee = deps.chainFees?.get(bsvNetwork);
+    return { bsvNetwork, feeRateSatoshisPerKb: fee?.effectiveSatoshisPerKb ?? deps.effectiveFeeRate?.(bsvNetwork) ?? cachedSettings.feeRateSatoshisPerKb ?? 100, ...(fee ? { feePolicy: fee.policy } : {}) };
   }
 
   async function listAllResources(): Promise<P2pkhKeyResource[]> {
@@ -974,7 +982,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       if (assetIdToNetwork(input.assetId) !== settings.bsvNetwork) {
         return Promise.reject(new Error("Testnet is not enabled in P2PKH settings"));
       }
-      return transfer.prepare(input);
+      return transfer.prepare({ ...input, feeRateSatoshisPerKb: input.feeRateSatoshisPerKb ?? resolveP2pkhFeeRateSatoshisPerKb(settings) });
     },
     submitTransfer: (preview) => {
       if (!preview.ownerPublicKeyHex) {
@@ -993,9 +1001,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       });
     },
 
-    getGlobalSettings() {
-      return { ...cachedSettings, bsvNetwork: deps.walletState.snapshot().activeKeyIdentity?.bsvNetwork ?? cachedSettings.bsvNetwork };
-    },
+    getGlobalSettings() { return getCurrentSettings(); },
     onGlobalSettingsChange(handler) {
       settingsListeners.add(handler);
       return () => settingsListeners.delete(handler);
@@ -1005,9 +1011,12 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       if (deps.coordinator?.p2pkhSettingsUpdate) {
         const result = await deps.coordinator.p2pkhSettingsUpdate({
           bsvNetwork: settings.bsvNetwork,
-          ...(settings.feeRateSatoshisPerKb === undefined ? {} : { feeRateSatoshisPerKb: settings.feeRateSatoshisPerKb })
+          ...(settings.feePolicy === undefined ? {} : { feePolicy: settings.feePolicy })
         });
-        if (result.status !== "accepted" && result.status !== "ok") throw new Error("Coordinator rejected P2PKH network settings");
+        if (result.status !== "accepted" && result.status !== "ok") {
+          const detail = "message" in result && typeof result.message === "string" ? result.message : "";
+          throw new Error(`保存手续费率失败（${result.status}）${detail ? `：${detail}` : ""}`);
+        }
       }
       setCachedSettingsAndEmit(settings);
       if (prev.bsvNetwork !== settings.bsvNetwork) {

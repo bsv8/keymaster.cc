@@ -1,3 +1,4 @@
+import { parseWocFeeRecommendation } from "@keymaster/contracts";
 import { observedPropagation } from "./transactionObservation.js";
 // packages/plugin-woc/src/wocActor.ts
 // WOC actor mailbox：注册 target="woc" 的 handler 统一处理 WOC 消息。
@@ -824,6 +825,11 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
     });
   }
 
+  function getFeeRecommendation(network: BsvNetwork, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }) {
+    return enqueue({ priority: priorityOf(opts.priority ?? "background"), signal: opts.signal, label: WOC_MSG.FEE_RECOMMENDATION,
+      fn: async signal => parseWocFeeRecommendation(await fetchJson<unknown>(network, "/feerecommendation", { method: "GET" }, signal, opts.timeoutMs)) });
+  }
+
   function getChainHeight(network: BsvNetwork, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<number> {
     return enqueue({
       priority: priorityOf(opts.priority ?? "background"), signal: opts.signal, label: WOC_MSG.CHAIN_HEIGHT,
@@ -1212,6 +1218,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         const p = payload as WocTransactionObservationPayload;
         return getTransactionObservation(p.network, p.canonicalTxid, opts);
       }
+      case WOC_MSG.FEE_RECOMMENDATION: return getFeeRecommendation((payload as WocChainHeightPayload).network, opts);
       case WOC_MSG.CHAIN_HEIGHT: {
         const p = payload as WocChainHeightPayload;
         return getChainHeight(p.network, opts);
@@ -1280,6 +1287,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
       WOC_MSG.HISTORY_UNCONFIRMED,
       WOC_MSG.TX_OBSERVATION,
       WOC_MSG.CHAIN_HEIGHT,
+      WOC_MSG.FEE_RECOMMENDATION,
       WOC_MSG.TX_SPENT_OUTPUT,
       WOC_MSG.TX_RAW,
       WOC_MSG.TX_BROADCAST,

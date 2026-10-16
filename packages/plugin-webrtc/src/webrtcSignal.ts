@@ -1,8 +1,9 @@
 // WebRTC 信令适配层。
 //
-// 线上 body 必须完全采用 ChannelProtocol 的
-// `bsv8.webrtc.signal.v1` 结构：
+// 内部复用 ChannelProtocol 的严格信令类型与 parser：
 // `{ request_message_id, session_id, signal }`。
+// 联系人通信在线上使用 bsv8.message.v1 的 keymaster.webrtc.signal 内容，
+// 将 request_message_id 映射为原私信邀请的 request_id，不依赖公开 Hash 请求。
 //
 // ChannelProtocol V1 只定义 offer / answer / ice-candidate /
 // end-of-candidates 四个分支。reject、busy、hangup 属于本地会话控制；文件
@@ -57,7 +58,7 @@ export type WebrtcTransferRejectReason = "busy" | "invalid_state" | "file_too_la
 /** 本地回退建议；V1 不通过信令发送。 */
 export type WebrtcSuggestedMode = WebrtcMode;
 
-/** Keymaster 使用的 WebRTC body。字段与 ChannelProtocol 完全一致。 */
+/** 内部 WebRTC body；联系人 APP 信令在服务边界映射邀请编号。 */
 export type WebrtcSignal = WebRTCSignalV1Body;
 
 /** offer body 的精确类型。 */

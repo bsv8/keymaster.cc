@@ -52,7 +52,7 @@ import {
 } from "@keymaster/contracts";
 import type { MsFileLocalContentSource } from "./bitfs/localContentSource.js";
 import { sanitizeAppOverride, type MsFileRepository } from "./storage/msfileRepository.js";
-import { MsFileServiceError } from "./msfileErrors.js";
+import { MsFileServiceError, msfileErrorMessage } from "./msfileErrors.js";
 import { validateBlockContent, validateSeedContent } from "./contentValidation.js";
 import { toArrayBuffer } from "./sha256.js";
 import { createUnavailableMsFileTransport, type MsFileTransport } from "./msfileTransport.js";
@@ -254,7 +254,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
       throw new MsFileServiceError("msfile_unavailable", "MSFile service was disposed");
     }
     if (this.initializationError) {
-      throw new MsFileServiceError("msfile_unavailable", "MSFile failed to initialize its configuration store");
+      throw new MsFileServiceError("msfile_unavailable", `MSFile failed to initialize its configuration store: ${msfileErrorMessage(this.initializationError, "unknown error")}`);
     }
   }
 

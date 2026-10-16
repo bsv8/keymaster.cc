@@ -1,3 +1,4 @@
+import { parseChainFeePolicy, parseWocFeeRecommendation, resolveChainFeeSnapshot, type ChainFeeSnapshots } from "./chainFees.js";
 import { validateNetworkIdentity } from "./networkIdentity.js";
 // Coordinator 与 WebLoom Runtime 之间的 typed capability 契约。
 //
@@ -249,9 +250,10 @@ export type CoordinatorMsFileControlResultFor<C extends CoordinatorMsFileControl
   C extends { type: "settings.readConcurrency.get" } ? MsFileReadConcurrencySettings :
   C extends { type: "settings.readConcurrency.update" | "settings.readConcurrency.reset" | "settings.mediaBlockReadConcurrency.update" | "settings.global.update" | "settings.seller.update" | "settings.bitfsBuyer.update" | "bitfs.buyerPriceLimit.update" | "supplier.upsert" | "supplier.delete" | "app-policy.update" | "app-policy.clear" | "approval.resolve" } ? null :
   C extends { type: "settings.mediaBlockReadConcurrency.get" } ? number :
-  C extends { type: "bitfs.demand.publish" | "bitfs.demand.snapshot" | "bitfs.purchase.start" | "bitfs.purchase.cancel" } ? MsFileBitfsDemandSnapshot :
+  C extends { type: "bitfs.demand.publish" | "bitfs.demand.snapshot" | "bitfs.purchase.start" | "bitfs.purchase.cancel" | "bitfs.purchase.reconnect" } ? MsFileBitfsDemandSnapshot :
   C extends { type: "bitfs.arbitration.list" } ? import("./msfile.js").MsFileArbitrationTask[] :
-  C extends { type: "bitfs.arbitration.operate" } ? null :
+  C extends { type: "bitfs.arbitration.operate" | "bitfs.purchase.reconcile" } ? null :
+  C extends { type: "bitfs.demands.monitor" } ? import("./msfile.js").MsFileDemandMonitorSnapshot :
   C extends { type: "bitfs.purchase.tasks.list" } ? MsFileBitfsTaskSnapshot[] :
   C extends { type: "bitfs.demand.cancel" } ? null :
   C extends { type: "supplier.probe" } ? MsFileSupplierProbeResult :
@@ -1149,7 +1151,7 @@ function parseMsFileControl(value: unknown): CoordinatorMsFileControl {
   if (type === "settings.get" || type === "settings.readConcurrency.get" || type === "settings.readConcurrency.reset"
     || type === "settings.bitfsBuyer.get"
     || type === "settings.mediaBlockReadConcurrency.get" || type === "app-authorizations.list" || type === "approvals.pending"
-    || type === "bitfs.purchase.tasks.list" || type === "bitfs.arbitration.list") {
+    || type === "bitfs.purchase.tasks.list" || type === "bitfs.demands.monitor" || type === "bitfs.arbitration.list") {
     return { type };
   }
   if (type === "bitfs.demand.publish" || type === "bitfs.demand.snapshot" || type === "bitfs.demand.cancel") {
@@ -1168,7 +1170,7 @@ function parseMsFileControl(value: unknown): CoordinatorMsFileControl {
       ...(maxFullBlockPriceSatoshis === undefined ? {} : { maxFullBlockPriceSatoshis: parseMsFileSatoshiAmount(maxFullBlockPriceSatoshis, `MSFile control.${type}.maxFullBlockPriceSatoshis`) }),
     };
   }
-  if (type === "bitfs.purchase.cancel") {
+  if (type === "bitfs.purchase.cancel" || type === "bitfs.purchase.reconcile" || type === "bitfs.purchase.reconnect") {
     const seedHashHex = text(control.seedHashHex, `MSFile control.${type}.seedHashHex`, 64);
     if (!isValidMsFileHashHex(seedHashHex)) throw new TypeError("Coordinator MSFile purchase Seed Hash is invalid");
     return { type, seedHashHex, sessionId: text(control.sessionId, `MSFile control.${type}.sessionId`, 128) };
@@ -1566,23 +1568,11 @@ function parseCoordinatorRequest(value: unknown): CoordinatorRpcRequest {
     case "autolock.settings.update": return { kind, settings: parseAutoLockSettings(request.settings), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "p2pkh.settings.update": {
       const settings = expectRecord(request.settings, kind + ".settings");
-      const feeRates = settings.feeRateSatoshisPerKb;
-      let parsedFeeRates: Partial<Record<"low" | "medium" | "high", number>> | undefined;
-      if (feeRates !== undefined) {
-        const values = expectRecord(feeRates, kind + ".settings.feeRateSatoshisPerKb");
-        parsedFeeRates = {};
-        for (const tier of ["low", "medium", "high"] as const) {
-          if (values[tier] === undefined) continue;
-          const value = integer(values[tier], kind + `.settings.feeRateSatoshisPerKb.${tier}`);
-          if (value < 1) throw new TypeError(`Coordinator ${kind}.settings.feeRateSatoshisPerKb.${tier} is invalid`);
-          parsedFeeRates[tier] = value;
-        }
-      }
       return {
         kind,
         settings: {
           bsvNetwork: enumValue(settings.bsvNetwork, ["main", "test"] as const, kind + ".settings.bsvNetwork"),
-          ...(parsedFeeRates === undefined ? {} : { feeRateSatoshisPerKb: parsedFeeRates })
+          ...(settings.feePolicy === undefined ? {} : { feePolicy: parseChainFeePolicy(settings.feePolicy) })
         },
         expectedSessionEpoch: epoch("expectedSessionEpoch")
       };
@@ -2708,7 +2698,9 @@ function parseMsFileControlResultFor(control: CoordinatorMsFileControl, value: u
     case "bitfs.demand.publish":
     case "bitfs.demand.snapshot":
     case "bitfs.purchase.start":
-    case "bitfs.purchase.cancel": return parseMsFileBitfsDemandSnapshot(value, field);
+    case "bitfs.purchase.cancel":
+    case "bitfs.purchase.reconnect": return parseMsFileBitfsDemandSnapshot(value, field);
+    case "bitfs.purchase.reconcile": return null;
     case "bitfs.arbitration.operate": return null;
     case "bitfs.arbitration.list": {
       if (!Array.isArray(value) || value.length > 1000) throw new TypeError("仲裁记录列表不合法");
@@ -2719,6 +2711,25 @@ function parseMsFileControlResultFor(control: CoordinatorMsFileControl, value: u
           message: text(entry.message, "arbitration.message", 4096), txid: entry.txid === null ? null : text(entry.txid, "arbitration.txid", 64),
           action: enumValue(entry.action, ["submit", "retrieve", "check"] as const, "arbitration.action") };
       });
+    }
+    case "bitfs.demands.monitor": {
+      const row = expectRecord(value, field), network = expectRecord(row.network, "demand network");
+      if (!Array.isArray(row.demands) || row.demands.length > 20 || !Array.isArray(network.suppliers) || network.suppliers.length > 1000) throw new TypeError("文件需求观察列表超限");
+      return { demands: row.demands.map(item => {
+        const demand = expectRecord(item, "heard demand");
+        const seedHashHex = text(demand.seedHashHex, "demand hash", 64);
+        if (!isValidMsFileHashHex(seedHashHex)) throw new TypeError("文件需求 Hash 无效");
+        return { requestMessageId: text(demand.requestMessageId, "demand id", 128), requesterPublicKeyHex: text(demand.requesterPublicKeyHex, "requester", 66), seedHashHex,
+          receivedAtMs: boundedNumber(demand.receivedAtMs, "received time"), expiresAtMs: boundedNumber(demand.expiresAtMs, "expiry"),
+          availability: enumValue(demand.availability, ["checking", "available", "missing"] as const, "availability"),
+          quoteStatus: enumValue(demand.quoteStatus, ["not-quoted", "unmatched", "preparing", "quoted", "failed"] as const, "quote status"),
+          quotedAtMs: demand.quotedAtMs === null ? null : boundedNumber(demand.quotedAtMs, "quoted time"),
+          quoteMessage: demand.quoteMessage === null ? null : text(demand.quoteMessage, "quote message", 4096) };
+      }), lastReceivedAtMs: row.lastReceivedAtMs === null ? null : boundedNumber(row.lastReceivedAtMs, "last received"), sellerEnabled: booleanValue(row.sellerEnabled, "seller enabled"),
+        network: { channel: text(network.channel, "channel", 256), subscriptionPhase: text(network.subscriptionPhase, "subscription", 64), error: network.error === null ? null : text(network.error, "network error", 4096),
+          suppliers: network.suppliers.map(item => { const supplier = expectRecord(item, "demand supplier"); return {
+            supplierId: text(supplier.supplierId, "supplier id", 128), name: text(supplier.name, "supplier name", 256), connectionState: text(supplier.connectionState, "connection state", 64),
+            receiving: booleanValue(supplier.receiving, "receiving"), subscribed: booleanValue(supplier.subscribed, "subscribed"), error: supplier.error === null ? null : text(supplier.error, "supplier error", 4096) }; }) } };
     }
     case "bitfs.purchase.tasks.list": {
       if (!Array.isArray(value) || value.length > 1_000) throw new TypeError(`Coordinator ${field} must be a bounded array`);
@@ -2773,6 +2784,7 @@ function parseMsFileBitfsQuoteView(value: unknown, field: string): MsFileBitfsQu
     if (!isValidMsFileSupplierPublicKeyHex(publicKeyHex)) throw new TypeError(`Coordinator ${field}.supportedArbiterPublicKeys[${index}] is invalid`);
     return publicKeyHex;
   });
+  if (integer(quote.maxBlocksPerBatch, `${field}.maxBlocksPerBatch`, 64) < 1) throw new TypeError("报价批次上限必须为正整数");
   const quoteExpiresAtUnixSeconds = text(quote.quoteExpiresAtUnixSeconds, `${field}.quoteExpiresAtUnixSeconds`, 20);
   if (!/^[1-9][0-9]*$/u.test(quoteExpiresAtUnixSeconds)) throw new TypeError(`Coordinator ${field}.quoteExpiresAtUnixSeconds is invalid`);
   const recentBytesPerSecond = quote.recentBytesPerSecond === undefined
@@ -2787,8 +2799,10 @@ function parseMsFileBitfsQuoteView(value: unknown, field: string): MsFileBitfsQu
     sellerPublicKeyHex,
     seedPriceSatoshis: parseMsFileSatoshiAmount(quote.seedPriceSatoshis, `${field}.seedPriceSatoshis`),
     fullBlockPriceSatoshis: parseMsFileSatoshiAmount(quote.fullBlockPriceSatoshis, `${field}.fullBlockPriceSatoshis`),
+    maxBlocksPerBatch: integer(quote.maxBlocksPerBatch, `${field}.maxBlocksPerBatch`, 64),
     quoteExpiresAtUnixSeconds,
     recommendedFilename: text(quote.recommendedFilename, `${field}.recommendedFilename`, 512),
+    mediaType: text(quote.mediaType, `${field}.mediaType`, 255),
     supportedArbiterPublicKeys,
     ...(recentBytesPerSecond === undefined ? {} : { recentBytesPerSecond }),
   };
@@ -2865,6 +2879,15 @@ function parseMsFileBitfsTaskSnapshot(value: unknown, field: string): MsFileBitf
   const canReconnect = row.canReconnect === undefined ? undefined : booleanValue(row.canReconnect, `${field}.canReconnect`);
   return {
     ...progress,
+    ...(row.taskId === undefined ? {} : { taskId: text(row.taskId, `${field}.taskId`, 128) }),
+    ...(row.taskState === undefined ? {} : { taskState: enumValue(row.taskState, ["active", "ended"] as const, `${field}.taskState`) }),
+    ...(row.taskEndReason === undefined ? {} : { taskEndReason: enumValue(row.taskEndReason, ["completed", "cancelled", "failed", "replaced"] as const, `${field}.taskEndReason`) }),
+    ...(row.createdAt === undefined ? {} : { createdAt: text(row.createdAt, `${field}.createdAt`, 64) }),
+    ...(row.updatedAt === undefined ? {} : { updatedAt: text(row.updatedAt, `${field}.updatedAt`, 64) }),
+    ...(row.fundingState === undefined ? {} : { fundingState: enumValue(row.fundingState, ["not-opened", "unknown", "open", "closed"] as const, `${field}.fundingState`) }),
+    ...(row.fundingTxid === undefined ? {} : { fundingTxid: row.fundingTxid === null ? null : text(row.fundingTxid, `${field}.fundingTxid`, 64) }),
+    ...(row.poolOutpoint === undefined ? {} : { poolOutpoint: row.poolOutpoint === null ? null : text(row.poolOutpoint, `${field}.poolOutpoint`, 80) }),
+    ...(row.refundLockTime === undefined ? {} : { refundLockTime: row.refundLockTime === null ? null : boundedNumber(row.refundLockTime, `${field}.refundLockTime`, 0, 0xffffffff) }),
     seedHashHex,
     sellerPublicKeyHex,
     recommendedFilename,
@@ -2905,6 +2928,7 @@ function parseMsFileBitfsDemandSnapshot(value: unknown, field: string): MsFileBi
     expiresAtMs,
     quotes: snapshot.quotes.map((item, index) => parseMsFileBitfsQuoteView(item, `${field}.quotes[${index}]`)),
     ...(purchase === undefined ? {} : { purchase }),
+    ...(snapshot.existingPurchaseSessionId === undefined ? {} : { existingPurchaseSessionId: snapshot.existingPurchaseSessionId === null ? null : text(snapshot.existingPurchaseSessionId, `${field}.existingPurchaseSessionId`, 128) }),
     ...(currentMaxFullBlockPriceSatoshis === undefined ? {} : { currentMaxFullBlockPriceSatoshis }),
   };
 }
@@ -3214,7 +3238,7 @@ function parseCoordinatorTopic(value: unknown, field: string): CoordinatorTopic 
     case "session.state": case "background.snapshot": case "asset.data-changed":
     case "storage.state": case "msfile.state":
     case "sat.events": case "channel.events": case "contacts.presence":
-    case "worker.units": case "chain.height":
+    case "worker.units": case "chain.fees": case "chain.height":
       return topic;
     default:
       throw new TypeError(`Coordinator ${field} is not supported`);
@@ -3703,6 +3727,26 @@ function parseTopicEventBody(value: unknown): CoordinatorTopicEvent {
   switch (topic) {
     case "session.state": return parseSessionStateEvent(value);
     case "background.snapshot": return parseBackgroundSnapshotEvent(value);
+    case "chain.fees": {
+      const event = topicEnvelope(value, "chain.fees", "chain.fees.changed");
+      const input = expectRecord(event.chainFees, "event.chainFees");
+      const chainFees = {} as ChainFeeSnapshots;
+      for (const network of ["main", "test"] as const) {
+        const row = expectRecord(input[network], "event.chainFees." + network);
+        if (row.network !== network) throw new TypeError("Fee snapshot network mismatch");
+        const policy = parseChainFeePolicy(row.policy);
+        const recommendation = row.recommendation === undefined ? undefined : parseWocFeeRecommendation(row.recommendation);
+        const projected = resolveChainFeeSnapshot(network, policy, { ...row, recommendation } as unknown as ChainFeeSnapshots[typeof network]);
+        if (projected.effectiveSatoshisPerKb !== row.effectiveSatoshisPerKb || projected.source !== row.source) throw new TypeError("Invalid effective fee rate");
+        chainFees[network] = { network, policy, source: projected.source, effectiveSatoshisPerKb: projected.effectiveSatoshisPerKb,
+          ...(recommendation ? { recommendation } : {}),
+          ...(row.updatedAtMs === undefined ? {} : { updatedAtMs: boundedNumber(row.updatedAtMs, "fee.updatedAtMs") }),
+          ...(row.lastAttemptAtMs === undefined ? {} : { lastAttemptAtMs: boundedNumber(row.lastAttemptAtMs, "fee.lastAttemptAtMs") }),
+          ...(row.error === undefined ? {} : { error: text(row.error, "fee.error", 4096) }) };
+        if (recommendation && chainFees[network].updatedAtMs === undefined) throw new TypeError("Fee recommendation requires timestamp");
+      }
+      return { topic: "chain.fees", type: "chain.fees.changed", sessionEpoch: text(event.sessionEpoch, "event.sessionEpoch", 256), chainFeeRevision: boundedNumber(event.chainFeeRevision, "event.chainFeeRevision"), chainFees };
+    }
     case "chain.height": return parseChainHeightEvent(value);
     case "asset.data-changed": return parseAssetDataChangedEvent(value);
     case "storage.state": return parseStorageStateEvent(value);

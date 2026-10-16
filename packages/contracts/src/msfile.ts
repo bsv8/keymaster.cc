@@ -345,6 +345,8 @@ export interface MsFileSellerSettings {
   seedPriceSatoshis: MsFileSatoshiAmount;
   /** 一个完整 256 KiB Block 的售价（聪）。 */
   fullBlockPriceSatoshis: MsFileSatoshiAmount;
+  /** 卖方每次接受的最大 Block 数，签名报价承诺，1–64。 */
+  maxBlocksPerBatch: number;
   /** 报价有效时间（秒）。 */
   quoteLifetimeSeconds: number;
   /** 在线交付后等待付款的秒数；重登不恢复倒计时。 */
@@ -369,8 +371,6 @@ export interface MsFileBitfsBuyerSettings {
   maxConcurrentDownloads: number;
   /** 单个文件同时参与传输的卖家费用池数量；旧设置缺失时保持单卖家。 */
   maxConcurrentSellerSessions: number;
-  /** 一个 Kind 5/6/7 批次最多购买的不同 Block 数。 */
-  blocksPerBatch: number;
   /** 新费用池退款等待的区块数；开池时加到真实链高度，池内付款保持该到期高度。 */
   refundDelayBlocks: number;
   /** 用户按 Seed 单独保存的强制下载完整 Block 最高价；与自动购买上限分开。 */
@@ -384,7 +384,6 @@ export const MSFILE_BITFS_BUYER_SETTINGS_DEFAULT: Readonly<MsFileBitfsBuyerSetti
   sellerSelectionPriority: "price",
   maxConcurrentDownloads: 1,
   maxConcurrentSellerSessions: 3,
-  blocksPerBatch: 10,
   refundDelayBlocks: 5,
   filePriceLimitsBySeedHash: Object.freeze({}),
 });
@@ -393,7 +392,6 @@ export const MSFILE_BITFS_BUYER_SETTINGS_DEFAULT: Readonly<MsFileBitfsBuyerSetti
 export const MSFILE_BITFS_BUYER_LIMITS = Object.freeze({
   maxConcurrentDownloads: 16,
   maxConcurrentSellerSessions: 16,
-  blocksPerBatch: 16,
   /** nLockTime 小于 500000000 才按区块高度解释；开池还须检查当前高度之和。 */
   refundDelayBlocks: 499_999_999,
 });
@@ -416,7 +414,6 @@ export function normalizeMsFileBitfsBuyerSettings(input: unknown): MsFileBitfsBu
     }
   }
   const maxConcurrentSellerSessions = value.maxConcurrentSellerSessions === undefined ? 1 : value.maxConcurrentSellerSessions;
-  const blocksPerBatch = value.blocksPerBatch === undefined ? 10 : value.blocksPerBatch;
   const refundDelayBlocks = value.refundDelayBlocks === undefined ? MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.refundDelayBlocks : value.refundDelayBlocks;
   if (typeof value.buyerAutoPurchaseEnabled !== "boolean"
     || maxFullBlockPriceSatoshis === undefined
@@ -427,9 +424,6 @@ export function normalizeMsFileBitfsBuyerSettings(input: unknown): MsFileBitfsBu
     || !Number.isSafeInteger(maxConcurrentSellerSessions)
     || (maxConcurrentSellerSessions as number) < 1
     || (maxConcurrentSellerSessions as number) > MSFILE_BITFS_BUYER_LIMITS.maxConcurrentSellerSessions
-    || !Number.isSafeInteger(blocksPerBatch)
-    || (blocksPerBatch as number) < 1
-    || (blocksPerBatch as number) > MSFILE_BITFS_BUYER_LIMITS.blocksPerBatch
     || !Number.isSafeInteger(refundDelayBlocks)
     || (refundDelayBlocks as number) < 1
     || (refundDelayBlocks as number) > MSFILE_BITFS_BUYER_LIMITS.refundDelayBlocks) return undefined;
@@ -439,7 +433,6 @@ export function normalizeMsFileBitfsBuyerSettings(input: unknown): MsFileBitfsBu
     sellerSelectionPriority: value.sellerSelectionPriority,
     maxConcurrentDownloads: value.maxConcurrentDownloads as number,
     maxConcurrentSellerSessions: maxConcurrentSellerSessions as number,
-    blocksPerBatch: blocksPerBatch as number,
     refundDelayBlocks: refundDelayBlocks as number,
     filePriceLimitsBySeedHash,
   };
@@ -459,10 +452,14 @@ export interface MsFileBitfsQuoteView {
   seedPriceSatoshis: string;
   /** 完整 Block 单价，单位聪。 */
   fullBlockPriceSatoshis: string;
+  /** 卖方签名报价允许的每批最大 Block 数。 */
+  maxBlocksPerBatch: number;
   /** 报价有效截止时间，Unix 秒。 */
   quoteExpiresAtUnixSeconds: string;
   /** 卖方建议文件名。 */
   recommendedFilename: string;
+  /** 卖方签名声明的规范 MIME。 */
+  mediaType: string;
   /** 报价允许的仲裁方压缩公钥；买方只可从此列表选择。 */
   supportedArbiterPublicKeys: string[];
   /** 最近一次已验收并完成付款的 Block 有效传输速度，单位字节/秒；没有样本时为 null。 */
@@ -534,6 +531,19 @@ export interface MsFileBitfsPurchaseSnapshot {
 
 /** `/msfile/storage` 显示的可恢复 BitFS 购买任务；不含 Artifact、签名或交易原文。 */
 export interface MsFileBitfsTaskSnapshot extends MsFileBitfsPurchaseSnapshot {
+  /** 所属文件采购任务；多卖家会话共享该编号。 */
+  taskId?: string;
+  /** 独立任务生命周期，与购买阶段和资金状态无关。 */
+  taskState?: "active" | "ended";
+  /** 已结束原因；结束后资金仍可能待回收。 */
+  taskEndReason?: "completed" | "cancelled" | "failed" | "replaced";
+  createdAt?: string;
+  updatedAt?: string;
+  /** 资金真值来自账本；保存了开池参数不代表已开池。 */
+  fundingState?: "not-opened" | "unknown" | "open" | "closed";
+  fundingTxid?: string | null;
+  poolOutpoint?: string | null;
+  refundLockTime?: number | null;
   /** 购买绑定的 Seed Hash。 */
   seedHashHex: string;
   /** 当前购买报价卖家的压缩公钥；仅收集需求报价时还没有卖家，值为 null。 */
@@ -574,8 +584,10 @@ export interface MsFileBitfsDemandSnapshot {
   expiresAtMs: number | null;
   /** 通过关联 WebRTC DataChannel 收到并验签的报价。 */
   quotes: MsFileBitfsQuoteView[];
-  /** 当前 Seed 最近一次买方购买会话；未开始时为 null。 */
+  /** 本轮需求明确启动的购买；不从历史记录自动恢复。 */
   purchase?: MsFileBitfsPurchaseSnapshot | null;
+  /** 同文件已有未结束购买时仅提供详情入口，不混入历史金额。 */
+  existingPurchaseSessionId?: string | null;
   /** 用户为当前 Seed 保存的强制下载上限；不代替全局自动购买价上限。 */
   currentMaxFullBlockPriceSatoshis?: MsFileSatoshiAmount | null;
 }
@@ -585,6 +597,7 @@ export const MSFILE_SELLER_SETTINGS_DEFAULT: Readonly<MsFileSellerSettings> = Ob
   sellerEnabled: false,
   seedPriceSatoshis: "0",
   fullBlockPriceSatoshis: "0",
+  maxBlocksPerBatch: 1,
   quoteLifetimeSeconds: 300,
   paymentTimeoutSeconds: 60,
   supportedArbiterPublicKeys: [],
@@ -598,6 +611,8 @@ export const MSFILE_SELLER_LIMITS = Object.freeze({
   quoteLifetimeSecondsMin: 30,
   /** 报价最长有效秒数。 */
   quoteLifetimeSecondsMax: 86_400,
+  /** 每批 Block 数协议硬上限。 */
+  maxBlocksPerBatch: 64,
   /** 同时销售会话硬上限。 */
   maxConcurrentSales: 16,
   /** 可配置仲裁方数量硬上限。 */
@@ -620,6 +635,8 @@ export function normalizeMsFileSellerSettings(input: unknown): MsFileSellerSetti
     || (value.maxConcurrentSales as number) > MSFILE_SELLER_LIMITS.maxConcurrentSales) return undefined;
   if (!Array.isArray(value.supportedArbiterPublicKeys)
     || value.supportedArbiterPublicKeys.length > MSFILE_SELLER_LIMITS.supportedArbiters) return undefined;
+  const maxBlocksPerBatch = value.maxBlocksPerBatch ?? MSFILE_SELLER_SETTINGS_DEFAULT.maxBlocksPerBatch;
+  if (!Number.isSafeInteger(maxBlocksPerBatch) || (maxBlocksPerBatch as number) < 1 || (maxBlocksPerBatch as number) > MSFILE_SELLER_LIMITS.maxBlocksPerBatch) return undefined;
   const minRefundDelayBlocks = value.minRefundDelayBlocks === undefined ? MSFILE_SELLER_SETTINGS_DEFAULT.minRefundDelayBlocks : value.minRefundDelayBlocks;
   if (!Number.isSafeInteger(minRefundDelayBlocks) || (minRefundDelayBlocks as number) < 1
     || (minRefundDelayBlocks as number) >= 500_000_000) return undefined;
@@ -639,6 +656,7 @@ export function normalizeMsFileSellerSettings(input: unknown): MsFileSellerSetti
     supportedArbiterPublicKeys,
     maxConcurrentSales: value.maxConcurrentSales as number,
     minRefundDelayBlocks: minRefundDelayBlocks as number,
+    maxBlocksPerBatch: maxBlocksPerBatch as number,
   };
 }
 
@@ -908,3 +926,27 @@ export type MsFileErrorCode =
   | "msfile_media_browser_capability"
   | "msfile_media_decode_failed"
   | "msfile_media_cancelled";
+
+/** 当前登录会话内已验签的文件需求；只存内存，最多二十条。 */
+export interface MsFileHeardDemand {
+  requestMessageId: string;
+  requesterPublicKeyHex: string;
+  seedHashHex: string;
+  receivedAtMs: number;
+  expiresAtMs: number;
+  availability: "checking" | "available" | "missing";
+  quoteStatus: "not-quoted" | "unmatched" | "preparing" | "quoted" | "failed";
+  quotedAtMs: number | null;
+  quoteMessage: string | null;
+}
+export interface MsFileDemandMonitorSnapshot {
+  demands: MsFileHeardDemand[];
+  lastReceivedAtMs: number | null;
+  sellerEnabled: boolean;
+  network: {
+    channel: string;
+    subscriptionPhase: string;
+    error: string | null;
+    suppliers: Array<{ supplierId: string; name: string; connectionState: string; receiving: boolean; subscribed: boolean; error: string | null }>;
+  };
+}

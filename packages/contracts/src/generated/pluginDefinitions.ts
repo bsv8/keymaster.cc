@@ -2081,6 +2081,16 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "capability": {
               "kind": "local",
+              "id": "chain-fee.reader",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "只读公共费率投影",
+            "optional": true
+          },
+          {
+            "capability": {
+              "kind": "local",
               "id": "chain-height.reader",
               "version": "1"
             },
@@ -2130,6 +2140,11 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
         "runtime": "window-main",
         "scopeKind": "owner-session",
         "provides": [
+          {
+            "kind": "local",
+            "id": "chain-fee.reader",
+            "version": "1"
+          },
           {
             "kind": "local",
             "id": "woc.service",
@@ -2487,6 +2502,15 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             },
             "sourceRuntime": "window-main",
             "reason": "注册 P2PKH resources"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "chain-fee.reader",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "消费全局有效手续费率"
           },
           {
             "capability": {

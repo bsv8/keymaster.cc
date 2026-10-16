@@ -1,3 +1,4 @@
+import { CHAIN_FEE_READER_CAPABILITY } from "@keymaster/contracts";
 import { requireUnlockedWalletIdentity } from "@keymaster/contracts";
 import { setupP2pkhUriActions } from "./setupUriActions.js";
 import { IdentityHomeButton } from "./IdentityHomeButton.js";
@@ -281,11 +282,20 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.settings.bsvNetwork.yes": "Yes",
       "p2pkh.settings.bsvNetwork.no": "No (recommended)",
       "p2pkh.settings.bsvNetworkHint": "The network is fixed when the identity is created or imported.",
+      "p2pkh.settings.feeEffective": "Effective rate",
+      "p2pkh.settings.feeRecommended": "WoC recommendation",
+      "p2pkh.settings.feePending": "Not received yet; using fallback",
+      "p2pkh.settings.feeUpdated": "Last successful update",
+      "p2pkh.settings.feeRefreshFailed": "Refresh failed; the previous recommendation is retained.",
+      "p2pkh.settings.feeManual": "Custom fee rate",
+      "p2pkh.settings.feeSaveManual": "Save custom rate",
+      "p2pkh.settings.feeUseWoc": "Use WoC recommendation automatically",
+      "p2pkh.settings.feeScheduling": "Configure refresh interval",
+      "p2pkh.settings.feeSource.woc": "Automatically following WoC",
+      "p2pkh.settings.feeSource.manual": "Custom rate",
+      "p2pkh.settings.feeSource.fallback": "Product fallback",
       "p2pkh.settings.feeRates": "BSV miner fee rates",
-      "p2pkh.settings.feeRatesHint": "Configure sats/kB. New transfers use Medium by default; changes apply to new transaction previews.",
-      "p2pkh.settings.feeRate.low": "Low",
-      "p2pkh.settings.feeRate.medium": "Medium (default)",
-      "p2pkh.settings.feeRate.high": "High",
+      "p2pkh.settings.feeRatesHint": "Defaults to the WoC recommendation. A manual rate remains in effect until you restore automatic mode. New transactions use the current rate.",
       "p2pkh.settings.feeRateInvalid": "Fee rate must be a positive integer in sats/kB.",
       "p2pkh.balanceWidget.title": "P2PKH balance",
       "p2pkh.balanceWidget.bsvMain": "BSV (main)",
@@ -325,9 +335,6 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.transfer.form.sendAllHint": "The final received amount automatically subtracts the actual miner fee.",
       "p2pkh.transfer.form.availableBalance": "Available balance: {{balance}} sats ({{network}})",
       "p2pkh.transfer.form.availableBalanceUnknown": "Available balance: Unknown ({{network}})",
-      "p2pkh.transfer.form.feeTier.low": "Low",
-      "p2pkh.transfer.form.feeTier.medium": "Medium",
-      "p2pkh.transfer.form.feeTier.high": "High",
       "p2pkh.transfer.step.addressAmount": "Amount and miner fee rate",
       "p2pkh.transfer.step.addressAmountHint": "The platform verified and locked the recipient address. Only amount and miner fee rate can be entered here.",
       "p2pkh.transfer.preview.stepHint": "Verify the recipient, received amount, change, and miner fee before broadcasting.",
@@ -543,11 +550,20 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.settings.bsvNetwork.yes": "是",
       "p2pkh.settings.bsvNetwork.no": "否（推荐）",
       "p2pkh.settings.bsvNetworkHint": "网络在创建或导入身份时确定，之后不可修改。",
+      "p2pkh.settings.feeEffective": "当前有效费率",
+      "p2pkh.settings.feeRecommended": "WoC 建议费率",
+      "p2pkh.settings.feePending": "尚未获取，使用备用值",
+      "p2pkh.settings.feeUpdated": "上次成功更新",
+      "p2pkh.settings.feeRefreshFailed": "刷新失败；上次建议值已过期，继续保留。",
+      "p2pkh.settings.feeManual": "自定义费率",
+      "p2pkh.settings.feeSaveManual": "保存自定义费率",
+      "p2pkh.settings.feeUseWoc": "使用 WoC 建议值（自动跟随）",
+      "p2pkh.settings.feeScheduling": "设置刷新频率",
+      "p2pkh.settings.feeSource.woc": "自动跟随 WoC",
+      "p2pkh.settings.feeSource.manual": "手动设置",
+      "p2pkh.settings.feeSource.fallback": "产品备用值",
       "p2pkh.settings.feeRates": "BSV 矿工费率",
-      "p2pkh.settings.feeRatesHint": "按 sats/kB 配置。转账页默认使用“中”；修改后立即应用到新建的交易预览。",
-      "p2pkh.settings.feeRate.low": "低",
-      "p2pkh.settings.feeRate.medium": "中（默认）",
-      "p2pkh.settings.feeRate.high": "高",
+      "p2pkh.settings.feeRatesHint": "默认自动使用 WoC 建议值；手动保存后保持自定义费率，直到恢复自动模式。新建交易采用当前有效费率。",
       "p2pkh.settings.feeRateInvalid": "费率必须是大于 0 的整数（sats/kB）。",
       "p2pkh.balanceWidget.title": "P2PKH 余额",
       "p2pkh.balanceWidget.bsvMain": "BSV (main)",
@@ -587,9 +603,6 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.transfer.form.sendAllHint": "最终到账额会自动扣除实际矿工费。",
       "p2pkh.transfer.form.availableBalance": "可用余额：{{balance}} sats（{{network}}）",
       "p2pkh.transfer.form.availableBalanceUnknown": "可用余额未知（{{network}}）",
-      "p2pkh.transfer.form.feeTier.low": "低",
-      "p2pkh.transfer.form.feeTier.medium": "中",
-      "p2pkh.transfer.form.feeTier.high": "高",
       "p2pkh.transfer.step.addressAmount": "金额与矿工费率",
       "p2pkh.transfer.step.addressAmountHint": "收款地址已由平台核对并锁定；这里只能输入金额和矿工费率。",
       "p2pkh.transfer.preview.stepHint": "请核对收款地址、到账金额、找零与矿工费，再广播。",
@@ -659,6 +672,7 @@ const p2pkhPluginDefinition = {
       { capability: PAGE_UI_REGISTRY_CAPABILITY, reason: "贡献本实例内部设置 UI" },
       { capability: OWNED_RESOURCE_ACCESS_CAPABILITY, reason: "UI 读取所属实例资源" },
       { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "注册 P2PKH resources" },
+      { capability: CHAIN_FEE_READER_CAPABILITY, reason: "消费全局有效手续费率" },
         { capability: RUNTIME_MESSAGE_BUS, reason: "订阅 key lifecycle events" },
         { capability: ASSET_DATA_NOTIFIER_CAPABILITY, optional: true, reason: "发布可选 asset data 变更" },
       ]),
@@ -997,6 +1011,12 @@ const p2pkhPluginDefinition = {
       invalidation: "microtask"
     });
 
+    const chainFees = ctx.capability(CHAIN_FEE_READER_CAPABILITY);
+    resources.register<import("@keymaster/contracts").ChainFeeSnapshots, readonly string[]>({
+      id: "p2pkh.chain-fees", scope: "global", key: () => ["p2pkh.chain-fees"],
+      load: async () => ({ main: chainFees.get("main"), test: chainFees.get("test") }),
+      subscribe: (_args, _context, invalidate) => chainFees.subscribe(invalidate), invalidation: "immediate"
+    });
     // p2pkh.settings：P2PKH 全局设置
     resources.register<P2pkhGlobalSettings, readonly string[]>({
       id: "p2pkh.settings",
@@ -1007,7 +1027,7 @@ const p2pkhPluginDefinition = {
       equals: (prev, next) => {
         if (!prev || !next) return prev === next;
         return prev.bsvNetwork === next.bsvNetwork
-          && JSON.stringify(prev.feeRateSatoshisPerKb ?? {}) === JSON.stringify(next.feeRateSatoshisPerKb ?? {});
+          && prev.feeRateSatoshisPerKb === next.feeRateSatoshisPerKb && JSON.stringify(prev.feePolicy) === JSON.stringify(next.feePolicy);
       },
       invalidation: "immediate"
     });

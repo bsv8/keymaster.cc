@@ -37,7 +37,7 @@ export interface SatP2pkhService {
   getGlobalSettings?(): {
     /** 是否允许使用 P2PKH 测试网资产、地址和交易。 */
     bsvNetwork?: "main" | "test";
-    feeRateSatoshisPerKb?: Partial<Record<"low" | "medium" | "high", number>>;
+    feeRateSatoshisPerKb?: number;
   };
   /** 创建 owner 绑定的 P2PKH 交易预览。 */
   prepareTransfer(input: {
@@ -351,7 +351,7 @@ export class SatSpiService implements SatSubscriptionSpiService {
     if (!p2pkh) throw new SatSubscriptionError("unavailable", "P2PKH service is unavailable");
     assertP2pkhNetworkEnabled(p2pkh, mapping);
     const amountNumber = safeNumber(input.amountSatoshis, "amountSatoshis");
-    const configuredFee = p2pkh.getGlobalSettings?.().feeRateSatoshisPerKb?.medium;
+    const configuredFee = p2pkh.getGlobalSettings?.().feeRateSatoshisPerKb;
     const feeRate = Number.isSafeInteger(configuredFee) && Number(configuredFee) > 0 ? Number(configuredFee) : 1000;
     let p2pkhPreview: unknown;
     try {

@@ -2,6 +2,7 @@ import { defineBuiltinWorkerPlugin, emptyChainHeightSnapshot, WOC_CAPABILITY, WO
 import type { MessageBus } from "webloom-framework";
 import { createWocService, createWocBsv21Service, createWocStasService, createWoc1SatOrdinalsService } from "./coordinator.js";
 import { createWorkerWocViews } from "./workerWocViews.js";
+import { createChainFeeRuntime } from "./chainFeeRuntime.js";
 import { createChainHeightTask } from "./chainHeightTask.js";
 
 export interface WocWorkerPorts {
@@ -9,10 +10,13 @@ export interface WocWorkerPorts {
   settings(): Readonly<Record<string, unknown>> | undefined;
   queueChanged(snapshot: WocQueueSnapshot): void;
   publishHeight(snapshot: ChainHeightSnapshot): void;
+  feePolicies(): import("@keymaster/contracts").ChainFeePolicies;
+  publishFees(snapshots: import("@keymaster/contracts").ChainFeeSnapshots): void;
 }
 
 /** 每次 setup 创建独立服务；链高度投影由 WOC 所有，Host 只转发事件。 */
 export function createWocWorkerRuntime(ports: WocWorkerPorts) {
+  const fees = createChainFeeRuntime({ policies: ports.feePolicies, publish: ports.publishFees });
   let height = emptyChainHeightSnapshot();
   const snapshot = () => ({ ...height });
   function createService(messageBus: MessageBus) {
@@ -52,9 +56,13 @@ export function createWocWorkerRuntime(ports: WocWorkerPorts) {
       if (!identity) throw new Error("WOC requires a network identity");
       return identity.bsvNetwork;
     }, (network, signal) => views.query.getChainHeight(network, { priority: "background", signal }));
+    const feeTask = fees.task(() => { context.scope.assertActive(); const identity = wallet.snapshot().activeKeyIdentity; if (!identity) throw new Error("WOC requires a network identity"); return identity.bsvNetwork; }, (network, signal) => views.query.getFeeRecommendation(network, { priority: "background", signal }));
+    const feeRegistration = await ports.tasks.register(feeTask, () => context.scope.assertActive());
+    context.scope.onRevoke(feeRegistration.revoke);
+    context.onDispose(feeRegistration.dispose);
     const registration = await ports.tasks.register(task, () => context.scope.assertActive());
     context.scope.onRevoke(registration.revoke);
     context.onDispose(registration.dispose);
   });
-  return { plugin, snapshot, createService, heightTask, resetHeight: () => { height = emptyChainHeightSnapshot(); } };
+  return { plugin, snapshot, fees, createService, heightTask, resetHeight: () => { height = emptyChainHeightSnapshot(); } };
 }

@@ -163,39 +163,17 @@ export interface P2pkhTransactionSyncState {
   lastError?: string;
 }
 
-/**
- * P2PKH 全局产品设置（硬切换 001）。
- * 设计缘由：这是产品级显示与同步范围配置，不是某一把 key 的链上状态，
- * 由 Coordinator 平台 K-V 保存，不属于任何单独的浏览器页面状态。
- */
-export type P2pkhFeeRateTier = "low" | "medium" | "high";
-
-/** BSV 交易费率按 sats/kB 计。中档是产品默认值；三档均可在系统设置调整。 */
-export const P2PKH_DEFAULT_FEE_RATE_SATOSHIS_PER_KB: Record<P2pkhFeeRateTier, number> = {
-  low: 60,
-  medium: 120,
-  high: 180
-};
-
+/** 网络由当前身份确定；有效费率只读，feePolicy 用于更新全局费率策略。 */
 export interface P2pkhGlobalSettings {
   bsvNetwork: "main" | "test";
-  /** 省略时回退到 `P2PKH_DEFAULT_FEE_RATE_SATOSHIS_PER_KB`。 */
-  feeRateSatoshisPerKb?: Partial<Record<P2pkhFeeRateTier, number>>;
+  feeRateSatoshisPerKb?: number;
+  feePolicy?: import("@keymaster/contracts").ChainFeePolicy;
+}
+export function resolveP2pkhFeeRateSatoshisPerKb(settings?: P2pkhGlobalSettings): number {
+  const value = settings?.feeRateSatoshisPerKb;
+  return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : 100;
 }
 
-export function resolveP2pkhFeeRateSatoshisPerKb(settings?: P2pkhGlobalSettings): Record<P2pkhFeeRateTier, number> {
-  const configured = settings?.feeRateSatoshisPerKb;
-  const valueFor = (tier: P2pkhFeeRateTier) => {
-    const value = configured?.[tier];
-    return Number.isInteger(value) && value! > 0 ? value! : P2PKH_DEFAULT_FEE_RATE_SATOSHIS_PER_KB[tier];
-  };
-  return { low: valueFor("low"), medium: valueFor("medium"), high: valueFor("high") };
-}
-
-/** P2PKH UTXO。
- *
- * 硬切换 002 收尾：UTXO 持有 `publicKeyHex`（owner 真值），不再持有
- */
 export interface P2pkhUtxo {
   id: string;
   resourceId: string;
