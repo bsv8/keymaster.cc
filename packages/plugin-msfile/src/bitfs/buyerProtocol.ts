@@ -202,6 +202,17 @@ export interface BitfsBuyerProtocolDeps {
     /** 从发送 Kind 5 到验收 Kind 6 的毫秒数。 */
     elapsedMs: number;
   }): Promise<void> | void;
+  /** 内核驱动模式：内容请求由宿主按内核派发登记，协议不自行选择或领取下一批。 */
+  dispatchMode?: boolean;
+  /** 内核驱动模式：一批 Kind 5/6/7 验收付款后上报可信交付事实（校验之后、付款已对清）。 */
+  onDispatchedDelivery?(input: {
+    sessionId: string;
+    contentIds: string[];
+    accepted: string[];
+    paidSatoshis: string;
+    startedAt: number;
+    endedAt: number;
+  }): Promise<void> | void;
   /** 状态变化通知；只返回不含精确证据的摘要。 */
   onProgress(progress: BitfsBuyerPurchaseProgress): void;
 }
@@ -777,6 +788,10 @@ export class BitfsBuyerProtocol {
 
   /** 新下载计划按预算为多个池分配不同 Block，并共用一份已付款 Seed。 */
   private async continueSharedFundedPool(sessionId: string, quote: ReturnType<typeof acceptBuyerQuote>, stream: BitfsBuyerStream): Promise<void> {
+    if (this.deps.dispatchMode) {
+      await this.continueDispatchedPool(sessionId, quote, stream);
+      return;
+    }
     const beforeActivation = await this.deps.downloadPlan.snapshot();
     if (beforeActivation.stopRequested || beforeActivation.pools.find(pool => pool.sessionId === sessionId)?.retired) {
       await this.closeStoppedSharedPool(sessionId, quote, stream);
@@ -871,6 +886,64 @@ export class BitfsBuyerProtocol {
   }
 
   /** 文件已请求取消时，不再领取内容；逐池发送既有 Kind 12 并等待回收确认。 */
+  /**
+   * 内核驱动模式：只请求宿主按内核派发登记的内容（Seed 或整批 Block），
+   * 没有派发就等待；不自行选择卖家、不自行领取下一批、也不因预算自行关池。
+   */
+  private async continueDispatchedPool(sessionId: string, quote: ReturnType<typeof acceptBuyerQuote>, stream: BitfsBuyerStream): Promise<void> {
+    const plan = await this.deps.downloadPlan.snapshot();
+    if (plan.stopRequested) {
+      await this.closeStoppedSharedPool(sessionId, quote, stream);
+      return;
+    }
+    const ownPool = plan.pools.find((pool) => pool.sessionId === sessionId);
+    const seedHashHex = bytesToHex(quote.terms.seedHash);
+    const totalBlocks = Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n);
+    if (!ownPool || ownPool.closed || ownPool.retired) {
+      this.progress(sessionId, "requesting-blocks", this.readOpeningAmount(sessionId), plan.completedBlockCount, totalBlocks,
+        "等待下载策略器关闭或重新评估该费用池");
+      return;
+    }
+    await this.deps.downloadPlan.activatePool(sessionId);
+    const dispatched = await this.deps.downloadPlan.dispatchedContent(sessionId);
+    if (dispatched.length === 0) {
+      this.progress(sessionId, "requesting-blocks", this.readOpeningAmount(sessionId), plan.completedBlockCount, totalBlocks,
+        "等待下载策略器派发下一批内容");
+      return;
+    }
+    const seedBytes = await this.readStagedBytes(sessionId, "seed.bin");
+    const blockIds = dispatched.filter((id) => id !== seedHashHex);
+    if (blockIds.length > 0) {
+      if (!seedBytes || !plan.seedCompleted) throw new Error("BitFS 内核派发 Block 前缺少已付款 Seed");
+      // 整批一次 Kind 5：批次上限已由内核（poolBlocks 与卖方 maxBlocks）约束。
+      await this.prepareAndSendRequest({ sessionId, contentHashes: blockIds.map(hexToBytes), seed: seedBytes, stream });
+      return;
+    }
+    if (dispatched.includes(seedHashHex) && !seedBytes) {
+      await this.prepareAndSendRequest({ sessionId, contentHashes: [quote.terms.seedHash.slice()], stream });
+      return;
+    }
+    if (plan.seedCompleted && plan.blockHashesHex === null) {
+      const hashes = await this.getAllBlockHashes(sessionId, quote.terms.fileSizeBytes.toString(10), seedHashHex);
+      await this.deps.downloadPlan.setBlockHashes(hashes);
+    }
+    this.progress(sessionId, "requesting-seed", this.readOpeningAmount(sessionId), 0, totalBlocks,
+      "Seed 已收到，等待本地付款证据或下一批派发");
+  }
+
+  /** 内核驱动模式：宿主按内核 close 意图请求关池；不自行决定何时关闭。 */
+  async closeDispatchedPool(input: { sessionId: string; stream: BitfsBuyerStream }): Promise<void> {
+    await this.serial(input.sessionId, async () => {
+      const record = await this.requiredSession(input.sessionId);
+      const quote = acceptBuyerQuote(bitfsWorkflowFacts(this.deps.nowMs()), await this.requiredEvidence(input.sessionId, "kind1-quote"));
+      const totalBlocks = Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n);
+      if (record.phase === "funded") {
+        await this.deps.sessions.update(input.sessionId, record.revision, { phase: "close-required" }, this.deps.nowMs());
+      }
+      await this.prepareAndSendClose(input.sessionId, await this.countStagedBlocks(input.sessionId), totalBlocks, input.stream);
+    });
+  }
+
   private async closeStoppedSharedPool(
     sessionId: string,
     quote: ReturnType<typeof acceptBuyerQuote>,
@@ -1053,7 +1126,15 @@ export class BitfsBuyerProtocol {
     this.progress(sessionId, "payment-unknown", this.readOpeningAmount(sessionId), completedBlockCount, allBlockHashes.length, "已发送买方付款签名，继续池内递进");
     record = (await this.deps.sessions.get(sessionId)) ?? record;
     if (record.evidence.includes("download-plan")) {
-      await this.completeSharedPayment({ sessionId, quote, summary: kind5Summary, pool });
+      const settlement = await this.completeSharedPayment({ sessionId, quote, summary: kind5Summary, pool });
+      if (this.deps.dispatchMode) {
+        const endedAt = contentReceivedAtMs;
+        const startedAt = deliveryElapsedMs !== undefined ? Math.max(1, endedAt - deliveryElapsedMs) : Math.max(1, endedAt - 1);
+        await this.deps.onDispatchedDelivery?.({
+          sessionId, contentIds: settlement.contentIds, accepted: settlement.contentIds,
+          paidSatoshis: settlement.paidSatoshis, startedAt, endedAt,
+        });
+      }
       const downloadPlan = await this.deps.downloadPlan.snapshot();
       completedBlockCount = downloadPlan.completedBlockCount;
       fileReady = downloadPlan.totalBlockCount !== null && downloadPlan.completedBlockCount === downloadPlan.totalBlockCount;
@@ -1505,7 +1586,7 @@ export class BitfsBuyerProtocol {
     quote: ReturnType<typeof acceptBuyerQuote>;
     summary: { contentHashes: Uint8Array[]; paymentSequence: number; sellerAmountAfterSatoshis: string };
     pool: BuyerPoolEvidence;
-  }): Promise<void> {
+  }): Promise<{ contentIds: string[]; paidSatoshis: string }> {
     // 重启后设置可能改变；已持久化的旧批次仍按协议上限完成。
     if (input.summary.contentHashes.length < 1 || input.summary.contentHashes.length > 16) {
       throw new Error("BitFS 共享计划付款批次块数无效");
@@ -1536,6 +1617,7 @@ export class BitfsBuyerProtocol {
         blockHashHex, paidSatoshis: prices[index]!.toString(10),
       })));
     }
+    return { contentIds: hashes, paidSatoshis: paid.toString(10) };
   }
 
   private async markFailed(sessionId: string, amount: string, total: number, error: unknown): Promise<void> {

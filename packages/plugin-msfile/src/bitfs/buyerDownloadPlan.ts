@@ -40,6 +40,8 @@ export interface BitfsBuyerDownloadPool {
   retired?: boolean;
   /** 本池当前批次的首个 Block；其余认领由 blocks 中的 sessionId 归属恢复。 */
   inFlightBlockHashHex?: string;
+  /** 内核驱动模式的当前派发批次（Seed Hash 或 Block Hash 列表）；完成或释放后清空。 */
+  dispatch?: string[];
 }
 
 /** 同 Seed 跨卖家下载计划的公开摘要。 */
@@ -76,6 +78,15 @@ export interface BitfsBuyerDownloadPlan {
   claimNextBlock(sessionId: string, priority: "price" | "recent-speed"): Promise<string | undefined>;
   /** 原子认领一个有界批次；重试返回当前池已认领的同一批 Hash。 */
   claimNextBlocks(sessionId: string, priority: "price" | "recent-speed", limit: number): Promise<string[]>;
+  /**
+   * 内核驱动模式：为池登记并认领一批待请求内容（Seed Hash 或 Block Hash）。
+   * 重复派发同一批幂等；与已完成的相同内容返回 `completed`；与其他池冲突返回 `conflict`。
+   */
+  dispatchContent(sessionId: string, contentIds: readonly string[]): Promise<"dispatched" | "completed" | "conflict">;
+  /** 内核驱动模式：返回当前派发中尚未完成的内容（保持派发顺序）。 */
+  dispatchedContent(sessionId: string): Promise<string[]>;
+  /** 请求结算：保留 accepted 的完成记录，其余未接受内容释放回待购；清空本池派发。 */
+  releaseDispatch(sessionId: string, accepted: readonly string[]): Promise<void>;
   /** Block 付款由本地 Kind 5/7 验收后标为全局完成。 */
   completeBlock(sessionId: string, blockHashHex: string, paidSatoshis: string): Promise<void>;
   /** 一笔 Kind 7 原子验收整批 Block，避免部分完成后误发下一批。 */
@@ -238,6 +249,7 @@ export function createBitfsBuyerDownloadPlan(input: {
           blockCommittedSatoshis: previous?.blockCommittedSatoshis ?? "0",
           active: previous?.active ?? false, closed: previous?.closed ?? false, retired: previous?.retired ?? false,
           ...(previous?.inFlightBlockHashHex ? { inFlightBlockHashHex: previous.inFlightBlockHashHex } : {}),
+          ...(previous?.dispatch ? { dispatch: [...previous.dispatch] } : {}),
         };
         return { plan, result: undefined };
       });
@@ -287,6 +299,7 @@ export function createBitfsBuyerDownloadPlan(input: {
         addPayment(pool, paid);
         pool.seedCommittedSatoshis = paid;
         plan.seedCompleted = true;
+        if (pool.dispatch && pool.dispatch.every((id) => id === plan.seedHashHex ? plan.seedCompleted : plan.blocks[id]?.state === "completed")) pool.dispatch = undefined;
         return { plan, result: undefined };
       });
     },
@@ -345,6 +358,70 @@ export function createBitfsBuyerDownloadPlan(input: {
         return { plan, result: hashes };
       });
     },
+    async dispatchContent(sessionId, contentIds) {
+      const ids = [...new Set(contentIds.map(assertHash))];
+      if (ids.length === 0) throw new Error("BitFS 内核派发批次为空");
+      return mutate((plan) => {
+        const pool = needPool(plan, sessionId);
+        if (pool.closed || pool.retired) return { plan, result: "conflict" as const };
+        if (pool.dispatch) return { plan, result: same(pool.dispatch, ids) ? "dispatched" as const : "conflict" as const };
+        const seedHash = plan.seedHashHex;
+        const wantsSeed = ids.includes(seedHash);
+        const blockIds = ids.filter((id) => id !== seedHash);
+        const blockHashes = plan.blockHashesHex ?? [];
+        if (ids.every((id) => id === seedHash ? plan.seedCompleted : plan.blocks[id]?.state === "completed")) {
+          return { plan, result: "completed" as const };
+        }
+        if (wantsSeed) {
+          if (plan.seedCompleted || (plan.seedOwnerSessionId !== undefined && plan.seedOwnerSessionId !== sessionId)) return { plan, result: "conflict" as const };
+          if (BigInt(pool.seedBudgetSatoshis) < BigInt(pool.seedPriceSatoshis)) return { plan, result: "conflict" as const };
+        }
+        for (const id of blockIds) {
+          if (!blockHashes.includes(id) || plan.blockedHashes?.includes(id)) return { plan, result: "conflict" as const };
+          const existing = plan.blocks[id];
+          if (existing && (existing.sessionId !== sessionId || existing.state !== "claimed")) return { plan, result: "conflict" as const };
+        }
+        if (BigInt(blockIds.length) * BigInt(pool.fullBlockPriceSatoshis) > BigInt(pool.blockBudgetSatoshis) - BigInt(pool.blockCommittedSatoshis)) {
+          return { plan, result: "conflict" as const };
+        }
+        if (wantsSeed) plan.seedOwnerSessionId = sessionId;
+        for (const id of blockIds) plan.blocks[id] = { sessionId, state: "claimed" };
+        pool.dispatch = ids;
+        pool.inFlightBlockHashHex = blockIds[0];
+        return { plan, result: "dispatched" as const };
+      });
+    },
+    async dispatchedContent(sessionId) {
+      const plan = await load();
+      const pool = plan.pools[sessionId];
+      if (!pool?.dispatch) return [];
+      return pool.dispatch.filter((id) => id === plan.seedHashHex
+        ? !plan.seedCompleted && plan.seedOwnerSessionId === sessionId
+        : plan.blocks[id]?.sessionId === sessionId && plan.blocks[id]?.state === "claimed");
+    },
+    async releaseDispatch(sessionId, accepted) {
+      const acceptedSet = new Set(accepted.map(assertHash));
+      await mutate((plan) => {
+        const pool = plan.pools[sessionId];
+        if (!pool?.dispatch) return { plan, result: undefined };
+        for (const id of pool.dispatch) {
+          if (acceptedSet.has(id)) continue;
+          if (id === plan.seedHashHex) {
+            if (!plan.seedCompleted && plan.seedOwnerSessionId === sessionId) plan.seedOwnerSessionId = undefined;
+            continue;
+          }
+          const block = plan.blocks[id];
+          if (block?.sessionId === sessionId && block.state === "claimed") delete plan.blocks[id];
+        }
+        if (pool.inFlightBlockHashHex && !acceptedSet.has(pool.inFlightBlockHashHex)) pool.inFlightBlockHashHex = undefined;
+        if (!pool.inFlightBlockHashHex) {
+          pool.inFlightBlockHashHex = (plan.blockHashesHex ?? []).find((hash) => plan.blocks[hash]?.sessionId === sessionId && plan.blocks[hash]?.state === "claimed");
+        }
+        pool.dispatch = undefined;
+        plan.fileComplete = plan.blockHashesHex?.every((hash) => plan.blocks[hash]?.state === "completed") ?? false;
+        return { plan, result: undefined };
+      });
+    },
     async completeBlock(sessionId, blockHashHex, paidSatoshis) {
       const hash = assertHash(blockHashHex);
       const paid = assertAmount(paidSatoshis, true);
@@ -392,6 +469,7 @@ export function createBitfsBuyerDownloadPlan(input: {
         pool.blockCommittedSatoshis = (BigInt(pool.blockCommittedSatoshis) + total).toString(10);
         for (const { hash, paid } of entries) plan.blocks[hash] = { sessionId, state: "completed", paidSatoshis: paid };
         pool.inFlightBlockHashHex = undefined;
+        if (pool.dispatch && pool.dispatch.every((id) => id === plan.seedHashHex ? plan.seedCompleted : plan.blocks[id]?.state === "completed")) pool.dispatch = undefined;
         plan.fileComplete = plan.blockHashesHex?.every((hash) => plan.blocks[hash]?.state === "completed") ?? false;
         return { plan, result: undefined };
       });
@@ -406,6 +484,7 @@ export function createBitfsBuyerDownloadPlan(input: {
           if (claim.sessionId === sessionId && claim.state === "claimed") delete plan.blocks[hash];
         }
         pool.inFlightBlockHashHex = undefined;
+        pool.dispatch = undefined;
         if (!plan.seedCompleted && plan.seedOwnerSessionId === sessionId) plan.seedOwnerSessionId = undefined;
         plan.fileComplete = plan.blockHashesHex?.every((hash) => plan.blocks[hash]?.state === "completed") ?? false;
         return { plan, result: undefined };
@@ -485,6 +564,7 @@ function parsePool(value: unknown, id: string): BitfsBuyerDownloadPool {
     recentBytesPerSecond: value.recentBytesPerSecond === null ? null : assertAmount(value.recentBytesPerSecond, false),
     active: value.active, closed: value.closed, retired: value.retired === true,
     ...(value.inFlightBlockHashHex === undefined ? {} : { inFlightBlockHashHex: assertHash(value.inFlightBlockHashHex) }),
+    ...(value.dispatch === undefined ? {} : { dispatch: Array.isArray(value.dispatch) ? value.dispatch.map((item) => { try { return assertHash(item); } catch { return invalid("BitFS 内核派发批次无效"); } }) : invalid("BitFS 内核派发批次无效") }),
   };
   if (BigInt(pool.seedBudgetSatoshis) + BigInt(pool.blockBudgetSatoshis) !== BigInt(pool.contentBudgetSatoshis)
     || BigInt(pool.committedSatoshis) !== BigInt(pool.seedCommittedSatoshis) + BigInt(pool.blockCommittedSatoshis)
