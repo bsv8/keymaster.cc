@@ -50,10 +50,13 @@ export interface MsFileStatusResourceSnapshot {
 type AmountDraft = { text: string; unlimited: boolean };
 type ConcurrencyField = keyof MsFileReadConcurrencySettings;
 type ConcurrencyDraft = Record<ConcurrencyField, string>;
-type BitfsBuyerSettingsDraft = Omit<MsFileBitfsBuyerSettings, "maxConcurrentDownloads" | "maxConcurrentSellerSessions" | "refundDelayBlocks"> & {
+type BitfsBuyerSettingsDraft = Omit<MsFileBitfsBuyerSettings, "maxConcurrentDownloads" | "maxConcurrentSellerSessions" | "refundDelayBlocks" | "poolBlocks" | "schedulerTotalSeats" | "schedulerFloatingSeats"> & {
   maxConcurrentDownloads: string;
   maxConcurrentSellerSessions: string;
   refundDelayBlocks: string;
+  poolBlocks: string;
+  schedulerTotalSeats: string;
+  schedulerFloatingSeats: string;
 };
 
 /** 卖方状态缺省文案；正式界面优先使用 i18n 资源。 */
@@ -151,6 +154,9 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
     maxConcurrentDownloads: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.maxConcurrentDownloads),
     maxConcurrentSellerSessions: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.maxConcurrentSellerSessions),
     refundDelayBlocks: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.refundDelayBlocks),
+    poolBlocks: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.poolBlocks),
+    schedulerTotalSeats: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.schedulerTotalSeats),
+    schedulerFloatingSeats: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.schedulerFloatingSeats),
   });
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [supplierEditorOpen, setSupplierEditorOpen] = useState(false);
@@ -167,6 +173,9 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
         maxConcurrentDownloads: String(buyerSettings.maxConcurrentDownloads),
         maxConcurrentSellerSessions: String(buyerSettings.maxConcurrentSellerSessions),
         refundDelayBlocks: String(buyerSettings.refundDelayBlocks),
+        poolBlocks: String(buyerSettings.poolBlocks),
+        schedulerTotalSeats: String(buyerSettings.schedulerTotalSeats),
+        schedulerFloatingSeats: String(buyerSettings.schedulerFloatingSeats),
       });
       setAuthorizations(await service.listAppAuthorizations());
       setError(null);
@@ -230,9 +239,12 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
       maxConcurrentDownloads: Number(bitfsBuyerDraft.maxConcurrentDownloads),
       maxConcurrentSellerSessions: Number(bitfsBuyerDraft.maxConcurrentSellerSessions),
       refundDelayBlocks: Number(bitfsBuyerDraft.refundDelayBlocks),
+      poolBlocks: Number(bitfsBuyerDraft.poolBlocks),
+      schedulerTotalSeats: Number(bitfsBuyerDraft.schedulerTotalSeats),
+      schedulerFloatingSeats: Number(bitfsBuyerDraft.schedulerFloatingSeats),
     });
     if (!candidate) {
-      setError("BitFS 买方设置不合法：请检查单块自动购买上限、文件任务数、单文件卖家数及退款等待区块数（正整数）。");
+      setError("BitFS 买方设置不合法：请检查单块自动购买上限、文件任务数、单文件卖家数、退款等待区块数、调度器批次块与席位数（正整数，浮动位须小于总席位）。");
       return;
     }
     if (!service.updateBitfsBuyerSettings) {
@@ -246,8 +258,11 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
         maxConcurrentDownloads: String(candidate.maxConcurrentDownloads),
         maxConcurrentSellerSessions: String(candidate.maxConcurrentSellerSessions),
         refundDelayBlocks: String(candidate.refundDelayBlocks),
+        poolBlocks: String(candidate.poolBlocks),
+        schedulerTotalSeats: String(candidate.schedulerTotalSeats),
+        schedulerFloatingSeats: String(candidate.schedulerFloatingSeats),
       });
-      setStatusMessage("BitFS 买方设置已保存。已开始的购买不会改变开池报价。");
+      setStatusMessage("BitFS 买方设置已保存。已开始的购买沿用任务创建时固定的调度设置。");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -828,6 +843,54 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
               value={bitfsBuyerDraft.maxConcurrentSellerSessions}
               onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, maxConcurrentSellerSessions: event.target.value }))}
             />
+          </div>
+          <div className="msfile-settings__field">
+            <label htmlFor="msfile-buyer-poolBlocks">{t("msfile.settings.bitfsBuyer.poolBlocks", { defaultValue: "调度器：一个费用池的批次块数（1–64）" })}</label>
+            <input
+              id="msfile-buyer-poolBlocks"
+              className="msfile-settings__control"
+              type="number"
+              min={1}
+              max={MSFILE_BITFS_BUYER_LIMITS.poolBlocks}
+              value={bitfsBuyerDraft.poolBlocks}
+              onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, poolBlocks: event.target.value }))}
+            />
+          </div>
+          <div className="msfile-settings__field">
+            <label htmlFor="msfile-buyer-totalSeats">{t("msfile.settings.bitfsBuyer.schedulerTotalSeats", { defaultValue: "调度器：任务内总席位（2–16）" })}</label>
+            <input
+              id="msfile-buyer-totalSeats"
+              className="msfile-settings__control"
+              type="number"
+              min={2}
+              max={MSFILE_BITFS_BUYER_LIMITS.schedulerTotalSeats}
+              value={bitfsBuyerDraft.schedulerTotalSeats}
+              onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, schedulerTotalSeats: event.target.value }))}
+            />
+          </div>
+          <div className="msfile-settings__field">
+            <label htmlFor="msfile-buyer-floatingSeats">{t("msfile.settings.bitfsBuyer.schedulerFloatingSeats", { defaultValue: "调度器：浮动位（未测速卖家上限）" })}</label>
+            <input
+              id="msfile-buyer-floatingSeats"
+              className="msfile-settings__control"
+              type="number"
+              min={1}
+              max={MSFILE_BITFS_BUYER_LIMITS.schedulerTotalSeats - 1}
+              value={bitfsBuyerDraft.schedulerFloatingSeats}
+              onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, schedulerFloatingSeats: event.target.value }))}
+            />
+          </div>
+          <div className="msfile-settings__field">
+            <label htmlFor="msfile-buyer-schedulerMode">{t("msfile.settings.bitfsBuyer.schedulerMode", { defaultValue: "下载调度器" })}</label>
+            <select
+              id="msfile-buyer-schedulerMode"
+              className="msfile-settings__control"
+              value={bitfsBuyerDraft.schedulerMode}
+              onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, schedulerMode: event.target.value as MsFileBitfsBuyerSettings["schedulerMode"] }))}
+            >
+              <option value="off">{t("msfile.settings.bitfsBuyer.schedulerMode.off", { defaultValue: "关闭（旧路径）" })}</option>
+              <option value="on">{t("msfile.settings.bitfsBuyer.schedulerMode.on", { defaultValue: "开启（下载策略器）" })}</option>
+            </select>
           </div>
           <div className="msfile-settings__field">
             <label htmlFor="msfile-buyer-refundDelayBlocks">{t("msfile.settings.bitfsBuyer.refundDelayBlocks", { defaultValue: "费用池退款等待区块数" })}</label>

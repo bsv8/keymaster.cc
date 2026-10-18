@@ -375,6 +375,14 @@ export interface MsFileBitfsBuyerSettings {
   refundDelayBlocks: number;
   /** 用户按 Seed 单独保存的强制下载完整 Block 最高价；与自动购买上限分开。 */
   filePriceLimitsBySeedHash?: Record<string, MsFileSatoshiAmount>;
+  /** 下载策略器：一个费用池 = 一批 = 一次请求的块数上限（1–64）。 */
+  poolBlocks: number;
+  /** 下载策略器：任务内总席位（基础 + 浮动），最小 2、上限 16。 */
+  schedulerTotalSeats: number;
+  /** 下载策略器：浮动位（未测速在席卖家上限），1–总席位−1。 */
+  schedulerFloatingSeats: number;
+  /** 下载策略器开关：`off` 使用旧路径；`on` 由下载策略器决策（切换完成前缺省 off）。 */
+  schedulerMode: "off" | "on";
 }
 
 /** 自动购买安全缺省值；升级旧配置时必须保持关闭。 */
@@ -386,12 +394,20 @@ export const MSFILE_BITFS_BUYER_SETTINGS_DEFAULT: Readonly<MsFileBitfsBuyerSetti
   maxConcurrentSellerSessions: 3,
   refundDelayBlocks: 5,
   filePriceLimitsBySeedHash: Object.freeze({}),
+  poolBlocks: 4,
+  schedulerTotalSeats: 8,
+  schedulerFloatingSeats: 2,
+  schedulerMode: "off",
 });
 
 /** BitFS 买方并发范围；任务数有界，避免报价洪峰同时占用资金和连接。 */
 export const MSFILE_BITFS_BUYER_LIMITS = Object.freeze({
   maxConcurrentDownloads: 16,
   maxConcurrentSellerSessions: 16,
+  /** 一个费用池 = 一批的块数上限；与卖方协议上限一致。 */
+  poolBlocks: 64,
+  /** 下载策略器总席位上限。 */
+  schedulerTotalSeats: 16,
   /** nLockTime 小于 500000000 才按区块高度解释；开池还须检查当前高度之和。 */
   refundDelayBlocks: 499_999_999,
 });
@@ -415,6 +431,10 @@ export function normalizeMsFileBitfsBuyerSettings(input: unknown): MsFileBitfsBu
   }
   const maxConcurrentSellerSessions = value.maxConcurrentSellerSessions === undefined ? 1 : value.maxConcurrentSellerSessions;
   const refundDelayBlocks = value.refundDelayBlocks === undefined ? MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.refundDelayBlocks : value.refundDelayBlocks;
+  const poolBlocks = value.poolBlocks === undefined ? MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.poolBlocks : value.poolBlocks;
+  const schedulerTotalSeats = value.schedulerTotalSeats === undefined ? MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.schedulerTotalSeats : value.schedulerTotalSeats;
+  const schedulerFloatingSeats = value.schedulerFloatingSeats === undefined ? MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.schedulerFloatingSeats : value.schedulerFloatingSeats;
+  const schedulerMode = value.schedulerMode === undefined ? MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.schedulerMode : value.schedulerMode;
   if (typeof value.buyerAutoPurchaseEnabled !== "boolean"
     || maxFullBlockPriceSatoshis === undefined
     || (value.sellerSelectionPriority !== "price" && value.sellerSelectionPriority !== "recent-speed")
@@ -426,7 +446,17 @@ export function normalizeMsFileBitfsBuyerSettings(input: unknown): MsFileBitfsBu
     || (maxConcurrentSellerSessions as number) > MSFILE_BITFS_BUYER_LIMITS.maxConcurrentSellerSessions
     || !Number.isSafeInteger(refundDelayBlocks)
     || (refundDelayBlocks as number) < 1
-    || (refundDelayBlocks as number) > MSFILE_BITFS_BUYER_LIMITS.refundDelayBlocks) return undefined;
+    || (refundDelayBlocks as number) > MSFILE_BITFS_BUYER_LIMITS.refundDelayBlocks
+    || !Number.isSafeInteger(poolBlocks)
+    || (poolBlocks as number) < 1
+    || (poolBlocks as number) > MSFILE_BITFS_BUYER_LIMITS.poolBlocks
+    || !Number.isSafeInteger(schedulerTotalSeats)
+    || (schedulerTotalSeats as number) < 2
+    || (schedulerTotalSeats as number) > MSFILE_BITFS_BUYER_LIMITS.schedulerTotalSeats
+    || !Number.isSafeInteger(schedulerFloatingSeats)
+    || (schedulerFloatingSeats as number) < 1
+    || (schedulerFloatingSeats as number) >= (schedulerTotalSeats as number)
+    || (schedulerMode !== "off" && schedulerMode !== "on")) return undefined;
   return {
     buyerAutoPurchaseEnabled: value.buyerAutoPurchaseEnabled,
     maxFullBlockPriceSatoshis,
@@ -435,6 +465,10 @@ export function normalizeMsFileBitfsBuyerSettings(input: unknown): MsFileBitfsBu
     maxConcurrentSellerSessions: maxConcurrentSellerSessions as number,
     refundDelayBlocks: refundDelayBlocks as number,
     filePriceLimitsBySeedHash,
+    poolBlocks: poolBlocks as number,
+    schedulerTotalSeats: schedulerTotalSeats as number,
+    schedulerFloatingSeats: schedulerFloatingSeats as number,
+    schedulerMode,
   };
 }
 

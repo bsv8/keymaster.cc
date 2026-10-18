@@ -204,6 +204,8 @@ export interface BitfsBuyerProtocolDeps {
   }): Promise<void> | void;
   /** 内核驱动模式：内容请求由宿主按内核派发登记，协议不自行选择或领取下一批。 */
   dispatchMode?: boolean;
+  /** 内核驱动模式：FundingTx 已观察且池可用于请求（等价内核 `opened`）。 */
+  onPoolUsable?(input: { sessionId: string }): Promise<void> | void;
   /** 内核驱动模式：一批 Kind 5/6/7 验收付款后上报可信交付事实（校验之后、付款已对清）。 */
   onDispatchedDelivery?(input: {
     sessionId: string;
@@ -721,6 +723,7 @@ export class BitfsBuyerProtocol {
     }
     this.deps.assertCurrentContext();
     await stream.send(kind4);
+    await this.deps.onPoolUsable?.({ sessionId });
     record = await this.requiredSession(sessionId);
     if (record.evidence.includes("download-plan")) {
       await this.continueFundedPool(sessionId, quote, stream);
@@ -758,6 +761,7 @@ export class BitfsBuyerProtocol {
       const result = await this.deps.task.reconcileFunding(sessionId);
       if (result?.kind4) {
         await stream.send(result.kind4);
+        await this.deps.onPoolUsable?.({ sessionId });
         const latest = await this.requiredSession(sessionId);
         if (latest.evidence.includes("download-plan")) {
           await this.continueFundedPool(sessionId, quote, stream);

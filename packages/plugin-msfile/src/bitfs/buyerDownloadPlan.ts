@@ -87,6 +87,8 @@ export interface BitfsBuyerDownloadPlan {
   dispatchedContent(sessionId: string): Promise<string[]>;
   /** 请求结算：保留 accepted 的完成记录，其余未接受内容释放回待购；清空本池派发。 */
   releaseDispatch(sessionId: string, accepted: readonly string[]): Promise<void>;
+  /** 内核 drain：停止该池新派发；在途批次与已完成归属保持。 */
+  retirePool(sessionId: string): Promise<void>;
   /** Block 付款由本地 Kind 5/7 验收后标为全局完成。 */
   completeBlock(sessionId: string, blockHashHex: string, paidSatoshis: string): Promise<void>;
   /** 一笔 Kind 7 原子验收整批 Block，避免部分完成后误发下一批。 */
@@ -419,6 +421,14 @@ export function createBitfsBuyerDownloadPlan(input: {
         }
         pool.dispatch = undefined;
         plan.fileComplete = plan.blockHashesHex?.every((hash) => plan.blocks[hash]?.state === "completed") ?? false;
+        return { plan, result: undefined };
+      });
+    },
+    async retirePool(sessionId) {
+      await mutate((plan) => {
+        const pool = plan.pools[sessionId];
+        if (!pool) return { plan, result: undefined };
+        pool.retired = true;
         return { plan, result: undefined };
       });
     },
