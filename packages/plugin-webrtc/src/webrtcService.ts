@@ -912,6 +912,7 @@ export function createWebrtcService(input: {
   function parseTransferRequest(content: JSONValue): {
     sessionId: string;
     requestId: string;
+    hash: string;
     kind: "image" | "file";
     byteLength: number;
     fileName?: string;
@@ -1907,11 +1908,13 @@ export function createWebrtcService(input: {
       });
       const current = pendingTransferRequests.get(sessionId);
       // 对端可能已收到接受私信并返回 offer，此时请求已转为实际会话。
-      if (!current && activeTransfer && isTransferCurrent(activeTransfer)
-        && activeTransfer.direction === "incoming" && activeTransfer.sessionId === sessionId
-        && activeTransfer.requestMessageId === request.requestId
-        && activeTransfer.ownerGeneration === request.ownerGeneration
-        && activeTransfer.remotePublicKeyHex === request.requesterPublicKeyHex) return;
+      // activeTransfer 可被异步回调更新；这里用类型断言重新读取，避免 await 前的 narrowing 把变量固化为 null。
+      const activeNow = activeTransfer as ActiveTransfer | null;
+      if (!current && activeNow && isTransferCurrent(activeNow)
+        && activeNow.direction === "incoming" && activeNow.sessionId === sessionId
+        && activeNow.requestMessageId === request.requestId
+        && activeNow.ownerGeneration === request.ownerGeneration
+        && activeNow.remotePublicKeyHex === request.requesterPublicKeyHex) return;
       if (!current
         || current !== request
         || current.expiresAtMs <= env.now()
