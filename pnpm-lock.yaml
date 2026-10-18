@@ -175,6 +175,12 @@ importers:
         specifier: ^5.4.2
         version: 5.4.21(@types/node@24.13.3)(terser@5.51.2)
 
+  ../keymaster.cc-download-scheduler:
+    devDependencies:
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+
   coding/keymaster/p2p-host:
     dependencies:
       '@chainsafe/libp2p-noise':
@@ -517,6 +523,9 @@ importers:
       go-bitfs:
         specifier: 0.5.0
         version: 0.5.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+      keymaster.cc-download-scheduler:
+        specifier: workspace:*
+        version: link:../../../keymaster.cc-download-scheduler
       masterseed:
         specifier: 1.1.0
         version: 1.1.0

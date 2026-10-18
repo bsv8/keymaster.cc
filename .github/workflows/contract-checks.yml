@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+      - name: Check out download scheduler
+        run: git clone --depth 1 https://github.com/bsv8/keymaster.cc-download-scheduler.git ../keymaster.cc-download-scheduler
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:

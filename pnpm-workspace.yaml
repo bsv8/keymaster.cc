@@ -3,6 +3,7 @@ packages:
   - "coding/keymaster/vaultlink-integration"
   - "coding/keymaster/vaultlink-sdk"
   - "coding/keymaster/p2p-host"
+  - "../keymaster.cc-download-scheduler"
 
 linkWorkspacePackages: true
 
