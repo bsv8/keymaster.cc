@@ -67,7 +67,7 @@ export class SchedulerAdapter {
     this.state = result.state;
     for (const command of result.commands) {
       if (!this.outbox.some((entry) => entry.commandId === command.commandId)) {
-        this.outbox.push({ commandId: command.commandId, type: command.type, revision: command.revision });
+        this.outbox.push({ commandId: command.commandId, type: command.type, revision: command.revision, command });
       }
     }
     await this.store.save({ state: this.state, outbox: this.outbox });

@@ -1,7 +1,7 @@
 // 内核快照 + 命令 outbox 的原子持久化；沿用 bitfs-journal 的条件写（CAS）约定。
 
 import type { BorrowedOwnerFileStore } from "@keymaster/contracts";
-import type { State } from "keymaster.cc-download-scheduler";
+import type { Command, State } from "keymaster.cc-download-scheduler";
 
 const FORMAT = "keymaster.scheduler-host";
 const VERSION = 1;
@@ -14,6 +14,8 @@ export interface SchedulerOutboxEntry {
   type: string;
   /** 命令创建时的任务修订号，便于排查乱序。 */
   revision: number;
+  /** 命令原文；重启后按 commandId 幂等重放。 */
+  command: Command;
 }
 
 /** 持久化的调度器宿主快照：状态与 outbox 同事务落盘。 */
@@ -62,7 +64,9 @@ function validate(raw: unknown, owner: string, network: string, taskId: string):
     if (typeof entry.commandId !== "string" || entry.commandId.length === 0) throw new Error("调度器 outbox 缺少命令编号");
     if (typeof entry.type !== "string" || entry.type.length === 0) throw new Error("调度器 outbox 缺少命令类型");
     if (!Number.isSafeInteger(entry.revision) || (entry.revision as number) < 0) throw new Error("调度器 outbox 修订号无效");
-    return { commandId: entry.commandId, type: entry.type, revision: entry.revision as number };
+    const command = assertObject(entry.command, "调度器 outbox 缺少命令原文");
+    if (command.commandId !== entry.commandId || command.type !== entry.type) throw new Error("调度器 outbox 命令与索引不一致");
+    return { commandId: entry.commandId, type: entry.type, revision: entry.revision as number, command: command as unknown as Command };
   });
   return {
     format: FORMAT, version: VERSION, ownerPublicKeyHex: owner, network, taskId,
