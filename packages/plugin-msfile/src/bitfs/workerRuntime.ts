@@ -1404,6 +1404,9 @@ async function ensureMsfileBitfsBuyerProtocol(
         await kernelRuntime.adapter.settle(pool.openCommandId);
         kernelRuntime.executor.forget(pool.openCommandId);
       },
+      onPoolClosed: async ({ sessionId }: { sessionId: string }) => {
+        await msfileBitfsKernelFeedCloseSettled(kernelRuntime, sessionId);
+      },
       onDispatchedDelivery: async ({ sessionId, accepted, paidSatoshis, startedAt, endedAt }: {
         sessionId: string; contentIds: string[]; accepted: string[]; paidSatoshis: string; startedAt: number; endedAt: number;
       }) => {
@@ -1749,6 +1752,45 @@ async function msfileBitfsKernelEnsureManifest(runtime: MsfileBitfsKernelRuntime
   }));
   await msfileBitfsKernelFeed(runtime, { eventId: `manifest-${sessionId}`, payload: { type: "manifest", content: blocks } });
 }
+
+/** 关池交易已观察：从专款账本算出 returned/spent 并回灌内核 `closed`（含退款可用）。 */
+async function msfileBitfsKernelFeedCloseSettled(runtime: MsfileBitfsKernelRuntime, sessionId: string): Promise<void> {
+  const state = runtime.adapter.snapshot();
+  const pool = Object.values(state.pools).find((item) => item.sessionId === sessionId
+    && (item.funding === "closing" || item.funding === "open" || item.funding === "problem"));
+  if (!pool || !pool.closeCommandId) return;
+  const commandId = pool.closeCommandId;
+  const ledger = currentMsfileBitfsFundingLedger();
+  const account = await ledger.getAccount({
+    ownerPublicKeyHex: runtime.ownerPublicKeyHex, seedHashHex: runtime.seedHashHex,
+    network: deps.network(), nowMs: Date.now(),
+  });
+  const fundingPool = account.pools.find((item) => item.poolId === sessionId);
+  const closeTxid = fundingPool?.recoveryTxid;
+  const closeTx = account.transactions.find((item) => item.txid === closeTxid && (item.purpose === "close" || item.purpose === "refund"));
+  const opening = account.utxos.find((item) => `${item.txid}:${item.vout}` === fundingPool?.openingOutpoint);
+  if (!fundingPool || fundingPool.state !== "closed" || !closeTx || !opening) {
+    await msfileBitfsKernelFeed(runtime, { eventId: `close-unknown-${pool.id}`, payload: { type: "unknown", poolId: pool.id, commandId } });
+    return;
+  }
+  const amount = BigInt(opening.valueSatoshis);
+  const outputs = closeTx.expectedOutputs.reduce((sum, output) => sum + BigInt(output.valueSatoshis), 0n);
+  const committed = BigInt(pool.committed);
+  const spent = amount - outputs;
+  const returned = outputs - committed;
+  if (spent < 0n || returned < 0n || returned + spent + committed !== amount) {
+    // 账本金额与内核承诺对不上：不冒充事实，留问题池追溯。
+    await msfileBitfsKernelFeed(runtime, { eventId: `close-mismatch-${pool.id}`, payload: { type: "unknown", poolId: pool.id, commandId } });
+    return;
+  }
+  await msfileBitfsKernelFeed(runtime, {
+    eventId: `closed-${pool.id}`,
+    payload: { type: "closed", poolId: pool.id, commandId, returned: returned.toString(10), spent: spent.toString(10) },
+  });
+  await msfileBitfsKernelFeed(runtime, { eventId: `refund-${pool.id}`, payload: { type: "refund-available", poolId: pool.id } });
+  await runtime.adapter.settle(commandId);
+  runtime.executor.forget(commandId);
+  msfileBitfsKernelProgress.delete(sessionId);}
 
 /** 内核购买入口：建任务、建/恢复适配器、喂事实并执行首批命令。 */
 async function startMsfileBitfsKernelPurchase(input: {

@@ -206,6 +206,8 @@ export interface BitfsBuyerProtocolDeps {
   dispatchMode?: boolean;
   /** 内核驱动模式：FundingTx 已观察且池可用于请求（等价内核 `opened`）。 */
   onPoolUsable?(input: { sessionId: string }): Promise<void> | void;
+  /** 内核驱动模式：关池交易已观察且专款账本已回收；宿主据此向内核回灌 `closed`。 */
+  onPoolClosed?(input: { sessionId: string }): Promise<void> | void;
   /** 内核驱动模式：一批 Kind 5/6/7 验收付款后上报可信交付事实（校验之后、付款已对清）。 */
   onDispatchedDelivery?(input: {
     sessionId: string;
@@ -1303,6 +1305,7 @@ export class BitfsBuyerProtocol {
           await this.deps.downloadPlan.closePool(sessionId);
           this.deps.onDownloadPlanChanged?.();
         }
+        await this.deps.onPoolClosed?.({ sessionId });
         this.progress(sessionId, cancelling ? "cancelled" : "completed", this.readOpeningAmount(sessionId), verifiedBlockCount, blockCount,
           cancelling ? "购买已取消，费用池已关闭且余款已收回" : "文件已验证并写入本地，费用池已关闭且余款已收回");
         return;
