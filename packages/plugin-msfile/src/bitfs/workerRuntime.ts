@@ -24,7 +24,7 @@ import { normalizeMsFileSatoshiAmount, isValidMsFileHashHex, MSFILE_BITFS_BUYER_
 import type { WindowP2pExecutorOperation } from "@keymaster/contracts/window-p2p";
 import { BitfsSeedIndex, BitfsSellerRuntime, BitfsSellerSessionManager, createBitfsBuyerTask, createBitfsBuyerDownloadPlan, BitfsBuyerProtocol, createBitfsLocalSellerContentResolver, BitfsTransactionBroadcaster, createBitfsJournal, createBitfsSessionJournal, createBitfsTransactionJournal, createBitfsVaultSigner, createBitfsWocChainPort, createMsFileLocalContentSource, recoverBitfsBuyerContentCommit, readBitfsBuyerLocalPaymentState, assertBitfsBuyerCloseBinding, parseBitfsBuyerCloseBinding, createUnavailableBitfsSellerContentResolver, reconcileBitfsTransactions, reconcileBitfsSessionTransactions, readBitfsPoolSpendChain, prepareBitfsFunding, recoverBitfsFundingSplits, BitfsSellerProtocol, type BitfsSellerMatch, type BitfsBuyerQuoteView, type BitfsBuyerTask, type BitfsSellerProtocolPort, type BitfsSellerStreamTransport, type BitfsFundingPrepareDeps, type BitfsTransactionJournal, type BitfsFundingLedger, type MsFileServiceImpl } from "../coordinator.js";
 import type { WorkerFundingDependencies, createWorkerFundingRuntime } from "./workerFundingRuntime.js";
-import { completeBuyerOpening, parsePaymentState, verifyArbitratedPayment, verifyBuyerCompletedClose, transactionID } from "go-bitfs";
+import { completeBuyerOpening, parse, parsePaymentState, verifyArbitratedPayment, verifyBuyerCompletedClose, transactionID } from "go-bitfs";
 import { peerIdFromPublicKeyBytes } from "bitcoin-libp2p/identity";
 import { newSessionID, parseMessageID, parseSessionID } from "bsv8-channel-protocol";
 import { WEBRTC_SIGNAL_PROTOCOL, newOffer, newAnswer, newEndOfCandidates as newEndOfCandidatesSignal, newICECandidate as newIceSignal } from "bsv8-channel-protocol/webrtc-signal";
@@ -1412,10 +1412,18 @@ async function ensureMsfileBitfsBuyerProtocol(
         const requestId = pool?.requestId ?? null;
         if (!requestId) return;
         const request = state.requests[requestId];
+        // 交付墙钟取最内侧帧时刻：Kind 5 写出完成 → Kind 6 完整到达（校验之前）。
+        const sentAt = msfileBitfsKernelLastSentAt.get(sessionId);
+        const receivedAt = msfileBitfsKernelLastReceivedAt.get(sessionId);
+        const wallStartedAt = sentAt !== undefined ? sentAt : startedAt;
+        const wallEndedAt = receivedAt !== undefined && receivedAt > wallStartedAt ? receivedAt : Math.max(wallStartedAt + 1, endedAt);
         await msfileBitfsKernelFeed(kernelRuntime, {
           eventId: `delivery-${requestId}`,
-          payload: { type: "delivery", requestId, accepted, paid: paidSatoshis, startedAt, endedAt },
+          payload: { type: "delivery", requestId, accepted, paid: paidSatoshis, startedAt: wallStartedAt, endedAt: wallEndedAt },
         });
+        msfileBitfsKernelProgress.delete(sessionId);
+        msfileBitfsKernelLastSentAt.delete(sessionId);
+        msfileBitfsKernelLastReceivedAt.delete(sessionId);
         if (request) { await kernelRuntime.adapter.settle(request.commandId); kernelRuntime.executor.forget(request.commandId); }
         await msfileBitfsKernelEnsureManifest(kernelRuntime, sessionId);
       },
@@ -1461,6 +1469,11 @@ interface MsfileBitfsKernelRuntime {
 const msfileBitfsKernelRuntimes = new Map<string, MsfileBitfsKernelRuntime>();
 const msfileBitfsKernelWakes = new Map<string, ReturnType<typeof setTimeout>>();
 const msfileBitfsKernelClock = new MonotonicClock();
+/** 流级进度基线：meter 的累计字节 → 本次内核请求已传字节。 */
+const msfileBitfsKernelProgress = new Map<string, { base: number; fed: number }>();
+/** 最内侧帧时刻（买方会话编号 → 本地毫秒）：交付墙钟用。 */
+const msfileBitfsKernelLastReceivedAt = new Map<string, number>();
+const msfileBitfsKernelLastSentAt = new Map<string, number>();
 
 /** Seed 内容在内核中的名义字节数；内核只用它做进度与准入，不参与协议校验。 */
 const MSFILE_BITFS_KERNEL_SEED_BYTES = 192;
@@ -1602,6 +1615,32 @@ function msfileBitfsKernelArmWake(runtime: MsfileBitfsKernelRuntime): void {
   msfileBitfsKernelWakes.set(key, timer);
 }
 
+/** 流字节活动 → 内核请求进度（基于 meter 累计字节与本次请求基线）。 */
+async function msfileBitfsKernelFeedStreamProgress(webrtcSessionId: string, bytesIn: number): Promise<void> {
+  const link = msfileBitfsWebRtcBuyerLinks.get(webrtcSessionId);
+  const quoteSessionId = link?.quoteSessionId;
+  if (!link || !quoteSessionId) return;
+  const runtime = msfileBitfsKernelRuntimeFor(link.ownerPublicKeyHex, link.seedHashHex);
+  if (!runtime) return;
+  const state = runtime.adapter.snapshot();
+  const pool = Object.values(state.pools).find((item) => item.sessionId === quoteSessionId && item.requestId !== null);
+  const requestId = pool?.requestId ?? null;
+  if (!requestId) { msfileBitfsKernelProgress.delete(quoteSessionId); return; }
+  const request = state.requests[requestId];
+  if (!request || request.state !== "pending") return;
+  let record = msfileBitfsKernelProgress.get(quoteSessionId);
+  if (!record) { record = { base: bytesIn, fed: 0 }; msfileBitfsKernelProgress.set(quoteSessionId, record); return; }
+  const transferred = Math.max(0, bytesIn - record.base);
+  if (transferred <= record.fed) return;
+  try {
+    await msfileBitfsKernelFeed(runtime, {
+      eventId: `progress-${requestId}-${transferred}`,
+      payload: { type: "progress", requestId, bytes: transferred },
+    });
+    record.fed = transferred;
+  } catch { /* 进度只用于停摆判定；写入失败不中断下载。 */ }
+}
+
 /** 内核 open：按执行层真实费率复算开池金额并启动协议会话。 */
 async function msfileBitfsKernelOpenPool(runtime: MsfileBitfsKernelRuntime, command: Extract<SchedulerCommand, { type: "open" }>): Promise<void> {
   const target = msfileBitfsKernelLinks(runtime).get(command.sessionId);
@@ -1660,6 +1699,8 @@ async function msfileBitfsKernelDispatchDownload(runtime: MsfileBitfsKernelRunti
   const plan = target.link.downloadPlan ?? await openMsfileBitfsBuyerDownloadPlan(runtime.ownerPublicKeyHex, runtime.seedHashHex, pool.sessionId);
   const outcome = await plan.dispatchContent(pool.sessionId, command.contentIds);
   if (outcome === "conflict") throw new Error("内核派发与下载计划冲突");
+  // 新请求重新建立流进度基线。
+  msfileBitfsKernelProgress.delete(pool.sessionId);
   await protocol.continueSharedDownload({ sessionId: pool.sessionId, stream: createMsfileBitfsBuyerStream(target.webrtcSessionId, target.link) });
 }
 
@@ -2385,6 +2426,11 @@ function createMsfileBitfsBuyerStream(
           laneId: "msfile",
           operation: { type: "bitfs-seller-send", sessionId: link.transportSessionId, frame },
         });
+        // 内核路径：记录授权帧实际写出完成时刻（最内侧，白名单失败不影响发送）。
+        if (link.quoteSessionId) {
+          try { if (parse(frame).kind === 5) msfileBitfsKernelLastSentAt.set(link.quoteSessionId, Date.now()); }
+          catch { /* 非规范帧由协议按错误处理 */ }
+        }
       } catch (error) {
         await writeBitfsDiagnostic("buyer-stream-send-error.json", {
           webrtcSessionId,
@@ -3373,6 +3419,14 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: BitfsExecutorLea
       requestMessageId?: unknown;
       publicKeyHex?: unknown;
       envelope?: unknown;
+      /** 帧完整到达时刻（本地毫秒）。 */
+      receivedAt?: unknown;
+      /** 流计量：累计到达字节。 */
+      bytesIn?: unknown;
+      /** 流计量：累计写出字节。 */
+      bytesOut?: unknown;
+      /** 流计量：最近活动时刻。 */
+      lastActivityAt?: unknown;
    };
   const manager = msfileSellerSessionManager;
   if (typeof event.sessionId !== "string" || event.sessionId.length === 0) return;
@@ -3515,6 +3569,9 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: BitfsExecutorLea
       void (async () => {
         await buyerLink.quoteAccepted;
         const protocol = await ensureMsfileBitfsBuyerProtocol(event.webrtcSessionId as string, buyerLink);
+        if (buyerLink.quoteSessionId) {
+          msfileBitfsKernelLastReceivedAt.set(buyerLink.quoteSessionId, typeof event.receivedAt === "number" ? event.receivedAt : Date.now());
+        }
         await protocol.onFrame({
           sessionId: buyerLink.quoteSessionId!,
           rawArtifact: (event.frame as Uint8Array).slice(),
@@ -3639,6 +3696,12 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: BitfsExecutorLea
         });
        msfileBitfsBuyerWebRtcFailure(buyerLink, event.webrtcSessionId as string, event.sessionId as string, "buyer_protocol_error");
      });
+    return;
+  }
+  if (event.type === "bitfs-webrtc-meter") {
+    if (typeof event.webrtcSessionId === "string" && typeof event.bytesIn === "number") {
+      void msfileBitfsKernelFeedStreamProgress(event.webrtcSessionId, event.bytesIn).catch(() => undefined);
+    }
     return;
   }
   if (!manager) return;

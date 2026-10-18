@@ -1,5 +1,6 @@
 import { parse } from "go-bitfs";
 import { BITFS_PROTOCOL_ID, MAX_WIRE_FRAME_BYTES, readArtifacts, writeArtifact } from "go-bitfs/transport";
+import { setStreamFrameMeter, type StreamFrameMeter } from "bitcoin-libp2p/stream";
 import { hexToBytes, peerIdFromPublicKeyBytes } from "bitcoin-libp2p/identity";
 import type {
   WebRTCInterconnectConnectionEvent,
@@ -23,6 +24,8 @@ export type BitfsWebRtcStreamEvent =
     webrtcSessionId: string;
     ownerSessionEpoch: string;
     frame: Uint8Array;
+    /** 帧完整到达时刻（本地时钟毫秒，解析与校验之前）。 */
+    receivedAt: number;
   }
   | {
     type: "bitfs-webrtc-session-closed";
@@ -117,6 +120,8 @@ export interface BitfsWebRtcStreamRuntimeOptions {
   onError?(error: unknown, context: { sessionId: string; webrtcSessionId: string; direction: "inbound" | "outbound" }): void;
   ownerSessionEpoch: string;
   signalTimeoutMs?: number;
+  /** 每条流的帧计量器；由宿主提供，流建立时挂载，库只负责转发字节与帧事件。 */
+  streamMeter?(input: { sessionId: string; webrtcSessionId: string; direction: "inbound" | "outbound" }): StreamFrameMeter | undefined;
 }
 
 export class BitfsWebRtcStreamRuntime {
@@ -551,6 +556,7 @@ export class BitfsWebRtcStreamRuntime {
         throw new Error("BitFS WebRTC session is closed");
       }
       entry.stream = typedStream;
+      this.attachStreamMeter(entry);
       if (entry.firstFrame != null) {
         const firstWrite = entry.sendQueue.catch(() => undefined).then(async () => {
           if (entry.closed) throw new Error("BitFS WebRTC session is not open");
@@ -576,12 +582,23 @@ export class BitfsWebRtcStreamRuntime {
     }
   }
 
+  private attachStreamMeter(entry: SessionEntry): void {
+    if (entry.stream == null) return;
+    const meter = this.options.streamMeter?.({
+      sessionId: entry.sessionId,
+      webrtcSessionId: entry.webrtcSessionId,
+      direction: entry.direction,
+    });
+    if (meter != null) setStreamFrameMeter(entry.stream as unknown as Parameters<typeof setStreamFrameMeter>[0], meter);
+  }
+
   private async attachInbound(entry: SessionEntry, stream: BitfsStreamLike): Promise<void> {
     if (entry.closed || entry.direction !== "inbound" || entry.stream != null) {
       this.abortStream(stream, "BitFS WebRTC stream is already attached");
       return;
     }
     entry.stream = stream;
+    this.attachStreamMeter(entry);
     if (entry.firstFrame != null) await this.writeFrame(entry, entry.firstFrame);
     if (entry.closed) throw new Error("BitFS WebRTC session is closed");
     entry.ready.resolve(entry);
@@ -613,7 +630,8 @@ export class BitfsWebRtcStreamRuntime {
           sessionId: entry.sessionId,
           webrtcSessionId: entry.webrtcSessionId,
           ownerSessionEpoch: entry.ownerSessionEpoch,
-          frame: exact
+          frame: exact,
+          receivedAt: Date.now()
         }, [exact.buffer]);
       }
       if (!entry.closed) await this.closeEntry(entry, "remote_closed", true);

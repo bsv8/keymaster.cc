@@ -70,6 +70,30 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
           });
         },
         ownerSessionEpoch: context.ownerSessionEpoch ?? "",
+        streamMeter: (input) => {
+          // 字节与帧计量在流建立处挂载；按 500ms 聚合上报，避免逐块过桥。
+          const record = { bytesIn: 0, bytesOut: 0, lastActivityAt: 0 };
+          let pending: ReturnType<typeof setTimeout> | undefined;
+          const flush = () => {
+            pending = undefined;
+            Promise.resolve(context.emit({
+              type: "bitfs-webrtc-meter",
+              sessionId: input.sessionId,
+              webrtcSessionId: input.webrtcSessionId,
+              ownerSessionEpoch: context.ownerSessionEpoch ?? "",
+              bytesIn: record.bytesIn,
+              bytesOut: record.bytesOut,
+              lastActivityAt: record.lastActivityAt,
+            })).catch(() => undefined);
+          };
+          const schedule = () => { if (pending === undefined) pending = setTimeout(flush, 500); };
+          return {
+            bytesIn(bytes: number) { record.bytesIn += bytes; record.lastActivityAt = Date.now(); schedule(); },
+            bytesOut(bytes: number) { record.bytesOut += bytes; record.lastActivityAt = Date.now(); schedule(); },
+            frameReceived() { schedule(); },
+            frameSent() { schedule(); },
+          };
+        },
       });
     }
   }
