@@ -263,14 +263,6 @@ export type CoordinatorMsFileControl =
   | { type: "settings.bitfsBuyer.get" }
   /** 保存当前 Key 的 BitFS 自动购买策略。 */
   | { type: "settings.bitfsBuyer.update"; input: MsFileBitfsBuyerSettings }
-  | {
-      /** 按 Seed 保存用户手动强制下载上限；不修改自动购买上限。 */
-      type: "bitfs.buyerPriceLimit.update";
-      /** 被设置限价的文件 Seed Hash。 */
-      seedHashHex: string;
-      /** 完整 Block 的最高价，单位聪。 */
-      maxFullBlockPriceSatoshis: string;
-    }
   /** 发布或复用指定 Seed 的 ChannelProtocol Hash 需求；不触发资金操作。 */
   | { type: "bitfs.demand.publish"; seedHashHex: string }
   /** 读取指定 Seed 当前需求编号及已验签报价。 */

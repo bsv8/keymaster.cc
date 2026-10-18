@@ -248,7 +248,7 @@ export type CoordinatorMsFileControlResultFor<C extends CoordinatorMsFileControl
   C extends { type: "settings.get" } ? MsFileSettingsSnapshot :
   C extends { type: "settings.bitfsBuyer.get" } ? MsFileBitfsBuyerSettings :
   C extends { type: "settings.readConcurrency.get" } ? MsFileReadConcurrencySettings :
-  C extends { type: "settings.readConcurrency.update" | "settings.readConcurrency.reset" | "settings.mediaBlockReadConcurrency.update" | "settings.global.update" | "settings.seller.update" | "settings.bitfsBuyer.update" | "bitfs.buyerPriceLimit.update" | "supplier.upsert" | "supplier.delete" | "app-policy.update" | "app-policy.clear" | "approval.resolve" } ? null :
+  C extends { type: "settings.readConcurrency.update" | "settings.readConcurrency.reset" | "settings.mediaBlockReadConcurrency.update" | "settings.global.update" | "settings.seller.update" | "settings.bitfsBuyer.update" | "supplier.upsert" | "supplier.delete" | "app-policy.update" | "app-policy.clear" | "approval.resolve" } ? null :
   C extends { type: "settings.mediaBlockReadConcurrency.get" } ? number :
   C extends { type: "bitfs.demand.publish" | "bitfs.demand.snapshot" | "bitfs.purchase.start" | "bitfs.purchase.cancel" | "bitfs.purchase.reconnect" } ? MsFileBitfsDemandSnapshot :
   C extends { type: "bitfs.arbitration.list" } ? import("./msfile.js").MsFileArbitrationTask[] :
@@ -1176,15 +1176,6 @@ function parseMsFileControl(value: unknown): CoordinatorMsFileControl {
     const seedHashHex = text(control.seedHashHex, `MSFile control.${type}.seedHashHex`, 64);
     if (!isValidMsFileHashHex(seedHashHex)) throw new TypeError("Coordinator MSFile purchase Seed Hash is invalid");
     return { type, seedHashHex, sessionId: text(control.sessionId, `MSFile control.${type}.sessionId`, 128) };
-  }
-  if (type === "bitfs.buyerPriceLimit.update") {
-    const seedHashHex = text(control.seedHashHex, `MSFile control.${type}.seedHashHex`, 64);
-    if (!isValidMsFileHashHex(seedHashHex)) throw new TypeError(`Coordinator MSFile control ${type} Seed Hash is invalid`);
-    return {
-      type,
-      seedHashHex,
-      maxFullBlockPriceSatoshis: parseMsFileSatoshiAmount(control.maxFullBlockPriceSatoshis, `MSFile control.${type}.maxFullBlockPriceSatoshis`),
-    };
   }
   if (type === "settings.readConcurrency.update") return { type, input: parseMsFileReadConcurrency(control.input) };
   if (type === "settings.global.update") return { type, input: parseMsFileGlobalPriceSettings(control.input) };
@@ -2776,7 +2767,6 @@ function parseMsFileControlResultFor(control: CoordinatorMsFileControl, value: u
     case "settings.global.update":
     case "settings.seller.update":
     case "settings.bitfsBuyer.update":
-    case "bitfs.buyerPriceLimit.update":
     case "bitfs.demand.cancel":
     case "bucket.delete-file":
     case "bitfs.purchase.history.delete":

@@ -15,15 +15,4 @@ export async function bitfsPoolSettlementFee(keys: PoolPublicKeys, feeRate: bigi
   return BigInt(probeAmount) - parseFundingOutput(refund, 0).satoshis;
 }
 
-/** 原购买调度的内容预算：按剩余块与剩余卖家分配，不从单个块推导采购上限。 */
-export function allocateBitfsRemainingContent(input: {
-  remainingBlocks: number; remainingSellers: number; seedCompleted: boolean; seedPrice: bigint; blockPrice: bigint;
-}) {
-  const assignedCount = Math.floor(input.remainingBlocks / input.remainingSellers)
-    + (input.remainingBlocks % input.remainingSellers > 0 ? 1 : 0);
-  const blockBudget = BigInt(assignedCount) * input.blockPrice;
-  const seedBudget = input.seedCompleted ? 0n : input.seedPrice;
-  return { assignedCount, blockBudget, seedBudget, contentBudget: blockBudget + seedBudget };
-}
-
 function toHex(bytes: Uint8Array): string { return Array.from(bytes, value => value.toString(16).padStart(2, "0")).join(""); }
