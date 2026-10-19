@@ -1388,41 +1388,51 @@ async function ensureMsfileBitfsBuyerProtocol(
     onVerifiedDelivery: persistMsfileBitfsSellerSpeedSample,
     ...(kernelRuntime ? {
       dispatchMode: true,
-      onPoolUsable: async ({ sessionId }: { sessionId: string }) => {
-        const state = kernelRuntime.adapter.snapshot();
-        const pool = Object.values(state.pools).find((item) => item.sessionId === sessionId && item.funding === "opening");
-        if (!pool) return;
-        await msfileBitfsKernelFeed(kernelRuntime, {
-          eventId: `opened-${pool.id}`, payload: { type: "opened", poolId: pool.id, commandId: pool.openCommandId },
-        });
-        await kernelRuntime.adapter.settle(pool.openCommandId);
-        kernelRuntime.executor.forget(pool.openCommandId);
+      // 协议回调运行在会话串行锁内；内核命令会回调协议（continue/close），
+      // 必须排程到锁释放后执行，否则非重入锁自锁。
+      onPoolUsable: ({ sessionId }: { sessionId: string }) => {
+        setTimeout(() => {
+          void (async () => {
+            const state = kernelRuntime.adapter.snapshot();
+            const pool = Object.values(state.pools).find((item) => item.sessionId === sessionId && item.funding === "opening");
+            if (!pool) return;
+            await msfileBitfsKernelFeed(kernelRuntime, {
+              eventId: `opened-${pool.id}`, payload: { type: "opened", poolId: pool.id, commandId: pool.openCommandId },
+            });
+            await kernelRuntime.adapter.settle(pool.openCommandId);
+            kernelRuntime.executor.forget(pool.openCommandId);
+          })().catch(() => undefined);
+        }, 0);
       },
-      onPoolClosed: async ({ sessionId }: { sessionId: string }) => {
-        await msfileBitfsKernelFeedCloseSettled(kernelRuntime, sessionId);
+      onPoolClosed: ({ sessionId }: { sessionId: string }) => {
+        setTimeout(() => { void msfileBitfsKernelFeedCloseSettled(kernelRuntime, sessionId).catch(() => undefined); }, 0);
       },
-      onDispatchedDelivery: async ({ sessionId, accepted, paidSatoshis, startedAt, endedAt }: {
+      onDispatchedDelivery: ({ sessionId, accepted, paidSatoshis, startedAt, endedAt }: {
         sessionId: string; contentIds: string[]; accepted: string[]; paidSatoshis: string; startedAt: number; endedAt: number;
       }) => {
-        const state = kernelRuntime.adapter.snapshot();
-        const pool = Object.values(state.pools).find((item) => item.sessionId === sessionId && item.requestId !== null);
-        const requestId = pool?.requestId ?? null;
-        if (!requestId) return;
-        const request = state.requests[requestId];
-        // 交付墙钟取最内侧帧时刻：Kind 5 写出完成 → Kind 6 完整到达（校验之前）。
-        const sentAt = msfileBitfsKernelLastSentAt.get(sessionId);
-        const receivedAt = msfileBitfsKernelLastReceivedAt.get(sessionId);
-        const wallStartedAt = sentAt !== undefined ? sentAt : startedAt;
-        const wallEndedAt = receivedAt !== undefined && receivedAt > wallStartedAt ? receivedAt : Math.max(wallStartedAt + 1, endedAt);
-        await msfileBitfsKernelFeed(kernelRuntime, {
-          eventId: `delivery-${requestId}`,
-          payload: { type: "delivery", requestId, accepted, paid: paidSatoshis, startedAt: wallStartedAt, endedAt: wallEndedAt },
-        });
-        msfileBitfsKernelProgress.delete(sessionId);
-        msfileBitfsKernelLastSentAt.delete(sessionId);
-        msfileBitfsKernelLastReceivedAt.delete(sessionId);
-        if (request) { await kernelRuntime.adapter.settle(request.commandId); kernelRuntime.executor.forget(request.commandId); }
-        await msfileBitfsKernelEnsureManifest(kernelRuntime, sessionId);
+        setTimeout(() => {
+          void (async () => {
+            const state = kernelRuntime.adapter.snapshot();
+            const pool = Object.values(state.pools).find((item) => item.sessionId === sessionId && item.requestId !== null);
+            const requestId = pool?.requestId ?? null;
+            if (!requestId) return;
+            const request = state.requests[requestId];
+            // 交付墙钟取最内侧帧时刻：Kind 5 写出完成 → Kind 6 完整到达（校验之前）。
+            const sentAt = msfileBitfsKernelLastSentAt.get(sessionId);
+            const receivedAt = msfileBitfsKernelLastReceivedAt.get(sessionId);
+            const wallStartedAt = sentAt !== undefined ? sentAt : startedAt;
+            const wallEndedAt = receivedAt !== undefined && receivedAt > wallStartedAt ? receivedAt : Math.max(wallStartedAt + 1, endedAt);
+            await msfileBitfsKernelFeed(kernelRuntime, {
+              eventId: `delivery-${requestId}`,
+              payload: { type: "delivery", requestId, accepted, paid: paidSatoshis, startedAt: wallStartedAt, endedAt: wallEndedAt },
+            });
+            msfileBitfsKernelProgress.delete(sessionId);
+            msfileBitfsKernelLastSentAt.delete(sessionId);
+            msfileBitfsKernelLastReceivedAt.delete(sessionId);
+            if (request) { await kernelRuntime.adapter.settle(request.commandId); kernelRuntime.executor.forget(request.commandId); }
+            await msfileBitfsKernelEnsureManifest(kernelRuntime, sessionId);
+          })().catch(() => undefined);
+        }, 0);
       },
     } : {}),
     onProgress(progress) {
@@ -1468,6 +1478,10 @@ const msfileBitfsKernelWakes = new Map<string, ReturnType<typeof setTimeout>>();
 const msfileBitfsKernelClock = new MonotonicClock();
 /** 流级进度基线：meter 的累计字节 → 本次内核请求已传字节。 */
 const msfileBitfsKernelProgress = new Map<string, { base: number; fed: number }>();
+/** 正在为某卖家刷新报价（旧协议会话已用完）的集合，避免重复取消/重发。 */
+const msfileBitfsKernelQuoteRefreshes = new Set<string>();
+/** 已用完的报价会话 → 等待关池结清后再刷新报价的卖家。 */
+const msfileBitfsKernelPendingRefreshes = new Map<string, string>();
 /** 最内侧帧时刻（买方会话编号 → 本地毫秒）：交付墙钟用。 */
 const msfileBitfsKernelLastReceivedAt = new Map<string, number>();
 const msfileBitfsKernelLastSentAt = new Map<string, number>();
@@ -1531,15 +1545,57 @@ async function msfileBitfsKernelQuoteFees(quoteView: import("@keymaster/contract
   };
 }
 
-/** 已验签报价 → 内核 Quote。 */
-async function msfileBitfsKernelQuote(quoteView: import("@keymaster/contracts").MsFileBitfsQuoteView): Promise<SchedulerQuote> {
+/** 已验签报价 → 内核 Quote。version 由宿主单调递增（同卖家后到的新报价必须能覆盖旧报价）。 */
+async function msfileBitfsKernelQuote(quoteView: import("@keymaster/contracts").MsFileBitfsQuoteView, version: number): Promise<SchedulerQuote> {
   const expiresAtSeconds = Number(quoteView.quoteExpiresAtUnixSeconds);
   return {
-    id: quoteView.sessionId, version: 1, sellerId: quoteView.sellerPublicKeyHex, sessionId: quoteView.sessionId,
+    id: quoteView.sessionId, version, sellerId: quoteView.sellerPublicKeyHex, sessionId: quoteView.sessionId,
     expiresAt: Number.isSafeInteger(expiresAtSeconds) && expiresAtSeconds > 0 ? expiresAtSeconds * 1_000 : Date.now() + 300_000,
     blockPrice: quoteView.fullBlockPriceSatoshis, seedPrice: quoteView.seedPriceSatoshis, blockBytes: 262_144,
     maxBlocks: quoteView.maxBlocksPerBatch, fees: await msfileBitfsKernelQuoteFees(quoteView),
   };
+}
+
+/** 把一份已验签报价喂给内核；版本按该卖家在内核里的当前报价递增。 */
+async function msfileBitfsKernelFeedQuote(runtime: MsfileBitfsKernelRuntime, quoteView: import("@keymaster/contracts").MsFileBitfsQuoteView): Promise<void> {
+  const previous = runtime.adapter.snapshot().sellers[quoteView.sellerPublicKeyHex]?.quote?.version ?? 0;
+  const quote = await msfileBitfsKernelQuote(quoteView, previous + 1);
+  msfileBitfsKernelQuoteRefreshes.delete(quoteView.sellerPublicKeyHex.toLowerCase());
+  await msfileBitfsKernelFeed(runtime, { eventId: `quote-${quoteView.sessionId}`, payload: { type: "quote", quote } });
+}
+
+/** 让内核立即忽略某卖家已用过的报价（版本递增 + 过期）。 */
+async function msfileBitfsKernelExpireQuote(runtime: MsfileBitfsKernelRuntime, sellerId: string): Promise<void> {
+  const seller = runtime.adapter.snapshot().sellers[sellerId];
+  if (!seller?.quote) return;
+  await msfileBitfsKernelFeed(runtime, {
+    eventId: `quote-expire-${sellerId}-${seller.quote.version}`,
+    payload: { type: "quote", quote: { ...seller.quote, version: seller.quote.version + 1, expiresAt: Date.now() - 1 } },
+  });
+}
+
+/**
+ * 协议报价会话一次采购一份费用池；内核“一池一批”需要下一批时，
+ * 宿主取消旧需求并重发，让卖家给出版本更新的新报价（新 session）。
+ * 必须在旧池关闭结清后调用，否则会打断 Kind 12/13 关池流程。
+ */
+async function msfileBitfsKernelRefreshQuote(runtime: MsfileBitfsKernelRuntime, sellerId: string, sessionId: string): Promise<void> {
+  const sellerKey = sellerId.toLowerCase();
+  if (msfileBitfsKernelQuoteRefreshes.has(sellerKey)) return;
+  msfileBitfsKernelQuoteRefreshes.add(sellerKey);
+  try {
+    const target = msfileBitfsKernelLinks(runtime).get(sessionId);
+    if (!target) { msfileBitfsKernelQuoteRefreshes.delete(sellerKey); return; }
+    await target.link.task.cancelDemand().catch(() => undefined);
+    const messageId = await target.link.task.publishDemand();
+    if (runtime.entry) runtime.entry.requestMessageId = messageId;
+  } catch (error) {
+    msfileBitfsKernelQuoteRefreshes.delete(sellerKey);
+    await writeBitfsDiagnostic("buyer-scheduler-quote-refresh-error.json", {
+      seedHashHex: runtime.seedHashHex, sellerId, sessionId,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 /** 普通钱包快照 → 内核 wallet；已准备开池（Kind 2 已落盘）的命令视为占用已反映。 */
@@ -1650,6 +1706,16 @@ async function msfileBitfsKernelOpenPool(runtime: MsfileBitfsKernelRuntime, comm
   const protocol = await ensureMsfileBitfsBuyerProtocol(target.webrtcSessionId, target.link);
   const quoteView = (await target.link.task.listDiscoveredQuotes()).find((item) => item.sessionId === command.sessionId);
   if (!quoteView) throw new Error("找不到内核所选卖家的已验签报价");
+  // 协议会话只服务一份费用池；已用完时刷新报价，让内核用新 session 重开。
+  const sessionRecord = await createBitfsSessionJournal(deps.files("bitfs-journal")).get(command.sessionId);
+  const consumed = sessionRecord !== undefined
+    && !["quote-selected", "opening-presign", "funding-prepared"].includes(sessionRecord.phase)
+    && (sessionRecord.evidence.includes("kind2-opening-request") || sessionRecord.evidence.includes("purchase-manifest") || sessionRecord.evidence.includes("download-plan"));
+  if (consumed) {
+    msfileBitfsKernelPendingRefreshes.set(command.sessionId, command.sellerId);
+    await msfileBitfsKernelExpireQuote(runtime, command.sellerId);
+    throw new Error("该报价会话已用于上一批采购；等待关池结清后刷新报价");
+  }
   const state = runtime.adapter.snapshot();
   const seedPurchased = state.completed[state.seedHash] === "purchased";
   const contentBudget = BigInt(command.contentBudget);
@@ -1792,7 +1858,13 @@ async function msfileBitfsKernelFeedCloseSettled(runtime: MsfileBitfsKernelRunti
   await msfileBitfsKernelFeed(runtime, { eventId: `refund-${pool.id}`, payload: { type: "refund-available", poolId: pool.id } });
   await runtime.adapter.settle(commandId);
   runtime.executor.forget(commandId);
-  msfileBitfsKernelProgress.delete(sessionId);}
+  msfileBitfsKernelProgress.delete(sessionId);
+  // 旧池已结清：现在可以安全地让卖家给下一批新报价。
+  const pendingSeller = msfileBitfsKernelPendingRefreshes.get(sessionId);
+  if (pendingSeller !== undefined) {
+    msfileBitfsKernelPendingRefreshes.delete(sessionId);
+    await msfileBitfsKernelRefreshQuote(runtime, pendingSeller, sessionId);
+  }}
 
 /** 重启恢复：按购买任务的调度器快照重建内核运行态、喂钱包/唤醒并重放未决命令。 */
 async function recoverMsfileBitfsKernelRuntimes(ownerPublicKeyHex: string): Promise<void> {
@@ -1953,7 +2025,7 @@ async function startMsfileBitfsKernelPurchase(input: {
   runtime.mediaType = mediaType;
   await msfileBitfsKernelFeed(runtime, { eventId: `wallet-${newTask.taskId}-${runtime.adapter.snapshot().wallet.revision + 1}`, payload: { type: "wallet", ...(await msfileBitfsKernelWallet(runtime)) } });
   for (const quoteView of quotes) {
-    await msfileBitfsKernelFeed(runtime, { eventId: `quote-${quoteView.sessionId}`, payload: { type: "quote", quote: await msfileBitfsKernelQuote(quoteView) } });
+    await msfileBitfsKernelFeedQuote(runtime, quoteView);
   }
   if (input.maxFullBlockPriceSatoshis !== undefined) {
     await msfileBitfsKernelFeed(runtime, { eventId: `slider-${input.maxFullBlockPriceSatoshis}`, payload: { type: "slider", slider: "price", value: input.maxFullBlockPriceSatoshis } });
@@ -3456,10 +3528,7 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: BitfsExecutorLea
         if (kernelRuntime && buyerLink.quoteSessionId) {
           const quoteView = (await buyerLink.task.listDiscoveredQuotes()).find((item) => item.sessionId === buyerLink.quoteSessionId);
           if (quoteView) {
-            await msfileBitfsKernelFeed(kernelRuntime, {
-              eventId: `quote-${quoteView.sessionId}`,
-              payload: { type: "quote", quote: await msfileBitfsKernelQuote(quoteView) },
-            });
+            await msfileBitfsKernelFeedQuote(kernelRuntime, quoteView);
           }
         }
         await maybeAutoStartMsfileBitfsKernelPurchase({
