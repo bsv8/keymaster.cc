@@ -233,7 +233,7 @@
     "sourceCommit": "0fe740bd4265cf9037b6eb78638cad1430914341"
   },
   "operationPolicyOverlay": {
-    "baseCommit": "184e52154e95bcc843c22eaa98c26c60c0450618",
+    "baseCommit": "ae52efea550376040415d8cc5a06d492718cab55",
     "sourceHashes": {
       "src/payment.ts": "920057da46c757119aade0d51eb8ed14a1b9b4e43c9f6fd62cf7cb293ef793a4",
       "src/signing-channel.ts": "a3fa4d39fee2ab9085901f00506fc421beede2834b1266a16a26e011c0eb8b37",
