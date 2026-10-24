@@ -332,21 +332,9 @@ export function OriginSettingsTrayInline({ origin, onClose }: OriginSettingsTray
         </button>
       </header>
       <div className="origin-settings-panel__form">
-        <p>{t("protocol.originSettings.paymentPolicyHint", {defaultValue: "付款额度统一在钱包顶栏的支付渠道设置；超过单笔或 App 会话累计额度时由钱包确认。"})}</p>
-        {/* ============== 施工单 001：identity / cipher auto-approve ============== */}
-        <label className="origin-settings-panel__field origin-settings-panel__field--inline">
-          <input
-            type="checkbox"
-            checked={record.identityAutoApproveEnabled}
-            disabled={saving}
-            onChange={(e) => toggleBoolean("identityAutoApproveEnabled", e.currentTarget.checked)}
-          />
-          <span>
-            {t("protocol.originSettings.identityAutoApprove.label", {
-              defaultValue: "始终同意 账户信息获取"
-            })}
-          </span>
-        </label>
+        <p>{t("protocol.originSettings.walletPaymentReview", {defaultValue: "付款由钱包核验实际金额及许可；额度在钱包的支付渠道设置中管理。"})}</p>
+        <p>{t("protocol.originSettings.knownOperationPolicy", {defaultValue: "已授权会话内的账户信息与意图签名为自动静默操作；仍校验身份、网络、权限和完整正文。登录、配置及密钥管理不在此范围。"})}</p>
+        {/* Cipher access is not silently promoted to an operation signature. */}
         <label className="origin-settings-panel__field origin-settings-panel__field--inline">
           <input
             type="checkbox"

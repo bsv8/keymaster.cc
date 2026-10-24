@@ -1,6 +1,6 @@
 import { validateNetworkIdentity, sameNetworkIdentity, type NetworkIdentity } from "@keymaster/contracts";
-import { requireUnlockedWalletIdentity } from "@keymaster/contracts";
-import { authenticateAppWallet, appPaymentChannelId } from "@keymaster/vaultlink-integration";
+import { requireUnlockedWalletIdentity, parseP2pkhPaymentLookupResult } from "@keymaster/contracts";
+import { authenticateAppWallet, publisherPaymentOwner, publisherPaymentChannelId, publisherPaymentSessionId } from "@keymaster/vaultlink-integration";
 import { createProviderDispatch } from "./providerDispatch.js";
 import type { AppStorageBinding, AppStorageClient } from "@keymaster/contracts";
 // packages/plugin-protocol/src/protocolService.ts
@@ -122,6 +122,11 @@ import {
   type P2pkhTransferAssetId,
   type PaymentChannelRegisterParams,
   type PaymentChannelRegisterResult,
+  type PaymentPayParams,
+  type PaymentPayResult,
+  type PaymentStatusParams,
+  type PaymentStatusResult,
+  type ProtocolConnectPaymentRecord,
   type P2pkhTransferParams,
   type P2pkhTransferResult,
   type ProtocolClosingMessage,
@@ -133,6 +138,7 @@ import {
   type ProtocolEventMessage,
   type ProtocolFailureReason,
   type ProtocolFeePoolAction,
+  type ProtocolFeePoolDeliveryRecord,
   type ProtocolFeePoolRecord,
   type ProtocolLockSummary,
   type ProtocolMethod,
@@ -164,7 +170,7 @@ import {
   type VaultService
 } from "@keymaster/contracts";
 import { AppIdentityValidationError, identityDigestBytes, verifyAppIdentityProof } from "./appIdentity.js";
-import { ProtocolValidationError, parseCancelMessage, parseRequestMessage } from "./protocolValidation.js";
+import { ProtocolValidationError, assertConnectV1Scope, parseCancelMessage, parseRequestMessage } from "./protocolValidation.js";
 import {
   aesGcmDecrypt,
   aesGcmEncrypt,
@@ -180,7 +186,10 @@ import { buildAppBootstrapPayload } from "./sessionWindowBootstrap.js";
 import { installLauncherBootstrapRegistry } from "@keymaster/contracts";
 import type { FeepoolPendingOpsMap } from "./feepoolOperations.js";
 import {
+  calcTxidFromRawTxHex,
+  feePoolInputOutpoints,
   feePoolInputTxids,
+  feePoolOutputFacts,
   type FeePoolTransactionSigner,
   sdkBuildBaseTx,
   sdkBuildInitialDraftSpendTx,
@@ -351,6 +360,13 @@ export interface ProtocolServiceDeps {
    * 不再次解析——避免 URL 被中途篡改。
    */
   bootMode?: "connect" | "appView";
+  /**
+   * Connect v1 production scope: reject new fee-pool signing requests and
+   * feepool.connect channel creation before any record or funds side effect.
+   * Tests that exercise historical fee-pool internals leave this off
+   * explicitly; the production manifest turns it on.
+   */
+  connectV1Scope?: boolean;
 }
 
 /**
@@ -1006,6 +1022,8 @@ export class ProtocolServiceImpl implements ProtocolService {
       void storageController?.abortSession(sessionId);
       void msfileService?.abortSession(sessionId);
       void this.deps.vault.requestPayment({action:"session-cancel",id:sessionId}).catch(() => {});
+      // New single-payment sessions never overwrite historical origin sessions.
+      void publisherPaymentSessionId(sessionId).then(id => this.deps.vault.requestPayment({action:"session-cancel",id})).catch(() => {});
     }
     // 把所有未终态 request 强制收尾为 rejected（不发 result 给 opener）。
     for (const [, rec] of this.requestsByRecordId) {
@@ -1240,6 +1258,18 @@ export class ProtocolServiceImpl implements ProtocolService {
     //   - appView mode：只接受当前 app client window；launcher 只是 bootstrap
     //     提供方，不再是运行期 request source。
     if (!this.isAllowedRequestSource(event, parsed.method)) return;
+
+    if (this.deps.connectV1Scope) {
+      try {
+        assertConnectV1Scope(parsed.method, parsed.params);
+      } catch (err) {
+        if (err instanceof ProtocolValidationError) {
+          this.postMessage(event.source as Window, event.origin, {v:PROTOCOL_VERSION,type:"result",id:parsed.id,networkIdentity:parsed.networkIdentity,ok:false,error:{code:err.code,message:err.message}});
+          return;
+        }
+        throw err;
+      }
+    }
 
     // 施工单 2026-06-30 003 硬切换：appView mode 下首条合法 child 协议
     // 消息（无论是顶层 `ready`，还是首条 `connect.launch` 等 request）
@@ -3254,9 +3284,9 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 判断新 request 是否命中 auto-approve / auto-sign。
    *
    * 命中条件（与旧实现一致，但**不**依赖当前 lockState）：
-   *   - 付款直接进入执行阶段，再由钱包核心核算渠道单笔/App 会话累计额度。
-   *     这里的 true 只跳过站点级重复确认，不授予签名或免除核心批准。
-   *   - identity.get / cipher.*：originCache 命中相应 auto-approve 配置；
+   *   - 付款直接进入钱包核心审核；true 不授予签名或免除钱包金额检查。
+   *   - 已知 identity.get / intent.sign 操作自动静默，仍校验当前会话和正文。
+   *   - cipher.*：originCache 命中相应 auto-approve 配置；
    *     cache miss 时先 await getOriginSettingsCached 兜底一次（不翻案）。
    *
    * 注意：lockState **不**参与 auto-approve 判断。auto-approve 的命中只
@@ -3276,22 +3306,22 @@ export class ProtocolServiceImpl implements ProtocolService {
     origin: string,
     _rec: RequestRecord
   ): Promise<boolean> {
-    if (parsed.method === "payment.channel.register" || parsed.method === "p2pkh.transfer" || parsed.method === "feepool.prepare" || parsed.method === "feepool.commit") return true;
+    // Known operation signatures are silent after normal session binding.
+    // This skips only the per-call confirmation; execute still validates the
+    // current session, scope, owner/network and complete typed document.
+    // Login, key export/settings and generic digest signing are not included.
+    if (parsed.method === "identity.get" || parsed.method === "intent.sign") return true;
+    if (parsed.method === "payment.channel.register" || parsed.method === "payment.pay" || parsed.method === "payment.status" || parsed.method === "p2pkh.transfer" || parsed.method === "feepool.prepare" || parsed.method === "feepool.commit") return true;
     if (
-      parsed.method === "identity.get" ||
       parsed.method === "cipher.encrypt" ||
       parsed.method === "cipher.decrypt"
     ) {
       // 同步 cache 检查；cache miss 时直接 await 一次 K-V 再判定一次。
-      let hit =
-        parsed.method === "identity.get"
-          ? this.isIdentityAutoApprovedSync(origin)
-          : this.isCipherAutoApprovedSync(origin);
+      let hit = this.isCipherAutoApprovedSync(origin);
       if (!hit) {
         const settings = await this.getOriginSettingsCached(origin);
         if (settings) {
           hit =
-            (parsed.method === "identity.get" && settings.identityAutoApproveEnabled) ||
             ((parsed.method === "cipher.encrypt" || parsed.method === "cipher.decrypt") &&
               settings.cipherAutoApproveEnabled);
         }
@@ -3305,13 +3335,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     // auto-approve 配置对 connect.* 不生效——caller 主动发 connect.* 已经是
     // "希望走 connect 流程"的信号，不应被 per-origin auto-approve 跳过。
     return false;
-  }
-
-  private isIdentityAutoApprovedSync(origin: string): boolean {
-    if (!this.deps.storageRepository) return false;
-    const rec = this.originCache.get(origin) ?? null;
-    if (!rec) return false;
-    return rec.identityAutoApproveEnabled === true;
   }
 
   private isCipherAutoApprovedSync(origin: string): boolean {
@@ -3685,7 +3708,17 @@ export class ProtocolServiceImpl implements ProtocolService {
           rec.failureReason = "runtime_missing";
           rec.finishedAt = Date.now();
           rec.updatedAt = rec.finishedAt;
-          await this.persistFeedCommandFor(rec);
+          try {
+            await this.persistFeedCommandFor(rec);
+          } catch (error) {
+            rec.errorCode = "internal_error";
+            rec.errorMessage = "Command history could not be persisted";
+            rec.failureReason = "storage_error";
+            await this.replyErrorToRec(rec, "internal_error", rec.errorMessage);
+            this.emitFeed();
+            this.emit();
+            continue;
+          }
           await this.replyErrorToRec(rec, "user_rejected", "User rejected");
           this.emitFeed();
           this.emit();
@@ -3875,6 +3908,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     "cipher.encrypt": rec => this.executeCipherEncrypt(rec),
     "cipher.decrypt": rec => this.executeCipherDecrypt(rec),
     "p2pkh.transfer": async rec => { await this.executeP2pkhTransferAndFinalize(rec); return null; },
+    "payment.pay": rec => this.executePaymentPay(rec),
+    "payment.status": rec => this.executePaymentStatus(rec),
     "feepool.prepare": async rec => { await this.executeFeepoolPrepareAndFinalize(rec); return null; },
     "feepool.commit": async rec => { await this.executeFeepoolCommitAndFinalize(rec); return null; },
     "connect.login": rec => this.executeConnectLogin(rec),
@@ -5069,9 +5104,237 @@ export class ProtocolServiceImpl implements ProtocolService {
     return { subscribed: false };
   }
 
+  /* ============== payment.pay / payment.status ============== */
+
+  private async executePaymentPay(rec: RequestRecord): Promise<PaymentPayResult> {
+    const params = rec.params as PaymentPayParams;
+    const p2pkhService = this.currentP2pkhService();
+    if (!p2pkhService?.prepareTransfer) throw protocolError("internal_error", "p2pkh service not available");
+    const session = await this.requireConnectSession(rec, params.walletPublicKeyHex);
+    this.assertSessionOwnerIsActive(session);
+    if (!session.appIdentity) throw protocolError("identity_required", "Connect payment requires a verified app identity");
+    const repo = this.deps.storageRepository;
+    if (!repo?.claimConnectPayment || !repo.putConnectPayment || !repo.getConnectPayment) {
+      throw protocolError("internal_error", "Connect payment idempotency storage is unavailable");
+    }
+    const publicAssetId = params.assetId ?? (session.networkIdentity.bsvNetwork === "test" ? "bsv-testnet" : "bsv-mainnet");
+    const internalAssetId = toInternalP2pkhAssetId(publicAssetId);
+    const normalized = normalizePaymentPayParams(params, publicAssetId);
+    const identity = {
+      origin: rec.origin,
+      ownerPublicKeyHex: session.ownerPublicKeyHex.toLowerCase(),
+      network: session.networkIdentity.bsvNetwork,
+      appId: session.appIdentity.appId,
+      publisherPublicKeyHex: session.appIdentity.publisherPublicKeyHex.toLowerCase(),
+    };
+    const requestDigest = paymentRequestDigest(identity, normalized);
+    const key = paymentRequestKey(identity, params.clientRequestId);
+    const now = Date.now();
+    const record: ProtocolConnectPaymentRecord = {
+      key,
+      paymentId: this.nextRecordId(),
+      clientRequestId: params.clientRequestId,
+      origin: identity.origin,
+      ownerPublicKeyHex: identity.ownerPublicKeyHex,
+      networkIdentity: session.networkIdentity,
+      appId: identity.appId,
+      publisherPublicKeyHex: identity.publisherPublicKeyHex,
+      requestDigest,
+      params: normalized,
+      status: "pending",
+      recipientOwnership: "unknown",
+      createdAt: now,
+      updatedAt: now,
+    };
+    let claimed: { created: boolean; record: ProtocolConnectPaymentRecord };
+    try {
+      claimed = await repo.claimConnectPayment(record, { maxPending: 64 });
+    } catch (error) {
+      if (error instanceof Error && error.message === "payment-pending-limit") {
+        throw protocolError("payment_pending_limit", "Too many pending Connect payments for this origin");
+      }
+      throw error;
+    }
+    if (!claimed.created) {
+      if (claimed.record.requestDigest !== requestDigest) throw protocolError("id_conflict", "clientRequestId was already used with different payment facts");
+      return paymentResultFromRecord(await this.refreshConnectPaymentFromManager(rec, claimed.record));
+    }
+    let current = claimed.record;
+    try {
+      const channelId = await publisherPaymentChannelId(session.appIdentity.publisherPublicKeyHex, params.paymentType, session.networkIdentity.bsvNetwork);
+      if (params.channelId !== channelId) throw protocolError("invalid_request", "Register a publisher single-payment channel before creating a new payment");
+      const paymentSessionId = await publisherPaymentSessionId(session.sessionId);
+      await this.deps.vault.requestPayment({ action: "session-open", id: paymentSessionId, owner: await this.paymentOwner(session) });
+      const preview = await p2pkhService.prepareTransfer({
+        paymentContext: { channelId: params.channelId, sessionId: paymentSessionId },
+        assetId: internalAssetId,
+        ownerPublicKeyHex: identity.ownerPublicKeyHex,
+        amountSatoshis: params.amountSatoshis,
+        feeRateSatoshisPerKb: params.feeRateSatoshisPerKb ?? DEFAULT_P2PKH_FEE_RATE_SAT_PER_KB,
+        payment: {
+          paymentId: current.paymentId,
+          clientRequestId: params.clientRequestId,
+          paymentType: params.paymentType,
+          businessKind: params.businessKind,
+          recipient: params.recipient,
+          appId: identity.appId,
+          appName: session.appIdentity.appName,
+          origin: identity.origin,
+          publisherPublicKeyHex: identity.publisherPublicKeyHex,
+        },
+      });
+      const payment = (preview as { payment?: import("@keymaster/contracts").P2pkhConnectPaymentPreview }).payment;
+      if (!payment) throw new Error("Connect payment preview is missing its frozen plan");
+      current = {
+        ...current,
+        allocationId: (preview as { managerAllocationId?: string }).managerAllocationId,
+        previewId: (preview as { previewId?: string }).previewId,
+        recipientOwnership: payment.recipientOwnership,
+        feeSatoshis: Number(payment.feeSats),
+        changeSatoshis: Number(payment.changeAmountSats),
+        updatedAt: Date.now(),
+      };
+      current = await storeConnectPaymentRecord(repo, current);
+      const submitted = await p2pkhService.submitTransfer({ ...preview, ownerPublicKeyHex: identity.ownerPublicKeyHex } as never);
+      const reason = submitted.error ?? submitted.reason ?? "";
+      const status: import("@keymaster/contracts").ConnectPaymentStatus =
+        submitted.status === "local-confirmed" && submitted.txid
+          ? submitted.delivery === "already-known" ? "already_known" : "accepted"
+          : submitted.status === "not-dispatched" && reason === "cancelled"
+            ? "not_signed"
+            : "unknown";
+      const candidateTxid = typeof submitted.txid === "string" && /^[0-9a-f]{64}$/iu.test(submitted.txid) ? submitted.txid.toLowerCase() : undefined;
+      current = {
+        ...current,
+        status,
+        ...(candidateTxid ? { txid: candidateTxid } : {}),
+        ...(reason ? { reason: reason.slice(0, 256) } : {}),
+        updatedAt: Date.now(),
+      };
+      current = await storeConnectPaymentRecord(repo, current);
+      return paymentResultFromRecord(current);
+    } catch (error) {
+      current = {
+        ...current,
+        status: "unknown",
+        reason: (error instanceof Error ? error.message : String(error)).slice(0, 256),
+        updatedAt: Date.now(),
+      };
+      current = await storeConnectPaymentRecord(repo, current).catch(() => current);
+      return paymentResultFromRecord(current);
+    }
+  }
+
+  /** Pure manager/outbox lookup plus protocol CAS; no signing, query start or chain I/O. */
+  private async refreshConnectPaymentFromManager(rec: RequestRecord, record: ProtocolConnectPaymentRecord): Promise<ProtocolConnectPaymentRecord> {
+    const assertAuthorized = async () => {
+      const session = await this.requireConnectSession(rec, record.ownerPublicKeyHex);
+      this.assertSessionOwnerIsActive(session);
+      if (session.origin !== record.origin || session.ownerPublicKeyHex.toLowerCase() !== record.ownerPublicKeyHex || session.networkIdentity.bsvNetwork !== record.networkIdentity.bsvNetwork || session.appIdentity?.appId !== record.appId || session.appIdentity?.publisherPublicKeyHex.toLowerCase() !== record.publisherPublicKeyHex) throw localFailure("session_owner_mismatch", "Connect payment lookup identity changed");
+    };
+    await assertAuthorized();
+    if (["accepted", "already_known", "not_signed", "failed"].includes(record.status)) return record;
+    const service = this.currentP2pkhService();
+    if (!service?.getPaymentStatus) return record;
+    const value = await service.getPaymentStatus({ ownerPublicKeyHex: record.ownerPublicKeyHex, network: record.networkIdentity.bsvNetwork, paymentId: record.paymentId });
+    await assertAuthorized();
+    const manager = parseP2pkhPaymentLookupResult(value);
+    if (manager.status === "not_found") return record;
+    if (manager.status === "pending" && record.txid) throw protocolError("id_conflict", "Signed payment lost its manager exact");
+    if (manager.status === "not_signed" && (record.txid || record.status === "signed_not_dispatched" || record.release)) throw protocolError("id_conflict", "Unsigned release contradicts signed payment facts");
+    if ((record.allocationId && manager.allocationId && manager.allocationId !== record.allocationId) || (record.txid && manager.txid && manager.txid !== record.txid.toLowerCase())) throw protocolError("id_conflict", "Manager payment identity/exact mismatch");
+    const release = manager.conclusion ? {
+      releasedSatoshis: manager.conclusion.releasedSats,
+      releasedInputCount: manager.conclusion.releasedInputs.length,
+      spentInputCount: manager.conclusion.spentInputs.length,
+      heldInputCount: manager.conclusion.heldInputs.length,
+    } : undefined;
+    const updated = await storeConnectPaymentRecord(this.deps.storageRepository!, {
+      ...record, status: manager.status,
+      allocationId: manager.allocationId ?? record.allocationId,
+      ...(manager.txid ? { txid: manager.txid } : {}),
+      ...(release ? { release, reason: "input-conflict" } : manager.status === "not_signed" ? { reason: "cancelled" } : manager.status === "accepted" ? { reason: undefined } : {}),
+      updatedAt: Date.now(),
+    });
+    await assertAuthorized();
+    return updated;
+  }
+
+  private async executePaymentStatus(rec: RequestRecord): Promise<PaymentStatusResult> {
+    const params = rec.params as PaymentStatusParams;
+    const repo = this.deps.storageRepository;
+    if (!repo?.getConnectPayment) throw protocolError("internal_error", "Connect payment storage is unavailable");
+    const session = await this.requireConnectSession(rec, params.walletPublicKeyHex);
+    this.assertSessionOwnerIsActive(session);
+    if (!session.appIdentity) throw protocolError("identity_required", "Connect payment status requires a verified app identity");
+    const identity = {
+      origin: rec.origin,
+      ownerPublicKeyHex: session.ownerPublicKeyHex.toLowerCase(),
+      network: session.networkIdentity.bsvNetwork,
+      appId: session.appIdentity.appId,
+      publisherPublicKeyHex: session.appIdentity.publisherPublicKeyHex.toLowerCase(),
+    };
+    let record = await repo.getConnectPayment(paymentRequestKey(identity, params.clientRequestId));
+    if (!record
+      || record.origin !== identity.origin
+      || record.ownerPublicKeyHex !== identity.ownerPublicKeyHex
+      || record.networkIdentity.bsvNetwork !== identity.network
+      || record.appId !== identity.appId
+      || record.publisherPublicKeyHex !== identity.publisherPublicKeyHex) {
+      throw protocolError("payment_not_found", "Connect payment was not found for this identity");
+    }
+    if (this.currentP2pkhService()?.getPaymentStatus) {
+      // The production adapter always uses the read-only Worker manager RPC.
+      // No txid is needed: paymentId locates the original allocation/outbox.
+      return paymentResultFromRecord(await this.refreshConnectPaymentFromManager(rec, record));
+    }
+    // Legacy adapters without manager lookup retain their read-only observation
+    // compatibility. Production must never fall back here after lookup failure.
+    // If the protocol write lost its txid, recover the exact bytes from the
+    // Vault journal by paymentId. The exact is persisted before broadcast, so
+    // a chain-accepted payment is still discoverable.
+    if ((record.status === "pending" || record.status === "unknown" || record.status === "signed_not_dispatched") && !record.txid) {
+      try {
+        const paymentId = record.paymentId;
+        const signed = await this.deps.vault.requestPayment({ action: "connect-payment-signed-recovery" });
+        const row = Array.isArray(signed) ? signed.find((value) => value && typeof value === "object" && (value as { paymentId?: unknown }).paymentId === paymentId) as { signedTxHex?: unknown } | undefined : undefined;
+        if (row && typeof row.signedTxHex === "string") {
+          const txid = calcTxidFromRawTxHex(row.signedTxHex);
+          record = await storeConnectPaymentRecord(repo, {
+            ...record, txid,
+            status: record.status === "pending" ? "signed_not_dispatched" : record.status,
+            updatedAt: Date.now(),
+          });
+        }
+      } catch {
+        // Journal unavailable: keep the existing responsibility state.
+      }
+    }
+    // Chain-observation reconciliation: a crash after broadcast but before
+    // the terminal protocol write leaves a pending/unknown record with a
+    // canonical txid. Only a trusted raw transaction with the same canonical
+    // txid upgrades it; absent/unavailable observations never downgrade.
+    if ((record.status === "pending" || record.status === "unknown" || record.status === "signed_not_dispatched")
+      && record.txid && this.currentP2pkhService()?.getRawTransaction) {
+      try {
+        const raw = await this.currentP2pkhService()!.getRawTransaction!(identity.network, record.txid);
+        if (calcTxidFromRawTxHex(raw).toLowerCase() === record.txid.toLowerCase()) {
+          record = await storeConnectPaymentRecord(repo, { ...record, status: "accepted" as const, updatedAt: Date.now() });
+        }
+      } catch {
+        // Not observed yet (or WoC unavailable): keep the existing state.
+      }
+    }
+    return paymentResultFromRecord(record);
+  }
+
   /* ============== p2pkh.transfer ============== */
 
   private async paymentOwner(session: ConnectSessionRecord): Promise<string> {
+    if (!session.appIdentity) throw protocolError("identity_required", "Payment settings require a verified publisher");
+    return publisherPaymentOwner(session.appIdentity.publisherPublicKeyHex);
+  }
+  private async legacyPaymentOwner(session: ConnectSessionRecord): Promise<string> {
     const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(session.origin)));
     return "connect." + Array.from(digest, b => b.toString(16).padStart(2, "0")).join("");
   }
@@ -5082,7 +5345,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const owner = await this.paymentOwner(session);
     const network = params.assetId === "bsv-testnet" ? "test" : "main";
     if (network !== session.networkIdentity.bsvNetwork) throw localFailure("asset_not_enabled", "Payment network differs from session identity");
-    const channelId = await appPaymentChannelId(owner, params.channelName, params.paymentType, network);
+    const channelId = await publisherPaymentChannelId(session.appIdentity!.publisherPublicKeyHex, params.paymentType, network);
     // 注册只建立零额度渠道。owner 不取 App 自报，额度仍只由钱包设置/设备确认。
     await this.deps.vault.requestPayment({action: "register", id: channelId, owner, kind: "app", network, paymentType: params.paymentType});
     await this.requireConnectSession(rec, params.walletPublicKeyHex);
@@ -5125,7 +5388,10 @@ export class ProtocolServiceImpl implements ProtocolService {
       // 这里只建立零额度渠道，免确认额度只能由钱包设置提高。
       const paymentOwner = await this.paymentOwner(session);
       const paymentChannelId = params.channelId;
-      await this.deps.vault.requestPayment({action: "session-open", id: session.sessionId, owner: paymentOwner});
+      const paymentSessionId = await publisherPaymentSessionId(session.sessionId);
+      const expectedChannelId = await publisherPaymentChannelId(session.appIdentity!.publisherPublicKeyHex, "p2pkh", session.networkIdentity.bsvNetwork);
+      if (paymentChannelId !== expectedChannelId) throw protocolError("invalid_request", "Register a publisher single-payment channel before creating a new transfer");
+      await this.deps.vault.requestPayment({action: "session-open", id: paymentSessionId, owner: paymentOwner});
       const card = this.feedCommands.find((c) => c.id === rec.recordId);
       if (card) {
         card.recipientAddress = params.recipientAddress;
@@ -5135,7 +5401,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         card.updatedAt = Date.now();
       }
       const preview = await p2pkhService.prepareTransfer({
-        paymentContext: {channelId: paymentChannelId, sessionId: session.sessionId},
+        paymentContext: {channelId: paymentChannelId, sessionId: paymentSessionId},
         assetId: internalAssetId,
         ownerPublicKeyHex,
         recipientAddress: params.recipientAddress,
@@ -5246,7 +5512,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         if(!adapter?.getRawTransaction)throw new Error('Fee pool previous transaction evidence unavailable');
         const raw=await adapter.getRawTransaction(network,txid);sourceCache.set(txid,raw);return raw;
       };
-      const paymentOwner=await this.paymentOwner(session);
+      const paymentOwner=await this.legacyPaymentOwner(session);
       const channelId=params.channelId;
       let registered: Promise<void> | undefined;
       const signTransaction=(stage:'fund'|'state'):FeePoolTransactionSigner=>async rawTxHex=>{
@@ -5261,6 +5527,9 @@ export class ProtocolServiceImpl implements ProtocolService {
       };
       const operationId = this.nextRecordId();
       const preparedAt = Date.now();
+      // 交付给站点的钱包 UTXO（A-Tx 的真实输入）。它们的责任必须先落盘，
+      // 再把签名字节交出去（E01）。
+      const baseTxInputs: Array<{ txid: string; vout: number; value: number }> = [];
 
       const priorPoolSnapshot = prior
         ? {
@@ -5303,6 +5572,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         baseTxHex = baseResp.baseTxHex;
         baseTxOutputIndex = baseResp.baseTxOutputIndex;
         draftTotalAmount = baseResp.amount;
+        baseTxInputs.push(...baseResp.inputs);
         const initialDraft = await sdkBuildInitialDraftSpendTx({
           prevTxId: baseResp.baseTxid,
           totalAmount: draftTotalAmount,
@@ -5385,6 +5655,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         baseTxHex = baseResp.baseTxHex;
         baseTxOutputIndex = baseResp.baseTxOutputIndex;
         draftTotalAmount = baseResp.amount;
+        baseTxInputs.push(...baseResp.inputs);
         const newInitialDraft = await sdkBuildInitialDraftSpendTx({
           prevTxId: baseResp.baseTxid,
           totalAmount: draftTotalAmount,
@@ -5441,6 +5712,26 @@ export class ProtocolServiceImpl implements ProtocolService {
         card.updatedAt = Date.now();
       }
 
+      // E01：签名字节交给站点之前，先把「可能已外露」的责任落盘。写失败
+      // 必须拒绝交付（站点收不到签名原文）；落盘后、回复前崩溃时保守留责。
+      await this.recordFeePoolDeliveries({
+        operationId,
+        origin: rec.origin,
+        ownerPublicKeyHex,
+        counterpartyPublicKeyHex: params.counterpartyPublicKeyHex,
+        assetId: publicAssetId,
+        channelId: params.channelId,
+        sessionId: session.sessionId,
+        action,
+        baseTxHex,
+        baseTxInputs,
+        draftSpendTxHex,
+        draftClientSignBytes,
+        closeDraftTxHex,
+        closeClientSignBytes,
+        source,
+      });
+
       const result: FeepoolPrepareResult = {
         operationId,
         action,
@@ -5483,7 +5774,208 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
   }
 
+  /**
+   * E03/E04：可信观察结算。
+   *
+   * 只有当链上能取到**同一笔** exact 交易原文时，才把该交付责任标记为已
+   * 结算。站点承诺、404、session 结束、popup 关闭都不是证据；观察不到就
+   * 继续保留责任。
+   */
+  private async settleObservedFeePoolDeliveries(origin: string): Promise<void> {
+    const repository = this.deps.storageRepository;
+    if (!repository) return;
+    const p2pkhService = this.currentP2pkhService();
+    if (!p2pkhService?.getRawTransaction) return;
+    const records = await repository.listFeePoolDeliveriesByOrigin(origin);
+    for (const record of records) {
+      if (record.settledTxid) continue;
+      if (record.kind !== "base-transaction") continue;
+      let txid: string;
+      try {
+        txid = calcTxidFromRawTxHex(record.rawTxHex);
+      } catch {
+        continue;
+      }
+      const network = record.assetId === "bsv-testnet" ? "test" : "main";
+      let observed: string | null = null;
+      try {
+        observed = await p2pkhService.getRawTransaction(network, txid);
+      } catch {
+        continue;
+      }
+      if (!observed) continue;
+      // 观察到的必须是同一笔 exact 交易：txid 相同还不够，字节也要相同。
+      let observedTxid: string;
+      try {
+        observedTxid = calcTxidFromRawTxHex(observed);
+      } catch {
+        continue;
+      }
+      if (observedTxid !== txid) continue;
+      await repository.settleFeePoolDelivery(record.id, txid, Date.now());
+    }
+  }
+
   /* ============== feepool base tx helper ============== */
+
+  /**
+   * E01：把本次「交给站点的签名」写成持久责任。
+   *
+   * - `base-transaction`：完整签名的 A-Tx。站点可以在钱包之外广播它，
+   *   因此钱包未派发不能证明它没被广播；责任保留到可信观察结算。
+   * - `state-signature`：部分签名的 B-Tx 草稿。对方还能补齐并花费，
+   *   责任同样保留。
+   *
+   * 每份原文按**它自己的**输入登记：旧 close 草稿花的是旧池，不能记成
+   * 新池的输出点。输入的金额来自该输入的前序交易原文（可信 source bytes），
+   * 不是调用方的自报值。
+   *
+   * 记录与 popup 会话无关：`operationId` 失效不消灭资金责任。
+   * 写失败必须让调用方拒绝交付（这里抛错）。
+   */
+  private async recordFeePoolDeliveries(input: {
+    operationId: string;
+    origin: string;
+    ownerPublicKeyHex: string;
+    counterpartyPublicKeyHex: string;
+    assetId: P2pkhTransferAssetId;
+    channelId: string;
+    sessionId: string;
+    action: ProtocolFeePoolAction;
+    baseTxHex: string | undefined;
+    baseTxInputs: Array<{ txid: string; vout: number; value: number }>;
+    draftSpendTxHex: string;
+    draftClientSignBytes: Uint8Array;
+    closeDraftTxHex: string | undefined;
+    closeClientSignBytes: Uint8Array | undefined;
+    source?: (txid: string) => Promise<string>;
+  }): Promise<void> {
+    const repository = this.deps.storageRepository;
+    if (!repository) throw localFailure("internal_error", "fee pool delivery ledger unavailable");
+    const now = Date.now();
+    const common = {
+      operationId: input.operationId,
+      origin: input.origin,
+      ownerPublicKeyHex: input.ownerPublicKeyHex,
+      counterpartyPublicKeyHex: input.counterpartyPublicKeyHex,
+      assetId: input.assetId,
+      channelId: input.channelId,
+      sessionId: input.sessionId,
+      action: input.action,
+      createdAt: now,
+    };
+    /**
+     * 解析一份原文真实花费的输入，并用可信前序原文核对每个输入的金额。
+     * 拿不到前序原文就拒绝交付：责任必须能定位到真实输入。
+     */
+    const artifactInputs = async (rawTxHex: string): Promise<Array<{ txid: string; vout: number; value: number; scriptHex: string }>> => {
+      const rows: Array<{ txid: string; vout: number; value: number; scriptHex: string }> = [];
+      for (const prevout of feePoolInputOutpoints(rawTxHex)) {
+        let value = 0;
+        let scriptHex = "";
+        if (input.source) {
+          const raw = await input.source(prevout.txid);
+          const outputs = feePoolOutputFacts(raw);
+          const output = outputs[prevout.vout];
+          if (!output) throw new Error(`Fee pool previous transaction output is missing: ${prevout.txid}:${prevout.vout}`);
+          value = output.value;
+          scriptHex = output.scriptHex;
+        }
+        rows.push({ txid: prevout.txid, vout: prevout.vout, value, scriptHex });
+      }
+      return rows;
+    };
+    const records: ProtocolFeePoolDeliveryRecord[] = [];
+    if (input.baseTxHex) {
+      const totalInSatoshis = input.baseTxInputs.reduce((sum, row) => sum + row.value, 0);
+      records.push({
+        ...common,
+        id: `${input.operationId}:base-transaction`,
+        kind: "base-transaction",
+        rawTxHex: input.baseTxHex,
+        inputs: input.baseTxInputs,
+        totalInSatoshis,
+        reason: "signed base transaction delivered outside the wallet",
+      });
+    }
+    if (input.draftSpendTxHex && input.draftClientSignBytes.length > 0) {
+      const related = await artifactInputs(input.draftSpendTxHex);
+      records.push({
+        ...common,
+        id: `${input.operationId}:state-signature`,
+        kind: "state-signature",
+        rawTxHex: input.draftSpendTxHex,
+        signatureHex: bytesToHex(input.draftClientSignBytes),
+        inputs: related,
+        totalInSatoshis: related.reduce((sum, row) => sum + row.value, 0),
+        reason: "partial signature delivered outside the wallet",
+      });
+    }
+    if (input.closeDraftTxHex && input.closeClientSignBytes && input.closeClientSignBytes.length > 0) {
+      // 旧 close 草稿花的是**旧池**：按它自己的输入登记。
+      const related = await artifactInputs(input.closeDraftTxHex);
+      records.push({
+        ...common,
+        id: `${input.operationId}:close-state-signature`,
+        kind: "state-signature",
+        rawTxHex: input.closeDraftTxHex,
+        signatureHex: bytesToHex(input.closeClientSignBytes),
+        inputs: related,
+        totalInSatoshis: related.reduce((sum, row) => sum + row.value, 0),
+        reason: "partial close signature delivered outside the wallet",
+      });
+    }
+    // F08：交付前先让 UTXO Manager 占住 artifact 花费的钱包输入。否则被
+    // 交付的 artifact 花掉的输入仍会被当作可花余额。占用失败即拒绝交付。
+    for (const record of records) {
+      // 只有**完整交易**能进 manager 的占用责任：部分签名草稿的最终字节与
+      // txid 会在补齐签名后变化，不能拿草稿 txid 当 exact 的结算身份；草稿的
+      // 责任留在 E01 账本（外露签名责任模型）。
+      if (record.kind !== "base-transaction") continue;
+      const artifact = this.deps.getP2pkhService?.() ?? this.deps.p2pkhService;
+      const occupy = artifact?.occupyDeliveredArtifact?.bind(artifact);
+      if (!occupy) throw new Error("P2PKH artifact occupation is unavailable; refusing to deliver");
+      // 输入的金额与脚本来自**可信前序原文**；输出清单来自 artifact 本身。
+      const outputs = feePoolOutputFacts(record.rawTxHex);
+      const totalOut = outputs.reduce((sum, output) => sum + output.value, 0);
+      const fee = record.totalInSatoshis - totalOut;
+      if (fee < 0) throw new Error(`Fee pool delivery ${record.id} spends more than its inputs`);
+
+      const occupied = await occupy({
+        ownerPublicKeyHex: record.ownerPublicKeyHex,
+        network: record.assetId === "bsv-testnet" ? "test" : "main",
+        artifactId: record.id,
+        // 形状以已签字节为准：manager 冻结的是交易骨架（不含 scriptSig）。
+        unsignedTxHex: record.rawTxHex,
+        signedTxHex: record.rawTxHex,
+        inputs: (await artifactInputs(record.rawTxHex)).map((row) => ({ txid: row.txid, vout: row.vout, value: String(row.value), scriptHex: row.scriptHex })),
+        outputs: outputs.map((output) => ({ scriptHex: output.scriptHex, value: String(output.value) })),
+        businessAmountSatoshis: String(record.totalInSatoshis),
+        // 不再按实际消耗反推费率（Q05：3 sats / 192 bytes 曾被反推成
+        // 16 sat/kB，与 manager 的取整叠加后判需 4 sats）。这里传 SDK 构建
+        // 这些 artifact 时使用的基础费率 1 sat/kB，作为**下界**；费用授权
+        // 仍由 feeCapSats（真实费用）承担，内核的签前下界检查保持原样。
+        feeRateSatoshisPerKb: "1",
+        feeCapSats: String(fee),
+        protocolKind: record.action === "close_and_recreate" ? "close" : "state",
+      });
+      record.managerAllocationId = occupied.allocationId;
+    }
+    for (const record of records) {
+      const existing = await repository.getFeePoolDelivery(record.id);
+      if (existing) {
+        // 稳定 ID 已存在时必须检查内容一致，不能无条件跳过：同一责任 ID
+        // 出现不同内容说明有东西在改写证据。
+        if (existing.rawTxHex !== record.rawTxHex
+          || existing.signatureHex !== record.signatureHex
+          || JSON.stringify(existing.inputs) !== JSON.stringify(record.inputs)) {
+          throw new Error(`Fee pool delivery record ${record.id} already exists with different content`);
+        }
+        continue;
+      }
+      await repository.putFeePoolDelivery(record);
+    }
+  }
 
   /**
    * 建 A-Tx（client P2PKH UTXO → 2-of-2 multisig output）；create /
@@ -5511,6 +6003,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     baseTxOutputIndex: number;
     baseTxid: string;
     amount: number;
+    inputs: Array<{ txid: string; vout: number; value: number }>;
   }> {
     const p2pkhService = this.currentP2pkhService();
     if (!p2pkhService) {
@@ -5541,7 +6034,8 @@ export class ProtocolServiceImpl implements ProtocolService {
       baseTxHex: resp.txHex,
       baseTxOutputIndex: resp.outputIndex,
       baseTxid: resp.txid,
-      amount: resp.amount
+      amount: resp.amount,
+      inputs: utxos.map((u) => ({ txid: u.txid, vout: u.vout, value: u.value })),
     };
   }
 
@@ -5673,6 +6167,10 @@ export class ProtocolServiceImpl implements ProtocolService {
       const draftTxid = await computeTxidFromHex(op.draftSpendTxHex);
       const draftTxHex = op.draftSpendTxHex;
       let closeDraftTxid: string | undefined;
+
+      // E03：commit 时按可信观察结算此前交付的 A-Tx 责任。观察不到就继续
+      // 保留；站点没有 commit 不是证据。
+      await this.settleObservedFeePoolDeliveries(rec.origin);
 
       if (op.action === "create" || op.action === "close_and_recreate") {
         const baseTxid = await computeTxidFromHex(op.baseTxHex ?? "");
@@ -6406,6 +6904,160 @@ function toProtocolError(err: unknown): ProtocolError {
   return { code: "internal_error", message: err instanceof Error ? err.message : "Internal error" };
 }
 
+const CONNECT_PAYMENT_STATUS_TRANSITIONS: Record<import("@keymaster/contracts").ConnectPaymentStatus, ReadonlySet<import("@keymaster/contracts").ConnectPaymentStatus>> = {
+  pending: new Set(["not_signed", "signed_not_dispatched", "unknown", "accepted", "already_known", "failed"]),
+  signed_not_dispatched: new Set(["unknown", "accepted", "already_known", "failed"]),
+  unknown: new Set(["not_signed", "accepted", "already_known", "failed"]),
+  failed: new Set([]),
+  not_signed: new Set([]),
+  accepted: new Set(["already_known"]),
+  already_known: new Set([]),
+};
+
+function sameConnectPaymentIdentity(left: ProtocolConnectPaymentRecord, right: ProtocolConnectPaymentRecord): boolean {
+  return left.key === right.key
+    && left.paymentId === right.paymentId
+    && left.clientRequestId === right.clientRequestId
+    && left.origin === right.origin
+    && left.ownerPublicKeyHex === right.ownerPublicKeyHex
+    && left.networkIdentity.bsvNetwork === right.networkIdentity.bsvNetwork
+    && left.networkIdentity.publicKeyHex === right.networkIdentity.publicKeyHex
+    && left.appId === right.appId
+    && left.publisherPublicKeyHex === right.publisherPublicKeyHex
+    && left.requestDigest === right.requestDigest
+    && JSON.stringify(left.params) === JSON.stringify(right.params);
+}
+
+/** Apply only allowed monotonic transitions; immutable identity and txid win. */
+function mergeConnectPaymentRecord(existing: ProtocolConnectPaymentRecord, next: ProtocolConnectPaymentRecord): ProtocolConnectPaymentRecord {
+  if (!sameConnectPaymentIdentity(existing, next)) throw protocolError("id_conflict", "Connect payment immutable facts changed");
+  if (next.txid && existing.txid && next.txid.toLowerCase() !== existing.txid.toLowerCase()) {
+    throw protocolError("id_conflict", "Connect payment canonical txid changed");
+  }
+  if ((existing.allocationId && next.allocationId && existing.allocationId !== next.allocationId) || (existing.previewId && next.previewId && existing.previewId !== next.previewId)) throw protocolError("id_conflict", "Connect payment allocation/preview identity changed");
+  const sameStatus = existing.status === next.status;
+  if (sameStatus && existing.status === "failed") return existing;
+  if (existing.reason === "input-conflict" && existing.release && (next.status === "accepted" || next.status === "already_known")) return existing;
+  if (next.status === "not_signed" && (existing.txid || existing.release)) return existing;
+  if (existing.release && next.release && (BigInt(next.release.releasedSatoshis) < BigInt(existing.release.releasedSatoshis) || next.release.releasedInputCount < existing.release.releasedInputCount || next.release.spentInputCount < existing.release.spentInputCount || next.release.heldInputCount > existing.release.heldInputCount)) return existing;
+  if (!sameStatus && !CONNECT_PAYMENT_STATUS_TRANSITIONS[existing.status].has(next.status)) {
+
+    return existing;
+  }
+  return {
+    ...next,
+    paymentId: existing.paymentId,
+    clientRequestId: existing.clientRequestId,
+    origin: existing.origin,
+    ownerPublicKeyHex: existing.ownerPublicKeyHex,
+    networkIdentity: existing.networkIdentity,
+    appId: existing.appId,
+    publisherPublicKeyHex: existing.publisherPublicKeyHex,
+    requestDigest: existing.requestDigest,
+    params: existing.params,
+    txid: existing.txid ?? next.txid,
+    allocationId: existing.allocationId ?? next.allocationId,
+    previewId: existing.previewId ?? next.previewId,
+    ...(next.release === undefined && existing.release ? { release: existing.release, reason: existing.reason } : {}),
+    createdAt: existing.createdAt,
+  };
+}
+
+/** Atomic compare-and-set status update; retries re-read and re-evaluate. */
+export async function storeConnectPaymentRecord(
+  repo: NonNullable<ProtocolServiceDeps["storageRepository"]>,
+  record: ProtocolConnectPaymentRecord,
+): Promise<ProtocolConnectPaymentRecord> {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const entry = repo.getConnectPaymentEntry
+      ? await repo.getConnectPaymentEntry(record.key)
+      : await repo.getConnectPayment?.(record.key).then((value) => value ? { record: value, revision: undefined } : null);
+    if (!entry) {
+      await repo.putConnectPayment!(record);
+      return record;
+    }
+    const merged = mergeConnectPaymentRecord(entry.record, record);
+    if (merged === entry.record || JSON.stringify(merged) === JSON.stringify(entry.record)) return entry.record;
+    if (repo.putConnectPaymentIfRevision && entry.revision !== undefined) {
+      try {
+        await repo.putConnectPaymentIfRevision(merged, entry.revision);
+        return merged;
+      } catch {
+        continue;
+      }
+    }
+    await repo.putConnectPayment!(merged);
+    return merged;
+  }
+  throw protocolError("internal_error", "Connect payment status update retry exhausted");
+}
+
+function normalizePaymentPayParams(params: PaymentPayParams, assetId: P2pkhTransferAssetId): PaymentPayParams {
+  return {
+    ...params,
+    assetId,
+    recipient: params.recipient.type === "p2pk"
+      ? { type: "p2pk", publicKeyHex: params.recipient.publicKeyHex.toLowerCase() }
+      : { type: "p2pkh", address: params.recipient.address },
+  };
+}
+
+function paymentIdentityKey(identity: {
+  origin: string;
+  ownerPublicKeyHex: string;
+  network: "main" | "test";
+  appId: string;
+  publisherPublicKeyHex: string;
+}): string {
+  return JSON.stringify([
+    "keymaster.connect-payment-id.v1",
+    identity.network,
+    identity.origin,
+    identity.ownerPublicKeyHex,
+    identity.appId,
+    identity.publisherPublicKeyHex,
+  ]);
+}
+
+function paymentRequestKey(identity: Parameters<typeof paymentIdentityKey>[0], clientRequestId: string): string {
+  return bytesToHex(sha256Bytes(new TextEncoder().encode(JSON.stringify([paymentIdentityKey(identity), clientRequestId]))));
+}
+
+function paymentRequestDigest(identity: Parameters<typeof paymentIdentityKey>[0], params: PaymentPayParams): string {
+  const recipient = params.recipient.type === "p2pkh" ? params.recipient.address : params.recipient.publicKeyHex;
+  return bytesToHex(sha256Bytes(new TextEncoder().encode(JSON.stringify([
+    "keymaster.connect-payment-request.v1",
+    paymentIdentityKey(identity),
+    params.channelId,
+    params.clientRequestId,
+    params.paymentType,
+    params.businessKind,
+    params.amountSatoshis,
+    params.feeRateSatoshisPerKb ?? 0,
+    params.recipient.type,
+    recipient,
+    params.assetId ?? "",
+  ]))));
+}
+
+function paymentResultFromRecord(record: ProtocolConnectPaymentRecord): PaymentPayResult {
+  const terminal = record.status === "accepted" || record.status === "already_known";
+  return {
+    paymentId: record.paymentId,
+    clientRequestId: record.clientRequestId,
+    status: record.status,
+    assetId: record.params.assetId ?? (record.networkIdentity.bsvNetwork === "test" ? "bsv-testnet" : "bsv-mainnet"),
+    paymentType: record.params.paymentType,
+    recipientOwnership: record.recipientOwnership,
+    ...(terminal && record.txid ? { txid: record.txid } : {}),
+    ...(record.feeSatoshis === undefined ? {} : { feeSatoshis: record.feeSatoshis }),
+    ...(record.changeSatoshis === undefined ? {} : { changeSatoshis: record.changeSatoshis }),
+    ...(record.approval === undefined ? {} : { approval: record.approval }),
+    ...(record.reason === undefined ? {} : { reason: record.reason }),
+    ...(record.release ? { release: { ...record.release } } : {}),
+  };
+}
+
 function protocolError(code: ProtocolErrorCode, message: string): ProtocolError {
   return { code, message };
 }
@@ -6450,6 +7102,10 @@ function binaryFieldsToBytes(fields: BinaryField[]): Uint8Array {
     return fields[0] ? new Uint8Array(fields[0].bytes) : new Uint8Array(0);
   }
   return new Uint8Array(fields[0]!.bytes);
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function bytesToBinaryField(bytes: Uint8Array): BinaryField {

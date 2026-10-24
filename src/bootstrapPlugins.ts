@@ -228,7 +228,8 @@ export function createPluginCoordinatorFacade(client: SessionCoordinatorClient, 
     case "p2pkh": return bindCoordinatorMethods<P2pkhCoordinatorControl & Pick<SessionCoordinatorClient, "p2pkhBroadcast">>(client, [
       "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainFeeSnapshots", "getChainHeightSnapshot", "subscribeTopic", "sendActivity",
       "p2pkhSettingsUpdate", "p2pkhProviderConfigGet", "p2pkhProviderConfigUpdate",
-      "p2pkhUtxosGet", "p2pkhUtxosRefresh", "p2pkhBroadcast"
+      "p2pkhUtxosGet", "p2pkhUtxosRefresh", "p2pkhBroadcast",
+      "p2pkhTransferPrepare", "p2pkhTransferSubmit", "p2pkhArtifactOccupy", "p2pkhConclusion", "p2pkhPaymentStatus", "p2pkhProtocolCommand"
     ]);
     case "woc": return bindCoordinatorMethods<import("@keymaster/contracts").P2pkhCoordinatorControl>(client, [
       "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainFeeSnapshots", "getChainHeightSnapshot", "subscribeTopic", "sendActivity",

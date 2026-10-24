@@ -130,7 +130,7 @@ export interface VaultLocalSecretService {
 export interface VaultService {
   /** 业务入口不包含设置额度或代替用户回答确认。 */
   requestPayment(command: Exclude<import("./sessionCoordinator.js").CoordinatorWalletPaymentCommand,
-    {action: "configure" | "answer" | "list" | "pending" | "backend" | "signing-list" | "signing-configure"}>): Promise<import("./channel.js").JSONValue>;
+    {action: "configure" | "answer" | "list" | "pending" | "spend-notices" | "notice-dismiss" | "backend" | "signing-list" | "signing-configure"}>): Promise<import("./channel.js").JSONValue>;
   /** 当前状态。 */
   status(): VaultStatus;
 

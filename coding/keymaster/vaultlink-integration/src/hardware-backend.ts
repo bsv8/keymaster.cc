@@ -1,3 +1,4 @@
+import {inspectConnectPayment} from './wallet-payments.js';
 import {signatureFailure,signatureOwner,type SignatureRecorder} from "./signature-history.js";
 import {
   signingOperations, type SigningChannel,
@@ -43,6 +44,7 @@ export const vaultLinkSupport = Object.freeze({
     "signing.register", "signing.list", "signing.execute",
     "channel.public-message", "channel.hash-request", "channel.private-message", "channel.seal", "channel.open",
     "tx.p2pkh-payment",
+    "tx.connect-payment",
     "tx.standard-payment",
     "payment.configure",
     "payment.session-open",
@@ -231,12 +233,12 @@ export class VaultLinkHardwareBackend {
     return {operation: active.operation, state};
   }
   private signingRegistered = false;
-  /** 钱包确认一批初始建议；重连重复注册由设备按来源校验，保留本机设置。 */
+  /** 已知操作静默注册；重连重复注册由设备核对来源，不能覆盖渠道身份。 */
   private async ensureSigningRegistration(): Promise<void> {
     if(this.signingRegistered)return;
     const channels:SigningChannel[]=signingOperations.filter(op=>op!=="software.digest-sign").map(operation=>({
       id:operation,owner:operation.startsWith("identity.")?"window-p2p":operation.startsWith("connect.")?"connect":operation.startsWith("channel.")?"channel":"bitfs",
-      kind:"plugin",operation,mode:operation.startsWith("identity.")?"automatic":"manual",revision:1,
+      kind:"plugin",operation,mode:"automatic",revision:1,
     }));
     const body:Value={network:this.context.bsvNetwork,channels:channels as unknown as Value};
     const value=await this.submitOperation("signing.register",body,await commitment("signing-register",1,body));
@@ -287,6 +289,10 @@ export class VaultLinkHardwareBackend {
     } catch (error) { this.lastOperation = {operation: op, state: "unknown"}; throw error; }
     finally { if (this.activeOperation === active) this.activeOperation = undefined; }
   }
+  signConnectPayment(input: PaymentInput, review: import('@keymaster/contracts').P2pkhConnectPaymentPreview, beforeDispatch: () => Promise<void>): Promise<HardwarePaymentResult> {
+    this.assert();const frozen=structuredClone(input),facts=structuredClone(review);
+    return this.enqueuePayment(frozen.sessionId,()=>this.executePayment(frozen,facts,beforeDispatch));
+  }
   signP2pkh(input: PaymentInput): Promise<HardwarePaymentResult> {
     this.assert();
     // 先冻结再排队，禁止业务页面在等待期间修改输出或前序证据。
@@ -315,7 +321,7 @@ export class VaultLinkHardwareBackend {
         frozen.stage,
         frozen.role,
       );
-      let amount = 0n;
+      let amount = review.stage === "fund" ? review.locked + review.fee : 0n;
       if (review.pool) {
         const old = object(
           await this.request("payment.pool-read", "payment-pool-read", {
@@ -718,12 +724,14 @@ export class VaultLinkHardwareBackend {
   }
   private async executePayment(
     input: PaymentInput,
+    connectReview?: import('@keymaster/contracts').P2pkhConnectPaymentPreview,
+    beforeDispatch?: () => Promise<void>,
   ): Promise<HardwarePaymentResult> {
     this.assert();
     if (input.network !== this.context.bsvNetwork) throw new Error("unsupported-network");
     if (!input.channelId || !input.paymentId)
       throw new Error("channel-required");
-    const review = await inspectP2pkh(
+    const review = connectReview ? await inspectConnectPayment(input.rawTx,input.prevTransactions,this.pub,connectReview) : await inspectP2pkh(
       input.rawTx,
       input.prevTransactions.map((transaction) => ({ transaction })),
       this.pub,
@@ -735,13 +743,15 @@ export class VaultLinkHardwareBackend {
       channelId: input.channelId,
       paymentId: input.paymentId,
       sessionId: input.sessionId,
+      ...(connectReview ? {connectPayment: connectReview as unknown as Value} : {}),
     };
-    const hash = await commitment("bsv-payment-context", 1, {
+    const hash = await commitment(connectReview ? "bsv-connect-payment" : "bsv-payment-context", 1, {
       ...body,
       amount: review.amount,
     });
     this.assert();
-    const result = await this.submitPayment("tx.p2pkh-payment", body, hash, input.sessionId);
+    await beforeDispatch?.();this.assert();
+    const result = await this.submitPayment(connectReview ? "tx.connect-payment" : "tx.p2pkh-payment", body, hash, input.sessionId);
     this.assert();
     if (
       result &&
@@ -750,7 +760,9 @@ export class VaultLinkHardwareBackend {
       !(result instanceof Uint8Array) &&
       "error" in result
     ) {
-      throw new Error(String(result.error));
+      // Only the authenticated endpoint's physical denial proves this typed
+      // request never entered execute. Transport failures remain unknown.
+      throw Object.assign(new Error(String(result.error)),{deviceNotSigned:connectReview!==undefined&&result.error==='denied'});
     }
     const response = object(result, ["signatures", "amount"]);
     const returnedAmount =

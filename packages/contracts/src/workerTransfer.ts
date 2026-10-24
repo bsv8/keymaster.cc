@@ -8,8 +8,8 @@ export const VAULT_WORKER_CRYPTO_CAPABILITY = defineCapability<VaultWorkerCrypto
 
 export interface P2pkhWorkerTransfer {
   getGlobalSettings(): { bsvNetwork?: "main" | "test"; feeRateSatoshisPerKb?: number };
-  prepareTransfer(input: { paymentContext?: { channelId: string; sessionId: string | null }; assetId: "bsv" | "bsvtest"; ownerPublicKeyHex: string; recipientAddress: string; amountSatoshis: number; feeRateSatoshisPerKb?: number }): Promise<unknown>;
-  submitTransfer(preview: unknown): Promise<{ status: string; txid?: string; error?: string; rawTxHex?: string }>;
+  prepareTransfer(input: { paymentContext?: { channelId: string; sessionId: string | null }; assetId: "bsv" | "bsvtest"; ownerPublicKeyHex: string; recipientAddress?: string; amountSatoshis: number; sendAll?: boolean; feeRateSatoshisPerKb?: number; payment?: import("./p2pkhConnectPayment.js").P2pkhConnectPaymentFacts }): Promise<unknown>;
+  submitTransfer(preview: unknown): Promise<{ status: "local-confirmed" | "isolated" | "not-dispatched"; txid?: string; error?: string; rawTxHex: string; submissionId: string; localInputClaimIds: string[]; attempts: number; reason?: string }>;
 }
 export interface P2pkhWorkerTransferBinding {
   getService(): Promise<P2pkhWorkerTransfer>;
@@ -22,6 +22,7 @@ export interface P2pkhWorkerProtocolBinding {
   getService(): Promise<{
     spend: import("./protocolSpend.js").ProtocolSpendService;
     funding: import("./protocolSpend.js").ProtocolFundingService;
+    planFunding(input: Extract<import("./protocolSpendRpc.js").P2pkhProtocolCommand, { type: "funding-plan" }>["input"]): Promise<{ selected: import("./protocolSpend.js").ProtocolSpendInput[]; totalInputSatoshis: number }>;
     observer: import("./protocolSpend.js").ProtocolSubmissionObserver;
     protectedOutpoints: import("./spendProtection.js").ProtectedOutpointRegistry;
   }>;

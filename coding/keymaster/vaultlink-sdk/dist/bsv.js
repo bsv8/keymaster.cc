@@ -5,7 +5,6 @@ import { addMoney, concat, equal, fail, fixed, money, u32 } from "./bytes.js";
 import { sha256d } from "./crypto.js";
 import { possessionDigest } from "./handshake.js";
 import { decode, encode } from './cbor.js';
-import { externalOutputAmount } from "./payment.js";
 /** 地址只从已核验的实际 P2PKH 输出生成，不采用主机给出的收款方标签。 */
 export async function p2pkhOutputAddress(script, network) {
     if (!p2pkh(script))
@@ -178,10 +177,9 @@ export async function inspectP2pkh(raw, evidence, publicKey, inputIndex) {
         externalOutputs: external,
         change,
         fee: inputs - outputs,
-        amount: externalOutputAmount(tx.outputs.map((o) => ({
-            amount: o.satoshis,
-            owned: equal(o.script, own),
-        }))),
+        // Every own P2PKH output is a return, regardless of its business role.
+        // The remaining wallet value includes the miner fee.
+        amount: inputs - change,
         digest,
         inputIndex,
     };

@@ -16,6 +16,11 @@ export function VaultLockButton() {
   const [expanded, setExpanded] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
   const pendingIds = useRef(new Set<string>());
+  const spendIds = useRef(new Set<string>());
+  const onSpendNotices = useCallback((ids: string[]) => {
+    if(ids.some(id => !spendIds.current.has(id)))setExpanded(true);
+    spendIds.current=new Set(ids);
+  }, []);
   const onPending = useCallback((ids: string[]) => {
     if (ids.some(id => !pendingIds.current.has(id))) setExpanded(true);
     pendingIds.current = new Set(ids);
@@ -29,7 +34,7 @@ export function VaultLockButton() {
   const payment = useCallback((command: import("@keymaster/contracts").CoordinatorWalletPaymentCommand) => vault.payment(command), [vault]);
   useEffect(() => {
     let current = true; setKey(undefined); setHardware(undefined); setError("");
-    if (status !== "unlocked") { setExpanded(false); pendingIds.current.clear(); setPendingCount(0); return; }
+    if (status !== "unlocked") { setExpanded(false); pendingIds.current.clear(); spendIds.current.clear(); setPendingCount(0); return; }
     void vault.getCurrentKey().then(value => {if (current) setKey(value);}).catch(e => {if (current) setError(e instanceof Error ? e.message : String(e));});
     return () => {current = false;};
   }, [vault, status, snapshot?.activePublicKeyHex, snapshot?.runGeneration, snapshot?.walletGeneration, snapshot?.revision]);
@@ -84,7 +89,7 @@ export function VaultLockButton() {
     <div hidden={!expanded} id="vault-topbar-panel" className="vault-topbar-wallet__panel" style={{"--vault-wallet-top": `${panelTop}px`} as CSSProperties} ref={panel} tabIndex={-1}
       role="region" aria-label={t("vault.panel.wallet", {defaultValue: "我的钱包"})}>
       {stateText ? <p role="status" aria-live="polite">{stateText}</p> : null}
-      <PaymentNotificationList execute={payment} visible={expanded} onPending={onPending} text={(name, fallback) => t(`vault.${name}`, {defaultValue: fallback})}/>
+      <PaymentNotificationList execute={payment} visible={expanded} onPending={onPending} onSpendNotices={onSpendNotices} text={(name, fallback) => t(`vault.${name}`, {defaultValue: fallback})}/>
 
     </div>
   </div>;

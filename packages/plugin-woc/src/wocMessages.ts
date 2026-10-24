@@ -41,6 +41,7 @@ export const WOC_MSG = {
   CHAIN_HEIGHT: "woc.chain.height",
   FEE_RECOMMENDATION: "woc.fee.recommendation",
   TX_SPENT_OUTPUT: "woc.tx.spentOutput",
+  TX_SPENT_OUTPUTS: "woc.tx.spentOutputs",
   TX_RAW: "woc.tx.raw",
   TX_BROADCAST: "woc.tx.broadcast",
   // token / collectible 协议查询：与上面 coin 类 endpoint 共享 actor 的
@@ -102,6 +103,10 @@ export interface WocSpentOutputPayload extends WocActorPayload {
   txid: string;
   /** 被花费输出索引。 */
   vout: number;
+}
+
+export interface WocSpentOutputsPayload extends WocActorPayload {
+  outpoints: Array<{ txid: string; vout: number }>;
 }
 
 /** BSV-21：列地址持有的 token。 */

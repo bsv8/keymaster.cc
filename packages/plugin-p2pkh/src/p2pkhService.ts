@@ -29,6 +29,7 @@ import type {
   P2pkhBroadcastSubmission,
   P2pkhUtxoBinding,
   P2pkhUtxoSnapshotResult,
+  P2pkhWorkerTransferBinding,
 } from "@keymaster/contracts";
 import { BALANCE_NETWORK_KEYS, emptyGlobalBalanceSnapshot } from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
@@ -41,7 +42,9 @@ import type {
   P2pkhSyncStatus,
   P2pkhTransactionDetail,
   P2pkhUtxo,
-  P2pkhUtxoFilter
+  P2pkhUtxoFilter,
+  P2pkhTransferPreview,
+  P2pkhTransferResult,
 } from "./p2pkhContracts.js";
 import {
   assetIdToNetwork,
@@ -162,8 +165,8 @@ export function calculateP2pkhBalanceBreakdown(input: {
 
 export interface P2pkhServiceDeps {
   vault: Pick<VaultService, "status" | "createActiveKeyCrypto" | "requestPayment">;
-  coordinator?: Pick<P2pkhCoordinatorControl, "p2pkhUtxosGet" | "p2pkhUtxosRefresh">
-    & Partial<Pick<P2pkhCoordinatorControl, "subscribeTopic" | "p2pkhSettingsUpdate">>
+  coordinator?: Pick<P2pkhCoordinatorControl, "p2pkhUtxosGet" | "p2pkhUtxosRefresh" | "p2pkhArtifactOccupy">
+    & Partial<Pick<P2pkhCoordinatorControl, "subscribeTopic" | "p2pkhSettingsUpdate" | "p2pkhPaymentStatus">>
     & { getBootstrapSnapshot(): Pick<CoordinatorBootstrapSnapshot, "p2pkhSettings"> };
   messageBus: MessageBus;
   /** Issuing runtime instance; fences publications before asynchronous cleanup. */
@@ -171,6 +174,10 @@ export interface P2pkhServiceDeps {
   walletState: VaultWalletState;
   /** Host 已按 manifest 声明绑定的当前 owner K-V 句柄。 */
   storage: BorrowedOwnerFileStore;
+  /** Worker-created durable UTXO Manager; absent only for Window read-only test fixtures. */
+  utxoManager?: import("./p2pkhUtxoManager.js").P2pkhUtxoManager;
+  /** Window production transfers are executed by the Worker-owned manager/signer path. */
+  workerTransfer?: P2pkhWorkerTransferBinding;
   /** 详情页懒加载 raw transaction 的唯一来源。 */
   woc?: WocService;
   /** 页面侧唯一中心广播服务；普通转账和协议 spend 共用。 */
@@ -378,7 +385,14 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
         return raw;
       }));
     },
+    async assertInputsUnspent(network, inputs) {
+      if (!deps.woc?.getSpentOutput) throw new Error("Spent-output evidence is unavailable");
+      await Promise.all(inputs.map(async ({ txid, vout }) => {
+        if (await deps.woc!.getSpentOutput!(network, txid, vout) !== null) throw new Error(`P2PKH input is already spent: ${txid}:${vout}`);
+      }));
+    },
     vault: deps.vault,
+    utxoManager: deps.utxoManager,
     centralBroadcastService: deps.centralBroadcastService,
     broadcastWithCoordinator: deps.broadcastWithCoordinator,
     messageBus: deps.messageBus,
@@ -387,21 +401,16 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     loadSpendableUtxos: async ({ ownerPublicKeyHex, resource, purpose }) => {
       // 转账与其它花 UTXO 的入口共用同一道门禁。
       await protectionGate(deps)();
-      // 准备/提交前刷新一次 `unspent/all`；刷新失败即拒绝继续，
-      // 不允许用可能已过期的快照签署交易。
       const transferPurpose = purpose ?? "prepare";
       let snapshot: P2pkhUtxoSnapshotResult;
       try {
-        // prepare/submit/retry 都只做一次 Coordinator 快照读取；consumed 不在
-        // service 内轮询等待，避免页面业务层自行制造 WoC 刷新循环。
         snapshot = await requireUtxoSnapshot({ ownerPublicKeyHex, network: resource.network }, "refresh");
       } catch (error) {
+        if (deps.utxoManager) return { utxos: [] }; // Durable local Manager outputs remain usable without WoC membership.
         if (transferPurpose === "submit" || transferPurpose === "retry") throw new CentralBroadcastRetryableError("snapshot-refresh");
         throw error;
       }
-      if (!snapshot.available) {
-        // submit/retry 看到 consumed 交给中心广播服务等待新序号；prepare
-        // 直接返回可重试的同步中错误，不把 consumed 误报成余额不足。
+      if (!snapshot.available && !deps.utxoManager) {
         if (snapshot.state === "consumed") {
           if (transferPurpose === "submit" || transferPurpose === "retry") throw new CentralBroadcastRetryableError("snapshot-wait", snapshot.seq);
           throw new Error("P2PKH UTXO snapshot is synchronizing; please wait for a fresh sequence and try again");
@@ -411,8 +420,9 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       const utxos = await listSpendableUtxosFromSnapshot({ resource, snapshot, ownerPublicKeyHex });
       return {
         utxos,
-        // 中文：与本次 refresh 的 UTXO 集合共用同一个序号，避免跨 RPC 错配。
-        ...(snapshot.seq === undefined ? {} : { utxoBinding: { resourceId: resource.resourceId, seq: snapshot.seq } }),
+        ...(snapshot.available && snapshot.state === "fresh" && snapshot.seq !== undefined
+          ? { utxoBinding: { resourceId: resource.resourceId, seq: snapshot.seq } }
+          : {}),
       };
     },
     getUtxoBinding: async ({ ownerPublicKeyHex, resource }) => getUtxoBinding({ ownerPublicKeyHex, network: resource.network }),
@@ -866,6 +876,21 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       return filtered.filter((r) => r.network === network);
     },
 
+    async getPaymentStatus(input) {
+      const epoch = deps.walletState.snapshot().sessionEpoch;
+      const assertFresh = () => {
+        const now = deps.walletState.snapshot();
+        if (!isCurrentInstance() || now.status !== "unlocked" || now.sessionEpoch !== epoch || now.activePublicKeyHex?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase() || getCurrentSettings().bsvNetwork !== input.network) throw new Error("Payment status identity revoked");
+      };
+      assertFresh();
+      if (deps.utxoManager) {
+        const result = await deps.utxoManager.paymentStatus(input); assertFresh(); return result;
+      }
+      if (!deps.coordinator?.p2pkhPaymentStatus) throw new Error("Payment manager status RPC unavailable");
+      const result = await deps.coordinator.p2pkhPaymentStatus(input); assertFresh();
+      if (result.status !== "ok") throw new Error("message" in result ? result.message : `Payment manager status: ${result.status}`);
+      return result.value;
+    },
     async getRawTransaction(network, txid) {
       if (!deps.woc?.getRawTransaction) throw new Error("Previous transaction evidence is unavailable");
       return deps.woc.getRawTransaction(network,txid);
@@ -982,7 +1007,9 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       if (assetIdToNetwork(input.assetId) !== settings.bsvNetwork) {
         return Promise.reject(new Error("Testnet is not enabled in P2PKH settings"));
       }
-      return transfer.prepare({ ...input, feeRateSatoshisPerKb: input.feeRateSatoshisPerKb ?? resolveP2pkhFeeRateSatoshisPerKb(settings) });
+      const preparedInput = { ...input, feeRateSatoshisPerKb: input.feeRateSatoshisPerKb ?? resolveP2pkhFeeRateSatoshisPerKb(settings) };
+      if (deps.workerTransfer) return deps.workerTransfer.getService().then((worker) => worker.prepareTransfer(preparedInput) as Promise<P2pkhTransferPreview>);
+      return transfer.prepare(preparedInput);
     },
     submitTransfer: (preview) => {
       if (!preview.ownerPublicKeyHex) {
@@ -994,9 +1021,52 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       if (assetIdToNetwork(preview.assetId) !== settings.bsvNetwork) {
         return Promise.reject(new Error("Testnet is not enabled in P2PKH settings"));
       }
+      if (deps.workerTransfer) return deps.workerTransfer.getService().then((worker) => worker.submitTransfer(preview) as Promise<P2pkhTransferResult>);
       const controller = new AbortController();
       transferRetryControllers.add(controller);
       return transfer.submit(preview, { signal: controller.signal }).finally(() => {
+        transferRetryControllers.delete(controller);
+      });
+    },
+
+    /**
+     * 外露 artifact 的占用（跨 Runtime 路径）。
+     *
+     * 中文说明：Window 不直接持有 Worker 的能力，只能经受限 Coordinator 请求
+     * Worker 让 UTXO Manager 占住这件 artifact 的钱包输入。
+     */
+    occupyDeliveredArtifact: (input: {
+      ownerPublicKeyHex: string;
+      network: "main" | "test";
+      artifactId: string;
+      unsignedTxHex: string;
+      signedTxHex: string;
+      inputs: Array<{ txid: string; vout: number; value: string; scriptHex: string }>;
+      outputs: Array<{ scriptHex: string; value: string }>;
+      businessAmountSatoshis: string;
+      feeRateSatoshisPerKb: string;
+      feeCapSats: string;
+      protocolKind: "refund" | "close" | "fund" | "state";
+    }) => {
+      const occupy = deps.coordinator?.p2pkhArtifactOccupy;
+      if (!occupy) return Promise.reject(new Error("P2PKH artifact occupation is unavailable"));
+      return occupy(input).then((result) => {
+        if (result.status !== "ok") throw new Error(`P2PKH artifact occupation failed: ${result.status}`);
+        return result.value;
+      });
+    },
+
+    /**
+     * 按预览 ID 提交 Worker 自己记住的预览（跨 Runtime 路径）。
+     *
+     * 中文说明：Window 只带 previewId；选币、金额、找零与 manager allocation
+     * 全部以 Worker 的记录为准，页面无法改写。
+     */
+    submitPreparedTransfer: (previewId: string) => {
+      if (deps.workerTransfer) return Promise.reject(new Error("P2PKH prepared submit is worker-only"));
+      const controller = new AbortController();
+      transferRetryControllers.add(controller);
+      return transfer.submitPrepared(previewId, { signal: controller.signal }).finally(() => {
         transferRetryControllers.delete(controller);
       });
     },

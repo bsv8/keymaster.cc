@@ -1,5 +1,6 @@
 import { parseChainFeePolicy, parseWocFeeRecommendation, resolveChainFeeSnapshot, type ChainFeeSnapshots } from "./chainFees.js";
 import { validateNetworkIdentity } from "./networkIdentity.js";
+import { parseP2pkhConclusionInput, parseP2pkhConclusionResult, parseP2pkhPaymentLookupInput, parseP2pkhPaymentLookupResult, type P2pkhConclusionResult, type P2pkhPaymentLookupResult } from "./p2pkhConclusion.js";
 // Coordinator 与 WebLoom Runtime 之间的 typed capability 契约。
 //
 // 这里是 Keymaster 领域 DTO 的唯一 Runtime 边界：manifest 只携带 capability
@@ -19,7 +20,7 @@ import type { CoordinatorClientRequest, CoordinatorCommandAck, CoordinatorCrypto
 import type { ChannelOperationCaller, ChannelPublishResult, ChannelSubscriptionSetResult, ChannelSubscriptionStatus, JSONValue } from "./channel.js";
 import type { I18nText, I18nValues } from "./i18n.js";
 import type { ContactPresenceMap } from "./contacts.js";
-import type { P2pkhBroadcastResult, P2pkhBroadcastSubmission, P2pkhUtxoSnapshotResult } from "./bsvP2pkhProviders.js";
+import type { P2pkhArtifactOccupyInput, P2pkhArtifactOccupyResult, P2pkhBroadcastResult, P2pkhBroadcastSubmission, P2pkhTransferPrepareInput, P2pkhTransferPreviewPayload, P2pkhTransferResultPayload, P2pkhTransferSubmitInput, P2pkhUtxoSnapshotResult } from "./bsvP2pkhProviders.js";
 import type {
   CoordinatorSatEvent,
   CoordinatorSatStateEvent,
@@ -102,6 +103,7 @@ import type {
   SatTopUpResult,
 } from "./satSubscription.js";
 import type { BinaryField } from "./protocol.js";
+import { parseP2pkhProtocolCommand, parseP2pkhProtocolCommandResult, type P2pkhProtocolCommandResult } from "./protocolSpendRpc.js";
 import type { KeymasterScopeKind } from "./keymasterLifecycle.js";
 
 type RecordValue = Record<string, unknown>;
@@ -119,6 +121,20 @@ function record(value: unknown): value is RecordValue {
 
 function text(value: unknown, field: string, maximum = 4_096): string {
   if (typeof value !== "string" || value.length === 0 || value.length > maximum) {
+    throw new TypeError(`Coordinator ${field} is invalid`);
+  }
+  return value;
+}
+
+/**
+ * 允许空字符串的有界文本。
+ *
+ * 中文说明：未签名的转账预览没有最终交易身份（`txid` 固定为空），未派发或被
+ * 取消的结果也可能没有 txid/submissionId。这些是**合法的业务状态**，不能用
+ * “非空即有效”的通用文本校验把它们当成非法响应。
+ */
+function boundedText(value: unknown, field: string, maximum = 4_096): string {
+  if (typeof value !== "string" || value.length > maximum) {
     throw new TypeError(`Coordinator ${field} is invalid`);
   }
   return value;
@@ -145,6 +161,8 @@ const COORDINATOR_REQUEST_KINDS = new Set<string>([
   "p2pkh.settings.update", "p2pkh.provider-config.get", "p2pkh.provider-config.update",
   "p2pkh.utxos.get", "p2pkh.utxos.refresh",
   "p2pkh.broadcast",
+  "p2pkh.transfer.prepare", "p2pkh.transfer.submit", "p2pkh.conclusion", "p2pkh.payment.status",
+  "p2pkh.artifact.occupy", "p2pkh.protocol.command",
 ]);
 
 const STORAGE_CONTROL_TYPES = [
@@ -359,6 +377,7 @@ export type CoordinatorP2pkhBroadcastResult =
   | {
       status: "not-dispatched";
       reason:
+        | "cancelled"
         | "stale-provider-generation"
         | "broadcast-provider-unavailable"
         | "coordinator-not-dispatched"
@@ -422,6 +441,12 @@ export type CoordinatorRpcResultForRequest<R extends CoordinatorRpcRequest> =
   R extends { kind: "p2pkh.utxos.get" | "p2pkh.utxos.refresh" } ? P2pkhUtxoSnapshotResult :
   R extends { kind: "p2pkh.provider-config.get" } ? P2pkhProviderConfig :
   R extends { kind: "p2pkh.broadcast" } ? CoordinatorP2pkhBroadcastResult :
+  R extends { kind: "p2pkh.payment.status" } ? P2pkhPaymentLookupResult :
+  R extends { kind: "p2pkh.conclusion" } ? P2pkhConclusionResult :
+  R extends { kind: "p2pkh.transfer.prepare" } ? P2pkhTransferPreviewPayload :
+  R extends { kind: "p2pkh.transfer.submit" } ? P2pkhTransferResultPayload :
+  R extends { kind: "p2pkh.artifact.occupy" } ? P2pkhArtifactOccupyResult :
+  R extends { kind: "p2pkh.protocol.command" } ? P2pkhProtocolCommandResult :
   undefined;
 
 /** A client command after removing transport-owned clientId/requestId. */
@@ -1285,14 +1310,19 @@ function parseVaultOperation(value: unknown): CoordinatorVaultOperation {
     }
     case "payment": {
       const command = expectRecord(operation.command, "payment.command");
-      const action = enumValue(command.action, ["signature-history", "backend", "signing-list", "signing-configure", "list", "pending", "register", "configure", "session-open", "session-close", "session-cancel", "answer", "sign-p2pkh", "sign-standard", "sign-feepool"] as const, "payment.action");
+      const action = enumValue(command.action, ["signature-history", "backend", "signing-list", "signing-configure", "list", "pending", "spend-notices", "notice-dismiss", "connect-payment-recovery", "connect-payment-recovery-ack", "connect-payment-signed-recovery", "register", "configure", "session-open", "session-close", "session-cancel", "answer", "sign-p2pkh", "sign-standard", "sign-feepool"] as const, "payment.action");
       const id = (key: string) => text(command[key], `payment.${key}`, 96);
       const amount = (v: unknown): string => {
         const s = text(v, "payment.amount", 20);
         if (!/^(0|[1-9][0-9]*)$/.test(s) || BigInt(s) > 0xffffffffffffffffn) throw new TypeError("payment amount is invalid");
         return s;
       };
-      if (action === "signature-history" || action === "list" || action === "pending" || action === "backend" || action === "signing-list") return {type, command: {action}};
+      if (action === "signature-history" || action === "list" || action === "pending" || action === "spend-notices" || action === "backend" || action === "signing-list" || action === "connect-payment-recovery" || action === "connect-payment-signed-recovery") return {type, command: {action}};
+      if (action === "connect-payment-recovery-ack") {
+        const ids = command.paymentIds;
+        if (!Array.isArray(ids) || ids.length > 256) throw new TypeError("payment recovery ack ids are invalid");
+        return {type, command: {action, paymentIds: ids.map((value, index) => text(value, `payment.paymentIds[${index}]`, 96))}};
+      }
       if(action==="signing-configure"){
         const n=command.revision;if(typeof n!=="number"||!Number.isSafeInteger(n)||n<1||n>=0xffffffff)throw new TypeError("invalid signing revision");
         return {type,command:{action,id:id("id"),mode:enumValue(command.mode,["automatic","manual"] as const,"signing.mode"),revision:n}};
@@ -1303,9 +1333,11 @@ function parseVaultOperation(value: unknown): CoordinatorVaultOperation {
         return {type, command: {action, channel: {id: text(c.id,"payment.id",96), owner: text(c.owner,"payment.owner",96), kind: enumValue(c.kind,["app","plugin"] as const,"payment.kind"), network: text(c.network,"payment.network",96), paymentType: text(c.paymentType,"payment.type",96), enabled: booleanValue(c.enabled,"payment.enabled"), singleLimit: amount(c.singleLimit), defaultSessionLimit: amount(c.defaultSessionLimit), revision: (() => { const n = c.revision; if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 1 || n >= 0xffffffff) throw new TypeError("invalid payment revision"); return n; })()}}};
       }
       if (action === "session-open") return {type, command: {action, id: id("id"), owner: id("owner")}};
-      if (action === "session-close" || action === "session-cancel") return {type, command: {action, id: id("id")}};
+      if (action === "session-close" || action === "session-cancel" || action === "notice-dismiss") return {type, command: {action, id: id("id")}};
       if (action === "answer") return {type, command: {action, id: id("id"), allow: booleanValue(command.allow,"payment.allow"), ...(command.raiseSessionLimit === undefined ? {} : {raiseSessionLimit: amount(command.raiseSessionLimit)})}};
       const transaction = {rawTxHex: text(command.rawTxHex,"payment.rawTxHex",16384), prevTransactionHexes: stringList(command.prevTransactionHexes,"payment.previous",10,16384), channelId: id("channelId"), paymentId: id("paymentId"), sessionId: command.sessionId === null ? null : id("sessionId")};
+      const connectPaymentReview = command.connectPaymentReview === undefined ? undefined : parseP2pkhConnectPaymentPreview(command.connectPaymentReview, "payment.connectPaymentReview");
+      if (connectPaymentReview !== undefined && action !== "sign-p2pkh") throw new TypeError("connectPaymentReview is only valid for sign-p2pkh");
       let authorization: {documentHex:string;refundTemplateHex:string}|undefined;
       if(command.authorization!==undefined){
         if(action!=="sign-feepool"||command.family!=="bitfs"||command.stage!=="state"||(command.role!==undefined&&command.role!=="payer"))throw new TypeError("invalid payment authorization");
@@ -1317,7 +1349,7 @@ function parseVaultOperation(value: unknown): CoordinatorVaultOperation {
         openingRequestHex=text(command.openingRequestHex,"payment.openingRequest",32768);
       }
       if(action === "sign-feepool") return {type, command: {action, ...transaction, ...(authorization ? {authorization} : {}), ...(openingRequestHex ? {openingRequestHex} : {}), family: enumValue(command.family,["connect","bitfs"] as const,"payment.family"), ...(command.role === undefined ? {} : {role: enumValue(command.role,["payer","cosigner"] as const,"payment.role")}), stage: enumValue(command.stage,["fund","state"] as const,"payment.stage")}};
-      return {type, command: {action, ...transaction}};
+      return {type, command: {action, ...transaction, ...(connectPaymentReview === undefined ? {} : {connectPaymentReview})}};
     }
     // 唯一 Key：读取公开摘要，不存在列表、选择、切换或第二把 Key 的入口。
     case "getCurrentKey": case "exportKeyHold":
@@ -1583,6 +1615,26 @@ function parseCoordinatorRequest(value: unknown): CoordinatorRpcRequest {
         network: request.network === "main" || request.network === "test" ? request.network : (() => { throw new TypeError("P2PKH network is invalid"); })(),
         submissionId: text(request.submissionId, kind + ".submissionId", 256),
         ...(submission === undefined ? {} : { submission }),
+        expectedSessionEpoch: epoch("expectedSessionEpoch"),
+      };
+    }
+    case "p2pkh.protocol.command": return { kind, input: parseP2pkhProtocolCommand(request.input), expectedSessionEpoch: epoch("expectedSessionEpoch") };
+    case "p2pkh.payment.status": return { kind, input: parseP2pkhPaymentLookupInput(request.input), expectedSessionEpoch: epoch("expectedSessionEpoch") };
+    case "p2pkh.conclusion": return { kind, input: parseP2pkhConclusionInput(request.input), expectedSessionEpoch: epoch("expectedSessionEpoch") };
+    case "p2pkh.transfer.prepare": {
+      return { kind, input: parseP2pkhTransferPrepareInput(request.input, kind + ".input"), expectedSessionEpoch: epoch("expectedSessionEpoch") };
+    }
+    case "p2pkh.artifact.occupy": {
+      return { kind, input: parseP2pkhArtifactOccupyInput(request.input, kind + ".input"), expectedSessionEpoch: epoch("expectedSessionEpoch") };
+    }
+    case "p2pkh.transfer.submit": {
+      const submit = expectRecord(request.input, kind + ".input");
+      return {
+        kind,
+        input: {
+          previewId: text(submit.previewId, kind + ".input.previewId", 256),
+          ownerPublicKeyHex: text(submit.ownerPublicKeyHex, kind + ".input.ownerPublicKeyHex", 256),
+        },
         expectedSessionEpoch: epoch("expectedSessionEpoch"),
       };
     }
@@ -2470,23 +2522,236 @@ function parseP2pkhBroadcastSubmission(value: unknown, field: string): P2pkhBroa
     resourceId: text(binding.resourceId, field + ".utxoBinding.resourceId", 256),
     seq: boundedNumber(binding.seq, field + ".utxoBinding.seq", 1),
   };
+  const managerAllocationId = optionalText(submission.managerAllocationId, field + ".managerAllocationId", 128);
+  if (managerAllocationId !== undefined && !/^[A-Za-z0-9:_.-]+$/u.test(managerAllocationId)) throw new TypeError(`Coordinator ${field}.managerAllocationId is invalid`);
   return {
     resourceId: text(submission.resourceId, field + ".resourceId", 256),
     txid: txid.toLowerCase(),
     rawTxHex: rawTxHex.toLowerCase(),
     ...(utxoBinding === undefined ? {} : { utxoBinding }),
+    ...(managerAllocationId === undefined ? {} : { managerAllocationId }),
   };
 }
 
-function parseP2pkhBroadcastResult(value: unknown, field: string): CoordinatorP2pkhBroadcastResult {
+/** 跨 Runtime 的普通转账输入：只接受纯数据字段。 */
+function parseP2pkhTransferPrepareInput(value: unknown, field: string): P2pkhTransferPrepareInput {
+  const input = expectRecord(value, field);
+  const paymentContext = input.paymentContext === undefined ? undefined : expectRecord(input.paymentContext, field + ".paymentContext");
+  return {
+    assetId: enumValue(input.assetId, ["bsv", "bsvtest"] as const, field + ".assetId"),
+    network: enumValue(input.network, ["main", "test"] as const, field + ".network"),
+    ownerPublicKeyHex: text(input.ownerPublicKeyHex, field + ".ownerPublicKeyHex", 256),
+    ...(input.recipientAddress === undefined ? {} : { recipientAddress: text(input.recipientAddress, field + ".recipientAddress", 512) }),
+    amountSatoshis: boundedNumber(input.amountSatoshis, field + ".amountSatoshis"),
+    ...(input.sendAll === undefined ? {} : { sendAll: input.sendAll === true }),
+    ...(input.payment === undefined ? {} : { payment: parseP2pkhConnectPaymentFacts(input.payment, field + ".payment") }),
+    ...(input.feeRateSatoshisPerKb === undefined ? {} : { feeRateSatoshisPerKb: boundedNumber(input.feeRateSatoshisPerKb, field + ".feeRateSatoshisPerKb") }),
+    ...(paymentContext === undefined ? {} : {
+      paymentContext: {
+        channelId: text(paymentContext.channelId, field + ".paymentContext.channelId", 256),
+        sessionId: paymentContext.sessionId === null ? null : text(paymentContext.sessionId, field + ".paymentContext.sessionId", 256),
+      },
+    }),
+  };
+}
+
+/** 跨 Runtime 的普通转账预览：逐字段校验，丢弃未声明字段。 */
+function parseP2pkhTransferPreviewPayload(value: unknown, field: string): P2pkhTransferPreviewPayload {
+  const preview = expectRecord(value, field);
+  const allocation = expectRecord(preview.allocation, field + ".allocation");
+  if (!Array.isArray(allocation.selected) || allocation.selected.length > 100_000) throw new TypeError(`Coordinator ${field}.allocation.selected is invalid`);
+  const paymentContext = preview.paymentContext === undefined ? undefined : expectRecord(preview.paymentContext, field + ".paymentContext");
+  const utxoBinding = preview.utxoBinding === undefined ? undefined : expectRecord(preview.utxoBinding, field + ".utxoBinding");
+  const outputs = preview.outputs;
+  if (!Array.isArray(outputs) || outputs.length > 10_000) throw new TypeError(`Coordinator ${field}.outputs is invalid`);
+  // 未签名预览没有最终交易身份：txid 固定为空字符串。跨 Runtime 不允许用
+  // 未签名哈希冒充 canonical txid；非空时必须是 canonical txid。
+  const txid = boundedText(preview.txid, field + ".txid", 64);
+  if (txid !== "" && !/^[0-9a-f]{64}$/iu.test(txid)) throw new TypeError(`Coordinator ${field}.txid is invalid`);
+  const rawTxHex = boundedText(preview.rawTxHex, field + ".rawTxHex", 262_144);
+  if (rawTxHex.length % 2 !== 0 || !/^[0-9a-f]+$/iu.test(rawTxHex)) throw new TypeError(`Coordinator ${field}.rawTxHex is invalid`);
+  const managerAllocationId = optionalText(preview.managerAllocationId, field + ".managerAllocationId", 128);
+  if (managerAllocationId !== undefined && !/^[A-Za-z0-9:_.-]+$/u.test(managerAllocationId)) throw new TypeError(`Coordinator ${field}.managerAllocationId is invalid`);
+  return {
+    previewId: text(preview.previewId, field + ".previewId", 256),
+    assetId: enumValue(preview.assetId, ["bsv", "bsvtest"] as const, field + ".assetId"),
+    network: enumValue(preview.network, ["main", "test"] as const, field + ".network"),
+    ownerPublicKeyHex: text(preview.ownerPublicKeyHex, field + ".ownerPublicKeyHex", 256),
+    ...(preview.recipientAddress === undefined || preview.recipientAddress === "" ? {} : { recipientAddress: text(preview.recipientAddress, field + ".recipientAddress", 512) }),
+    amountSatoshis: boundedNumber(preview.amountSatoshis, field + ".amountSatoshis"),
+    ...(preview.sendAll === undefined ? {} : { sendAll: preview.sendAll === true }),
+    feeRateSatoshisPerKb: boundedNumber(preview.feeRateSatoshisPerKb, field + ".feeRateSatoshisPerKb"),
+    estimatedFeeSatoshis: boundedNumber(preview.estimatedFeeSatoshis, field + ".estimatedFeeSatoshis"),
+    serializedSizeBytes: boundedNumber(preview.serializedSizeBytes, field + ".serializedSizeBytes"),
+    outputs: outputs.map((output, index) => {
+      const record = expectRecord(output, `${field}.outputs[${index}]`);
+      const role = record.role === undefined ? undefined : enumValue(record.role, ["business", "change"] as const, `${field}.outputs[${index}].role`);
+      return {
+        ...(record.address === undefined ? {} : { address: text(record.address, `${field}.outputs[${index}].address`, 512) }),
+        ...(record.scriptHex === undefined ? {} : { scriptHex: text(record.scriptHex, `${field}.outputs[${index}].scriptHex`, 10_000) }),
+        value: boundedNumber(record.value, `${field}.outputs[${index}].value`),
+        ...(role === undefined ? {} : { role }),
+      };
+    }),
+    changeAddress: text(preview.changeAddress, field + ".changeAddress", 512),
+    ...(preview.payment === undefined ? {} : { payment: parseP2pkhConnectPaymentPreview(preview.payment, field + ".payment") }),
+    rawTxHex: rawTxHex.toLowerCase(),
+    txid: txid.toLowerCase(),
+    ...(managerAllocationId === undefined ? {} : { managerAllocationId }),
+    ...(utxoBinding === undefined ? {} : {
+      utxoBinding: {
+        resourceId: text(utxoBinding.resourceId, field + ".utxoBinding.resourceId", 256),
+        seq: boundedNumber(utxoBinding.seq, field + ".utxoBinding.seq", 1),
+      },
+    }),
+    ...(paymentContext === undefined ? {} : {
+      paymentContext: {
+        channelId: text(paymentContext.channelId, field + ".paymentContext.channelId", 256),
+        sessionId: paymentContext.sessionId === null ? null : text(paymentContext.sessionId, field + ".paymentContext.sessionId", 256),
+      },
+    }),
+    allocation: {
+      requestedSatoshis: boundedNumber(allocation.requestedSatoshis, field + ".allocation.requestedSatoshis"),
+      feeReserveSatoshis: boundedNumber(allocation.feeReserveSatoshis, field + ".allocation.feeReserveSatoshis"),
+      selected: allocation.selected.map((item, index) => {
+        const record = expectRecord(item, `${field}.allocation.selected[${index}]`);
+        const itemTxid = text(record.txid, `${field}.allocation.selected[${index}].txid`, 64);
+        if (!/^[0-9a-f]{64}$/iu.test(itemTxid)) throw new TypeError(`Coordinator ${field}.allocation.selected[${index}].txid is invalid`);
+        return { txid: itemTxid.toLowerCase(), vout: boundedNumber(record.vout, `${field}.allocation.selected[${index}].vout`), value: boundedNumber(record.value, `${field}.allocation.selected[${index}].value`) };
+      }),
+      totalInputSatoshis: boundedNumber(allocation.totalInputSatoshis, field + ".allocation.totalInputSatoshis"),
+      changeSatoshis: boundedNumber(allocation.changeSatoshis, field + ".allocation.changeSatoshis"),
+    },
+  };
+}
+
+function parseP2pkhConnectPaymentFacts(value: unknown, field: string): import("./p2pkhConnectPayment.js").P2pkhConnectPaymentFacts {
+  const payment = expectRecord(value, field);
+  const recipient = expectRecord(payment.recipient, field + ".recipient");
+  const type = enumValue(recipient.type, ["p2pkh", "p2pk"] as const, field + ".recipient.type");
+  return {
+    paymentId: text(payment.paymentId, field + ".paymentId", 96),
+    clientRequestId: text(payment.clientRequestId, field + ".clientRequestId", 128),
+    paymentType: enumValue(payment.paymentType, ["p2pkh", "p2pk"] as const, field + ".paymentType"),
+    businessKind: text(payment.businessKind, field + ".businessKind", 64),
+    recipient: type === "p2pkh"
+      ? { type, address: text(recipient.address, field + ".recipient.address", 512) }
+      : { type, publicKeyHex: text(recipient.publicKeyHex, field + ".recipient.publicKeyHex", 66) },
+    appId: text(payment.appId, field + ".appId", 256),
+    appName: text(payment.appName, field + ".appName", 256),
+    origin: text(payment.origin, field + ".origin", 2048),
+    publisherPublicKeyHex: text(payment.publisherPublicKeyHex, field + ".publisherPublicKeyHex", 66),
+  };
+}
+
+function parseP2pkhConnectPaymentPreview(value: unknown, field: string): import("./p2pkhConnectPayment.js").P2pkhConnectPaymentPreview {
+  const payment = expectRecord(value, field);
+  const outputs = payment.outputs;
+  if (!Array.isArray(outputs) || outputs.length > 8) throw new TypeError(`Coordinator ${field}.outputs is invalid`);
+  const roleMap = outputs.map((row, index) => {
+    const output = expectRecord(row, `${field}.outputs[${index}]`);
+    return {
+      vout: boundedNumber(output.vout, `${field}.outputs[${index}].vout`),
+      scriptHex: text(output.scriptHex, `${field}.outputs[${index}].scriptHex`, 10_000),
+      valueSats: text(output.valueSats, `${field}.outputs[${index}].valueSats`, 32),
+      role: enumValue(output.role, ["business", "change"] as const, `${field}.outputs[${index}].role`),
+    };
+  });
+  return {
+    paymentId: text(payment.paymentId, field + ".paymentId", 96),
+    clientRequestId: text(payment.clientRequestId, field + ".clientRequestId", 128),
+    planDigest: text(payment.planDigest, field + ".planDigest", 4096),
+    paymentType: enumValue(payment.paymentType, ["p2pkh", "p2pk"] as const, field + ".paymentType"),
+    businessKind: text(payment.businessKind, field + ".businessKind", 64),
+    appId: text(payment.appId, field + ".appId", 256),
+    appName: text(payment.appName, field + ".appName", 256),
+    origin: text(payment.origin, field + ".origin", 2048),
+    publisherPublicKeyHex: text(payment.publisherPublicKeyHex, field + ".publisherPublicKeyHex", 66),
+    recipientOwnership: enumValue(payment.recipientOwnership, ["app-publisher", "third-party", "unknown"] as const, field + ".recipientOwnership"),
+    recipientLabel: text(payment.recipientLabel, field + ".recipientLabel", 512),
+    businessScriptHex: text(payment.businessScriptHex, field + ".businessScriptHex", 10_000),
+    businessAmountSats: text(payment.businessAmountSats, field + ".businessAmountSats", 32),
+    changeAmountSats: text(payment.changeAmountSats, field + ".changeAmountSats", 32),
+    feeSats: text(payment.feeSats, field + ".feeSats", 32),
+    changeScriptHex: payment.changeScriptHex === null ? null : text(payment.changeScriptHex, field + ".changeScriptHex", 10_000),
+    outputs: roleMap,
+  };
+}
+
+/** 外露 artifact 的占用请求：逐字段校验，纯数据。 */
+function parseP2pkhArtifactOccupyInput(value: unknown, field: string): P2pkhArtifactOccupyInput {
+  const input = expectRecord(value, field);
+  if (!Array.isArray(input.inputs) || input.inputs.length > 100_000) throw new TypeError(`Coordinator ${field}.inputs is invalid`);
+  if (!Array.isArray(input.outputs) || input.outputs.length > 10_000) throw new TypeError(`Coordinator ${field}.outputs is invalid`);
+  return {
+    ownerPublicKeyHex: text(input.ownerPublicKeyHex, field + ".ownerPublicKeyHex", 256),
+    network: enumValue(input.network, ["main", "test"] as const, field + ".network"),
+    artifactId: text(input.artifactId, field + ".artifactId", 256),
+    unsignedTxHex: boundedText(input.unsignedTxHex, field + ".unsignedTxHex", 262_144),
+    signedTxHex: boundedText(input.signedTxHex, field + ".signedTxHex", 262_144),
+    inputs: input.inputs.map((row, index) => {
+      const record = expectRecord(row, `${field}.inputs[${index}]`);
+      const txid = text(record.txid, `${field}.inputs[${index}].txid`, 64);
+      if (!/^[0-9a-f]{64}$/iu.test(txid)) throw new TypeError(`Coordinator ${field}.inputs[${index}].txid is invalid`);
+      return {
+        txid: txid.toLowerCase(),
+        vout: boundedNumber(record.vout, `${field}.inputs[${index}].vout`),
+        value: text(record.value, `${field}.inputs[${index}].value`, 32),
+        scriptHex: text(record.scriptHex, `${field}.inputs[${index}].scriptHex`, 10_000),
+      };
+    }),
+    outputs: input.outputs.map((row, index) => {
+      const record = expectRecord(row, `${field}.outputs[${index}]`);
+      return {
+        scriptHex: text(record.scriptHex, `${field}.outputs[${index}].scriptHex`, 10_000),
+        value: text(record.value, `${field}.outputs[${index}].value`, 32),
+      };
+    }),
+    businessAmountSatoshis: text(input.businessAmountSatoshis, field + ".businessAmountSatoshis", 32),
+    feeRateSatoshisPerKb: text(input.feeRateSatoshisPerKb, field + ".feeRateSatoshisPerKb", 32),
+    feeCapSats: text(input.feeCapSats, field + ".feeCapSats", 32),
+    protocolKind: enumValue(input.protocolKind, ["refund", "close", "fund", "state"] as const, field + ".protocolKind"),
+  };
+}
+
+/** 外露 artifact 的占用结果。 */
+function parseP2pkhArtifactOccupyResult(value: unknown, field: string): P2pkhArtifactOccupyResult {
   const result = expectRecord(value, field);
+  const txid = text(result.txid, field + ".txid", 64);
+  if (!/^[0-9a-f]{64}$/iu.test(txid)) throw new TypeError(`Coordinator ${field}.txid is invalid`);
+  return { allocationId: text(result.allocationId, field + ".allocationId", 128), txid: txid.toLowerCase() };
+}
+
+/** 跨 Runtime 的普通转账结果。 */
+function parseP2pkhTransferResultPayload(value: unknown, field: string): P2pkhTransferResultPayload {
+  const result = expectRecord(value, field);
+  if (!Array.isArray(result.localInputClaimIds) || result.localInputClaimIds.length > 100_000) throw new TypeError(`Coordinator ${field}.localInputClaimIds is invalid`);
+  const status = enumValue(result.status, ["local-confirmed", "isolated", "not-dispatched"] as const, field + ".status");
+  // 只有已确认的本地提交才有最终交易身份；未派发、取消或隔离的结果可以没有
+  // txid/submissionId——那是合法状态，不能被响应解析器当成非法响应。
+  const txid = boundedText(result.txid ?? "", field + ".txid", 64);
+  if (txid !== "" && !/^[0-9a-f]{64}$/iu.test(txid)) throw new TypeError(`Coordinator ${field}.txid is invalid`);
+  if (status === "local-confirmed" && txid === "") throw new TypeError(`Coordinator ${field}.txid is required for a confirmed submission`);
+  return {
+    status,
+    ...(txid === "" ? {} : { txid: txid.toLowerCase() }),
+    rawTxHex: boundedText(result.rawTxHex, field + ".rawTxHex", 262_144),
+    ...(result.error === undefined ? {} : { error: boundedText(result.error, field + ".error", 4096) }),
+    submissionId: boundedText(result.submissionId, field + ".submissionId", 256),
+    localInputClaimIds: result.localInputClaimIds.map((claimId, index) => text(claimId, `${field}.localInputClaimIds[${index}]`, 256)),
+    attempts: boundedNumber(result.attempts, field + ".attempts"),
+    ...(result.reason === undefined ? {} : { reason: boundedText(result.reason, field + ".reason", 256) }),
+  };
+}
+
+function parseP2pkhBroadcastResult(value: unknown, field: string): CoordinatorP2pkhBroadcastResult {  const result = expectRecord(value, field);
   const status = text(result.status, field + ".status", 64);
   const providerId = optionalText(result.providerId, field + ".providerId", 256);
   if (status === "not-dispatched") {
     const currentSeq = optionalBoundedNumber(result.currentSeq, field + ".currentSeq", 1);
     return {
       status,
-      reason: enumValue(result.reason, ["stale-provider-generation", "broadcast-provider-unavailable", "coordinator-not-dispatched", "stale-session-epoch", "snapshot-stale", "snapshot-consumed", "snapshot-binding-required", "snapshot-input-invalid"] as const, field + ".reason"),
+      reason: enumValue(result.reason, ["cancelled", "stale-provider-generation", "broadcast-provider-unavailable", "coordinator-not-dispatched", "stale-session-epoch", "snapshot-stale", "snapshot-consumed", "snapshot-binding-required", "snapshot-input-invalid"] as const, field + ".reason"),
       ...(currentSeq === undefined ? {} : { currentSeq }),
     };
   }
@@ -3140,6 +3405,12 @@ function parseCoordinatorResultForRequest(request: CoordinatorRpcRequest, value:
     case "p2pkh.utxos.refresh": return parseP2pkhUtxoSnapshotResult(value, field);
     case "p2pkh.provider-config.get": return parseP2pkhProviderConfigResult(value, field);
     case "p2pkh.broadcast": return parseP2pkhBroadcastResult(value, field);
+    case "p2pkh.payment.status": return parseP2pkhPaymentLookupResult(value);
+    case "p2pkh.conclusion": return parseP2pkhConclusionResult(value);
+    case "p2pkh.transfer.prepare": return parseP2pkhTransferPreviewPayload(value, field);
+    case "p2pkh.transfer.submit": return parseP2pkhTransferResultPayload(value, field);
+    case "p2pkh.artifact.occupy": return parseP2pkhArtifactOccupyResult(value, field);
+    case "p2pkh.protocol.command": return parseP2pkhProtocolCommandResult(value);
     default: return parseUndefinedResult(value, field);
   }
 }

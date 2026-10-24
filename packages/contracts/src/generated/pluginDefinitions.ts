@@ -2535,6 +2535,8 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
         "connect": {
           "providerMethods": [
             "p2pkh.transfer",
+            "payment.pay",
+            "payment.status",
             "feepool.prepare",
             "feepool.commit"
           ]

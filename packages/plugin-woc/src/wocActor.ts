@@ -1,5 +1,7 @@
 import { parseWocFeeRecommendation } from "@keymaster/contracts";
 import { observedPropagation } from "./transactionObservation.js";
+import { normalizeWocBroadcastReceipt } from "./broadcastReceipt.js";
+import { parseSpentOutput, parseSpentBatch, validateSpentOutpoints } from "./spentReceipt.js";
 // packages/plugin-woc/src/wocActor.ts
 // WOC actor mailbox：注册 target="woc" 的 handler 统一处理 WOC 消息。
 //
@@ -29,6 +31,8 @@ import type {
   WocRequestPriority,
   WocTransactionObservation,
   WocSpentOutput,
+  WocOutpoint,
+  WocSpentResult,
   WocUnconfirmedHistory,
   WocUtxoResponse,
   WocBsv21TokenDetail
@@ -49,6 +53,7 @@ import {
   type WocHistoryPayload,
   type WocChainHeightPayload,
   type WocSpentOutputPayload,
+  type WocSpentOutputsPayload,
   type WocTransactionObservationPayload,
   type WocRawTransactionPayload,
   type Woc1SatContentPayload,
@@ -117,17 +122,6 @@ function normalizeTxidHex(txid: string): string {
   return txid.startsWith("0x") ? txid.slice(2).toLowerCase() : txid.toLowerCase();
 }
 
-/** 反转 hex 字节序；输入非法时返回 undefined。 */
-function reverseHexBytes(txid: string): string | undefined {
-  const clean = normalizeTxidHex(txid);
-  if (clean.length === 0) return "";
-  if (clean.length % 2 !== 0 || !/^[0-9a-f]+$/.test(clean)) {
-    return undefined;
-  }
-  const parts = clean.match(/../g);
-  return parts ? parts.reverse().join("") : undefined;
-}
-
 /** 计算 rawTxHex 的 canonical txid（double-SHA256 后字节序反转）。 */
 async function calcCanonicalTxidFromRawTxHex(rawTxHex: string): Promise<string> {
   const input = hexToBytes(rawTxHex);
@@ -137,62 +131,6 @@ async function calcCanonicalTxidFromRawTxHex(rawTxHex: string): Promise<string> 
   const digest = new Uint8Array(second);
   digest.reverse();
   return bytesToHex(digest);
-}
-
-/**
- * Provider txid 回执解释器（纯函数）。
- *
- * 职责：
- *   - 把 provider 返回的原始 txid 与本地 canonical txid 一起解释成
- *     "exact / reversed / mismatch / missing" 四种 integrity 结论；
- *   - 不做任何 fetch / 不做归一化之外的副作用；
- *   - 业务层（包括 plugin-p2pkh）只消费 canonicalTxid；
- *     providerReturnedTxid* 仅用于诊断。
- *
- * 设计缘由：
- *   把回执解释从 broadcast() 主流程中抽离出来，避免在主流程里继续堆
- *   条件分支引入新的优先级副作用（例如不小心在 fetch 之前 await）。
- */
-function interpretProviderTxidReceipt(input: {
-  providerTxid?: string;
-  canonicalTxid: string;
-}): {
-  providerReturnedTxidRaw?: string;
-  providerReturnedTxidNormalized?: string;
-  txidIntegrity: "exact" | "reversed" | "mismatch" | "missing";
-} {
-  if (input.providerTxid === undefined) {
-    return { txidIntegrity: "missing" };
-  }
-  const providerReturnedTxidRaw = input.providerTxid;
-  const providerReturnedTxidNormalized = normalizeTxidHex(providerReturnedTxidRaw);
-  const reversedProviderTxid = reverseHexBytes(providerReturnedTxidRaw);
-  const txidIntegrity: "exact" | "reversed" | "mismatch" | "missing" =
-    providerReturnedTxidNormalized === input.canonicalTxid
-      ? "exact"
-      : reversedProviderTxid === input.canonicalTxid
-        ? "reversed"
-        : providerReturnedTxidNormalized.length > 0
-          ? "mismatch"
-          : "missing";
-  return {
-    providerReturnedTxidRaw,
-    providerReturnedTxidNormalized,
-    txidIntegrity
-  };
-}
-
-/**
- * WOC 的成功回执在公开 API 中是顶层 JSON 字符串；历史 mock / 代理也可能
- * 返回 `{ txid }`。网络层只以 HTTP 2xx 判断请求已被 provider 接受，本
- * helper 仅提取可选的诊断 txid，不能因为字段缺失而把已提交的广播降级为
- * 异常结果。
- */
-function extractProviderTxid(receipt: unknown): string | undefined {
-  if (typeof receipt === "string") return receipt;
-  if (typeof receipt !== "object" || receipt === null) return undefined;
-  const txid = (receipt as { txid?: unknown }).txid;
-  return typeof txid === "string" ? txid : undefined;
 }
 
 function getLocker(): Locker | undefined {
@@ -424,16 +362,18 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
       if (res.status === 429) {
         const retryAfter = parseRetryAfter(res.headers.get("retry-after"));
         applyBackoff(retryAfter, "429 Too Many Requests");
-        throw new Error(`WOC 429`);
+        throw Object.assign(new Error(`WOC 429`), { status: 429, body: await res.text() });
       }
       if (!res.ok) {
-        throw new Error(`WOC ${res.status} ${res.statusText} ${path}`);
+        const body = await res.text();
+        throw Object.assign(new Error(`WOC ${res.status} ${res.statusText} ${path}: ${body}`), { status: res.status, body });
       }
+      const body = await res.text();
       try {
-        return (await res.json()) as T;
+        return JSON.parse(body) as T;
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
-        throw new Error(`WOC returned invalid JSON for ${path}: ${detail}`, { cause: error });
+        throw Object.assign(new Error(`WOC returned invalid JSON for ${path}: ${detail}`, { cause: error }), { status: res.status, body });
       }
     } finally {
       clearTimeout(timer);
@@ -845,7 +785,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
 
   function getSpentOutput(network: BsvNetwork, txid: string, vout: number, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<WocSpentOutput | null> {
     const normalized = normalizeTxidHex(txid);
-    if (!Number.isSafeInteger(vout) || vout < 0 || vout > 0xffffffff) return Promise.reject(new TypeError("WOC spent output vout is invalid"));
+    if (!/^[0-9a-f]{64}$/.test(normalized) || !Number.isSafeInteger(vout) || vout < 0 || vout > 0xffffffff) return Promise.reject(new TypeError("WOC spent output outpoint is invalid"));
     return enqueue({
       priority: priorityOf(opts.priority ?? "background"), signal: opts.signal, label: WOC_MSG.TX_SPENT_OUTPUT,
       fn: async (signal) => {
@@ -856,14 +796,19 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
           if (isWocNotFoundError(error)) return null;
           throw error;
         }
-        if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("WOC spent output response is invalid");
-        const value = raw as Record<string, unknown>;
-        const spenderTxid = normalizeTxidHex(String(value.txid ?? ""));
-        const vin = value.vin;
-        if (!Number.isSafeInteger(vin) || (vin as number) < 0) throw new Error("WOC spent output response has invalid vin");
-        if (value.status !== "confirmed" && value.status !== "unconfirmed") throw new Error("WOC spent output response has invalid status");
-        return { txid: spenderTxid, vin: vin as number, status: value.status };
+        try { return parseSpentOutput(raw); }
+        catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), { status: 200, body: JSON.stringify(raw) }); }
       }
+    });
+  }
+
+  function getSpentOutputs(network: BsvNetwork, outpoints: WocOutpoint[], opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<WocSpentResult[]> {
+    validateSpentOutpoints(outpoints);
+    const frozen = outpoints.map(p => ({ ...p }));
+    return enqueue({ priority: priorityOf(opts.priority ?? "background"), signal: opts.signal, label: WOC_MSG.TX_SPENT_OUTPUTS,
+      fn: async signal => parseSpentBatch(frozen, await fetchJson<unknown>(network, "/utxos/spent", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ utxos: frozen }),
+      }, signal, opts.timeoutMs)),
     });
   }
 
@@ -878,24 +823,27 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         // 任务在 fetchJson 之前先让出执行权；pump 继续 while 循环时趁机拉起
         // background 任务的 fetch，破坏 broadcast 优先级（order[1] 变成
         // background 而不是 /tx/raw）。
-        const receipt = await fetchJson<unknown>(network, "/tx/raw", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ txhex: rawTxHex })
-        }, signal, opts.timeoutMs);
-        resetBackoff();
-        const canonicalTxid = await calcCanonicalTxidFromRawTxHex(rawTxHex);
-        const interpreted = interpretProviderTxidReceipt({
-          providerTxid: extractProviderTxid(receipt),
-          canonicalTxid
-        });
-        return {
-          accepted: true,
-          canonicalTxid,
-          providerReturnedTxidRaw: interpreted.providerReturnedTxidRaw,
-          providerReturnedTxidNormalized: interpreted.providerReturnedTxidNormalized,
-          txidIntegrity: interpreted.txidIntegrity
-        };
+        const ctl = new AbortController();
+        const onAbort = () => ctl.abort(signal.reason);
+        if (signal.aborted) ctl.abort(signal.reason);
+        else signal.addEventListener("abort", onAbort, { once: true });
+        const timer = setTimeout(() => ctl.abort(new Error("timeout")), opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+        try {
+          // Read text even for 4xx/5xx: the exact body is part of the funds decision.
+          const res = await fetch(fullUrl(network, "/tx/raw"), {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ txhex: rawTxHex }), signal: ctl.signal,
+          });
+          const evidence = { status: res.status, statusText: res.statusText, body: await res.text() };
+          if (res.status === 429) applyBackoff(parseRetryAfter(res.headers.get("retry-after")), "429 Too Many Requests");
+          const canonicalTxid = await calcCanonicalTxidFromRawTxHex(rawTxHex);
+          const result = normalizeWocBroadcastReceipt(canonicalTxid, evidence);
+          resetBackoff();
+          return result;
+        } finally {
+          clearTimeout(timer);
+          signal.removeEventListener("abort", onAbort);
+        }
       }
     });
   }
@@ -1223,6 +1171,10 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         const p = payload as WocChainHeightPayload;
         return getChainHeight(p.network, opts);
       }
+      case WOC_MSG.TX_SPENT_OUTPUTS: {
+        const p = payload as WocSpentOutputsPayload;
+        return getSpentOutputs(p.network, p.outpoints, opts);
+      }
       case WOC_MSG.TX_SPENT_OUTPUT: {
         const p = payload as WocSpentOutputPayload;
         return getSpentOutput(p.network, p.txid, p.vout, opts);
@@ -1289,6 +1241,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
       WOC_MSG.CHAIN_HEIGHT,
       WOC_MSG.FEE_RECOMMENDATION,
       WOC_MSG.TX_SPENT_OUTPUT,
+      WOC_MSG.TX_SPENT_OUTPUTS,
       WOC_MSG.TX_RAW,
       WOC_MSG.TX_BROADCAST,
       WOC_MSG.BSV21_LIST_TOKENS,

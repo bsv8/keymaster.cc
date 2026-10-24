@@ -11,22 +11,15 @@ import type { CoordinatorP2pkhBroadcastResult } from "./sessionCoordinatorRuntim
  *   - HTTP 4xx（含 400/408/413/422）本身不构成证明：Provider 对
  *     "交易已存在 / 已在 mempool" 也可能返回 4xx，此时交易其实已上链路；
  *   - 超时、网络断开、429/5xx 同样可能发生在 Provider 已收到交易之后；
- *   - WoC 适配器当前对任意非 2xx 只抛 `WOC <status> <text>`，没有结构化
- *     状态，所以默认必须按“结果未知”处理。
+ *   - WoC conflict/unknown 也不能证明未派发或所有输入可释放。
  *
- * 只有两条安全通道允许回滚：
- *   1. Provider 适配器显式抛出的结构化标记 `code === "definitive-not-dispatched"`；
- *   2. 节点明确拒绝交易本体的错误文本（`invalid transaction` / `bad-txns-*` /
- *      `malformed payload`）；笼统的 `rejected` 不算。
+ * 只接受受信适配器在交网络前明确证明未派发的结构化标记。
+ * 任何错误文字（包括 invalid transaction / bad-txns / malformed payload）
+ * 都不构成释放证据；已签后的冲突须逐 input 核实消费方。
  */
 export function isDefinitelyNotDispatchedBroadcastError(error: unknown): boolean {
   const record = error && typeof error === "object" ? error as { code?: unknown } : undefined;
-  if (record?.code === "definitive-not-dispatched") return true;
-  const message = error instanceof Error ? error.message : String(error);
-  const lower = message.toLowerCase();
-  return lower.includes("invalid transaction")
-    || lower.includes("bad-txns")
-    || lower.includes("malformed payload");
+  return record?.code === "definitive-not-dispatched";
 }
 
 /** 中心广播终态原因；UI 应映射成中文文案。 */
@@ -64,6 +57,8 @@ export interface OneShotBroadcastInput {
   rawTxHex: string;
   /** 花费钱包 P2PKH UTXO 时的快照绑定。 */
   utxoBinding?: P2pkhUtxoBinding;
+  /** Durable UTXO Manager reservation for ordinary wallet funding. */
+  managerAllocationId?: string;
 }
 
 /** 中心广播服务的最终结果。 */

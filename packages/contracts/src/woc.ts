@@ -121,6 +121,15 @@ export interface WocTransactionObservation {
   observation?: WocObservation;
 }
 
+export interface WocOutpoint { txid: string; vout: number; }
+export interface WocSpentResult {
+  outpoint: WocOutpoint;
+  status: "spent" | "unknown";
+  spender?: WocSpentOutput;
+  /** Parsed unknown row for diagnostics, never a release proof. */
+  diagnostic?: string;
+}
+
 /** 指定 outpoint 的花费交易；null 表示节点明确返回尚未花费。 */
 export interface WocSpentOutput {
   /** 花费交易 canonical txid。 */
@@ -135,10 +144,9 @@ export interface WocSpentOutput {
  * 广播结果。
  *
  * 关键不变量（消费方必须遵守）：
- *   - `accepted: true` 仅表示 provider（Whatsonchain）接受了 broadcast
- *     请求并返回 2xx，并不等于链上最终确认。是否进入 mempool、是否被打包、
- *     是否被重组，仍以 WOC recent-sync / history-backfill 观察到的链上
- *     真值为准。
+ *   - `accepted: true` 只用于回执 txid 匹配本地 exact 或同 exact 的实测
+ *     already-in-mempool 回执，不等于出块确认。其余回执抛结构化 unknown/conflict，
+ *     保留 HTTP/body；不能以缺失 txid 或任意 2xx 推断成功。
  *   - `canonicalTxid` 是上层业务唯一应消费的 txid；上层不应再自行 reverse
  *     或 normalize provider 原始回执，所有字节序归一化已由 `plugin-woc`
  *     在此层完成。
@@ -152,8 +160,16 @@ export interface WocSpentOutput {
  *                       仍写本地 input claim，等待链上真值收敛
  *       - "missing"   ：provider 未返回 txid 字段
  */
+export interface WocBroadcastEvidence {
+  status: number;
+  statusText: string;
+  body: string;
+}
+
 export interface WocBroadcastResult {
   accepted: true;
+  conclusion?: "matching-txid" | "already-in-mempool";
+  evidence?: WocBroadcastEvidence;
   canonicalTxid: string;
   providerReturnedTxidRaw?: string;
   providerReturnedTxidNormalized?: string;
@@ -254,6 +270,9 @@ export interface WocService {
     vout: number,
     options?: WocRequestOptions
   ): Promise<WocSpentOutput | null>;
+
+  /** One batch, at most20. Unknown/null/empty error is not an unspent proof. */
+  getSpentOutputs?(network: BsvNetwork, outpoints: WocOutpoint[], options?: WocRequestOptions): Promise<WocSpentResult[]>;
 
   /** Confirmed raw transaction bytes for provider adapters. */
   getRawTransaction?(

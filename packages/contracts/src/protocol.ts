@@ -170,6 +170,8 @@ export const PROTOCOL_METHODS = [
   "cipher.encrypt",
   "cipher.decrypt",
   "p2pkh.transfer",
+  "payment.pay",
+  "payment.status",
   "payment.channel.register",
   "feepool.prepare",
   "feepool.commit",
@@ -239,6 +241,17 @@ export type ProtocolErrorCode =
    * P2PKH 设置里没有打开 testnet。accept 阶段 fail-fast，不进确认流。
    */
   | "asset_not_enabled"
+  /** Connect v1 明确排除的方法族（新费用池签名等）。 */
+  | "unsupported_scope"
+  /** 通用支付需要已验证 App 身份（publisher 是归属唯一基准）。 */
+  | "identity_required"
+  /** 当前硬件后端缺少 Connect 支付所需的受信展示/结构检查。 */
+  | "hardware_connect_payment_unsupported"
+  | "payment_not_found"
+  /** Too many non-terminal Connect payment responsibilities. */
+  | "payment_pending_limit"
+  /** Same stable payment key with different frozen facts. */
+  | "id_conflict"
   | "storage_not_configured"
   | "storage_unavailable"
   | "storage_invalid_path"
@@ -567,11 +580,11 @@ export interface CipherDecryptResult {
 
 /* ============== p2pkh.transfer ============== */
 
-/** App 注册自身支付用途；owner 始终取已连接会话的 origin，不能自报。 */
+/** App 注册支付用途；owner 取已验证会话的 publisher，不能自报或用 channelName 分叉额度。 */
 export interface PaymentChannelRegisterParams {
   walletPublicKeyHex: string;
   channelName: string;
-  paymentType: "p2pkh" | "feepool.connect";
+  paymentType: "p2pkh" | "p2pk" | "feepool.connect";
   assetId?: P2pkhTransferAssetId;
 }
 export interface PaymentChannelRegisterResult { channelId: string; }
@@ -638,6 +651,104 @@ export interface P2pkhTransferResult {
   rawTxHex: string;
   /** 实际花费的 fee satoshis。 */
   feeSatoshis: number;
+}
+
+/* ============== payment.pay / payment.status ============== */
+
+/** Connect v1 支付方案；业务种类（businessKind）是独立维度。 */
+export type ConnectPaymentType = "p2pkh" | "p2pk";
+export type ConnectPaymentRecipientOwnership = "app-publisher" | "third-party" | "unknown";
+export type ConnectPaymentStatus =
+  | "pending"
+  | "not_signed"
+  | "signed_not_dispatched"
+  | "unknown"
+  | "failed"
+  | "accepted"
+  | "already_known";
+
+/** 收款材料：类型必须与 paymentType 一致。 */
+export type ConnectPaymentRecipient =
+  | { type: "p2pkh"; address: string }
+  | { type: "p2pk"; publicKeyHex: string };
+
+/**
+ * 通用支付申请。App 只声明业务金额、业务种类、费率与收款材料；不得自报
+ * publisher、归属、找零或任意脚本。钱包输入与找零固定为付款钱包 P2PKH。
+ */
+export interface PaymentPayParams {
+  channelId: string;
+  /** 稳定幂等身份，1–128 字符。 */
+  clientRequestId: string;
+  paymentType: ConnectPaymentType;
+  /** App 声明的业务用途；展示时不是可信商业结论。 */
+  businessKind: string;
+  /** 业务金额（聪，不含矿工费）。 */
+  amountSatoshis: number;
+  /** 可选希望费率（sat/kB）。 */
+  feeRateSatoshisPerKb?: number;
+  recipient: ConnectPaymentRecipient;
+  assetId?: P2pkhTransferAssetId;
+  walletPublicKeyHex: string;
+}
+
+export interface PaymentReleaseSummary {
+  /** Historical amount safely released, NOT the current wallet balance. */
+  releasedSatoshis: string;
+  releasedInputCount: number;
+  spentInputCount: number;
+  heldInputCount: number;
+}
+
+/** 对外支付结果：不返回 rawTxHex、签名或内部 exact。 */
+export interface PaymentPayResult {
+  paymentId: string;
+  clientRequestId: string;
+  status: ConnectPaymentStatus;
+  assetId: P2pkhTransferAssetId;
+  paymentType: ConnectPaymentType;
+  recipientOwnership: ConnectPaymentRecipientOwnership;
+  /** 只有 accepted/already_known 才有 canonical txid。 */
+  txid?: string;
+  feeSatoshis?: number;
+  changeSatoshis?: number;
+  approval?: "automatic" | "manual" | "unknown";
+  /** 稳定原因码；不包含签名/交易原文。 */
+  reason?: string;
+  release?: PaymentReleaseSummary;
+}
+
+/** 状态查询使用同一稳定身份；不泄露其他调用者的请求存在性。 */
+export interface PaymentStatusParams {
+  clientRequestId: string;
+  walletPublicKeyHex: string;
+}
+export type PaymentStatusResult = PaymentPayResult;
+
+/** 持久去重/状态记录；内部字段不得下发给 App。 */
+export interface ProtocolConnectPaymentRecord {
+  key: string;
+  paymentId: string;
+  clientRequestId: string;
+  origin: string;
+  ownerPublicKeyHex: string;
+  networkIdentity: NetworkIdentity;
+  appId: string;
+  publisherPublicKeyHex: string;
+  requestDigest: string;
+  params: PaymentPayParams;
+  status: ConnectPaymentStatus;
+  recipientOwnership: ConnectPaymentRecipientOwnership;
+  reason?: string;
+  txid?: string;
+  feeSatoshis?: number;
+  changeSatoshis?: number;
+  approval?: "automatic" | "manual" | "unknown";
+  allocationId?: string;
+  previewId?: string;
+  release?: PaymentReleaseSummary;
+  createdAt: number;
+  updatedAt: number;
 }
 
 /* ============== feepool.prepare / feepool.commit ============== */
@@ -959,6 +1070,50 @@ export interface ProtocolFeePoolRecord {
   /** 产生这条记录的最后一次 operation id。 */
   lastOperationId: string;
   updatedAt: number;
+}
+
+/**
+ * 对外交付签名责任的持久记录（E01）。
+ *
+ * 签名字节离开钱包前必须落盘：wallet provider 未派发不能证明站点没广播，
+ * 站点承诺 / 404 / session 结束都不是证据。记录与 popup 会话无关：
+ * `operationId` 失效不消灭资金责任。
+ */
+export interface ProtocolFeePoolDeliveryRecord {
+  /** 稳定责任 ID；同一 operation 的同一 kind 只写一次。 */
+  id: string;
+  operationId: string;
+  origin: string;
+  ownerPublicKeyHex: string;
+  counterpartyPublicKeyHex: string;
+  assetId: P2pkhTransferAssetId;
+  channelId: string;
+  sessionId: string;
+  action: ProtocolFeePoolAction;
+  /**
+   * `base-transaction` = 完整签名的 A-Tx（可被站点自行广播）；
+   * `state-signature` = 对方还能补齐并花费的部分签名草稿。
+   */
+  kind: "base-transaction" | "state-signature";
+  /** 交付的 exact 原文（A-Tx 或草稿）。 */
+  rawTxHex: string;
+  /** `state-signature` 的钱包签名原文。 */
+  signatureHex?: string;
+  /** 相关真实输入与金额。 */
+  inputs: Array<{ txid: string; vout: number; value: number }>;
+  totalInSatoshis: number;
+  reason: string;
+  createdAt: number;
+  /**
+   * UTXO Manager 的占用 ID（稳定身份）。
+   *
+   * 中文说明：ledger 记录与 manager 占用指向同一笔责任；恢复时据此对账，
+   * 不重建交易、不重复释放。
+   */
+  managerAllocationId?: string;
+  /** 可信观察结算后的 txid（未结算时缺省）。 */
+  settledTxid?: string;
+  settledAt?: number;
 }
 
 /**
@@ -1735,6 +1890,8 @@ export interface MethodParamsMap {
   "cipher.encrypt": CipherEncryptParams;
   "cipher.decrypt": CipherDecryptParams;
   "p2pkh.transfer": P2pkhTransferParams;
+  "payment.pay": PaymentPayParams;
+  "payment.status": PaymentStatusParams;
   "feepool.prepare": FeepoolPrepareParams;
   "feepool.commit": FeepoolCommitParams;
   "connect.login": ConnectLoginParams;
@@ -1768,6 +1925,8 @@ export interface MethodResultMap {
   "cipher.encrypt": CipherEncryptResult;
   "cipher.decrypt": CipherDecryptResult;
   "p2pkh.transfer": P2pkhTransferResult;
+  "payment.pay": PaymentPayResult;
+  "payment.status": PaymentStatusResult;
   "feepool.prepare": FeepoolPrepareResult;
   "feepool.commit": FeepoolCommitResult;
   "connect.login": ConnectLoginResult;
@@ -2108,6 +2267,18 @@ export interface ProtocolStorageRepository {
   /** 按 origin 列出该站点下所有费用池。 */
   listFeePoolsByOrigin(origin: string): Promise<ProtocolFeePoolRecord[]>;
 
+  /* ----- feePoolDeliveries (E01) ----- */
+  /**
+   * 持久记录一次对外交付的签名责任。必须在把签名字节交给站点之前写入；
+   * 写失败时调用方必须拒绝交付。
+   */
+  putFeePoolDelivery(record: ProtocolFeePoolDeliveryRecord): Promise<void>;
+  getFeePoolDelivery(id: string): Promise<ProtocolFeePoolDeliveryRecord | null>;
+  /** 按 origin 列出该站点的全部未结算交付责任。 */
+  listFeePoolDeliveriesByOrigin(origin: string): Promise<ProtocolFeePoolDeliveryRecord[]>;
+  /** 标记一条交付责任已被可信观察结算。 */
+  settleFeePoolDelivery(id: string, settledTxid: string, settledAt: number): Promise<void>;
+
   /* ----- connectSessions ----- */
   /**
    * 写一条 connect session 记录；同 sessionId 覆盖。
@@ -2140,6 +2311,17 @@ export interface ProtocolStorageRepository {
    * 为可选（实现可走内存 Map），便于将来如果需要"重启 launcher 后仍
    * 能恢复 launchToken"再开启持久化路径。
    */
+  /* ----- Connect payment idempotency (CV1) ----- */
+  getConnectPayment?(key: string): Promise<ProtocolConnectPaymentRecord | null>;
+  /** CAS read: the value plus the partition revision needed for an atomic update. */
+  getConnectPaymentEntry?(key: string): Promise<{ record: ProtocolConnectPaymentRecord; revision: number } | null>;
+  /** 选币前原子认领；created=false 时返回既有记录，调用方不得重复执行。 */
+  claimConnectPayment?(record: ProtocolConnectPaymentRecord, options?: { maxPending?: number }): Promise<{ created: boolean; record: ProtocolConnectPaymentRecord }>;
+  putConnectPayment?(record: ProtocolConnectPaymentRecord): Promise<void>;
+  /** CAS write used for monotonic payment status/fact updates. */
+  putConnectPaymentIfRevision?(record: ProtocolConnectPaymentRecord, revision: number): Promise<void>;
+  listConnectPaymentsByOrigin?(origin: string): Promise<ProtocolConnectPaymentRecord[]>;
+
   putLaunchToken?(record: LaunchTokenRecord): Promise<void>;
   /** 按 token 读一条记录；未消费时返回，未命中返回 null。 */
   getLaunchToken?(token: string): Promise<LaunchTokenRecord | null>;
@@ -2282,6 +2464,8 @@ export const PROTOCOL_SERVICE_CAPABILITY = defineCapability<ProtocolService>({
 export interface P2pkhProtocolAdapter {
   /** 完整前序证据的链上读接口；缺失时费用池不能退回盲签摘要。 */
   getRawTransaction?(network: "main" | "test", txid: string): Promise<string>;
+  /** Local manager lookup only; never implicitly starts conclusion queries. */
+  getPaymentStatus?(input: import("./p2pkhConclusion.js").P2pkhPaymentLookupInput): Promise<import("./p2pkhConclusion.js").P2pkhPaymentLookupResult>;
   /**
    * 列指定 owner 在指定 assetId 下的 UTXO。
    *
@@ -2311,23 +2495,47 @@ export interface P2pkhProtocolAdapter {
     paymentContext?: { channelId: string; sessionId: string | null };
     assetId: string;
     ownerPublicKeyHex: string;
-    recipientAddress: string;
+    recipientAddress?: string;
     amountSatoshis: number;
     feeRateSatoshisPerKb: number;
+    /** Connect v1 payment facts; when present the service uses the strict role plan. */
+    payment?: import("./p2pkhConnectPayment.js").P2pkhConnectPaymentFacts;
   }): Promise<{
     assetId: string;
     network: "main" | "test";
-    recipientAddress: string;
+    recipientAddress?: string;
     amountSatoshis: number;
     feeRateSatoshisPerKb: number;
     allocation: unknown;
     changeAddress: string;
-    outputs: Array<{ address: string; value: number }>;
+    outputs: Array<{ address?: string; scriptHex?: string; value: number; role?: "business" | "change" }>;
     estimatedFeeSatoshis: number;
     serializedSizeBytes: number;
     txid: string;
     rawTxHex: string;
+    payment?: import("./p2pkhConnectPayment.js").P2pkhConnectPaymentPreview;
   }>;
+  /**
+   * 外露 artifact 的占用：Connect/费用池把**已签名**的 artifact 交给站点
+   * 之前，先让 UTXO Manager 占住它花费的钱包输入。
+   *
+   * 中文说明：没有这一步，被交付 artifact 花掉的输入仍会被 manager 当作可花
+   * 余额——同一枚输入可能被再花一次。返回的 allocation id 是稳定身份：
+   * ledger 与 manager 两侧指向同一笔占用。
+   */
+  occupyDeliveredArtifact?(input: {
+    ownerPublicKeyHex: string;
+    network: "main" | "test";
+    artifactId: string;
+    unsignedTxHex: string;
+    signedTxHex: string;
+    inputs: Array<{ txid: string; vout: number; value: string; scriptHex: string }>;
+    outputs: Array<{ scriptHex: string; value: string }>;
+    businessAmountSatoshis: string;
+    feeRateSatoshisPerKb: string;
+    feeCapSats: string;
+    protocolKind: "refund" | "close" | "fund" | "state";
+  }): Promise<{ allocationId: string; txid: string }>;
   /**
    * 广播已签名 transfer preview。
    *
@@ -2338,18 +2546,21 @@ export interface P2pkhProtocolAdapter {
     assetId: string;
     network: "main" | "test";
     ownerPublicKeyHex: string;
-    recipientAddress: string;
+    recipientAddress?: string;
     amountSatoshis: number;
     feeRateSatoshisPerKb: number;
     allocation: unknown;
     changeAddress: string;
-    outputs: Array<{ address: string; value: number }>;
+    outputs: Array<{ address?: string; scriptHex?: string; value: number; role?: "business" | "change" }>;
     estimatedFeeSatoshis: number;
     serializedSizeBytes: number;
     txid: string;
     rawTxHex: string;
+    payment?: import("./p2pkhConnectPayment.js").P2pkhConnectPaymentPreview;
   }): Promise<{
     status: string;
+    delivery?: "accepted" | "already-known";
+    reason?: string;
     txid?: string;
     rawTxHex: string;
     error?: string;

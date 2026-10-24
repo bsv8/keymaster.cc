@@ -69,7 +69,7 @@ export function createVaultWorkerKeys(ports: VaultWorkerKeyPorts) {
     if (walletPayments) return walletPayments;
     if (walletPaymentsOpening) return walletPaymentsOpening;
     if (activeKeyBackend === "hardware") {
-      walletPayments = new HardwareWalletPayments(hardwareConnections.backend(), assertActive);
+      walletPayments = new HardwareWalletPayments(hardwareConnections.backend(), assertActive,{files:ports.storage.payments(),key:owner!,network});
       return walletPayments;
     }
     const pending = WalletPayments.open(ports.storage.payments(), owner!, assertActive, async digest => {

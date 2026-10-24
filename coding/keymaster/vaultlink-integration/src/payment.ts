@@ -54,19 +54,23 @@ export class SoftwarePaymentGate {
     await this.policy.startSession(id, owner, true);
   }
   async execute<T>(
-    inspection: PaymentInspection,
+    inspection: PaymentInspection & { forceConfirm?: boolean },
     confirm: (
       request: PaymentInspection,
       quote: Quote,
     ) => Promise<{ allow: boolean; raiseSessionLimit?: bigint }>,
     sign: () => Promise<T>,
-    beforeSign: () => void = () => {},
+    beforeSign: () => void | Promise<void> = () => {},
+    present: (request: PaymentInspection, quote: Quote) => void | Promise<void> = () => {},
   ): Promise<T> {
     this.assertActive();
     const frozen = structuredClone(inspection);
     const quote = await this.policy.quote(frozen);
+    // Emit the dedicated spend notice before approval/signing, not as a
+    // post-sign feed record. Presentation cannot authorize a payment.
+    await present(structuredClone(frozen), structuredClone(quote));
     let approval;
-    if (quote.reasons.length) {
+    if (quote.reasons.length || inspection.forceConfirm === true) {
       const answer = await confirm(
         structuredClone(frozen),
         structuredClone(quote),
@@ -90,7 +94,7 @@ export class SoftwarePaymentGate {
       await this.policy.assertExecutable(frozen.requestId);
       this.assertActive();
       // 宿主在此同步检查请求撤销；尚未进入密码运算的失败有明确未执行证明。
-      beforeSign();
+      await beforeSign();
       signingStarted = true;
       const result = await sign();
       await this.policy.markSigned(frozen.requestId);
@@ -107,6 +111,10 @@ export class SoftwarePaymentGate {
   inspectPool(id: string, binding: Uint8Array, paid: bigint) {
     this.assertActive();
     return this.policy.inspectPool(id, binding, paid);
+  }
+  releaseUnknownProven(requestId: string) {
+    this.assertActive();
+    return this.policy.releaseUnknownProven(requestId);
   }
   registerSigning(...args: Parameters<PaymentPolicy["registerSigning"]>) {
     this.assertActive();

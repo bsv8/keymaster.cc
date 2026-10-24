@@ -6,7 +6,7 @@
   "files": {
     "LICENSE": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef",
     "dist/bsv.d.ts": "d96eae3f00801faa12299afa57c4472d04179bf8109373eaca5d61a7bcece2fc",
-    "dist/bsv.js": "85e0752680adac53d0ce5a80138ddd7fd77dbb83bd01a7356673a1934526ba26",
+    "dist/bsv.js": "16ab16f0cda7ff18269ca1f13379b3a7188ce80046e8aece8449060a27c39ab7",
     "dist/bytes.d.ts": "47f299c87f4779831934cb8b3e533b32b4951743de70ac37d408c7cc311ec05f",
     "dist/bytes.js": "fae47b4166b9cd1f3e1b8609ad6d796a8a3b1443ab3b57b1bb50aa8584139916",
     "dist/cbor.d.ts": "4bd5f3318de7e9bc086bf5bc6c85276f53fa29a9e9555cec2ece0c7147590c83",
@@ -31,14 +31,14 @@
     "dist/local-secret.js": "3530903b4ff4cd09799100a2eae59dd185ddaaf9d431a3b4f6c0deb9c510d361",
     "dist/payment-operation.d.ts": "9ad5c761f7c187da724668264e9836ff9990ab8327c80d88729f47df0d3600ee",
     "dist/payment-operation.js": "92d35cab9c706044a9b0ea6b2b273d08777fdb373d4d2931e324070e69d55dcc",
-    "dist/payment.d.ts": "fa61303d058cf9a5ee016b67efac46bef3ceacc4806ec012574d0c6b5cbc0804",
-    "dist/payment.js": "bb146ff106a9f3af8bd2e01115508d030ca10d7f35808323ec2cb8fcd8675ebc",
+    "dist/payment.d.ts": "481a58f606e46ae34332ce3df50c9f413a299cc9d9ce0314485623f9b0dc31b8",
+    "dist/payment.js": "f17ac640bfa01ab95a5b9e3aede436a88b0880f4485c53feacf03ab915b92345",
     "dist/requests.d.ts": "cf5e486596fe70f7cf51389e465203f4be545b6ca4269a21569f641e3ee9e8e7",
     "dist/requests.js": "b3f49cb5fafb2daa8209f651269fafe9d8db5c9ffdc7bbdd2415d032f89d4700",
     "dist/session.d.ts": "48b5e59850f649965a046d8f2e4813b987520417c739bfaff6ae1503058e5921",
     "dist/session.js": "8c0eff745a107ecf7e76bc73ff513f519435b088740fa6bcef69258a44dd5d44",
     "dist/standard.d.ts": "9f364bfde08f6c5fd3a92feb7a88da8c54e4573743765bed0a9606316832ce01",
-    "dist/standard.js": "1a4489344f088e3d04d4e82d98f8f222acdff1751660402145d58532fa384159",
+    "dist/standard.js": "548cb1a22f5ed0ab29d43cfeefee6090d91a08ccc820aae4e661f697177d5690",
     "dist/transport.d.ts": "ca3a22832be1c30f0efe14751fe1428a1743c0b1ebc7a8b69f2ab81cad13ffeb",
     "dist/transport.js": "04b5c3eba4bc2a79e0faaaabc04f0ec59a498ee2e81a2387da437ef40020fc21",
     "package.json": "ba801aebf3bf6edaa43251756258fa1638fd9e7b2f8e24e04c492706da1e606e",
@@ -58,8 +58,8 @@
     "dist/migration.js": "f80702fc4d4bf91efaf369503fd16a3836c3a22515b9d5ea1f4e448f7d4dd789",
     "dist/secret-value.js": "b0b13f4c7a6cedaa09cf6372c810d197f29d521e0e224eae4d9f1272ced55c40",
     "dist/secret-value.d.ts": "1b5a138fd71249e50fd69752876e0a579da67dd1b4ec5bab8e13d5a3cb3107ae",
-    "dist/signing-channel.js": "c987c4d4e13292a65352870334a680b095a049a5925c8da202ef35f898c0a1ed",
-    "dist/signing-channel.d.ts": "29b45b4477b5fadc938036fb52c5323675029db7472f515bb402605d756b0302"
+    "dist/signing-channel.js": "b385d35ca0912f77e32dfb6b91b7512a2a2f0265844bb590a07b1d382d877198",
+    "dist/signing-channel.d.ts": "17c5837aad02746c870c2b4b0ca5bf83fc9f54cd874cf9ffaeb39bc1862bc891"
   },
   "sourceOverrides": {
     "reason": "渠道授权增量，sourceCommit 为网络身份基线；实际消费副本由 files 的 SHA256 固定；BitFS 普通付款锁定值必须延续退款模板，拒绝提前清零，同源修复已提交；工作区源码同步 go-bitfs 0.4.0 九字段报价审查，签名域和协议版本保持不变；Kind 1 软件钱包审查保留字段、预期约束与安全实际值，错误码及签名规则不变；同步含 MIME 的十字段报价审查",
@@ -231,5 +231,35 @@
     },
     "snapshotHashEncoding": "SHA256(JSON.stringify(files) with sorted file keys, compact JSON)",
     "sourceCommit": "0fe740bd4265cf9037b6eb78638cad1430914341"
+  },
+  "operationPolicyOverlay": {
+    "baseCommit": "184e52154e95bcc843c22eaa98c26c60c0450618",
+    "sourceHashes": {
+      "src/payment.ts": "920057da46c757119aade0d51eb8ed14a1b9b4e43c9f6fd62cf7cb293ef793a4",
+      "src/signing-channel.ts": "a3fa4d39fee2ab9085901f00506fc421beede2834b1266a16a26e011c0eb8b37",
+      "src/bitfs-wire.ts": "c4f26859a0ab2bba73d50c806b83e8d1870dcb8725a51db223b60e9da3b74d8b",
+      "src/bsv.ts": "e1cfd89c842576858f33fd45d8a3ac5a2984a775e24bb29eda6ac2362eef9d2a",
+      "src/standard.ts": "a5c82551078fad231b8837e804bd9c67f294025b982a5b3a3b6228ab8bb98dfb",
+      "device/sdk/bsv.hpp": "e3454e1827a6dca5835712b7b6db6a543cd6a5b1c5d50f28eb1871f09dbaa09b",
+      "device/sdk/connect_payment.hpp": "ef88dda4231d2e7fb589890bf11f4f6a0792f0e7efa6959536f025ae811ba144",
+      "device/sdk/standard.hpp": "7707127737baa3dc6422920f4091cf24e870a2c0b8ce088deba74b5766461984",
+      "device/sdk/feepool.hpp": "fc54dff8dc12cbcaa1f02ed20ef2ab216b52f0b563e8bdc3a9cc54e0dafc9fc4",
+      "device/sdk/policy.hpp": "e082a496fdbeeb3e38684e7707d53a19da943d2a38f2829fc5e6ef8b97c15dea",
+      "device/sdk/signing_channel.hpp": "88ca41b9e79bdadcf5001b68cac54ac767d1d8aaf0636bad3e2326d1a1206604",
+      "device/sdk/channel.hpp": "a926b8ffdd39d824b7d356bb7e2d9d4c851a2c6af09524da056aeff25d3c8f25",
+      "device/sdk/bitfs_wire.hpp": "57b23623234c843ff0b2ce673e7077b501811d7b8a5038591fc944724015cebc"
+    },
+    "files": {
+      "dist/payment.js": "f17ac640bfa01ab95a5b9e3aede436a88b0880f4485c53feacf03ab915b92345",
+      "dist/payment.d.ts": "481a58f606e46ae34332ce3df50c9f413a299cc9d9ce0314485623f9b0dc31b8",
+      "dist/signing-channel.js": "b385d35ca0912f77e32dfb6b91b7512a2a2f0265844bb590a07b1d382d877198",
+      "dist/signing-channel.d.ts": "17c5837aad02746c870c2b4b0ca5bf83fc9f54cd874cf9ffaeb39bc1862bc891",
+      "dist/bitfs-wire.js": "9caa9735ac2c6e14388bdfd6d1cc68f1abd1fc85a1cb546b3def764d0292d7db",
+      "dist/bitfs-wire.d.ts": "64d75023e4df920d79b5c49f341ce08111ea3b7d940b18ae166eac0079d6d815",
+      "dist/bsv.js": "16ab16f0cda7ff18269ca1f13379b3a7188ce80046e8aece8449060a27c39ab7",
+      "dist/bsv.d.ts": "d96eae3f00801faa12299afa57c4472d04179bf8109373eaca5d61a7bcece2fc",
+      "dist/standard.js": "548cb1a22f5ed0ab29d43cfeefee6090d91a08ccc820aae4e661f697177d5690",
+      "dist/standard.d.ts": "9f364bfde08f6c5fd3a92feb7a88da8c54e4573743765bed0a9606316832ce01"
+    }
   }
 }

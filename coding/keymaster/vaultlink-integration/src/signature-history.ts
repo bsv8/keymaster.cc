@@ -13,6 +13,8 @@ export interface SignatureMeta {
   owner: string;
   backend: "software" | "hardware";
   amount?: string;
+  /** Stable Connect payment identity; never contains transaction or signature bytes. */
+  paymentId?: string;
 }
 export interface SignatureRecord extends SignatureMeta {
   id: string;
@@ -83,7 +85,9 @@ export class SignatureHistory {
           (typeof r.finishedAt !== "string" ||
             !Number.isFinite(Date.parse(r.finishedAt)))) ||
         (r.amount !== undefined &&
-          (typeof r.amount !== "string" || !/^\d{1,20}$/.test(r.amount)))
+          (typeof r.amount !== "string" || !/^\d{1,20}$/.test(r.amount))) ||
+        (r.paymentId !== undefined &&
+          (typeof r.paymentId !== "string" || r.paymentId.length > 96))
       )
         throw Error("invalid-signature-history");
     }
@@ -137,6 +141,7 @@ export class SignatureHistory {
       owner: meta.owner,
       backend: meta.backend,
       ...(meta.amount === undefined ? {} : { amount: meta.amount }),
+      ...(meta.paymentId === undefined ? {} : { paymentId: meta.paymentId }),
     };
     await this.change((rows) => rows.push(row));
     return {

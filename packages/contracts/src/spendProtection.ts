@@ -21,6 +21,17 @@ export interface ProtectedOutpoint {
   kind?: string;
   /** 关联的 active key。 */
   publicKeyHex?: string;
+  /**
+   * 保护来源标识（例如 `protocol-claim:<submissionId>`、
+   * `protocol-funding:<fundingId>`）。
+   *
+   * 同一 outpoint 可以同时有多个保护来源：协议 submission 自己的输入占用
+   * 是一种来源，专款记录是另一种。资金授权必须按来源分别判断：接管自己的
+   * 占用不能顺带放掉别人的保护。
+   */
+  source?: string;
+  /** `protocol-claim` 来源对应的 submission id。 */
+  submissionId?: string;
 }
 
 /** 协议 plugin 提供受保护 outpoint 的能力。 */

@@ -1061,6 +1061,62 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
   }
 
+  async p2pkhPaymentStatus(input: import("@keymaster/contracts").P2pkhPaymentLookupInput): Promise<import("@keymaster/contracts").CoordinatorValueResult<import("@keymaster/contracts").P2pkhPaymentLookupResult>> {
+    const request = { kind: "p2pkh.payment.status" as const, clientId: this.clientId, requestId: this.generateRequestId(), input, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    try {
+      const response = await this.sendRequest(request);
+      if (response.ack.status !== "ok") return response.ack;
+      return { status: "ok", value: requiredCoordinatorOperationResult(response, request.kind), sessionEpoch: response.sessionEpoch };
+    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
+  }
+
+  async p2pkhConclusion(input: import("@keymaster/contracts").P2pkhConclusionInput): Promise<import("@keymaster/contracts").CoordinatorValueResult<import("@keymaster/contracts").P2pkhConclusionResult>> {
+    const request = { kind: "p2pkh.conclusion" as const, clientId: this.clientId, requestId: this.generateRequestId(), input, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    try {
+      const response = await this.sendRequest(request);
+      if (response.ack.status !== "ok") return response.ack;
+      return { status: "ok", value: requiredCoordinatorOperationResult(response, request.kind), sessionEpoch: response.sessionEpoch };
+    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
+  }
+
+  async p2pkhProtocolCommand(input: import("@keymaster/contracts").P2pkhProtocolCommand): Promise<import("@keymaster/contracts").CoordinatorValueResult<import("@keymaster/contracts").P2pkhProtocolCommandResult>> {
+    const request = { kind: "p2pkh.protocol.command" as const, clientId: this.clientId, requestId: this.generateRequestId(), input, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    try {
+      const response = await this.sendRequest(request);
+      if (response.ack.status !== "ok") return response.ack;
+      const value = requiredCoordinatorOperationResult(response, request.kind);
+      if (value.type !== input.type) throw new Error("Protocol RPC response type changed");
+      return { status: "ok", value, sessionEpoch: response.sessionEpoch };
+    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
+  }
+
+  async p2pkhTransferPrepare(input: import("@keymaster/contracts").P2pkhTransferPrepareInput): Promise<import("@keymaster/contracts").CoordinatorValueResult<import("@keymaster/contracts").P2pkhTransferPreviewPayload>> {
+    const request = { kind: "p2pkh.transfer.prepare" as const, clientId: this.clientId, requestId: this.generateRequestId(), input, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    try {
+      const response = await this.sendRequest(request);
+      if (response.ack.status !== "ok") return response.ack;
+      return { status: "ok", value: requiredCoordinatorOperationResult(response, request.kind), sessionEpoch: response.sessionEpoch };
+    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
+  }
+
+  async p2pkhTransferSubmit(input: import("@keymaster/contracts").P2pkhTransferSubmitInput): Promise<import("@keymaster/contracts").CoordinatorValueResult<import("@keymaster/contracts").P2pkhTransferResultPayload>> {
+    const request = { kind: "p2pkh.transfer.submit" as const, clientId: this.clientId, requestId: this.generateRequestId(), input, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    try {
+      const response = await this.sendRequest(request);
+      if (response.ack.status !== "ok") return response.ack;
+      return { status: "ok", value: requiredCoordinatorOperationResult(response, request.kind), sessionEpoch: response.sessionEpoch };
+    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
+  }
+
+  async p2pkhArtifactOccupy(input: import("@keymaster/contracts").P2pkhArtifactOccupyInput): Promise<import("@keymaster/contracts").CoordinatorValueResult<import("@keymaster/contracts").P2pkhArtifactOccupyResult>> {
+    const request = { kind: "p2pkh.artifact.occupy" as const, clientId: this.clientId, requestId: this.generateRequestId(), input, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    try {
+      const response = await this.sendRequest(request);
+      if (response.ack.status !== "ok") return response.ack;
+      return { status: "ok", value: requiredCoordinatorOperationResult(response, request.kind), sessionEpoch: response.sessionEpoch };
+    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
+  }
+
   async p2pkhSettingsUpdate(settings: { bsvNetwork: "main" | "test"; feePolicy?: ChainFeePolicy }): Promise<CoordinatorCommandResult> {
     return this.requestCommand({ kind: "p2pkh.settings.update", clientId: this.clientId, requestId: this.generateRequestId(), settings, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
   }

@@ -196,17 +196,22 @@ bsvNetwork: document.bsvNetwork, backend: "hardware", publicKeyHex: document.pub
           throw error;
         } finally { ports.keys.hardwareEnrollmentInProgress = false; }
       } else {
-        const epoch = ports.session().sessionEpoch, run = ports.session().runGeneration, token = ports.storage.token();
+        const epoch = ports.session().sessionEpoch, run = ports.session().runGeneration;
+        let token = ports.storage.token();
         let bindingEpoch = epoch;
         if (ports.session().vaultStatus !== "locked") throw new Error("Hardware connection requires a locked wallet");
         const keys = ports.wallet.walletKeys;
         if (!keys) throw ports.storage.unavailable("Hardware wallet record is unavailable");
         const file = await ports.io.run("read", undefined, () => keys.read(), { auditOperation: "vault.operation" });
         if (!file || file.backend !== "hardware" || file.document.bsvNetwork + "/" + file.document.publicKeyHex !== ports.session().walletGeneration) throw new Error("Current wallet is not bound to a hardware Key");
-        const assertRecordLive = () => {
-          if (signal?.aborted || ports.peerRevoked(peerId) || ports.wallet.walletKeys !== keys || ports.storage.token() !== token
+        const assertRecordIdentity = () => {
+          if (signal?.aborted || ports.peerRevoked(peerId) || ports.wallet.walletKeys !== keys
             || ports.session().sessionEpoch !== bindingEpoch || ports.session().runGeneration !== run
             || ports.session().walletGeneration !== file.document.bsvNetwork + "/" + file.document.publicKeyHex) throw new Error("Hardware wallet binding was revoked");
+        };
+        const assertRecordLive = () => {
+          assertRecordIdentity();
+          if (ports.storage.token() !== token) throw new Error("Hardware wallet binding was revoked");
         };
         assertRecordLive();
         await ports.keys.hardwareConnections.attach({ peerId, leaseId: command.leaseId, port: command.port, document: file.document, assertRecordLive, signal });
@@ -246,6 +251,13 @@ bsvNetwork: document.bsvNetwork, backend: "hardware", publicKeyHex: document.pub
         });
         ports.publishWallet();
         await ports.binding.complete();
+        // complete() deliberately reinstalls platform storage for the new
+        // unlocked epoch. Adopt only that fenced transition, never a token
+        // observed during pairing or an identity/epoch/peer change.
+        assertRecordIdentity();
+        const unlockedToken = ports.storage.token();
+        if (!unlockedToken || ports.session().vaultStatus !== "unlocked") throw new Error("Hardware wallet binding was revoked");
+        token = unlockedToken;
         assertRecordLive(); ports.keys.hardwareConnections.backend();
       }
       return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "ok" }, operationResult: ports.keys.hardwareConnections.state() };

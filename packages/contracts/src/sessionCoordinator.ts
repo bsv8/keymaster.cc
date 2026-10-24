@@ -1,4 +1,5 @@
 import type { NetworkIdentity } from "./networkIdentity.js";
+import type { P2pkhConclusionInput, P2pkhConclusionResult, P2pkhPaymentLookupInput, P2pkhPaymentLookupResult } from "./p2pkhConclusion.js";
 // packages/contracts/src/sessionCoordinator.ts
 // Session Coordinator 契约：SharedWorker 作为唯一会话协调器的 RPC 协议定义。
 //
@@ -36,7 +37,13 @@ import type {
 } from "./storage/runtime.js";
 import type { WalletInitializePlan } from "./storage/wallet.js";
 import type {
+  P2pkhArtifactOccupyInput,
+  P2pkhArtifactOccupyResult,
   P2pkhBroadcastSubmission,
+  P2pkhTransferPrepareInput,
+  P2pkhTransferPreviewPayload,
+  P2pkhTransferResultPayload,
+  P2pkhTransferSubmitInput,
   P2pkhUtxoSnapshotResult,
 } from "./bsvP2pkhProviders.js";
 
@@ -406,6 +413,12 @@ export type CoordinatorClientRequest =
     | { kind: "p2pkh.utxos.get"; clientId: string; requestId: string; ownerPublicKeyHex: string; network: "main" | "test"; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.utxos.refresh"; clientId: string; requestId: string; ownerPublicKeyHex: string; network: "main" | "test"; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.broadcast"; clientId: string; requestId: string; ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; submission?: P2pkhBroadcastSubmission; expectedSessionEpoch: SessionEpoch }
+    | { kind: "p2pkh.payment.status"; clientId: string; requestId: string; input: P2pkhPaymentLookupInput; expectedSessionEpoch: SessionEpoch }
+    | { kind: "p2pkh.conclusion"; clientId: string; requestId: string; input: P2pkhConclusionInput; expectedSessionEpoch: SessionEpoch }
+    | { kind: "p2pkh.transfer.prepare"; clientId: string; requestId: string; input: P2pkhTransferPrepareInput; expectedSessionEpoch: SessionEpoch }
+    | { kind: "p2pkh.transfer.submit"; clientId: string; requestId: string; input: P2pkhTransferSubmitInput; expectedSessionEpoch: SessionEpoch }
+    | { kind: "p2pkh.artifact.occupy"; clientId: string; requestId: string; input: P2pkhArtifactOccupyInput; expectedSessionEpoch: SessionEpoch }
+    | { kind: "p2pkh.protocol.command"; clientId: string; requestId: string; input: import("./protocolSpendRpc.js").P2pkhProtocolCommand; expectedSessionEpoch: SessionEpoch }
     | { kind: "activity"; clientId: string });
 
 /** Coordinator 订阅主题。 */
@@ -467,13 +480,18 @@ export type CoordinatorWalletPaymentCommand =
   | {action:"signature-history"}
   | {action:"backend"|"signing-list"}
   | {action:"signing-configure";id:string;mode:"automatic"|"manual";revision:number}
-  | { action: "list" | "pending" }
+  | { action: "list" | "pending" | "spend-notices" }
+  | { action: "notice-dismiss"; id: string }
+  /** Internal Worker startup recovery: return proofs for authorized-but-never-signed Connect payments. */
+  | { action: "connect-payment-recovery" }
+  | { action: "connect-payment-recovery-ack"; paymentIds: string[] }
+  | { action: "connect-payment-signed-recovery" }
   | { action: "register"; id: string; owner: string; kind: "app" | "plugin"; network: string; paymentType: string }
   | { action: "configure"; channel: WalletPaymentChannel }
   | { action: "session-open"; id: string; owner: string }
   | { action: "session-close" | "session-cancel"; id: string }
   | { action: "answer"; id: string; allow: boolean; raiseSessionLimit?: string }
-  | { action: "sign-p2pkh" | "sign-standard"; rawTxHex: string; prevTransactionHexes: string[]; channelId: string; paymentId: string; sessionId: string | null }
+  | { action: "sign-p2pkh" | "sign-standard"; rawTxHex: string; prevTransactionHexes: string[]; channelId: string; paymentId: string; sessionId: string | null; connectPaymentReview?: import("./p2pkhConnectPayment.js").P2pkhConnectPaymentPreview }
   | { action: "sign-feepool"; family: "connect" | "bitfs"; role?: "payer" | "cosigner"; stage: "fund" | "state"; authorization?: {documentHex:string;refundTemplateHex:string}; openingRequestHex?:string; rawTxHex: string; prevTransactionHexes: string[]; channelId: string; paymentId: string; sessionId: string | null };
 
 /** 钱包内部 UI 的 USB 控制面；没有 PIN、私钥或任意设备命令。 */
@@ -879,6 +897,25 @@ export interface SessionCoordinatorClient {
   /** 主动刷新 UTXO 快照；失败时旧快照保留，返回旧快照或 unavailable。 */
   p2pkhUtxosRefresh(input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<CoordinatorValueResult<P2pkhUtxoSnapshotResult>>;
   p2pkhBroadcast(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; submission?: P2pkhBroadcastSubmission }): Promise<CoordinatorValueResult<unknown>>;
+  /**
+   * 普通转账的跨 Runtime 准备：Window 不持有 Worker 的本地能力，只把纯数据
+   * 请求交给 Worker 的 UTXO Manager，拿到可序列化的冻结预览。
+   */
+  p2pkhPaymentStatus(input: P2pkhPaymentLookupInput): Promise<CoordinatorValueResult<P2pkhPaymentLookupResult>>;
+  p2pkhConclusion(input: P2pkhConclusionInput): Promise<CoordinatorValueResult<P2pkhConclusionResult>>;
+  /** Wallet-owned protocol operations, executed only by the current Worker. */
+  p2pkhProtocolCommand(input: import("./protocolSpendRpc.js").P2pkhProtocolCommand): Promise<CoordinatorValueResult<import("./protocolSpendRpc.js").P2pkhProtocolCommandResult>>;
+  p2pkhTransferPrepare(input: P2pkhTransferPrepareInput): Promise<CoordinatorValueResult<P2pkhTransferPreviewPayload>>;
+  /**
+   * 普通转账的跨 Runtime 提交：Worker 按自己记住的预览、快照、allocation 与
+   * 签名事实复核后广播；页面自报的状态与预览内容都不构成授权。
+   */
+  p2pkhTransferSubmit(input: P2pkhTransferSubmitInput): Promise<CoordinatorValueResult<P2pkhTransferResultPayload>>;
+  /**
+   * 外露 artifact 的占用：Connect/费用池把已签名 artifact 交给站点之前，
+   * 先让 UTXO Manager 占住它的钱包输入（并投影找零）。
+   */
+  p2pkhArtifactOccupy(input: P2pkhArtifactOccupyInput): Promise<CoordinatorValueResult<P2pkhArtifactOccupyResult>>;
   /** 页面活动心跳；不包含任何业务 RPC 权限。 */
   sendActivity(): void;
   /** 记录可恢复的 transport/业务失败，不抛到全局 UI。 */
@@ -926,7 +963,8 @@ export type BackgroundCoordinatorControl = Pick<SessionCoordinatorClient,
 export type P2pkhCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
   "p2pkhSettingsUpdate" |
   "p2pkhProviderConfigGet" | "p2pkhProviderConfigUpdate" |
-  "p2pkhUtxosGet" | "p2pkhUtxosRefresh"
+  "p2pkhUtxosGet" | "p2pkhUtxosRefresh" |
+  "p2pkhTransferPrepare" | "p2pkhTransferSubmit" | "p2pkhArtifactOccupy" | "p2pkhConclusion" | "p2pkhPaymentStatus" | "p2pkhProtocolCommand"
 >;
 
 /**

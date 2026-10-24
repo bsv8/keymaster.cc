@@ -1,6 +1,8 @@
+import {HardwareConnectJournal} from './hardware-connect-journal.js';
+import {publisherPaymentOwner,publisherPaymentChannelId} from './app-payment-channel.js';
 import { object, type Value } from '@vaultlink/sdk';
 import { VaultLinkHardwareBackend, type HardwarePaymentResult } from './hardware-backend.js';
-import type { PaymentChannelDTO, WalletPaymentCommand } from './wallet-payments.js';
+import type { PaymentFileStore, PaymentChannelDTO, WalletPaymentCommand } from './wallet-payments.js';
 
 function money(value: string): bigint {
   if (!/^(0|[1-9][0-9]{0,19})$/.test(value) || BigInt(value) > 0xffffffffffffffffn) throw Error('invalid-amount');
@@ -30,7 +32,10 @@ export class HardwareWalletPayments {
   private closed = false;
   private requests = new Map<string, {revoked:boolean}>();
   private mutations: Promise<unknown> = Promise.resolve();
-  constructor(private backend: VaultLinkHardwareBackend, private assertActive: () => void) {}
+  private journal?:HardwareConnectJournal;
+  constructor(private backend: VaultLinkHardwareBackend, private assertActive: () => void, storage?:{files:PaymentFileStore;key:string;network:string}) {
+    if(storage)this.journal=new HardwareConnectJournal(storage.files,storage.key,storage.network);
+  }
   close(): void { this.closed = true; for (const token of this.requests.values()) token.revoked = true; }
   private assert(): void { this.assertActive(); if (this.closed) throw Error('payment-wallet-locked'); }
   handle(command: WalletPaymentCommand): Promise<unknown> {
@@ -38,7 +43,7 @@ export class HardwareWalletPayments {
     // 取消不进入配置/签名 FIFO，立即撤销等候按钮的请求。
     if (frozen.action === 'session-cancel' || frozen.action === 'session-close') {
       const token = this.requests.get(frozen.id); if (token) token.revoked = true;
-      return frozen.action === 'session-close' ? this.backend.closeAppSession(frozen.id) : this.backend.cancelAppRequests(frozen.id);
+      return Promise.all([this.journal?.cancel(frozen.id),frozen.action === 'session-close' ? this.backend.closeAppSession(frozen.id) : this.backend.cancelAppRequests(frozen.id)]).then(([,result])=>result);
     }
     let token: {revoked:boolean} | undefined;
     if ('sessionId' in frozen && frozen.sessionId !== null) {
@@ -64,9 +69,14 @@ export class HardwareWalletPayments {
   private async execute(command: WalletPaymentCommand, guard: () => void = () => this.assert()): Promise<unknown> {
     this.assert();
     if(command.action==='backend')return 'hardware';
+    if(command.action==='connect-payment-recovery')return this.journal?.recovery()??[];
+    if(command.action==='connect-payment-recovery-ack')return this.journal?.ack(command.paymentIds);
+    if(command.action==='connect-payment-signed-recovery')return this.journal?.recoverSigned()??[];
     if(command.action==='signing-list'){const value=await this.backend.listSigningChannels();this.assert();return (value as {channels:unknown}).channels;}
     if(command.action==='signing-configure')throw Error('hardware-settings-local');
     if (command.action === 'list') return this.channels();
+    if (command.action === 'spend-notices') return [];
+    if (command.action === 'notice-dismiss') return false;
     if (command.action === 'pending') return []; // 硬件上确认；网页不产生可以绕过按键的批准入口。
     if (command.action === 'answer') throw Error('hardware-approval-required');
     if (command.action === 'register') {
@@ -83,13 +93,27 @@ export class HardwareWalletPayments {
     if (command.action === 'configure')throw Error('hardware-settings-local');
     if (command.action === 'session-open') { await this.backend.startAppSession(command.id,command.owner); this.assert(); return true; }
     if (command.action !== 'sign-p2pkh' && command.action !== 'sign-standard' && command.action !== 'sign-feepool') throw Error('unsupported');
+    const connectReview=command.action==='sign-p2pkh'?command.connectPaymentReview:undefined;
     const config = channel(await this.backend.readChannel(command.channelId)); guard();
-    if (config.paymentType !== (command.action === 'sign-feepool' ? `feepool.${command.family}${command.role === 'cosigner' ? '.cosigner' : ''}` : command.action === 'sign-standard' ? 'bsv.standard' : 'p2pkh')) throw Error('unsupported');
+    if (config.paymentType !== (command.action === 'sign-feepool' ? `feepool.${command.family}${command.role === 'cosigner' ? '.cosigner' : ''}` : command.action === 'sign-standard' ? 'bsv.standard' : connectReview?.paymentType??'p2pkh')) throw Error('unsupported');
     const input = {rawTx:bytes(command.rawTxHex),prevTransactions:command.prevTransactionHexes.map(bytes),channelId:command.channelId,
       paymentId:command.paymentId,sessionId:command.sessionId,network:config.network as "main" | "test"};
     let result: HardwarePaymentResult;
     if (command.action === 'sign-feepool') result = await this.backend.signFeePool({...input,family:command.family,stage:command.stage,...(command.role ? {role:command.role} : {}),...(command.openingRequestHex ? {openingRequest:bytes(command.openingRequestHex)} : {}),...(command.authorization ? {authorization:{document:bytes(command.authorization.documentHex),refundTemplate:bytes(command.authorization.refundTemplateHex)}} : {})});
     else if (command.action === 'sign-standard') result = await this.backend.signStandard(input);
+    else if(connectReview){
+      if(!this.journal)throw Error('hardware-connect-journal-unavailable');
+      if(config.kind!=='app'||config.owner!==publisherPaymentOwner(connectReview.publisherPublicKeyHex)||config.id!==await publisherPaymentChannelId(connectReview.publisherPublicKeyHex,connectReview.paymentType,config.network)||connectReview.paymentId!==command.paymentId)throw Error('invalid-publisher-channel');
+      await this.journal.prepare(connectReview,command.sessionId,command.rawTxHex,command.prevTransactionHexes);
+      try{
+        result=await this.backend.signConnectPayment(input,connectReview,async()=>{guard();await this.journal!.start(command.paymentId);guard();});
+        await this.journal.signed(command.paymentId,result.signatures.map(hex));
+      }catch(error){
+        const proof=await this.journal.cancelUnexecuted(command.paymentId,!!error&&typeof error==='object'&&'deviceNotSigned' in error&&error.deviceNotSigned===true).catch(()=>undefined);
+        if(proof&&error&&typeof error==='object')Object.assign(error,{connectPaymentNotSigned:proof});
+        throw error;
+      }
+    }
     else result = await this.backend.signP2pkh(input);
     guard(); return {signatures:result.signatures.map(hex),amount:String(result.amount),fee:String(result.fee)};
   }

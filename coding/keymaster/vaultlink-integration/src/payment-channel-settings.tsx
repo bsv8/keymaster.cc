@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { SigningChannel } from "@vaultlink/sdk";
+import { automaticSigningOperation, type SigningChannel } from "@vaultlink/sdk";
 import { Button, Modal, TextInput } from "@keymaster/ui";
 import type { PaymentChannelDTO } from "./wallet-payments.js";
 import type { PaymentUIProps } from "./ui.js";
@@ -162,7 +162,11 @@ export function PaymentChannelSettings({ execute, text }: PaymentUIProps) {
                       </span>
                     </td>
                     <td className="wallet-channels__action">
-                      {hardware === false ? (
+                      {automaticSigningOperation(c.operation) ? (
+                        <span className="wallet-channels__muted">
+                          {text("signing.knownOperation", "已知操作 · 自动静默")}
+                        </span>
+                      ) : hardware === false ? (
                         <Button
                           variant="ghost"
                           disabled={busy}
@@ -190,7 +194,7 @@ export function PaymentChannelSettings({ execute, text }: PaymentUIProps) {
           <p className="wallet-channels__hint">
             {text(
               "channels.sessionHint",
-              "会话额度仅适用于外部 App，每次连接独立累计。金额单位：聪（sat）。",
+              "仅检查每笔实际花费（含矿工费）；会话只用于身份与撤权，不累计限制。金额单位：聪（sat）。",
             )}
           </p>
           <div
@@ -205,9 +209,6 @@ export function PaymentChannelSettings({ execute, text }: PaymentUIProps) {
                   <th scope="col">{text("channels.channel", "渠道")}</th>
                   <th scope="col">{text("channels.owner", "来源")}</th>
                   <th scope="col">{text("channels.single", "单笔免确认")}</th>
-                  <th scope="col">
-                    {text("channels.session", "新会话免确认总额")}
-                  </th>
                   <th scope="col">{text("channels.status", "免确认")}</th>
                   <th scope="col" className="wallet-channels__action">
                     {text("channels.action", "操作")}
@@ -217,7 +218,7 @@ export function PaymentChannelSettings({ execute, text }: PaymentUIProps) {
               <tbody>
                 {!channels.length ? (
                   <tr>
-                    <td colSpan={6} className="wallet-channels__empty">
+                    <td colSpan={5} className="wallet-channels__empty">
                       {text("payment.empty", "尚无已注册的支付渠道")}
                     </td>
                   </tr>
@@ -241,16 +242,6 @@ export function PaymentChannelSettings({ execute, text }: PaymentUIProps) {
                     <td className="wallet-channels__amount">
                       {c.singleLimit}
                       <small>sat</small>
-                    </td>
-                    <td className="wallet-channels__amount">
-                      {c.kind === "app" ? (
-                        <>
-                          {c.defaultSessionLimit}
-                          <small>sat</small>
-                        </>
-                      ) : (
-                        <span className="wallet-channels__muted">—</span>
-                      )}
                     </td>
                     <td>
                       <span
@@ -312,7 +303,7 @@ export function PaymentChannelSettings({ execute, text }: PaymentUIProps) {
           <p className="wallet-channel-edit__hint">
             {text(
               "channels.editHint",
-              "额度以内免确认；超出额度会请求确认。新会话总额用于之后的新连接。",
+              "实际花费含矿工费，不超过已启用的单笔额度免确认；超出或未设置会请求确认。",
             )}
           </p>
           <div className="wallet-channel-edit__fields">
@@ -324,19 +315,6 @@ export function PaymentChannelSettings({ execute, text }: PaymentUIProps) {
                 setEditing({ ...editing, singleLimit: e.currentTarget.value })
               }
             />
-            {editing.kind === "app" ? (
-              <TextInput
-                label={text("payment.default", "新会话累计免确认额度（聪）")}
-                inputMode="numeric"
-                value={editing.defaultSessionLimit}
-                onChange={(e) =>
-                  setEditing({
-                    ...editing,
-                    defaultSessionLimit: e.currentTarget.value,
-                  })
-                }
-              />
-            ) : null}
           </div>
           <label className="wallet-channel-edit__toggle">
             <input

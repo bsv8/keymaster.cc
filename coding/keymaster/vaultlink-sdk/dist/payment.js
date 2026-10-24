@@ -1,4 +1,4 @@
-import { inspectSigningChannel, sameSigningRegistration } from "./signing-channel.js";
+import { automaticSigningOperation, inspectSigningChannel, sameSigningRegistration } from "./signing-channel.js";
 import { sha256 as digest256 } from "@noble/hashes/sha256";
 import { encode } from "./cbor.js";
 import { addMoney, equal, fail, fixed, hex, money, MAX_U64 } from "./bytes.js";
@@ -59,6 +59,15 @@ export class PaymentPolicy {
             }
             PaymentPolicy.validate(old, key);
             p.state = structuredClone(old);
+            // Migrate only known operation channels, never payment limits, identities,
+            // pending liabilities or the generic digest-signing capability.
+            for (const channel of p.state.signing ?? []) {
+                if (automaticSigningOperation(channel.operation) && channel.mode === "manual") {
+                    revision(channel.revision + 1);
+                    channel.mode = "automatic";
+                    channel.revision++;
+                }
+            }
             // 断电位置不可判断：旧预占转成未知并保留占用。App 预算按连接 ID 持久，
             // 进程或 USB 重启不等于 App 主动断开；已关闭标记也原样保留。
             for (const request of p.state.pending)
@@ -198,12 +207,12 @@ export class PaymentPolicy {
             }
             if (this.state.sessions.length >= 16)
                 fail("capacity");
-            const channels = this.state.channels.filter((x) => x.owner === owner && x.kind === "app" && x.enabled);
+            const channels = this.state.channels.filter((x) => x.owner === owner && x.kind === "app");
             if (!channels.length)
                 fail("unknown-owner");
-            /* 多渠道只对应一个 App 默认会话额度，冲突时拒绝而不是偷偷选最大。 */ const limit = channels[0].defaultSessionLimit;
-            if (channels.some((x) => x.defaultSessionLimit !== limit))
-                fail("session-limit-conflict");
+            // New sessions carry identity/revocation only. Historical limits stay
+            // decodable on old sessions but cannot grant or restrict spending.
+            const limit = 0n;
             this.state.sessions.push({
                 id: sessionId,
                 owner,
@@ -274,16 +283,8 @@ export class PaymentPolicy {
                     !equal(a.requestCommitment, copy.commitment)))
                 fail("stale-approval");
             if (a?.raiseSessionLimit !== undefined) {
-                if (copy.kind !== "app" || !copy.sessionId)
-                    fail("invalid-session");
-                const s = this.session(copy.sessionId);
-                money(a.raiseSessionLimit);
-                if (!q.reasons.includes("session-limit") ||
-                    a.raiseSessionLimit < s.limit ||
-                    a.raiseSessionLimit < addMoney(q.used, copy.amount))
-                    fail("invalid-limit");
-                s.limit = a.raiseSessionLimit;
-                s.revision++;
+                // Retained wire field for decoding old histories, not an authority.
+                fail("session-limits-removed");
             }
             if (copy.kind === "app") {
                 const s = this.session(copy.sessionId);
@@ -349,6 +350,34 @@ export class PaymentPolicy {
             await this.persist();
         });
     }
+    /**
+     * 只允许受信执行权威在持有绑定该 request 的未签终止证明时，释放
+     * 重启后已变为 unknown 的预占。普通 App/插件不可到达此方法。
+     * 已签/部分签名的 request 必须拒绝。
+     */
+    async releaseUnknownProven(requestId) {
+        return this.run(async () => {
+            const p = this.pending(requestId);
+            if (p.state === "released")
+                return;
+            if (p.state !== "unknown" && p.state !== "reserved")
+                fail("result-unknown");
+            if (p.pool) {
+                const pool = this.state.pools.find((x) => x.id === p.pool.id);
+                if (!pool || pool.paid !== p.pool.paid)
+                    fail("corrupt-state");
+                pool.paid = p.pool.previousPaid;
+            }
+            if (p.sessionId) {
+                const s = this.session(p.sessionId);
+                if (s.used < p.amount)
+                    fail("corrupt-state");
+                s.used -= p.amount;
+            }
+            /* 保留墓碑防 requestId 再执行。 */ p.state = "released";
+            await this.persist();
+        });
+    }
     /** 只允许执行权威在确定未执行时释放；App/普通插件不得调用此内部方法。 */
     async releaseUnexecuted(requestId) {
         return this.run(async () => {
@@ -371,7 +400,7 @@ export class PaymentPolicy {
             await this.persist();
         });
     }
-    /** 与支付账本原子存储、一起迁移；重复注册只校验来源，绝不覆盖用户决定。 */
+    /** 与支付账本原子存储；已知操作自动注册，重复注册不能替换身份。 */
     async registerSigning(channels, network, confirmed) {
         const copies = channels.map(inspectSigningChannel);
         if (!copies.length || copies.length > 32 || new Set(copies.map(c => c.id)).size !== copies.length)
@@ -389,11 +418,12 @@ export class PaymentPolicy {
                         fail("channel-conflict");
                     continue;
                 }
-                if (!confirmed || c.revision !== 1)
+                const automatic = automaticSigningOperation(c.operation);
+                if ((!confirmed && !automatic) || c.revision !== 1)
                     fail("confirmation-required");
                 if (next.length >= 32)
                     fail("capacity");
-                next.push(c);
+                next.push(automatic ? { ...c, mode: "automatic" } : c);
             }
             const changed = next.length !== (this.state.signing?.length ?? 0);
             if (changed) {
@@ -418,6 +448,8 @@ export class PaymentPolicy {
                 fail("channel-required");
             if (c.revision !== expectedRevision)
                 fail("stale-config");
+            if (automaticSigningOperation(c.operation) && mode !== "automatic")
+                fail("operation-policy-automatic");
             const next = inspectSigningChannel({ ...c, mode, revision: c.revision + 1 });
             Object.assign(c, next);
             await this.persist();
@@ -458,6 +490,8 @@ export class PaymentPolicy {
         id(p.network);
         id(p.paymentType);
         money(p.amount);
+        if (p.operation !== undefined && (p.operation !== "internal-pool-state" || p.kind !== "plugin" || !/^feepool\.(connect|bitfs)(\.cosigner)?$/.test(p.paymentType)))
+            fail("invalid-operation");
         if (p.kind !== "app" && p.kind !== "plugin")
             fail("invalid-owner");
         if (p.sessionId !== null)
@@ -499,10 +533,12 @@ export class PaymentPolicy {
             c.paymentType !== p.paymentType)
             fail("invalid-channel");
         const reasons = [];
-        if (!c.enabled)
-            reasons.push("disabled");
-        if (p.amount > c.singleLimit)
-            reasons.push("single-limit");
+        if (!p.operation) {
+            if (!c.enabled)
+                reasons.push("disabled");
+            if (p.amount > c.singleLimit)
+                reasons.push("single-limit");
+        }
         let s;
         if (p.kind === "app") {
             if (!p.sessionId)
@@ -512,9 +548,8 @@ export class PaymentPolicy {
                 fail("invalid-session");
             if (s.used > MAX_U64 - p.amount)
                 fail("amount-overflow");
-            // 零增量关池/退款不新增支出，不能重复要求为已批准累计额付款。
-            if (p.amount > 0n && s.used + p.amount > s.limit)
-                reasons.push("session-limit");
+            // Session usage is historical responsibility only, never an allowance.
+            // Identity, active/revision and overflow checks remain enforced.
         }
         else if (p.sessionId !== null)
             fail("invalid-session");
@@ -523,7 +558,7 @@ export class PaymentPolicy {
             amount: p.amount,
             used: s?.used ?? 0n,
             singleLimit: c.singleLimit,
-            sessionLimit: s?.limit ?? null,
+            sessionLimit: null,
             configRevision: c.revision,
             sessionRevision: s?.revision ?? 0,
         };
@@ -685,7 +720,9 @@ export class PaymentPolicy {
         }
     }
 }
-/** owned 必须来自实际脚本与当前 Key 的核验，不使用主机 change 标记。矿工费不占额度。 */
+/** Output-only net business value. NOT wallet spend or an approval amount:
+ * it cannot account for fees without verified inputs. Inspectors compute spend
+ * as owned inputs minus all own P2PKH outputs instead. */
 export function externalOutputAmount(outputs) {
     let total = 0n;
     for (const o of outputs) {

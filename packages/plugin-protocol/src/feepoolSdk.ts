@@ -228,6 +228,21 @@ function deserializeTx(bytes: Uint8Array): UnsignedTx {
 export function feePoolInputTxids(rawTxHex: string): string[] {
   return deserializeTx(hexToBytes(rawTxHex)).inputs.map(i=>i.prevTxid);
 }
+/**
+ * 从原文取出它真实花费的输入（txid + vout）。
+ *
+ * 交付责任账本必须按**每份原文自己的**输入登记：把旧 close 草稿的输入
+ * 记成新池的输出点，会让责任定位到错误的交易上。
+ */
+export function feePoolInputOutpoints(rawTxHex: string): Array<{ txid: string; vout: number }> {
+  return deserializeTx(hexToBytes(rawTxHex)).inputs.map(i=>({ txid: i.prevTxid, vout: i.prevVout }));
+}
+/**
+ * 从原文取出它创建的输出（值 + 脚本）。用于按 exact 原文核对前序输出。
+ */
+export function feePoolOutputFacts(rawTxHex: string): Array<{ value: number; scriptHex: string }> {
+  return deserializeTx(hexToBytes(rawTxHex)).outputs.map(o=>({ value: o.value, scriptHex: bytesToHex(o.script) }));
+}
 /** 接口只能接收整个未签名交易；钱包负责脚本/金额核验及一次额度预占。 */
 export type FeePoolTransactionSigner = (rawTxHex: string) => Promise<string[]>;
 async function signP2pkhInputs(unsigned: UnsignedTx, signTransaction: FeePoolTransactionSigner, publicKeyHex: string): Promise<string> {

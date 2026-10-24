@@ -47,7 +47,7 @@ export async function inspectStandard(raw, previous, publicKey) {
     if (previous.length !== tx.inputs.length || tx.inputs.length > 10 || tx.outputs.length > 32)
         fail("unsupported");
     const seen = new Set(), digests = [], unlockKinds = [];
-    let inputs = 0n, outputs = 0n, change = 0n, amount = 0n;
+    let inputs = 0n, outputs = 0n, change = 0n;
     for (let i = 0; i < tx.inputs.length; i++) {
         const input = tx.inputs[i], ref = hex(input.txid) + ":" + input.vout;
         if (input.script.length)
@@ -67,12 +67,11 @@ export async function inspectStandard(raw, previous, publicKey) {
     }
     for (const out of tx.outputs) {
         outputs = addMoney(outputs, out.satoshis);
-        if (standardUnlockKind(out.script, publicKey))
+        // P2PK (even to this public key) is not a wallet P2PKH return.
+        if (equal(out.script, p2pkhScript(publicKey)))
             change = addMoney(change, out.satoshis);
-        else
-            amount = addMoney(amount, out.satoshis);
     }
     if (outputs > inputs)
         fail("negative-fee");
-    return { amount, change, fee: inputs - outputs, digests, unlockKinds, outputs: tx.outputs };
+    return { amount: inputs - change, change, fee: inputs - outputs, digests, unlockKinds, outputs: tx.outputs };
 }

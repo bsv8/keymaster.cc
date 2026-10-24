@@ -1,3 +1,4 @@
+import {publisherPaymentOwner, publisherPaymentChannelId} from "./app-payment-channel.js";
 import {signatureFailure,signatureOwner,type SignatureRecorder,type SignatureTicket} from "./signature-history.js";
 import {
   inspectConnectEnvelope,
@@ -7,6 +8,8 @@ import {
   type Value,
   type SigningChannel,
   type SigningMode,
+  automaticSigningOperation,
+  signingOperations,
   commitment,
   inspectP2pkh,
   inspectFeePool,
@@ -14,8 +17,10 @@ import {
   inspectBitfsOpening,
   inspectStandard,
   parseTransaction,
+  serializeTransaction,
   p2pkhSighash,
   p2pkhOutputAddress,
+  p2pkhScript,
   type PolicyStore,
 } from "@vaultlink/sdk";
 import {
@@ -24,6 +29,9 @@ import {
   type PaymentInspection,
   type Quote,
 } from "./payment.js";
+import { sha256 } from "@noble/hashes/sha256";
+import { secp256k1 } from "@noble/curves/secp256k1.js";
+import type { P2pkhConnectPaymentPreview } from "@keymaster/contracts";
 import {
   parseStoredPaymentPolicy,
   serializeStoredPaymentPolicy,
@@ -59,7 +67,11 @@ export type WalletPaymentCommand =
       revision: number;
     }
   | { action: "backend" }
-  | { action: "list" | "pending" }
+  | { action: "list" | "pending" | "spend-notices" }
+  | { action: "notice-dismiss"; id: string }
+  | { action: "connect-payment-recovery" }
+  | { action: "connect-payment-recovery-ack"; paymentIds: string[] }
+  | { action: "connect-payment-signed-recovery" }
   | {
       action: "register";
       id: string;
@@ -79,6 +91,7 @@ export type WalletPaymentCommand =
       channelId: string;
       paymentId: string;
       sessionId: string | null;
+      connectPaymentReview?: P2pkhConnectPaymentPreview;
     }
   | {
       action: "sign-feepool";
@@ -93,6 +106,198 @@ export type WalletPaymentCommand =
       paymentId: string;
       sessionId: string | null;
     };
+export function buildSignedP2pkhExact(raw: Uint8Array, tx: ReturnType<typeof parseTransaction>, signatures: string[], publicKey: Uint8Array): string {
+  if (signatures.length !== tx.inputs.length) throw Error("invalid-signature-count");
+  const signed = {
+    ...tx,
+    inputs: tx.inputs.map((input, index) => {
+      const signature = unhex(signatures[index]!);
+      const script = new Uint8Array(1 + signature.length + 1 + publicKey.length);
+      script[0] = signature.length;
+      script.set(signature, 1);
+      script[1 + signature.length] = publicKey.length;
+      script.set(publicKey, 2 + signature.length);
+      return { ...input, script };
+    }),
+  };
+  return hex(serializeTransaction(signed));
+}
+
+function dsha256(bytesValue: Uint8Array): Uint8Array {
+  return sha256(sha256(bytesValue));
+}
+
+/** Recovered disk material is not a signing authority. Verify every input and
+ * bind the exact bytes to the original unsigned template before handing off. */
+export async function verifyRecoveredP2pkhExact(unsignedTxHex: string, previousHexes: string[], signedTxHex: string, publicKeyHex: string): Promise<string[]> {
+  const unsigned = unhex(unsignedTxHex), tx = parseTransaction(unsigned);
+  const exact = parseTransaction(unhex(signedTxHex)), pub = unhex(publicKeyHex), own = p2pkhScript(pub);
+  if (!tx.inputs.length || tx.inputs.length > 16 || previousHexes.length !== tx.inputs.length || exact.inputs.length !== tx.inputs.length || tx.inputs.some(input => input.script.length !== 0)) throw Error('invalid-recovered-exact');
+  const signatures = exact.inputs.map(input => {
+    const script = input.script, size = script[0] ?? 0;
+    if (size < 9 || size > 73 || script.length !== size + pub.length + 2 || script[size + 1] !== pub.length || hex(script.slice(size + 2)) !== hex(pub)) throw Error('invalid-recovered-signature');
+    const signature = script.slice(1, size + 1);
+    if (signature.at(-1) !== 0x41) throw Error('invalid-recovered-signature');
+    return hex(signature);
+  });
+  if (buildSignedP2pkhExact(unsigned, tx, signatures, pub) !== signedTxHex.toLowerCase()) throw Error('invalid-recovered-exact');
+  for (let index = 0; index < tx.inputs.length; index++) {
+    const input = tx.inputs[index]!, previous = unhex(previousHexes[index]!), prior = parseTransaction(previous), output = prior.outputs[input.vout];
+    if (hex(dsha256(previous)) !== hex(input.txid) || !output || hex(output.script) !== hex(own)) throw Error('invalid-recovered-prevout');
+    const signature = unhex(signatures[index]!).slice(0, -1);
+    if (!secp256k1.verify(signature, await p2pkhSighash(tx, index, output), pub, { prehash: false, lowS: true, format: 'der' })) throw Error('invalid-recovered-signature');
+  }
+  return signatures;
+}
+
+function isP2pkhScript(script: Uint8Array): boolean {
+  return script.length === 25 && script[0] === 0x76 && script[1] === 0xa9 && script[2] === 0x14
+    && script[23] === 0x88 && script[24] === 0xac;
+}
+
+function isP2pkScript(script: Uint8Array): boolean {
+  if (script.length !== 35 || script[0] !== 0x21 || script[34] !== 0xac
+    || (script[1] !== 0x02 && script[1] !== 0x03)) return false;
+  try {
+    secp256k1.Point.fromHex(hex(script.slice(1, 34)));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function publisherMatchesScript(script: Uint8Array, publisher: Uint8Array): boolean {
+  if (isP2pkhScript(script)) {
+    const own = p2pkhScript(publisher);
+    return script.length === own.length && script.every((byte, index) => byte === own[index]);
+  }
+  if (isP2pkScript(script)) {
+    return script.length === 35 && publisher.length === 33 && script.slice(1, 34).every((byte, index) => byte === publisher[index]);
+  }
+  return false;
+}
+
+interface ConnectPaymentReviewResult {
+  /** Actual wallet spend, including fee, minus ALL own P2PKH outputs. */
+  amount: bigint;
+  businessAmount: bigint;
+  ownReturn: bigint;
+  ownOutputs: Array<{ vout: number; valueSats: string; scriptHex: string }>;
+  change: bigint;
+  fee: bigint;
+  digests: Uint8Array[];
+  ownership: "app-publisher" | "third-party";
+  forceConfirm: boolean;
+  businessKind: string;
+  appId: string;
+  appName: string;
+  origin: string;
+  publisherPublicKeyHex: string;
+  paymentType: "p2pkh" | "p2pk";
+  recipientLabel: string;
+}
+
+/** Vault-side independent recheck of the frozen Connect payment role map. */
+export async function inspectConnectPayment(
+  raw: Uint8Array,
+  previous: Uint8Array[],
+  publicKey: Uint8Array,
+  review: P2pkhConnectPaymentPreview,
+): Promise<ConnectPaymentReviewResult> {
+  const tx = parseTransaction(raw, 640);
+  if (tx.inputs.length === 0 || tx.inputs.length > 16 || previous.length !== tx.inputs.length || tx.outputs.length !== review.outputs.length) {
+    throw Error("invalid-connect-payment-template");
+  }
+  const own = p2pkhScript(publicKey);
+  const seen = new Set<string>();
+  let inputTotal = 0n;
+  const digests: Uint8Array[] = [];
+  for (let index = 0; index < tx.inputs.length; index += 1) {
+    const input = tx.inputs[index]!;
+    if (input.script.length !== 0) throw Error("already-signed");
+    const priorRaw = previous[index];
+    if (!priorRaw) throw Error("missing-prevout");
+    const prior = parseTransaction(priorRaw, 640);
+    if (input.vout >= prior.outputs.length) throw Error("invalid-prevout");
+    const priorTxid = dsha256(priorRaw);
+    if (priorTxid.length !== input.txid.length || !priorTxid.every((byte, i) => byte === input.txid[i])) throw Error("invalid-prevout");
+    const ref = Array.from(input.txid).join(",") + ":" + input.vout;
+    if (seen.has(ref)) throw Error("duplicate-input");
+    seen.add(ref);
+    const prevout = prior.outputs[input.vout]!;
+    if (!isP2pkhScript(prevout.script) || !prevout.script.every((byte, i) => byte === own[i])) throw Error("wrong-key");
+    inputTotal += prevout.satoshis;
+    if (inputTotal > 0xffffffffffffffffn) throw Error("invalid-amount");
+    digests.push(await p2pkhSighash(tx, index, prevout));
+  }
+  const expectedByVout = new Map(review.outputs.map((row) => [row.vout, row]));
+  if (expectedByVout.size !== review.outputs.length) throw Error("invalid-connect-payment-template");
+  let business = 0n;
+  let change = 0n;
+  let outputTotal = 0n;
+  let ownReturn = 0n;
+  const ownOutputs: ConnectPaymentReviewResult["ownOutputs"] = [];
+  for (let vout = 0; vout < tx.outputs.length; vout += 1) {
+    const actual = tx.outputs[vout]!;
+    const expected = expectedByVout.get(vout);
+    if (!expected) throw Error("invalid-connect-payment-template");
+    const actualHex = hex(actual.script);
+    if (actualHex !== expected.scriptHex || actual.satoshis !== money(expected.valueSats)) {
+      throw Error("invalid-connect-payment-template");
+    }
+    outputTotal += actual.satoshis;
+    if (outputTotal > 0xffffffffffffffffn) throw Error("invalid-amount");
+    // Ownership is derived from the current public key, never from the App's role label.
+    if (isP2pkhScript(actual.script) && actual.script.every((byte, i) => byte === own[i])) {
+      ownReturn += actual.satoshis;
+      ownOutputs.push({ vout, valueSats: String(actual.satoshis), scriptHex: actualHex });
+    }
+    if (expected.role === "business") {
+      if (!isP2pkhScript(actual.script) && !isP2pkScript(actual.script)) throw Error("invalid-connect-payment-template");
+      business += actual.satoshis;
+    } else if (expected.role === "change") {
+      if (!isP2pkhScript(actual.script) || !actual.script.every((byte, i) => byte === own[i])) throw Error("invalid-connect-payment-template");
+      change += actual.satoshis;
+    } else throw Error("invalid-connect-payment-template");
+  }
+  const fee = inputTotal - outputTotal;
+  if (fee < 0n || fee !== money(review.feeSats)) throw Error("invalid-connect-payment-template");
+  if (business !== money(review.businessAmountSats) || change !== money(review.changeAmountSats)) {
+    throw Error("invalid-connect-payment-template");
+  }
+  const changeRows = review.outputs.filter((row) => row.role === "change");
+  if (changeRows.length > 1 || (changeRows.length === 1 && (review.changeScriptHex === null || changeRows[0]!.scriptHex !== review.changeScriptHex))) {
+    throw Error("invalid-connect-payment-template");
+  }
+  const businessRows = review.outputs.filter((row) => row.role === "business");
+  if (businessRows.length !== 1 || businessRows[0]!.scriptHex !== review.businessScriptHex) throw Error("invalid-connect-payment-template");
+  const businessKind = isP2pkhScript(unhex(review.businessScriptHex)) ? "p2pkh" : isP2pkScript(unhex(review.businessScriptHex)) ? "p2pk" : null;
+  if (businessKind !== review.paymentType) throw Error("invalid-connect-payment-template");
+  const publisher = unhex(review.publisherPublicKeyHex);
+  try { secp256k1.Point.fromHex(review.publisherPublicKeyHex); } catch { throw Error("invalid-connect-payment-template"); }
+  const ownership = publisherMatchesScript(unhex(review.businessScriptHex), publisher) ? "app-publisher" : "third-party";
+  if (ownership !== review.recipientOwnership) throw Error("invalid-connect-payment-template");
+  return {
+    amount: inputTotal - ownReturn,
+    businessAmount: business,
+    ownReturn,
+    ownOutputs,
+    change,
+    fee,
+    digests,
+    ownership,
+    // Ownership affects the displayed warning, not the single allowance.
+    forceConfirm: false,
+    businessKind: review.businessKind,
+    appId: review.appId,
+    appName: review.appName,
+    origin: review.origin,
+    publisherPublicKeyHex: review.publisherPublicKeyHex,
+    paymentType: review.paymentType,
+    recipientLabel: review.recipientLabel,
+  };
+}
+
 function money(s: string): bigint {
   if (!/^(0|[1-9][0-9]{0,19})$/.test(s)) throw Error("invalid-amount");
   const n = BigInt(s);
@@ -113,6 +318,27 @@ function dto(c: ChannelConfig): PaymentChannelDTO {
     defaultSessionLimit: String(c.defaultSessionLimit),
   };
 }
+type ConnectExecutionState = "authorized" | "signing_started" | "signed_partial" | "signed_complete" | "cancelled_before_sign" | "signed" | "unknown";
+interface ConnectExecutionRecord {
+  paymentId: string;
+  planDigest: string;
+  sessionId: string | null;
+  state: ConnectExecutionState;
+  acknowledged?: boolean;
+  unsignedTxHex?: string;
+  prevTransactionHexes?: string[];
+  signatures?: string[];
+  signedTxHex?: string;
+  version: number;
+  updatedAt: number;
+}
+interface ConnectExecutionProof {
+  paymentId: string;
+  planDigest: string;
+  version: number;
+  state: "cancelled_before_sign";
+}
+
 /** 仅 Coordinator 的唯一钱包实例拥有此对象；读写使用绑定钱包世代的真实文件句柄。 */
 export class WalletPayments {
   private sessionRequests = new Map<string, { revoked: boolean }>();
@@ -124,14 +350,17 @@ export class WalletPayments {
       timer: ReturnType<typeof setTimeout>;
     }
   >();
+  private spendNotices = new Map<string, Record<string, unknown>>();
   private signatureRecorder?:SignatureRecorder;
   setSignatureRecorder(recorder:SignatureRecorder){this.signatureRecorder=recorder;}
+  private journalTail: Promise<unknown> = Promise.resolve();
   private constructor(
     private gate: SoftwarePaymentGate,
     private publicKeyHex: string,
     private assertActive: () => void,
     private signDigest: (digest: Uint8Array) => Promise<Uint8Array>,
     private network: "main" | "test",
+    private files: PaymentFileStore,
   ) {}
   static async open(
     files: PaymentFileStore,
@@ -178,6 +407,7 @@ export class WalletPayments {
       assertActive,
       signDigest,
       network,
+      files,
     );
   }
   close() {
@@ -187,6 +417,7 @@ export class WalletPayments {
       p.resolve({ allow: false });
     }
     this.pending.clear();
+    this.spendNotices.clear();
     for (const token of this.sessionRequests.values()) token.revoked = true;
     this.sessionRequests.clear();
   }
@@ -303,6 +534,9 @@ export class WalletPayments {
     signal?: AbortSignal,
     facts: Record<string, string> = {},
   ): Promise<T> {
+    this.assertActive();
+    if (!signingOperations.includes(operation)) throw Error("unsupported-operation");
+    if (signal?.aborted) throw Error("signature-cancelled");
     const ticket=await this.signatureRecorder?.({operation,channelId:operation,owner:signatureOwner(operation),backend:'software'});
     try {const result=await this.authorizeSignatureInner(operation,sign,signal,facts,ticket);await ticket?.update('completed');return result;}
     catch(error){await ticket?.update(signatureFailure(error));throw error;}
@@ -325,14 +559,17 @@ export class WalletPayments {
                 : "vault",
         kind: "plugin",
         operation,
-        mode: operation.startsWith("identity.") ? "automatic" : "manual",
+        mode: automaticSigningOperation(operation) ? "automatic" : "manual",
         revision: 1,
       };
       const registration = await this.signatureRecorder?.({operation: "signing.register", channelId: channel.id, owner: channel.owner, backend: "software"});
-      await registration?.update("pending", "manual");
+      const automatic = automaticSigningOperation(operation);
+      await registration?.update("pending", automatic ? "automatic" : "manual");
       try {
-        if (!(await this.signatureConsent(channel, "registration", facts, signal, registration?.id))) throw Error("denied");
-        [channel] = await this.gate.registerSigning([channel], this.network, true);
+        this.assertActive();
+        if (signal?.aborted) throw Error("signature-cancelled");
+        if (!automatic && !(await this.signatureConsent(channel, "registration", facts, signal, registration?.id))) throw Error("denied");
+        [channel] = await this.gate.registerSigning([channel], this.network, !automatic);
         await registration?.update("completed");
       } catch (error) {
         await registration?.update(signatureFailure(error));
@@ -365,6 +602,246 @@ export class WalletPayments {
     if (signal?.aborted) throw Error("signature-cancelled");
     return result;
   }
+  private runJournal<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.journalTail.then(fn);
+    this.journalTail = next.catch(() => undefined);
+    return next;
+  }
+
+  private async readConnectJournal(): Promise<{ records: Record<string, ConnectExecutionRecord>; revision?: string }> {
+    const file = await this.files.get("connect-payment-executions.json");
+    if (!file) return { records: {} };
+    try {
+      const parsed = JSON.parse(new TextDecoder().decode(file.bytes)) as { version?: unknown; records?: unknown };
+      if (parsed.version !== 1 || typeof parsed.records !== "object" || parsed.records === null || Array.isArray(parsed.records)) {
+        throw Error("bad journal");
+      }
+      const entries = Object.entries(parsed.records);
+      if (entries.length > 4096) throw Error('bad journal');
+      for (const [id, value] of entries) {
+        const row = value as ConnectExecutionRecord;
+        if (!row || typeof row !== 'object' || Array.isArray(row) || row.paymentId !== id || typeof row.planDigest !== 'string' || !row.planDigest || !Number.isSafeInteger(row.version) || row.version < 1 || !(row.sessionId === null || typeof row.sessionId === 'string') || !['authorized', 'signing_started', 'signed_partial', 'signed_complete', 'cancelled_before_sign', 'signed', 'unknown'].includes(row.state) || (row.acknowledged !== undefined && typeof row.acknowledged !== 'boolean')) throw Error('bad journal');
+        if (row.unsignedTxHex !== undefined) unhex(row.unsignedTxHex);
+        if (row.prevTransactionHexes !== undefined) { if (!Array.isArray(row.prevTransactionHexes) || row.prevTransactionHexes.length > 16) throw Error('bad journal'); for (const previous of row.prevTransactionHexes) unhex(previous); }
+        if (row.signatures !== undefined) { if (!Array.isArray(row.signatures) || row.signatures.length > 16) throw Error('bad journal'); for (const signature of row.signatures) unhex(signature); }
+        if (row.signedTxHex !== undefined) unhex(row.signedTxHex);
+        if ((row.state === 'authorized' || row.state === 'cancelled_before_sign') && (row.signatures !== undefined || row.signedTxHex !== undefined)) throw Error('bad journal');
+      }
+      return { records: parsed.records as Record<string, ConnectExecutionRecord>, revision: file.revision };
+    } catch {
+      throw Error("connect-payment-journal-corrupt");
+    }
+  }
+
+  private async writeConnectJournal(records: Record<string, ConnectExecutionRecord>, revision?: string): Promise<void> {
+    const bytes = new TextEncoder().encode(JSON.stringify({ version: 1, records }));
+    await this.files.put("connect-payment-executions.json", bytes, revision === undefined ? { ifNoneMatch: true } : { ifRevision: revision });
+  }
+
+  private notSignedError(proof: ConnectExecutionProof): Error {
+    const error = new Error("payment-cancelled-before-sign");
+    Object.assign(error, { connectPaymentNotSigned: proof });
+    return error;
+  }
+
+  private async beginConnectExecution(review: P2pkhConnectPaymentPreview, sessionId: string | null, unsignedTxHex: string, prevTransactionHexes: string[]): Promise<void> {
+    if (!review.planDigest) throw Error("connect-payment-plan-digest-required");
+    return this.runJournal(async () => {
+      const { records, revision } = await this.readConnectJournal();
+      const existing = records[review.paymentId];
+      if (existing) {
+        if (existing.planDigest !== review.planDigest) throw Error("connect-payment-plan-conflict");
+        if (existing.state === "cancelled_before_sign") throw this.notSignedError({ paymentId: review.paymentId, planDigest: review.planDigest, version: existing.version, state: "cancelled_before_sign" });
+        if (existing.state === "signing_started" || existing.state === "signed") throw Error("connect-payment-already-started");
+        return;
+      }
+      records[review.paymentId] = {
+        paymentId: review.paymentId, planDigest: review.planDigest, sessionId,
+        unsignedTxHex, prevTransactionHexes: [...prevTransactionHexes],
+        state: "authorized", version: 1, updatedAt: Date.now(),
+      };
+      await this.writeConnectJournal(records, revision);
+    });
+  }
+
+  private async acknowledgeConnectRecovery(paymentIds: readonly string[]): Promise<void> {
+    if (paymentIds.length === 0) return;
+    return this.runJournal(async () => {
+      const { records, revision } = await this.readConnectJournal();
+      let changed = false;
+      for (const paymentId of paymentIds) {
+        const record = records[paymentId];
+        if (!record || record.acknowledged) continue;
+        if (record.state !== "cancelled_before_sign" && record.state !== "signed_complete" && record.state !== "signed") continue;
+        record.acknowledged = true;
+        record.updatedAt = Date.now();
+        changed = true;
+      }
+      if (changed) await this.writeConnectJournal(records, revision);
+    });
+  }
+
+  private async persistConnectSignedMaterial(paymentId: string, signatures: string[], signedTxHex?: string): Promise<void> {
+    return this.runJournal(async () => {
+      const { records, revision } = await this.readConnectJournal();
+      const record = records[paymentId];
+      if (!record || record.state === "cancelled_before_sign") throw Error("connect-payment-cancelled");
+      record.signatures = [...signatures];
+      if (signedTxHex !== undefined) record.signedTxHex = signedTxHex;
+      record.state = signedTxHex === undefined ? "signed_partial" : "signed_complete";
+      record.version += 1;
+      record.updatedAt = Date.now();
+      await this.writeConnectJournal(records, revision);
+    });
+  }
+
+  private async recoverSignedConnectExecutions(): Promise<Array<{ paymentId: string; planDigest: string; state: "signed_complete" | "quarantined"; signatures?: string[]; signedTxHex?: string; version: number }>> {
+    return this.runJournal(async () => {
+      const { records, revision } = await this.readConnectJournal();
+      let changed = false;
+      const recovered = [];
+      for (const record of Object.values(records)) {
+        if (record.state === 'authorized' || record.state === 'cancelled_before_sign') continue;
+        // ACK does not erase the responsibility or make signed material vanish
+        // when the manager store is later missing/corrupt.
+        let exact = record.signedTxHex;
+        // If the last exact write failed but every input signature is durable,
+        // reconstruct the SAME exact from the persisted unsigned template.
+        if (!exact && record.unsignedTxHex && record.signatures) {
+          try {
+            const tx = parseTransaction(unhex(record.unsignedTxHex));
+            if (record.signatures.length === tx.inputs.length) {
+              exact = buildSignedP2pkhExact(unhex(record.unsignedTxHex), tx, record.signatures, unhex(this.publicKeyHex));
+            }
+          } catch {
+            // Incomplete/corrupt material stays quarantined; never re-sign.
+          }
+        }
+        let valid = false;
+        try {
+          if (exact && record.unsignedTxHex && record.prevTransactionHexes) {
+            const signatures = await verifyRecoveredP2pkhExact(record.unsignedTxHex, record.prevTransactionHexes, exact, this.publicKeyHex);
+            valid = !record.signatures || JSON.stringify(record.signatures) === JSON.stringify(signatures);
+          }
+        } catch { /* retain corrupt/partial material and its original duty */ }
+        if (!exact || !valid) {
+          recovered.push({ paymentId: record.paymentId, planDigest: record.planDigest, version: record.version, state: 'quarantined' as const });
+          continue;
+        }
+        if (!record.signedTxHex) {
+          record.signedTxHex = exact; record.state = 'signed_complete'; record.version += 1; record.updatedAt = Date.now(); changed = true;
+        }
+        recovered.push({
+          paymentId: record.paymentId, planDigest: record.planDigest, state: "signed_complete" as const,
+          signatures: [...(record.signatures ?? [])], signedTxHex: exact, version: record.version,
+        });
+      }
+      if (changed) await this.writeConnectJournal(records, revision);
+      return recovered;
+    });
+  }
+
+  private async markConnectSigningStarted(paymentId: string): Promise<void> {
+    return this.runJournal(async () => {
+      const { records, revision } = await this.readConnectJournal();
+      const record = records[paymentId];
+      if (!record) throw Error("connect-payment-journal-missing");
+      if (record.state === "cancelled_before_sign") throw this.notSignedError({ paymentId, planDigest: record.planDigest, version: record.version, state: "cancelled_before_sign" });
+      if (record.state === "signing_started" || record.state === "signed") return;
+      if (record.state !== "authorized") throw Error("connect-payment-journal-state");
+      record.state = "signing_started";
+      record.version += 1;
+      record.updatedAt = Date.now();
+      await this.writeConnectJournal(records, revision);
+    });
+  }
+
+  private async cancelConnectExecution(paymentId: string): Promise<ConnectExecutionProof | null> {
+    return this.runJournal(async () => {
+      const { records, revision } = await this.readConnectJournal();
+      const record = records[paymentId];
+      if (!record) return null;
+      if (record.state === "cancelled_before_sign") {
+        return record.acknowledged ? null : { paymentId, planDigest: record.planDigest, version: record.version, state: "cancelled_before_sign" };
+      }
+      if (record.state !== "authorized") return null;
+      record.state = "cancelled_before_sign";
+      record.acknowledged = false;
+      record.version += 1;
+      record.updatedAt = Date.now();
+      await this.writeConnectJournal(records, revision);
+      return { paymentId, planDigest: record.planDigest, version: record.version, state: "cancelled_before_sign" };
+    });
+  }
+
+  private async cancelConnectExecutions(sessionId: string): Promise<void> {
+    return this.runJournal(async () => {
+      const { records, revision } = await this.readConnectJournal();
+      let changed = false;
+      for (const record of Object.values(records)) {
+        if (record.sessionId !== sessionId || record.state !== "authorized") continue;
+        record.state = "cancelled_before_sign";
+        record.acknowledged = false;
+        record.version += 1;
+        record.updatedAt = Date.now();
+        changed = true;
+      }
+      if (changed) await this.writeConnectJournal(records, revision);
+    });
+  }
+
+  private async recoverAuthorizedConnectExecutions(): Promise<ConnectExecutionProof[]> {
+    const candidates = await this.runJournal(async () => {
+      const { records, revision } = await this.readConnectJournal();
+      const proofs: ConnectExecutionProof[] = [];
+      let changed = false;
+      for (const record of Object.values(records)) {
+        if (record.state === "authorized") {
+          record.state = "cancelled_before_sign";
+          record.acknowledged = false;
+          record.version += 1;
+          record.updatedAt = Date.now();
+          changed = true;
+        }
+        if (record.state === "cancelled_before_sign" && !record.acknowledged) {
+          proofs.push({ paymentId: record.paymentId, planDigest: record.planDigest, version: record.version, state: "cancelled_before_sign" });
+        }
+      }
+      if (changed) await this.writeConnectJournal(records, revision);
+      return proofs;
+    });
+    // Release policy BEFORE the manager, and only expose proofs whose policy
+    // reservation is now safely released (or was already released). A policy
+    // signed/partial state keeps the manager responsibility intact.
+    const released: ConnectExecutionProof[] = [];
+    for (const proof of candidates) {
+      try {
+        await this.gate.releaseUnknownProven(proof.paymentId);
+        released.push(proof);
+      } catch (error) {
+        // No policy reservation exists yet (crash/denial before reserve):
+        // there is no quota to refund, so the manager release proof is safe.
+        // Any other policy state (signed/partial) keeps manager responsibility.
+        if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "invalid-request") {
+          released.push(proof);
+        }
+      }
+    }
+    return released;
+  }
+
+  private async finishConnectExecution(paymentId: string, state: "signed" | "unknown"): Promise<void> {
+    return this.runJournal(async () => {
+      const { records, revision } = await this.readConnectJournal();
+      const record = records[paymentId];
+      if (!record || record.state === "cancelled_before_sign") return;
+      record.state = state === "signed" ? "signed_complete" : state;
+      record.version += 1;
+      record.updatedAt = Date.now();
+      await this.writeConnectJournal(records, revision);
+    });
+  }
+
   private confirm(
     request: PaymentInspection,
     quote: Quote,
@@ -392,6 +869,9 @@ export class WalletPayments {
             channelId: request.channelId,
             sessionId: request.sessionId,
             owner: request.owner,
+            wallet: this.publicKeyHex,
+            network: request.network,
+            paymentType: request.paymentType,
             kind: request.kind,
             amount: String(quote.amount),
             used: String(quote.used),
@@ -440,6 +920,9 @@ export class WalletPayments {
   }
   private async execute(command: WalletPaymentCommand): Promise<unknown> {
     this.assertActive();
+    if (command.action === "connect-payment-recovery") return this.recoverAuthorizedConnectExecutions();
+    if (command.action === "connect-payment-recovery-ack") return this.acknowledgeConnectRecovery(command.paymentIds);
+    if (command.action === "connect-payment-signed-recovery") return this.recoverSignedConnectExecutions();
     if (command.action === "backend") return "software";
     if (command.action === "signing-list")
       return (await this.gate.snapshot()).signing ?? [];
@@ -454,13 +937,13 @@ export class WalletPayments {
     }
     if (command.action === "pending")
       return [...this.pending.values()].map((p) => structuredClone(p.view));
+    if (command.action === "spend-notices") return [...this.spendNotices.values()].map(v => structuredClone(v));
+    if (command.action === "notice-dismiss") return this.spendNotices.delete(command.id);
     if (command.action === "answer") {
       const p = this.pending.get(command.id);
       if (!p) throw Error("stale-approval");
-      const raised =
-        command.raiseSessionLimit === undefined
-          ? undefined
-          : money(command.raiseSessionLimit);
+      if(command.raiseSessionLimit !== undefined) throw Error("session-limits-removed");
+      const raised = undefined;
       this.pending.delete(command.id);
       clearTimeout(p.timer);
       p.resolve({
@@ -520,7 +1003,7 @@ export class WalletPayments {
           : 0n;
       const c = {
         ...command,
-        enabled: true,
+        enabled: false,
         singleLimit: 0n,
         defaultSessionLimit: inherited,
         revision: 1,
@@ -564,6 +1047,7 @@ export class WalletPayments {
       command.action === "session-cancel"
     ) {
       this.cancelRequests(command.id);
+      await this.cancelConnectExecutions(command.id);
       // popup 关闭只取消未签申请。Connect resume 沿用连接预算，不允许清 used。
       if (command.action === "session-cancel") return true;
       await this.gate.closeSession(command.id);
@@ -579,6 +1063,7 @@ export class WalletPayments {
     const c = snapshot.channels.find((c) => c.id === command.channelId);
     if (!c) throw Error("invalid-channel");
     const isPool = command.action === "sign-feepool";
+    if (isPool && c.kind !== "plugin") throw Error("internal-pool-only");
     if (
       isPool &&
       command.authorization &&
@@ -604,13 +1089,15 @@ export class WalletPayments {
         ? `feepool.${command.family}${command.role === "cosigner" ? ".cosigner" : ""}`
         : isStandard
           ? "bsv.standard"
-          : "p2pkh")
+          : command.connectPaymentReview?.paymentType ?? "p2pkh")
     )
       throw Error("unsupported");
     if (c.network !== this.network) throw Error("unsupported-network");
     const raw = bytes(command.rawTxHex),
       previous = command.prevTransactionHexes.map(bytes),
       pub = bytes(this.publicKeyHex);
+    const connectPaymentReview = command.action === "sign-p2pkh" ? command.connectPaymentReview : undefined;
+    if (connectPaymentReview && connectPaymentReview.paymentId !== command.paymentId) throw Error("invalid-connect-payment-template");
     const review = isPool
       ? command.openingRequestHex
         ? await inspectBitfsOpening(raw, bytes(command.openingRequestHex), pub)
@@ -629,12 +1116,17 @@ export class WalletPayments {
             )
       : isStandard
         ? await inspectStandard(raw, previous, pub)
-        : await inspectP2pkh(
-            raw,
-            previous.map((transaction) => ({ transaction })),
-            pub,
-            0,
-          );
+        : connectPaymentReview
+          ? await inspectConnectPayment(raw, previous, pub, connectPaymentReview)
+          : await inspectP2pkh(
+              raw,
+              previous.map((transaction) => ({ transaction })),
+              pub,
+              0,
+            );
+    const connectReview = connectPaymentReview ? (review as ConnectPaymentReviewResult) : null;
+    if (connectReview && (c.kind !== "app" || c.owner !== publisherPaymentOwner(connectReview.publisherPublicKeyHex)
+      || c.id !== await publisherPaymentChannelId(connectReview.publisherPublicKeyHex,connectReview.paymentType,c.network))) throw Error("invalid-publisher-channel");
     // 钱包账本是累计付款基线；业务传来的 sourceAmount/previousAmount 不能决定额度。
     const poolReview = isPool
       ? (review as Awaited<ReturnType<typeof inspectFeePool>>)
@@ -646,11 +1138,14 @@ export class WalletPayments {
           poolReview.paid,
         )
       : null;
+    const poolOperation = poolReview?.stage === "state";
     const amount =
-      delta?.amount ??
+      (poolReview?.stage === "fund" ? poolReview.locked + poolReview.fee : undefined) ?? delta?.amount ??
       (poolReview
         ? 0n
-        : (review as Awaited<ReturnType<typeof inspectP2pkh>>).amount);
+        : connectReview
+          ? connectReview.amount
+          : (review as Awaited<ReturnType<typeof inspectP2pkh>>).amount);
     const body = {
       rawTx: raw,
       prevTransactions: previous,
@@ -674,9 +1169,35 @@ export class WalletPayments {
       ...(isPool && command.openingRequestHex
         ? { openingRequest: bytes(command.openingRequestHex) }
         : {}),
+      ...(connectReview
+        ? {
+            connectPayment: {
+              paymentId: command.paymentId,
+              clientRequestId: connectPaymentReview!.clientRequestId,
+              paymentType: connectReview.paymentType,
+              businessKind: connectReview.businessKind,
+              appId: connectReview.appId,
+              appName: connectReview.appName,
+              origin: connectReview.origin,
+              publisherPublicKeyHex: connectReview.publisherPublicKeyHex,
+              recipientOwnership: connectReview.ownership,
+              recipientLabel: connectReview.recipientLabel,
+              businessAmountSats: String(connectReview.businessAmount),
+              actualSpendSats: String(connectReview.amount),
+              ownReturnSats: String(connectReview.ownReturn),
+              ownOutputs: connectReview.ownOutputs,
+              changeAmountSats: String(connectReview.change),
+              feeSats: String(connectReview.fee),
+              roleMap: connectPaymentReview!.outputs,
+            },
+          }
+        : {}),
       amount,
     };
-    const inspection: PaymentInspection = {
+    const inspection: PaymentInspection & {
+      forceConfirm?: boolean;
+      connectPayment?: Record<string, unknown>;
+    } = {
       requestId: command.paymentId,
       channelId: c.id,
       owner: c.owner,
@@ -686,6 +1207,8 @@ export class WalletPayments {
       paymentType: c.paymentType,
       amount,
       ...(delta ? { pool: delta.pool } : {}),
+      ...(poolOperation ? { operation: "internal-pool-state" as const } : {}),
+      ...(connectReview ? { forceConfirm: connectReview.forceConfirm, connectPayment: body.connectPayment as Record<string, unknown> } : {}),
       commitment: await commitment(
         isPool
           ? command.openingRequestHex
@@ -695,7 +1218,9 @@ export class WalletPayments {
               : `bsv-feepool-${command.family}`
           : isStandard
             ? "bsv-standard-payment"
-            : "bsv-payment-context",
+            : connectReview
+              ? "bsv-connect-payment"
+              : "bsv-payment-context",
         1,
         body,
       ),
@@ -703,9 +1228,11 @@ export class WalletPayments {
     const tx = parseTransaction(raw);
     const digests = poolReview
       ? poolReview.digests
-      : isStandard
-        ? (review as Awaited<ReturnType<typeof inspectStandard>>).digests
-        : await Promise.all(
+      : connectReview
+        ? connectReview.digests
+        : isStandard
+          ? (review as Awaited<ReturnType<typeof inspectStandard>>).digests
+          : await Promise.all(
             tx.inputs.map((input, i) =>
               p2pkhSighash(
                 tx,
@@ -714,36 +1241,36 @@ export class WalletPayments {
               ),
             ),
           );
-    const recipients = await Promise.all(
-      tx.outputs.map(async (o) =>
-        o.script.length === 25
-          ? `${o.satoshis} sat · ${await p2pkhOutputAddress(o.script, c.network as "main" | "test")}`
-          : `${o.satoshis} sat · ${poolReview?.stage === "fund" ? `feepool.${poolReview.family}` : `script ${hex(o.script)}`}`,
-      ),
-    );
+    const recipients = connectPaymentReview
+      ? connectPaymentReview.outputs.map((row) => `${row.valueSats} sat · ${row.role} · ${row.scriptHex}`)
+      : await Promise.all(
+        tx.outputs.map(async (o) =>
+          o.script.length === 25
+            ? `${o.satoshis} sat · ${await p2pkhOutputAddress(o.script, c.network as "main" | "test")}`
+            : `${o.satoshis} sat · ${poolReview?.stage === "fund" ? `feepool.${poolReview.family}` : `script ${hex(o.script)}`}`,
+        ),
+      );
 
     assertRequest();
-    const ticket=await this.signatureRecorder?.({operation:command.action,channelId:command.channelId,owner:c.owner,backend:'software',amount:String(amount)});
+    if (connectPaymentReview) await this.beginConnectExecution(connectPaymentReview, command.sessionId, command.rawTxHex, command.prevTransactionHexes);
+    const ticket=await this.signatureRecorder?.({operation:command.action,channelId:command.channelId,owner:c.owner,backend:'software',amount:String(amount),...(connectPaymentReview ? {paymentId:connectPaymentReview.paymentId} : {})});
     await ticket?.update('pending','automatic');
+    const spendFacts = {
+      historyId: ticket?.id, fee: String(review.fee),
+      change: String(connectReview?.ownReturn ?? review.change),
+      businessAmount: String(connectReview?.businessAmount ?? (poolReview ? poolReview.locked : amount - review.fee)),
+      ...(connectReview ? {connectPayment: {
+        appId: connectReview.appId, appName: connectReview.appName, origin: connectReview.origin,
+        publisherPublicKeyHex: connectReview.publisherPublicKeyHex, recipientOwnership: connectReview.ownership,
+        paymentType: connectReview.paymentType, businessKind: connectReview.businessKind, recipientLabel: connectReview.recipientLabel,
+      }} : {}),
+      ...(poolReview ? {pool: {family:poolReview.family,stage:poolReview.stage,paid:String(poolReview.paid),locked:String(poolReview.locked)}} : {}),
+    };
     try {const result=await this.gate.execute(
       inspection,
       async (request, quote) => {
         await ticket?.update('pending','manual');
-        return this.confirm(request, quote, recipients, {
-          historyId: ticket?.id,
-          fee: String(review.fee),
-          change: String(review.change),
-          ...(poolReview
-            ? {
-                pool: {
-                  family: poolReview.family,
-                  stage: poolReview.stage,
-                  paid: String(poolReview.paid),
-                  locked: String(poolReview.locked),
-                },
-              }
-            : {}),
-        });},
+        return this.confirm(request, quote, recipients, spendFacts);},
       async () => {
         const signatures: string[] = [];
         for (let i = 0; i < tx.inputs.length; i++) {
@@ -754,11 +1281,38 @@ export class WalletPayments {
           signatures.push(
             hex(signature) + (isPool && command.authorization ? "" : "41"),
           );
+          if (connectPaymentReview) await this.persistConnectSignedMaterial(connectPaymentReview.paymentId, signatures);
+        }
+        if (connectPaymentReview) {
+          await this.persistConnectSignedMaterial(connectPaymentReview.paymentId, signatures, buildSignedP2pkhExact(raw, tx, signatures, pub));
         }
         return { signatures, amount: String(amount), fee: String(review.fee) };
       },
-      assertRequest,
-    );await ticket?.update('completed');return result;}
-    catch(error){await ticket?.update(signatureFailure(error));throw error;}
+      async () => {
+        assertRequest();
+        if (connectPaymentReview) await this.markConnectSigningStarted(connectPaymentReview.paymentId);
+      },
+      (request, quote) => {
+        if (poolOperation || quote.reasons.length || connectReview?.forceConfirm) return;
+        // Bounded queue, never silently discard an unseen spend notice.
+        if (this.spendNotices.size >= 64) throw Error("spend-notice-capacity");
+        const id = crypto.randomUUID();
+        this.spendNotices.set(id, {id, automatic:true, channelId:request.channelId, sessionId:request.sessionId,
+          owner:request.owner,wallet:this.publicKeyHex,network:request.network,paymentType:request.paymentType,kind:request.kind,
+          amount:String(quote.amount),used:String(quote.used),singleLimit:String(quote.singleLimit),sessionLimit:null,reasons:[],recipients,...spendFacts});
+      },
+    );
+      if (connectPaymentReview) await this.finishConnectExecution(connectPaymentReview.paymentId, "signed").catch(() => undefined);
+      await ticket?.update('completed');
+      return result;}
+    catch(error){
+      if (connectPaymentReview) {
+        const proof = await this.cancelConnectExecution(connectPaymentReview.paymentId).catch(() => null);
+        if (proof) Object.assign(error as object, { connectPaymentNotSigned: proof });
+        else await this.finishConnectExecution(connectPaymentReview.paymentId, "unknown").catch(() => undefined);
+      }
+      await ticket?.update(signatureFailure(error));
+      throw error;
+    }
   }
 }

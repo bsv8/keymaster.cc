@@ -29,6 +29,10 @@ import {
   type MsFileStatResult,
   type P2pkhTransferParams,
   type P2pkhTransferResult,
+  type PaymentPayParams,
+  type PaymentPayResult,
+  type PaymentStatusParams,
+  type PaymentStatusResult,
   type PaymentChannelRegisterParams,
   type PaymentChannelRegisterResult,
   type PriceGetParams,
@@ -419,6 +423,14 @@ export class KeymasterConnectClient {
    *
    * @group Transfer
    */
+  paymentPay(params: PaymentPayParams, options?: KeymasterRequestOptions): Promise<PaymentPayResult> {
+    return this.request("payment.pay", params, options);
+  }
+
+  paymentStatus(params: PaymentStatusParams, options?: KeymasterRequestOptions): Promise<PaymentStatusResult> {
+    return this.request("payment.status", params, options);
+  }
+
   p2pkhTransfer(params: P2pkhTransferParams, options?: KeymasterRequestOptions): Promise<P2pkhTransferResult> {
     return this.request("p2pkh.transfer", params, options);
   }

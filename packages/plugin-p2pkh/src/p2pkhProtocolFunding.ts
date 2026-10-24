@@ -5,8 +5,8 @@
 // 之后的协议交易只花这一个 UTXO 且不带找零。
 //
 // 关键点：
-//   - 选币用既有 allocateUtxos（受保护输入已被过滤掉），因此专用资金不会被
-//     普通选币重复选中；
+//   - 生产 Worker 选币由同一 UTXO manager 的只读计划提供；签名前仍须
+//     原子持有 protocol intent，不能以计划代替占用或回退旧 allocator；
 //   - 资金准备交易提供 changeAddress，所以余额差走找零而不是矿工费；
 //   - 产出的专用 UTXO 立即登记为受保护输出，普通转账不能误花；
 //   - 同一个 fundingId 只对应一笔专用资金，重复准备返回同一个 UTXO；
@@ -80,8 +80,8 @@ export interface CreateProtocolFundingServiceDeps {
   store: ProtocolFundingStore;
   now?(): number;
   /** 枚举并分配钱包 UTXO；金额单位为 number，越界必须由调用方拒绝。 */
-  allocate(input: { assetId: "bsv" | "bsvtest"; amountSatoshis: number; feeReserveSatoshis: number }): Promise<{
-    selected: { txid: string; vout: number; value: number; address: string }[];
+  allocate(input: { assetId: "bsv" | "bsvtest"; amountSatoshis: number; feeReserveSatoshis: number; feeRateSatoshisPerKb: number }): Promise<{
+    selected: { txid: string; vout: number; value: number; address: string; previousTransactionHex?: string }[];
     totalInputSatoshis: number;
   }>;
   /** 派发后观察一笔已广播交易的链上状态。 */
@@ -478,6 +478,7 @@ export function createProtocolFundingService(deps: CreateProtocolFundingServiceD
       assetId,
       amountSatoshis: toSafeNumber(required),
       feeReserveSatoshis,
+      feeRateSatoshisPerKb: input.feeRateSatoshisPerKb,
     });
     if (allocation.selected.length === 0) throw new Error("没有可用于准备专用资金的 UTXO");
 
@@ -494,11 +495,13 @@ export function createProtocolFundingService(deps: CreateProtocolFundingServiceD
         vout: utxo.vout,
         value: requireSafeNumber(utxo.value, `准备资金输入 ${utxo.txid}:${utxo.vout}`),
         address: utxo.address,
+        ...(utxo.previousTransactionHex === undefined ? {} : { previousTransactionHex: utxo.previousTransactionHex }),
       })),
       outputs: [{ value: toSafeNumber(required), scriptHex: dedicatedScriptHex, label: "protocol-dedicated-funding" }],
       feeRateSatoshisPerKb: input.feeRateSatoshisPerKb,
       // 余额差走找零：没有 changeAddress 时 spend 会拒绝把余款当矿工费。
       changeAddress,
+      protocolKind: "fund",
     });
 
     const base = {

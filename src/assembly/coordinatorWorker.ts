@@ -1058,6 +1058,7 @@ function releaseSatRelatedResources(reason: string): import("@keymaster/plugin-s
   // 防止永不结束的旧 handler 在新 owner 中制造未受控并发。
   windowP2pWorkerRuntime.cancelSatInboundHandlers(undefined, `Sat runtime was released: ${reason}`);
   satIncomingHandlers.clear();
+  p2pkhWorkerOperations.dispose();
   const { starting: p2pkhStarting, protocolStarting } = workerTransferRuntime.release();
   resetP2pkhSettingsRuntime();
   lastSatState = undefined;
@@ -2125,6 +2126,10 @@ function createP2pkhSnapshotWocSource(woc: WocService): WocService {
         ? testP2pkhUnspentAllProvider(network, address)
         : woc.getAddressUnspentAll(network, address, options),
     getTransactionObservation: (network: "main" | "test", txid: string, options?: import("@keymaster/contracts").WocRequestOptions) => woc.getTransactionObservation(network, txid, options),
+    // 测试夹具替换 `unspent/all` 时，spent 查询也必须留在本地：否则提交前的
+    // “输入是否已被花费”会打到真实 WoC，组件链夹具就无法离线运行。
+    getSpentOutput: async (network: "main" | "test", txid: string, vout: number, options?: import("@keymaster/contracts").WocRequestOptions) =>
+      testP2pkhUnspentAllProvider ? null : woc.getSpentOutput(network, txid, vout, options),
   } as unknown as WocService;
 }
 
@@ -2727,7 +2732,19 @@ function currentP2pkhDomainStorage(): BorrowedModuleFileStore {
 }
 
 const p2pkhWorkerOperations = createP2pkhWorkerOperations({
-  domain: p2pkhWorkerRuntime, walletState: workerWalletState,
+  // 测试接缝：替换 `unspent/all` 时，Worker 的 WoC 读数也留在本地——
+  // 否则 manager 路径广播前的“输入是否已被花费”检查会打到真实 WoC。
+  domain: {
+    ...p2pkhWorkerRuntime,
+    query: () => {
+      // 与 Worker 运行时端口同一口径：单元 setup 没绑上读数时退回装配层的
+      // WoC 服务（领域夹具模式），否则广播前的“输入是否已被花费”检查
+      // 会因为没有读数而直接拒绝提交。
+      const query = p2pkhWorkerRuntime.query() ?? p2pkhWocService;
+      return query && testP2pkhUnspentAllProvider ? createP2pkhSnapshotWocSource(query) : query;
+    },
+  },
+  walletState: workerWalletState,
   network: () => coordinatorMeta.p2pkhSettings.bsvNetwork,
   storage: currentP2pkhDomainStorage,
   available: () => isCoordinatorProductRegistered("p2pkh"),

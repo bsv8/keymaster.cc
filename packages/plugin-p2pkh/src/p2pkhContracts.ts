@@ -12,7 +12,7 @@
 //     唯一 owner 真值，UTXO / history 过滤同 owner 时直接匹配 hex。
 
 import { defineCapability } from "webloom-framework";
-import type { BalanceBroadcaster, BsvNetwork, KeyIdentity, P2pkhBalance, P2pkhBalanceBreakdown, P2pkhUtxoBinding, CentralBroadcastFailureReason } from "@keymaster/contracts";
+import type { BalanceBroadcaster, BsvNetwork, KeyIdentity, P2pkhBalance, P2pkhBalanceBreakdown, P2pkhConnectPaymentFacts, P2pkhConnectPaymentPreview, P2pkhUtxoBinding, CentralBroadcastFailureReason } from "@keymaster/contracts";
 
 // 余额广播契约属于全局 contracts；这里重导出旧路径，兼容插件内部和外部现有 import。
 export type { P2pkhBalance, P2pkhBalanceBreakdown } from "@keymaster/contracts";
@@ -317,11 +317,13 @@ export interface P2pkhTransferInput {
   assetId: P2pkhAssetId;
   /** session / caller 视角的 owner public key hex；UTXO 选币 / 签名 key / resourceId 全按该 owner 走。 */
   ownerPublicKeyHex: string;
-  recipientAddress: string;
+  recipientAddress?: string;
   amountSatoshis: number;
   /** 使用所有可用输入；最终收款额在签名后按实际 fee 自动扣减。 */
   sendAll?: boolean;
   feeRateSatoshisPerKb?: number;
+  /** Connect v1 strict payment facts; mutually exclusive with sendAll. */
+  payment?: P2pkhConnectPaymentFacts;
 }
 
 /**
@@ -340,7 +342,9 @@ export interface P2pkhTransferPreview {
   feeRateSatoshisPerKb: number;
   allocation: UtxoAllocation;
   changeAddress: string;
-  outputs: Array<{ address: string; value: number }>;
+  outputs: Array<{ address?: string; scriptHex?: string; value: number; role?: "business" | "change" }>;
+  /** Present only on the strict Connect payment path. */
+  payment?: P2pkhConnectPaymentPreview;
   estimatedFeeSatoshis: number;
   /** 签名后序列化大小上限；预览不会为了估费调用私钥。 */
   serializedSizeBytes: number;
@@ -348,6 +352,8 @@ export interface P2pkhTransferPreview {
   txid: string;
   /** 未签名交易；不能用于广播，不含私钥签名。 */
   rawTxHex: string;
+  /** Durable UTXO Manager allocation bound to this preview (production Worker path). */
+  managerAllocationId?: string;
   /** 本次准备的内存标识；重试时用于区分每一轮提交。 */
   previewId: string;
   /** 组合阶段捕获的 UTXO 快照序号；纯兼容夹具可省略。 */
@@ -364,6 +370,8 @@ export type P2pkhTransferResultStatus =
 
 export interface P2pkhTransferResult {
   status: P2pkhTransferResultStatus;
+  /** Final provider outcome when known; distinguishes fresh acceptance from already-known. */
+  delivery?: "accepted" | "already-known";
   txid?: string;
   rawTxHex: string;
   error?: string;
@@ -393,6 +401,8 @@ export interface P2pkhTransactionDetail {
 export interface P2pkhService {
   /** 完整前序证据的链上读接口；缺失时费用池不能退回盲签摘要。 */
   getRawTransaction?(network: "main" | "test", txid: string): Promise<string>;
+  /** Pure local manager lookup; must never initiate signing/broadcast/chain polling. */
+  getPaymentStatus?(input: import("@keymaster/contracts").P2pkhPaymentLookupInput): Promise<import("@keymaster/contracts").P2pkhPaymentLookupResult>;
   /** 全局余额只读广播；所有余额展示/offer 都从此快照取值。 */
   readonly balanceBroadcaster: BalanceBroadcaster;
   syncStatus(): P2pkhSyncStatus;
@@ -468,6 +478,30 @@ export interface P2pkhService {
   prepareTransfer(input: P2pkhTransferInput): Promise<P2pkhTransferPreview>;
   /** 转移：广播 preview 中已经生成好的最终交易。 */
   submitTransfer(preview: P2pkhTransferPreview): Promise<P2pkhTransferResult>;
+  /**
+   * 按预览 ID 提交 Worker 自己记住的那份预览（跨 Runtime 路径）。
+   *
+   * 中文说明：可选能力——只有 Worker 侧的 service 实现它。页面只能带
+   * previewId，选币、金额、找零与 manager allocation 以 Worker 的记录为准。
+   */
+  submitPreparedTransfer?(previewId: string): Promise<P2pkhTransferResult>;
+  /**
+   * 外露 artifact 的占用：Connect/费用池交付已签名 artifact 之前，先让
+   * UTXO Manager 占住它的钱包输入（跨 Runtime 路径，经受限 Coordinator）。
+   */
+  occupyDeliveredArtifact?(input: {
+    ownerPublicKeyHex: string;
+    network: "main" | "test";
+    artifactId: string;
+    unsignedTxHex: string;
+    signedTxHex: string;
+    inputs: Array<{ txid: string; vout: number; value: string; scriptHex: string }>;
+    outputs: Array<{ scriptHex: string; value: string }>;
+    businessAmountSatoshis: string;
+    feeRateSatoshisPerKb: string;
+    feeCapSats: string;
+    protocolKind: "refund" | "close" | "fund" | "state";
+  }): Promise<{ allocationId: string; txid: string }>;
   /** Explicitly revoke an initial submission only when no provider attempt exists. */
   abortUnattemptedLocalSubmission?(input: { ownerPublicKeyHex: string; submissionId: string; reason?: string }): Promise<void>;
 

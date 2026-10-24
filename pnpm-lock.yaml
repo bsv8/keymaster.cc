@@ -547,6 +547,9 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
+      '@keymaster/utxo-manager':
+        specifier: workspace:*
+        version: link:../utxo-manager
       '@keymaster/vaultlink-integration':
         specifier: workspace:*
         version: link:../../coding/keymaster/vaultlink-integration
@@ -838,6 +841,8 @@ importers:
       '@keymaster/contracts':
         specifier: '*'
         version: link:../contracts
+
+  packages/utxo-manager: {}
 
 packages:
 

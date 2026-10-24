@@ -58,6 +58,13 @@ export interface ProtocolSpendPreview {
   protectedClaimIds?: string[];
   inputClaimIds?: string[];
   submissionId?: string;
+  /**
+   * UTXO manager allocation that owns this signed transaction. When present
+   * the manager holds the durable pre-signature intent, the exclusive input
+   * responsibility and the exact bytes, and the broadcast must run through
+   * the manager's dispatch path.
+   */
+  managerAllocationId?: string;
   /** 花费钱包 P2PKH UTXO 时捕获的快照绑定；纯代币输入可省略。 */
   utxoBinding?: P2pkhUtxoBinding;
   /** 兼容协议层的序号投影；无钱包 P2PKH 输入时省略。 */
@@ -124,6 +131,11 @@ export interface ProtocolSpendPrepareInput {
    * 钱包只能报「余款拒绝」，调用方无法构造固定输出的协议交易。
    */
   noChangeRule?: ProtocolSpendNoChangeRule;
+  /**
+   * Protocol role recorded in the UTXO manager's durable intent. Optional so
+   * existing callers keep their behaviour; the default is "refund".
+   */
+  protocolKind?: "refund" | "close" | "fund" | "state";
 }
 
 /**

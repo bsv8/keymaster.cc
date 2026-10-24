@@ -54,6 +54,8 @@ export interface PaymentInspection {
     amount: bigint;
     commitment: Uint8Array;
     pool?: PoolInspection;
+    /** Trusted typed verifier only: funded pool state, never wallet funding. */
+    operation?: "internal-pool-state";
 }
 export interface Quote {
     reasons: readonly ("disabled" | "single-limit" | "session-limit")[];
@@ -127,9 +129,15 @@ export declare class PaymentPolicy {
     markSigned(requestId: string): Promise<void>;
     markUnknown(requestId: string): Promise<void>;
     private setState;
+    /**
+     * 只允许受信执行权威在持有绑定该 request 的未签终止证明时，释放
+     * 重启后已变为 unknown 的预占。普通 App/插件不可到达此方法。
+     * 已签/部分签名的 request 必须拒绝。
+     */
+    releaseUnknownProven(requestId: string): Promise<void>;
     /** 只允许执行权威在确定未执行时释放；App/普通插件不得调用此内部方法。 */
     releaseUnexecuted(requestId: string): Promise<void>;
-    /** 与支付账本原子存储、一起迁移；重复注册只校验来源，绝不覆盖用户决定。 */
+    /** 与支付账本原子存储；已知操作自动注册，重复注册不能替换身份。 */
     registerSigning(channels: SigningChannel[], network: "main" | "test", confirmed: boolean): Promise<SigningChannel[]>;
     /** 调用者只能是钱包设置入口；主机协议不能转发这个能力给硬件。 */
     configureSigning(id: string, mode: SigningMode, expectedRevision: number): Promise<void>;
@@ -149,7 +157,9 @@ export interface Output {
     amount: bigint;
     owned: boolean;
 }
-/** owned 必须来自实际脚本与当前 Key 的核验，不使用主机 change 标记。矿工费不占额度。 */
+/** Output-only net business value. NOT wallet spend or an approval amount:
+ * it cannot account for fees without verified inputs. Inspectors compute spend
+ * as owned inputs minus all own P2PKH outputs instead. */
 export declare function externalOutputAmount(outputs: readonly Output[]): bigint;
 /** 费用池累计更新仅按核验后的对外付款增量；同池连续状态验证由 Profile 负责。 */
 export declare function poolPaymentDelta(previous: bigint, next: bigint): bigint;

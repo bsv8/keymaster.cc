@@ -3,10 +3,12 @@ import { useEffect, useMemo, useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, formatSats, formatSatsWithPrice, type DataTableColumn } from "@keymaster/ui";
 import { useOptionalPluginCapability } from "webloom-framework/react";
 import { router, usePluginBsvPrice, usePluginI18n, usePluginLocale, useOptionalResourceSelector } from "@keymaster/runtime";
-import { BALANCE_NETWORK_KEYS, emptyGlobalBalanceSnapshot, P2PKH_COORDINATOR_CONTROL_CAPABILITY, type GlobalBalanceSnapshot } from "@keymaster/contracts";
+import { BALANCE_NETWORK_KEYS, emptyGlobalBalanceSnapshot, P2PKH_COORDINATOR_CONTROL_CAPABILITY, type GlobalBalanceSnapshot, type P2pkhCoordinatorControl } from "@keymaster/contracts";
 import type { P2pkhBalanceBreakdown, P2pkhGlobalSettings, P2pkhHistoryRecord, P2pkhKeyResource, P2pkhLocalTransaction, P2pkhService, P2pkhSyncStatus, P2pkhTransactionSyncState, P2pkhUtxo } from "../p2pkhContracts.js";
 import { P2PKH_CAPABILITY } from "../p2pkhContracts.js";
 import { detailPath, listPath, parseStoredTransaction, readPage, type P2pkhNetwork, type P2pkhWalletView } from "./p2pkhTransactionView.js";
+
+import { P2pkhConclusionPanel } from "./P2pkhConclusionPanel.js";
 
 export const TRANSACTION_PAGE_SIZE = 20;
 
@@ -63,17 +65,19 @@ export function P2pkhWalletPage(props: { view?: P2pkhWalletView; network?: P2pkh
       </div>
     );
   }
-  return <P2pkhWalletPageInner {...props} service={service} />;
+  return <P2pkhWalletPageInner {...props} service={service} coordinator={coordinator} />;
 }
 
 function P2pkhWalletPageInner({
   view = "transactions",
   network = "main",
-  service
+  service,
+  coordinator
 }: {
   view?: P2pkhWalletView;
   network?: P2pkhNetwork;
   service: P2pkhService;
+  coordinator: P2pkhCoordinatorControl;
 }) {
   const resources = useP2pkhResources();
   const { t } = usePluginI18n();
@@ -278,6 +282,7 @@ function P2pkhWalletPageInner({
         {(wallet.syncError ?? sync?.lastError) ? <p role="alert">{t("p2pkh.wallet.syncError", { defaultValue: "Sync error: {{error}}", error: wallet.syncError ?? sync?.lastError })}</p> : null}
         {actionError ? <p role="alert">{actionError}</p> : null}
       </section>
+      {view === "local-transactions" && networkEnabled && typeof coordinator.p2pkhConclusion === "function" && coordinator.getActivePublicKeyHex() && <P2pkhConclusionPanel coordinator={coordinator} owner={coordinator.getActivePublicKeyHex()!} network={network} />}
       {view === "transactions" ? <>
         <DataTable columns={txColumns} rows={visibleTxRows} rowKey={(row) => row.id} />
         <div className="p2pkh-wallet__pagination" aria-label={t("p2pkh.wallet.pagination", { defaultValue: "Transaction pages" })}>

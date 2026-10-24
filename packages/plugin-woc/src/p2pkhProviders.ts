@@ -17,14 +17,15 @@ export function registerWocP2pkhProviders(input: { registry: P2pkhProviderRegist
     async broadcast({ network, rawTxHex, signal }): Promise<P2pkhBroadcastResult> {
       const result = await input.woc.broadcast(network, rawTxHex, { signal });
       return {
-        status: "accepted",
+        status: result.conclusion === "already-in-mempool" ? "already-known" : "accepted",
         canonicalTxid: result.canonicalTxid,
         // Provider txid 保真信息必须透传：Worker 与协议层用它区分
         // exact / reversed / mismatch / missing，不能在这里静默丢弃。
         ...(result.providerReturnedTxidRaw === undefined ? {} : { providerReturnedTxidRaw: result.providerReturnedTxidRaw }),
         ...(result.providerReturnedTxidNormalized === undefined ? {} : { providerReturnedTxidNormalized: result.providerReturnedTxidNormalized }),
         ...(result.txidIntegrity === undefined ? {} : { txidIntegrity: result.txidIntegrity }),
-        providerCode: "woc",
+        providerCode: result.conclusion ?? "woc",
+        ...(result.evidence === undefined ? {} : { providerMessage: JSON.stringify(result.evidence) }),
       };
     },
   });

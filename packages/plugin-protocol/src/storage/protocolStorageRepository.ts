@@ -13,7 +13,9 @@ import type {
   BorrowedKeyValueStore,
   ConnectSessionRecord,
   ProtocolCommandRecord,
+  ProtocolFeePoolDeliveryRecord,
   ProtocolFeePoolRecord,
+  ProtocolConnectPaymentRecord,
   ProtocolOriginSettingsRecord,
   ProtocolStorageRepository
 } from "@keymaster/contracts";
@@ -31,6 +33,8 @@ const PARTITION = "protocol";
 const COMMAND_PREFIX = "commands/";
 const ORIGIN_PREFIX = "origins/";
 const FEE_POOL_PREFIX = "fee-pools/";
+const FEE_POOL_DELIVERY_PREFIX = "fee-pool-deliveries/";
+const CONNECT_PAYMENT_PREFIX = "connect-payments/";
 const SESSION_PREFIX = "sessions/";
 
 function requireStore(store: BorrowedKeyValueStore | undefined, name: string): BorrowedKeyValueStore {
@@ -73,7 +77,9 @@ export function openProtocolStorageRepository(stores: ProtocolStorageStores): Pr
   const commandKey = (id: string) => `${COMMAND_PREFIX}${id}`;
   const originKey = (origin: string) => `${ORIGIN_PREFIX}${encodeURIComponent(origin)}`;
   const feePoolKey = (key: string) => `${FEE_POOL_PREFIX}${encodeURIComponent(key)}`;
+  const feePoolDeliveryKey = (id: string) => `${FEE_POOL_DELIVERY_PREFIX}${encodeURIComponent(id)}`;
   const sessionKey = (id: string) => `${SESSION_PREFIX}${encodeURIComponent(id)}`;
+  const connectPaymentKey = (key: string) => `${CONNECT_PAYMENT_PREFIX}${encodeURIComponent(key)}`;
 
   return {
     /* ----- command-history ----- */
@@ -111,6 +117,71 @@ export function openProtocolStorageRepository(stores: ProtocolStorageStores): Pr
     },
     async listFeePoolsByOrigin(origin: string) {
       return (await listValues<ProtocolFeePoolRecord>(durablePolicy, FEE_POOL_PREFIX))
+        .map((row) => row.value)
+        .filter((row) => row.origin === origin);
+    },
+
+    /* ----- feePoolDeliveries (E01) ----- */
+    async putFeePoolDelivery(record: ProtocolFeePoolDeliveryRecord) {
+      await durablePolicy.put(feePoolDeliveryKey(record.id), record, { partition: PARTITION });
+    },
+    async getFeePoolDelivery(id: string) {
+      return (await durablePolicy.get<ProtocolFeePoolDeliveryRecord>(feePoolDeliveryKey(id), { partition: PARTITION }))?.value ?? null;
+    },
+    async listFeePoolDeliveriesByOrigin(origin: string) {
+      return (await listValues<ProtocolFeePoolDeliveryRecord>(durablePolicy, FEE_POOL_DELIVERY_PREFIX))
+        .map((row) => row.value)
+        .filter((row) => row.origin === origin);
+    },
+    async settleFeePoolDelivery(id: string, settledTxid: string, settledAt: number) {
+      const existing = (await durablePolicy.get<ProtocolFeePoolDeliveryRecord>(feePoolDeliveryKey(id), { partition: PARTITION }))?.value;
+      if (!existing) throw new Error(`Protocol fee pool delivery not found: ${id}`);
+      await durablePolicy.put(feePoolDeliveryKey(id), { ...existing, settledTxid, settledAt }, { partition: PARTITION });
+    },
+
+    /* ----- Connect payment idempotency ----- */
+    async getConnectPayment(key: string) {
+      return (await durablePolicy.get<ProtocolConnectPaymentRecord>(connectPaymentKey(key), { partition: PARTITION }))?.value ?? null;
+    },
+    async getConnectPaymentEntry(key: string) {
+      const entry = await durablePolicy.get<ProtocolConnectPaymentRecord>(connectPaymentKey(key), { partition: PARTITION });
+      return entry ? { record: entry.value, revision: entry.revision } : null;
+    },
+    async claimConnectPayment(record: ProtocolConnectPaymentRecord, options: { maxPending?: number } = {}) {
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        // Read the partition revision BEFORE checking the key. A competing
+        // claim changes the revision; this claim then fails CAS instead of
+        // overwriting the winner.
+        const revision = await currentRevision(durablePolicy);
+        const existing = (await durablePolicy.get<ProtocolConnectPaymentRecord>(connectPaymentKey(record.key), { partition: PARTITION }))?.value ?? null;
+        if (existing) return { created: false, record: existing };
+        if (options.maxPending !== undefined) {
+          const pending = (await listValues<ProtocolConnectPaymentRecord>(durablePolicy, CONNECT_PAYMENT_PREFIX))
+            .map((row) => row.value)
+            .filter((row) => row.origin === record.origin && row.status === "pending").length;
+          if (pending >= options.maxPending) throw new Error("payment-pending-limit");
+        }
+        try {
+          await durablePolicy.commit({
+            partition: PARTITION,
+            ifRevision: revision,
+            operations: [{ type: "put", key: connectPaymentKey(record.key), value: record }],
+          });
+          return { created: true, record };
+        } catch (error) {
+          if (attempt === 7) throw error;
+        }
+      }
+      throw new Error("Protocol connect payment claim retry exhausted");
+    },
+    async putConnectPayment(record: ProtocolConnectPaymentRecord) {
+      await durablePolicy.put(connectPaymentKey(record.key), record, { partition: PARTITION });
+    },
+    async putConnectPaymentIfRevision(record: ProtocolConnectPaymentRecord, revision: number) {
+      await durablePolicy.put(connectPaymentKey(record.key), record, { partition: PARTITION, ifRevision: revision });
+    },
+    async listConnectPaymentsByOrigin(origin: string) {
+      return (await listValues<ProtocolConnectPaymentRecord>(durablePolicy, CONNECT_PAYMENT_PREFIX))
         .map((row) => row.value)
         .filter((row) => row.origin === origin);
     },

@@ -8,6 +8,9 @@ import type { P2pkhUtxoSnapshotResource, P2pkhUtxoSnapshotStore } from "./p2pkhU
 type BroadcastRequest = Extract<CoordinatorClientRequest, { kind: "p2pkh.broadcast" }>;
 export interface WorkerBroadcastDependencies {
   assertFresh(): void;
+  /** Internal-only: original durable manager exact, never a Window flag. */
+  recoveringExact?: boolean;
+  signal?: AbortSignal;
   provider?: P2pkhTransactionBroadcastProvider;
   walletState: VaultWalletState;
   storage(): BorrowedModuleFileStore;
@@ -15,7 +18,18 @@ export interface WorkerBroadcastDependencies {
   snapshots: P2pkhUtxoSnapshotStore | undefined;
   resource(owner: string, network: "main" | "test"): Promise<P2pkhUtxoSnapshotResource | undefined>;
   listProtectedOutpoints(input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<readonly { txid: string; vout: number }[]>;
-  listProtocolProtectedOutpoints?(input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<readonly { txid: string; vout: number }[]>;
+  listProtocolProtectedOutpoints?(input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<readonly { txid: string; vout: number; kind?: string; source?: string; submissionId?: string }[]>;
+  /** Final per-input chain-spend check for Manager-authorized ordinary transfers. */
+  assertInputsUnspent?(network: "main" | "test", outpointKeys: readonly string[]): Promise<void>;
+  /**
+   * Manager proof for a protocol-bound broadcast: the frozen manager intent
+   * must bind the same exact transaction and the same inputs, with a
+   * protocol claim on every protected input. A caller flag never proves it.
+   */
+  managerProtocolIntent?(input: {
+    ownerPublicKeyHex: string; network: "main" | "test"; allocationId: string;
+    txid: string; inputOutpointKeys: readonly string[];
+  }): Promise<{ ok: boolean; protectedInputs: string[] }>;
   abortNotDispatched(request: BroadcastRequest, reason: string): Promise<void>;
   refresh(): Promise<{ main?: number; test?: number }>;
   publishChanged(event: { type: "asset.data-changed"; providerId: string; publicKeyHex: string; kinds: string[]; utxoSeqs?: { main?: number; test?: number } }): void;
@@ -28,6 +42,8 @@ export async function executeWorkerP2pkhBroadcast(
   deps: WorkerBroadcastDependencies,
 ): Promise<CoordinatorResponse> {
   deps.assertFresh();
+  if (deps.recoveringExact && !request.submission?.managerAllocationId) throw new Error("Recovered exact requires manager allocation");
+  try {
   const provider = deps.provider;
   if (!provider) {
     await deps.abortNotDispatched(request, "broadcast-provider-unavailable");
@@ -80,7 +96,8 @@ export async function executeWorkerP2pkhBroadcast(
   } else if (request.submission && local.txid.toLowerCase() !== request.submission.txid) {
     return { requestId, sessionEpoch: deps.sessionEpoch(), ack: { status: "validation-error", message: "P2PKH broadcast payload does not match the stored submission" } };
   }
-  if (local.localState !== "submitting" || local.chainResolution !== "unresolved") {
+  if (local.publicKeyHex.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase() || (request.submission && local.rawTxHex.toLowerCase() !== request.submission.rawTxHex.toLowerCase())) throw new Error("Stored broadcast identity/exact mismatch");
+  if ((!deps.recoveringExact && local.localState !== "submitting") || local.chainResolution !== "unresolved") {
     return { requestId, sessionEpoch: deps.sessionEpoch(), ack: { status: "validation-error", message: `Submission is not dispatchable in localState=${local.localState}, chainResolution=${local.chainResolution}` } };
   }
 
@@ -120,34 +137,80 @@ export async function executeWorkerP2pkhBroadcast(
   const protocolProtection = await deps.listProtocolProtectedOutpoints?.({ ownerPublicKeyHex: request.ownerPublicKeyHex, network: request.network }) ?? [];
   deps.assertFresh();
   const protocolKeys = new Set(protocolProtection.map(row => `${row.txid}:${row.vout}`));
-  if (parsedInputOutpointKeys.some(key => protocolKeys.has(key))) {
+  const protocolProtectedInputs = parsedInputOutpointKeys.filter(key => protocolKeys.has(key));
+  if (protocolProtectedInputs.length > 0) {
+    // Two different protections must not be conflated:
+    //  - "protocol-claim" is the input occupation THIS submission created;
+    //    the manager's frozen intent (same exact tx, same inputs) proves it.
+    //  - "protocol-funding" is a real protocol-protected output (dedicated
+    //    funds); it needs a trusted business claim.
+    // The subtraction is per SOURCE, not per outpoint: an outpoint that also
+    // carries somebody else's protection stays protected.
     const evidence = createWorkerProtocolEvidence(deps.storage());
     const protocol = await evidence.getProtocolSubmission(request.submissionId);
     const claims = await evidence.listLocalInputClaims();
-    const inputKeys = protocol?.inputs.map(row => `${row.txid}:${row.vout}`) ?? [];
-    const authorized = protocol?.status === "prepared" && protocol.canonicalTxid === local.txid
-      && protocol.publicKeyHex.toLowerCase() === request.ownerPublicKeyHex.toLowerCase() && protocol.network === request.network
-      && inputKeys.length === parsedInputOutpointKeys.length && inputKeys.every((key, index) => key === parsedInputOutpointKeys[index])
-      && parsedInputOutpointKeys.every(key => claims.some(claim => claim.submissionId === protocol.id && protocol.localInputClaimIds.includes(claim.id)
-        && claim.publicKeyHex.toLowerCase() === request.ownerPublicKeyHex.toLowerCase() && claim.network === request.network && claim.state === "active"
-        && `${claim.txid}:${claim.vout}` === key));
-    deps.assertFresh();
+    const ownClaimSubmissions = new Set(claims
+      .filter(claim => claim.submissionId === request.submissionId
+        && claim.publicKeyHex.toLowerCase() === request.ownerPublicKeyHex.toLowerCase()
+        && claim.network === request.network
+        && claim.state === "active")
+      .map((claim) => claim.submissionId));
+    const foreignProtectedInputs = protocolProtectedInputs.filter((key) =>
+      // A protection that is not one of this submission's own input claims.
+      protocolProtection.some((row) => `${row.txid}:${row.vout}` === key
+        && !(row.kind === "protocol-claim" && ownClaimSubmissions.has(row.submissionId ?? request.submissionId))));
+    const managerAllocationId = request.submission?.managerAllocationId;
+    let authorized = false;
+    if (managerAllocationId && deps.managerProtocolIntent) {
+      // The manager holds the durable protocol intent: it must bind this
+      // exact transaction and the same input set.
+      const proof = await deps.managerProtocolIntent({
+        ownerPublicKeyHex: request.ownerPublicKeyHex,
+        network: request.network,
+        allocationId: managerAllocationId,
+        txid: local.txid,
+        inputOutpointKeys: parsedInputOutpointKeys,
+      });
+      deps.assertFresh();
+      // The submission's own input claims are covered by the manager intent
+      // itself; every other protected output must be a claimed protocol input.
+      authorized = proof.ok && foreignProtectedInputs.every(key => proof.protectedInputs.includes(key));
+    } else {
+      const inputKeys = protocol?.inputs.map(row => `${row.txid}:${row.vout}`) ?? [];
+      authorized = protocol?.status === "prepared" && protocol.canonicalTxid === local.txid
+        && protocol.publicKeyHex.toLowerCase() === request.ownerPublicKeyHex.toLowerCase() && protocol.network === request.network
+        && inputKeys.length === parsedInputOutpointKeys.length && inputKeys.every((key, index) => key === parsedInputOutpointKeys[index])
+        && parsedInputOutpointKeys.every(key => claims.some(claim => claim.submissionId === protocol.id && protocol.localInputClaimIds.includes(claim.id)
+          && claim.publicKeyHex.toLowerCase() === request.ownerPublicKeyHex.toLowerCase() && claim.network === request.network && claim.state === "active"
+          && `${claim.txid}:${claim.vout}` === key));
+      deps.assertFresh();
+    }
     if (!authorized) {
       await deps.abortNotDispatched(request, "protocol-funds-protected");
       return { requestId, sessionEpoch: deps.sessionEpoch(), ack: { status: "ok" }, operationResult: { status: "not-dispatched", reason: "protocol-funds-protected" } };
     }
   }
 
-  // 唯一的 Worker 门禁：在同一无 await 的同步块内完成绑定核对、输入归属
-  // 校验和消费。纯代币输入没有命中钱包快照时保持 untouched，不要求序号。
+  const managerAuthorized = typeof request.submission?.managerAllocationId === "string";
+  if (managerAuthorized && !deps.recoveringExact) {
+    if (!deps.assertInputsUnspent) throw new Error("Manager input spend checker is unavailable");
+    await deps.assertInputsUnspent(request.network, parsedInputOutpointKeys);
+    deps.assertFresh();
+  }
+
+  // Manager 已持久化具体输入占用、signing intent 与 exact-byte dispatch；
+  // 此时不再用旧的 whole-snapshot consume 序号门禁。未迁移的协议路径仍
+  // 保留原 consume 保护，直到其责任也迁入 Manager。
   snapshotResource = await deps.resource(request.ownerPublicKeyHex, request.network);
   deps.assertFresh();
-  const consumeResult = snapshotResource && deps.snapshots
-    ? deps.snapshots.consume(snapshotResource, {
-        binding: consumedBinding,
-        inputOutpointKeys: parsedInputOutpointKeys,
-        txid: local.txid,
-      })
+  const consumeResult = managerAuthorized
+    ? { status: "untouched" as const }
+    : snapshotResource && deps.snapshots
+      ? deps.snapshots.consume(snapshotResource, {
+          binding: consumedBinding,
+          inputOutpointKeys: parsedInputOutpointKeys,
+          txid: local.txid,
+        })
     // 没有该 owner/network 资源时无法证明输入属于钱包快照，按纯协议输入
     // 路径继续；正常 P2PKH 资源由 ensureWorkerP2pkhResources 预先材料化。
     : { status: "untouched" as const };
@@ -172,11 +235,12 @@ export async function executeWorkerP2pkhBroadcast(
     const evidence = createWorkerProtocolEvidence(deps.storage());
     const protocol = await evidence.getProtocolSubmission(request.submissionId);
     if (protocol) {
-      if (protocol.status !== "prepared" || protocol.canonicalTxid !== local.txid || protocol.publicKeyHex.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase() || protocol.network !== request.network) throw Object.assign(new Error("Protocol submission is not dispatchable"), { code: "definitive-not-dispatched" });
+      if ((protocol.status !== "prepared" && !(deps.recoveringExact && protocol.status === "unknown")) || protocol.canonicalTxid !== local.txid || protocol.publicKeyHex.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase() || protocol.network !== request.network) throw Object.assign(new Error("Protocol submission is not dispatchable"), { code: "definitive-not-dispatched" });
       await evidence.putProtocolSubmission({ ...protocol, status: "unknown", updatedAt: new Date().toISOString() });
       deps.assertFresh();
     }
-    const result = await provider.broadcast({ network: request.network, canonicalTxid: local.txid, rawTxHex: local.rawTxHex });
+    if (deps.signal?.aborted) throw new Error("Conclusion query stopped");
+    const result = await provider.broadcast({ network: request.network, canonicalTxid: local.txid, rawTxHex: local.rawTxHex, signal: deps.signal });
     if (result.canonicalTxid !== local.txid) {
       // 中文：Provider 已返回，但 txid 与本地原始交易不一致。它不是“未派发”，
       // 不能回滚消费；同时把回执完整透传，让协议层进入 provider-inconsistent。
@@ -238,8 +302,8 @@ export async function executeWorkerP2pkhBroadcast(
     const message = (rawMessage.trim() || (error instanceof Error ? error.name || "broadcast-isolated" : "broadcast-isolated")).slice(0, 2_048);
     const finishedAt = new Date().toISOString();
     const attempt = { id: `${local.id}:${startedAt}`, submissionId: local.id, providerId: provider.descriptor.id, startedAt, finishedAt, status: "isolated" as const, providerMessage: message };
-    // 只有结构化标记（code=definitive-not-dispatched）或节点明确拒绝交易本体
-    // 的错误才允许回滚消费；HTTP 4xx / 超时 / 网络错误可能是"已存在"，保持 isolated。
+    // Only a trusted pre-dispatch marker permits rollback. Generic node text
+    // and conflicts never prove every input releasable.
     if (isDefinitelyNotDispatchedBroadcastError(error)) {
       if (consumed && snapshotResource && consumedBinding) deps.snapshots?.rollbackConsume(snapshotResource, consumedBinding);
       await deps.abortNotDispatched(request, message);
@@ -247,7 +311,10 @@ export async function executeWorkerP2pkhBroadcast(
     }
     await repository.finishLocalSubmission({ submissionId: local.id, localState: "isolated", reason: message, attempt });
     deps.publishChanged( { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["submission", "balance"] });
-    return { requestId, sessionEpoch: deps.sessionEpoch(), ack: { status: "ok" }, operationResult: { status: "isolated", txid: local.txid, reason: message, providerId: provider.descriptor.id } };
+    return { requestId, sessionEpoch: deps.sessionEpoch(), ack: { status: "ok" }, operationResult: { status: "isolated", txid: local.txid, reason: message, providerId: provider.descriptor.id, ...((error as { code?: unknown })?.code === "woc-mempool-conflict" ? { providerCode: "woc-mempool-conflict" } : {}) } };
+  }
+  } catch (error) {
+    throw error;
   }
 }
 

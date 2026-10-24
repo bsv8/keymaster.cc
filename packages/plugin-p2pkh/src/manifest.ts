@@ -6,6 +6,7 @@ import { identityResources } from "./identityResources.js";
 import { URI_ACTION_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import { createTransferRegistry } from "./registries/transferRegistry.js";
 import { VAULT_WORKER_CRYPTO_CAPABILITY, P2PKH_WORKER_TRANSFER_CAPABILITY, P2PKH_WORKER_PROTOCOL_CAPABILITY } from "@keymaster/contracts";
+import type { P2pkhWorkerTransfer, P2pkhWorkerTransferBinding } from "@keymaster/contracts";
 import { WOC_WORKER_BROADCAST_CAPABILITY } from "@keymaster/contracts";
 import { P2PKH_ASSET_READER_CAPABILITY } from "@keymaster/contracts";
 import { createInstanceRegistryService } from "@keymaster/runtime";
@@ -77,13 +78,14 @@ import {
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
 import type { P2pkhGlobalSettings, P2pkhSyncStatus, P2pkhKeyResource, P2pkhAssetId, P2pkhHistoryRecord, P2pkhLocalTransaction, P2pkhTransactionSyncState, P2pkhUtxo } from "./p2pkhContracts.js";
+import { assetIdToNetwork } from "./p2pkhContracts.js";
 
 type ReadinessState = "initializing" | "no-active-key" | "ready";
 import { createP2pkhService } from "./p2pkhService.js";
 import { P2PKH_CAPABILITY } from "./p2pkhContracts.js";
 import { p2pkhAddressCodec } from "./p2pkhAddressCodec.js";
 import { createProtocolFundingService } from "./p2pkhProtocolFunding.js";
-import { createP2pkhProtocolSpendService } from "./p2pkhProtocolSpend.js";
+import { createWindowProtocolSpend } from "./windowProtocolSpend.js";
 import { createCentralBroadcastService } from "./centralBroadcastService.js";
 import { createP2pkhAssetProvider } from "./p2pkhAssetProvider.js";
 import { createP2pkhTransferProvider } from "./p2pkhTransferProvider.js";
@@ -650,7 +652,7 @@ const p2pkhPluginDefinition = {
     {
       id: "p2pkh.window",
       runtime: "window-main",
-    connect: { providerMethods: ["p2pkh.transfer", "feepool.prepare", "feepool.commit"] },
+    connect: { providerMethods: ["p2pkh.transfer", "payment.pay", "payment.status", "feepool.prepare", "feepool.commit"] },
       scopeKind: "owner-session",
       provides: [TRANSFER_REGISTRY_CAPABILITY, PROTECTED_OUTPOINT_REGISTRY_CAPABILITY, P2PKH_CAPABILITY, BALANCE_BROADCAST_CAPABILITY, P2PKH_ADDRESS_CODEC_CAPABILITY, P2PKH_SETTINGS_READER_CAPABILITY, P2PKH_PROTOCOL_SPEND_CAPABILITY, P2PKH_FUNDING_CAPABILITY, P2PKH_SUBMISSION_OBSERVER_CAPABILITY, CENTRAL_BROADCAST_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY],
       storage: CENTRAL_STORAGE_DECLARATIONS.p2pkhFiles,
@@ -728,6 +730,40 @@ const p2pkhPluginDefinition = {
     });
     ctx.provide(CENTRAL_BROADCAST_CAPABILITY, centralBroadcastService);
 
+    // 普通转账的 Worker 出口：Window 不持有 Worker 的本地能力（跨 Runtime 的
+    // local capability 依赖被装配校验拒绝），只经受限 Coordinator 连接调用
+    // Worker 的 prepare/submit。跨边界只传可序列化数据；选币、冻结、签名与
+    // 广播仍全部在 Worker 的 UTXO Manager 内完成，页面无法改写事实。
+    const workerTransfer: P2pkhWorkerTransferBinding = {
+      getService: async () => Object.freeze({
+        getGlobalSettings: () => publicCoordinator.getBootstrapSnapshot().p2pkhSettings ?? {},
+        prepareTransfer: async (input: Parameters<P2pkhWorkerTransfer["prepareTransfer"]>[0]) => {
+          const result = await publicCoordinator.p2pkhTransferPrepare({
+            assetId: input.assetId,
+            network: assetIdToNetwork(input.assetId),
+            ownerPublicKeyHex: input.ownerPublicKeyHex,
+            recipientAddress: input.recipientAddress,
+            amountSatoshis: input.amountSatoshis,
+            ...(input.sendAll === undefined ? {} : { sendAll: input.sendAll }),
+            ...(input.feeRateSatoshisPerKb === undefined ? {} : { feeRateSatoshisPerKb: input.feeRateSatoshisPerKb }),
+            ...(input.paymentContext === undefined ? {} : { paymentContext: input.paymentContext }),
+          });
+          if (result.status !== "ok") throw new Error(`P2PKH transfer prepare failed: ${result.status}`);
+          return result.value;
+        },
+        submitTransfer: async (preview: unknown) => {
+          const record = preview as { previewId?: string; ownerPublicKeyHex?: string };
+          if (!record.previewId || !record.ownerPublicKeyHex) throw new Error("P2PKH transfer preview lost its identity");
+          const result = await publicCoordinator.p2pkhTransferSubmit({
+            previewId: record.previewId,
+            ownerPublicKeyHex: record.ownerPublicKeyHex,
+          });
+          if (result.status !== "ok") throw new Error(`P2PKH transfer submit failed: ${result.status}`);
+          return { ...result.value, localInputClaimIds: [...result.value.localInputClaimIds] };
+        },
+      }),
+    };
+
     // 选币门禁的可变游标：先声明，`createP2pkhService` 需要它，而 fundingService 在
     // 其后才装配（它依赖 P2PKH 协议 spend 与保护登记）。
     let protectionRestore: Promise<void> = Promise.resolve();
@@ -757,6 +793,7 @@ const p2pkhPluginDefinition = {
     const service = createP2pkhService({
       signal: ctx.scope.signal,
       vault,
+      workerTransfer,
       coordinator: publicCoordinator,
       messageBus,
       walletState,
@@ -774,53 +811,10 @@ const p2pkhPluginDefinition = {
     });
     ctx.provide(BALANCE_BROADCAST_CAPABILITY, service.balanceBroadcaster);
     ctx.provide(P2PKH_ADDRESS_CODEC_CAPABILITY, p2pkhAddressCodec);
-    ctx.provide(P2PKH_PROTOCOL_SPEND_CAPABILITY, createP2pkhProtocolSpendService({
-      assertInputsUnspent:async(network,inputs)=>{await Promise.all(inputs.map(async i=>{if(await woc.getSpentOutput(network,i.txid,i.vout)!==null)throw Error("Protocol input is already spent");}));},
-      vault,
-      previousTransactions: async (network, inputs) => {
-        if (!woc.getRawTransaction) throw new Error("Complete previous transaction reader unavailable");
-        return Promise.all(inputs.map(i => woc.getRawTransaction!(network, i.txid)));
-      },
-      centralBroadcastService,
-      getUtxoBinding: async ({ ownerPublicKeyHex, network }) => {
-        const result = await publicCoordinator.p2pkhUtxosGet({ ownerPublicKeyHex, network });
-        if (result.status !== "ok" || !result.value.available || result.value.state !== "fresh" || result.value.seq === undefined) return undefined;
-        return { resourceId: `p2pkh:${network}`, seq: result.value.seq };
-      },
-      claimStore: {
-        async tryClaimInputs(input) {
-          if (walletState.snapshot().activePublicKeyHex?.toLowerCase() !== input.publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
-          const bundle = await openP2pkhStateRepository(storage);
-          return createP2pkhStateRepository(bundle).tryClaimInputs(input);
-        },
-        async releaseLocalInputClaims(input) {
-          if (walletState.snapshot().activePublicKeyHex?.toLowerCase() !== input.publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
-          const bundle = await openP2pkhStateRepository(storage);
-          return createP2pkhStateRepository(bundle).releaseLocalInputClaims(input.claimIds);
-        }
-      },
-        submissionStore: {
-          async getProtocolSubmission(input) {
-          if (walletState.snapshot().activePublicKeyHex?.toLowerCase() !== input.publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
-          const bundle = await openP2pkhStateRepository(storage);
-          return createP2pkhStateRepository(bundle).getProtocolSubmission(input.id);
-        },
-        async putProtocolSubmission(record) {
-          if (walletState.snapshot().activePublicKeyHex?.toLowerCase() !== record.publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
-          const bundle = await openP2pkhStateRepository(storage);
-          return createP2pkhStateRepository(bundle).putProtocolSubmission(record);
-        }
-      },
-      protectedOutpoints,
-      getKeyForOwner: async (ownerPublicKeyHex: string) => {
-        // 单 Key 本地钱包：只有当前唯一 Key 能作为 owner。
-        const active = walletState.snapshot().activePublicKeyHex;
-        if (!active || active.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) {
-          throw new Error(`P2PKH owner key not ready: ${ownerPublicKeyHex}`);
-        }
-        return { publicKeyHex: requireUnlockedWalletIdentity(walletState.snapshot()).publicKeyHex };
-      }
-    }));
+    // Window retains the plugin interface, never a signer or a local claim
+    // authority. MSFile/Token/1Sat use the same durable Worker manager path.
+    const protocolSpend = createWindowProtocolSpend(publicCoordinator);
+    ctx.provide(P2PKH_PROTOCOL_SPEND_CAPABILITY, protocolSpend);
 
     // 专用资金：协议插件用它拆出金额已知的单输入 UTXO，避免协议交易直接花大额余额。
     //
@@ -879,17 +873,10 @@ const p2pkhPluginDefinition = {
         },
       },
       allocate: async (request) => {
-        const allocation = await service.allocateUtxos({
-          amountSatoshis: request.amountSatoshis,
-          feeReserveSatoshis: request.feeReserveSatoshis,
-          assetId: request.assetId,
-        });
-        return {
-          selected: allocation.selected.map((utxo) => ({
-            txid: utxo.txid, vout: utxo.vout, value: utxo.value, address: utxo.address,
-          })),
-          totalInputSatoshis: allocation.totalInputSatoshis,
-        };
+        const ownerPublicKeyHex = walletState.snapshot().activePublicKeyHex;
+        if (!ownerPublicKeyHex) throw new Error("Protocol funding owner is not active");
+        return protocolSpend.planFunding({ ownerPublicKeyHex, network: request.assetId === "bsvtest" ? "test" : "main",
+          amountSatoshis: request.amountSatoshis, feeRateSatoshisPerKb: request.feeRateSatoshisPerKb });
       },
       observeChain: async (network, txid) => {
         if (woc === undefined) return "unknown";

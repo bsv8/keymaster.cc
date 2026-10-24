@@ -121,6 +121,7 @@ export function createCentralBroadcastService(deps: CentralBroadcastServiceDeps)
         txid: input.txid,
         rawTxHex: input.rawTxHex,
         ...(input.utxoBinding === undefined ? {} : { utxoBinding: input.utxoBinding }),
+        ...(input.managerAllocationId === undefined ? {} : { managerAllocationId: input.managerAllocationId }),
       },
     });
     if (result.status === "ok") return result.value as CoordinatorP2pkhBroadcastResult;

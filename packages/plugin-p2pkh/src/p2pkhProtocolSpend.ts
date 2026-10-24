@@ -18,6 +18,7 @@ import { isDefinitelyNotDispatchedBroadcastError } from "@keymaster/contracts";
 import type { P2pkhProtocolSubmission, P2pkhUtxo } from "./p2pkhContracts.js";
 import {
   calcTxidFromRawTxHex,
+  pubKeyHash160Hex,
   rawTxHexByteLength,
   serializeTx,
   type UnsignedTx,
@@ -47,6 +48,47 @@ export interface P2pkhProtocolSpendSubmissionStore {
   putProtocolSubmission(record: P2pkhProtocolSubmission): Promise<void>;
 }
 
+/**
+ * UTXO manager port for protocol spends. The manager freezes a durable
+ * pre-signature intent (classified inputs, fee cap, business cap) before the
+ * signer runs and owns the exact bytes afterwards. The protocol service keeps
+ * its own WAL as business/history evidence; the manager is the money truth.
+ */
+export interface P2pkhProtocolManagerPort {
+  /** Host-only read projection of common kernel selection. Not a reservation
+   * or approval; beginProtocolIntent must still claim before private-key use. */
+  selectFundingInputs?(input: {
+    ownerPublicKeyHex: string;
+    network: BsvNetwork;
+    amountSatoshis: number;
+    feeRateSatoshisPerKb: number;
+  }): Promise<{ selected: ProtocolSpendInput[]; totalInputSatoshis: number }>;
+  beginProtocolIntent(input: {
+    ownerPublicKeyHex: string;
+    network: BsvNetwork;
+    binding: { kind: "refund" | "close" | "fund" | "state"; poolId: string };
+    unsignedTxHex: string;
+    inputs: Array<{ outpoint: string; class: "wallet" | "protected" | "external"; value: string; scriptHex: string; claimId: string | null }>;
+    outputs: Array<{ scriptHex: string; value: string }>;
+    businessAmountSats: string;
+    feeRateSatPerKb: string;
+    feeCapSats: string;
+    feePolicy: "rate" | "exact";
+    externalProofs?: Record<string, { value: string; scriptHex: string }>;
+    /** Protection sources this intent takes over (the submission's own claim). */
+    claims?: string[];
+    /** Q04: stable identity of a delivered artifact (idempotent replay). */
+    artifactId?: string;
+  }): Promise<{ allocationId: string }>;
+  completeProtocolIntent(input: {
+    ownerPublicKeyHex: string;
+    network: BsvNetwork;
+    allocationId: string;
+    signedTxHex: string;
+    delivery: "wallet" | "external";
+  }): Promise<{ txid: string; feeSats: string }>;
+}
+
 export interface P2pkhProtocolSpendDeps {
   vault: Pick<VaultService, "status" | "createActiveKeyCrypto" | "requestPayment">;
   previousTransactions(network: BsvNetwork, inputs: readonly ProtocolSpendInput[]): Promise<string[]>;
@@ -60,6 +102,8 @@ export interface P2pkhProtocolSpendDeps {
   claimStore: P2pkhProtocolSpendClaimStore;
   submissionStore?: P2pkhProtocolSpendSubmissionStore;
   protectedOutpoints?: ProtectedOutpointRegistry;
+  /** UTXO manager: durable pre-sign intent and exact-byte responsibility. */
+  protocolManager?: P2pkhProtocolManagerPort;
 }
 
 function hexToBytes(hex: string): Uint8Array {
@@ -74,13 +118,17 @@ function hexToBytes(hex: string): Uint8Array {
   return out;
 }
 
+/** The wallet's own P2PKH locking script, derived from the owner public key. */
+function p2pkhScriptForPublicKey(publicKeyHex: string): string {
+  return `76a914${pubKeyHash160Hex(publicKeyHex).toLowerCase()}88ac`;
+}
+
 function buildUnsignedTx(
   inputs: ProtocolSpendInput[],
   outputs: ProtocolSpendOutput[],
   changeAddress: string | undefined,
   changeSatoshis: number
-): UnsignedTx {
-  const txInputs = inputs.map((u) => ({
+): UnsignedTx {  const txInputs = inputs.map((u) => ({
     prevTxid: u.txid,
     prevVout: u.vout,
     scriptSig: new Uint8Array(0),
@@ -253,6 +301,16 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
   }
 
   const tickets=new Map<string,{preview:ProtocolSpendPreview;input:ProtocolSpendPrepareInput;expires:number}>();
+  /**
+   * Freeze the manager intent before the signer runs. Without a manager port
+   * the protocol service keeps its historic behaviour; hosts that wire the
+   * manager get the durable intent and the exclusive input responsibility.
+   */
+  const beginManagerIntent = async (intent: Parameters<P2pkhProtocolManagerPort["beginProtocolIntent"]>[0]):
+    Promise<{ allocationId: string } | undefined> => {
+    if (!deps.protocolManager) return undefined;
+    return deps.protocolManager.beginProtocolIntent(intent);
+  };
   const build=async(input:ProtocolSpendPrepareInput,sign:boolean):Promise<ProtocolSpendPreview>=>{
       let protectedClaimIds: string[] = [];
       let inputClaimIds: string[] = [];
@@ -272,6 +330,8 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
         changeAddress: string | undefined;
         changeSatoshis: number;
         feeSatoshis: number;
+        /** 费率型授权（rate）还是已确认的固定费用（exact）。 */
+        feePolicy: "rate" | "exact";
         /** 裸公钥单签输入的锁定脚本；按输入顺序给出，缺省项按 P2PKH 处理。 */
         lockingScripts?: readonly (string | undefined)[];
       }): Promise<ProtocolSpendPreview> => {
@@ -301,12 +361,80 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           if (!raw) throw new Error("Complete previous transaction reader unavailable");
           return raw;
         }));
+        // The manager needs trusted prevout facts: the value and script come
+        // from the exact previous transaction, never from the caller's claim.
+        const prevoutFacts = input.inputs.map((item, index) => {
+          const previous = parseP2pkhTransaction(previousTransactions[index]!, item.txid);
+          const output = previous.outputs[item.vout];
+          if (!output) throw new Error("Protocol previous transaction output is missing");
+          return {
+            outpoint: `${item.txid.toLowerCase()}:${item.vout}`,
+            value: String(output.value),
+            scriptHex: output.scriptHex.toLowerCase(),
+          };
+        });
+        // Classification is by trusted script, never by the caller's label:
+        // the wallet's own P2PKH is a wallet input, a protocol-protected
+        // wallet output is a protected input, everything else is external and
+        // needs a trusted prevout proof.
+        const walletScriptHex = p2pkhScriptForPublicKey(resolvedOwner.publicKeyHex);
+        const classifiedInputs = prevoutFacts.map((fact) => {
+          if (fact.scriptHex !== walletScriptHex) {
+            return { ...fact, class: "external" as const, claimId: null };
+          }
+          const protectedInput = deps.protectedOutpoints?.isProtected({
+            txid: fact.outpoint.split(":")[0]!,
+            vout: Number(fact.outpoint.split(":")[1]),
+            network: input.network,
+            publicKeyHex: resolvedOwner.publicKeyHex,
+          }) === true;
+          if (protectedInput) {
+            const ownerPluginId = input.requestingPluginId;
+            if (!ownerPluginId) throw new Error("Protocol spend requires requestingPluginId for protected inputs");
+            return {
+              ...fact,
+              class: "protected" as const,
+              claimId: `${input.network}:${fact.outpoint}:${ownerPluginId}`,
+            };
+          }
+          return { ...fact, class: "wallet" as const, claimId: null };
+        });
+        const managerIntent = await beginManagerIntent({
+          ownerPublicKeyHex: resolvedOwner.publicKeyHex,
+          network: input.network,
+          binding: { kind: input.protocolKind ?? "refund", poolId: submissionId },
+          unsignedTxHex: Array.from(serializeTx(unsigned), b => b.toString(16).padStart(2, "0")).join(""),
+          inputs: classifiedInputs,
+          outputs: plan.outputs.map((output) => ({ scriptHex: output.scriptHex.toLowerCase(), value: String(output.value) })),
+          businessAmountSats: String(plan.outputs.reduce((sum, output) => sum + output.value, 0)),
+          feeRateSatPerKb: String(input.feeRateSatoshisPerKb),
+          feeCapSats: String(plan.feeSatoshis),
+          feePolicy: plan.feePolicy,
+          // The manager takes over exactly the input claim this submission
+          // just created; any other protection keeps blocking the input.
+          claims: [`occupation:${submissionId}`],
+          externalProofs: Object.fromEntries(
+            classifiedInputs
+              .filter((fact) => fact.class === "external")
+              .map((fact) => [fact.outpoint, { value: fact.value, scriptHex: fact.scriptHex }]),
+          ),
+        });
         const rawTxHex = await signProtocolPayment({
           rawTxHex: Array.from(serializeTx(unsigned), b => b.toString(16).padStart(2, "0")).join(""),
           prevTransactionHexes: previousTransactions,
           publicKeyHex: resolvedOwner.publicKeyHex, network: input.network,
           pluginId: input.requestingPluginId ?? "p2pkh", requestPayment: c => deps.vault.requestPayment(c),
         });
+        if (managerIntent) {
+          // The exact bytes become durable BEFORE the broadcast is attempted.
+          await deps.protocolManager!.completeProtocolIntent({
+            ownerPublicKeyHex: resolvedOwner.publicKeyHex,
+            network: input.network,
+            allocationId: managerIntent.allocationId,
+            signedTxHex: rawTxHex,
+            delivery: "wallet",
+          });
+        }
         const serializedSizeBytes = rawTxHexByteLength(rawTxHex);
         inputClaimIds = (await deps.claimStore.tryClaimInputs({
           submissionId,
@@ -345,6 +473,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           protectedClaimIds,
           inputClaimIds,
           submissionId,
+          ...(managerIntent ? { managerAllocationId: managerIntent.allocationId } : {}),
           ...(utxoBinding === undefined ? {} : { utxoBinding, utxoSeq: utxoBinding.seq })
         };
       };
@@ -417,6 +546,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
             changeAddress: undefined,
             changeSatoshis: 0,
             feeSatoshis,
+            feePolicy: "exact",
             // 裸公钥脚本的输入必须按自己的 scriptCode 签：传给签名器。
             lockingScripts: input.inputs.map((u) => u.lockingScriptHex),
           });
@@ -445,6 +575,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
               changeAddress: input.changeAddress,
               changeSatoshis,
               feeSatoshis,
+              feePolicy: "rate",
               lockingScripts: input.inputs.map((u) => u.lockingScriptHex),
             });
           }
@@ -593,6 +724,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
             txid: preview.txid,
             rawTxHex: preview.rawTxHex,
             ...(preview.utxoBinding === undefined ? {} : { utxoBinding: preview.utxoBinding }),
+            ...(preview.managerAllocationId === undefined ? {} : { managerAllocationId: preview.managerAllocationId }),
           });
           if (result.status === "isolated") {
             isolated = true;

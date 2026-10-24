@@ -1,4 +1,5 @@
 import { createPublicProtocolService } from "./publicProtocolService.js";
+import { CONNECT_V1_SCOPE_ENABLED } from "./protocolValidation.js";
 import { APP_STORAGE_CLIENTS_CAPABILITY } from "@keymaster/contracts";
 import { STORAGE_KV_CLIENTS_CAPABILITY } from "@keymaster/contracts";
 import { PROTOCOL_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
@@ -587,6 +588,7 @@ const protocolPluginDefinition = {
             return undefined;
           }
         },
+        connectV1Scope: CONNECT_V1_SCOPE_ENABLED,
         // 施工单 2026-06-29 001：从 URL `?boot=appView` 解析当前模式。
         // 仅在 popup 挂载时解析一次；session 启动后不再变动。
         bootMode: typeof window !== "undefined" ? parseBootMode(window.location.search) : "connect",

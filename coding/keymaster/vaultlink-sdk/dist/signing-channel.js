@@ -4,6 +4,11 @@ export const signingOperations = Object.freeze([
     "bitfs.wire-sign", "channel.public-message", "channel.hash-request", "channel.private-message",
     "software.digest-sign",
 ]);
+/** This allowlist is not a digest-signing permission: typed callers still validate
+ * the full operation document before entering the signing policy. */
+export function automaticSigningOperation(operation) {
+    return signingOperations.includes(operation) && operation !== "software.digest-sign";
+}
 export function inspectSigningChannel(value) {
     if (!value || Object.keys(value).sort().join() !== "id,kind,mode,operation,owner,revision" ||
         !/^[a-zA-Z0-9._:/-]{1,96}$/.test(value.id) || !/^[a-zA-Z0-9._:/-]{1,96}$/.test(value.owner) ||

@@ -1,6 +1,7 @@
+import { playSpendSound } from "./spend-sound.js";
 import { useEffect, useId, useRef, useState } from "react";
 export { HardwareConnectionPanel } from "./hardware-connection-ui.js";
-import { Button, TextInput } from "@keymaster/ui";
+import { Button } from "@keymaster/ui";
 import type { WalletPaymentCommand } from "./wallet-payments.js";
 export interface PaymentUIProps {
   execute(command: WalletPaymentCommand): Promise<unknown>;
@@ -10,6 +11,11 @@ export { PaymentChannelSettings } from "./payment-channel-settings.js";
 
 interface Pending {
   historyId?: string;
+  automatic?: boolean;
+  wallet?: string;
+  network?: string;
+  paymentType?: string;
+  businessAmount?: string;
   id: string;
   channelId: string;
   owner: string;
@@ -27,14 +33,26 @@ interface Pending {
   mode?: string;
   facts?: Record<string, string>;
   pool?: { family: string; stage: string; paid: string; locked: string };
+  connectPayment?: {
+    appId: string; appName: string; origin: string; publisherPublicKeyHex: string;
+    recipientOwnership: "app-publisher" | "third-party" | "unknown";
+    paymentType: "p2pkh" | "p2pk"; businessKind: string; recipientLabel: string;
+  };
 }
 function ApprovalRequest({ request, execute, text, onAnswered }: PaymentUIProps & { request: Pending; onAnswered(id: string): void }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(!request.purpose);
   const detailsId = useId();
-  const [raised, setRaised] = useState("");
+  const [sound, setSound] = useState("pending");
+  const [soundError, setSoundError] = useState("");
+  async function soundNotice() {
+    setSoundError("");setSound("pending");
+    try { await playSpendSound(request.automatic === true);setSound("scheduled"); }
+    catch(e) {setSound("unavailable");setSoundError(String(e));}
+  }
+  useEffect(() => {if(!request.purpose) void soundNotice();}, [request.id]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  async function answer(allow: boolean, increase = false) {
+  async function answer(allow: boolean) {
     if (!request) return;
     setBusy(true);
     setError("");
@@ -43,7 +61,6 @@ function ApprovalRequest({ request, execute, text, onAnswered }: PaymentUIProps 
         action: "answer",
         id: request.id,
         allow,
-        ...(increase ? { raiseSessionLimit: raised } : {}),
       });
       onAnswered(request.id);
     } catch (e) {
@@ -55,7 +72,7 @@ function ApprovalRequest({ request, execute, text, onAnswered }: PaymentUIProps 
   const title = request.purpose
     ? text(request.purpose === "registration" ? "signing.register" : "signing.approve",
         request.purpose === "registration" ? "注册签名渠道" : "请求签名授权")
-    : text("payment.approval", "付款超过免确认额度");
+    : request.automatic ? text("payment.automaticNotice", "额度内自动花费签名") : text("payment.spendApproval", "花费签名确认");
   const summary = [title, request.owner, request.channelId, request.purpose ? undefined : `${request.amount} sat`].filter(Boolean).join(" · ");
   return (
     <article className="wallet-notifications__item wallet-notifications__item--pending">
@@ -63,15 +80,39 @@ function ApprovalRequest({ request, execute, text, onAnswered }: PaymentUIProps 
         title={summary} onClick={() => setExpanded(value => !value)}>
         <span>{summary}</span><span className="wallet-notifications__chevron" aria-hidden="true">▾</span>
       </button></h3>
+      {!request.purpose ? <div aria-live="polite">
+        {sound === "unavailable" ? <p role="alert">{text("payment.soundUnavailable", "提示音未播放；检查浏览器音频权限或输出设备。签名策略不因此改变。")} {soundError}
+          <Button size="sm" onClick={() => void soundNotice()}>{text("payment.retrySound", "重试提示音")}</Button></p> :
+          <p role="status">{text(sound === "scheduled" ? "payment.soundScheduled" : "payment.soundPending", sound === "scheduled" ? "已请求播放提示音（不代表实体扬声器已发声）" : "正在请求播放提示音…")}</p>}
+      </div> : null}
       <div className="wallet-notifications__actions">
-        <Button size="sm" disabled={busy} onClick={() => void answer(true)}>{text("notifications.approve", "批准")}</Button>
-        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void answer(false)}>{text("notifications.deny", "不批准")}</Button>
+        {request.automatic ? <Button size="sm" variant="ghost" onClick={() => {void execute({action:"notice-dismiss",id:request.id}).then(() => onAnswered(request.id)).catch(e => setError(String(e)));}}>{text("payment.dismissNotice", "关闭提示")}</Button> : <>
+          <Button size="sm" disabled={busy} onClick={() => void answer(true)}>{text("notifications.approve", "批准")}</Button>
+          <Button size="sm" variant="ghost" disabled={busy} onClick={() => void answer(false)}>{text("notifications.deny", "不批准")}</Button>
+        </>}
       </div>
       {error ? <p role="alert">{error}</p> : null}
       {expanded ? <div id={detailsId} className="wallet-notifications__details">
       <p>
         {request.owner} · {request.channelId}
       </p>
+      {!request.purpose ? <div><p>{text("payment.wallet", "当前钱包")}: {request.wallet}</p><p>{text("payment.network", "网络")}: {request.network} · {request.paymentType}</p>
+        <p>{text("payment.businessAmount", "业务金额（不含矿工费，聪）")}: {request.businessAmount}</p></div> : null}
+      {request.connectPayment ? (
+        <div>
+          <p>{text("payment.app", "App")}: {request.connectPayment.appName} ({request.connectPayment.appId})</p>
+          <p style={{ overflowWrap: "anywhere" }}>{text("payment.origin", "调用来源")}: {request.connectPayment.origin}</p>
+          <p>{text("payment.type", "支付类型")}: {request.connectPayment.paymentType}</p>
+          <p>{text("payment.publisher", "App 发布者公钥")}:  {request.connectPayment.publisherPublicKeyHex}</p>
+          <p>{text("payment.businessKind", "业务种类")}: {request.connectPayment.businessKind}</p>
+          <p>{text("payment.recipient", "收款材料")}: {request.connectPayment.recipientLabel}</p>
+          <p role="alert">
+            {request.connectPayment.recipientOwnership === "app-publisher"
+              ? text("payment.publisherMatch", "收款脚本对应本 App 已验证发布者公钥；公钥对应不代表用途真实或无风险。")
+              : text("payment.thirdParty", "收款方不对应本 App 发布者公钥，无法仅凭 App 身份确认归属，请核实。")}
+          </p>
+        </div>
+      ) : null}
       {request.purpose ? (
         <div>
           <p>
@@ -86,13 +127,13 @@ function ApprovalRequest({ request, execute, text, onAnswered }: PaymentUIProps 
       ) : (
         <>
           <p>
-            {text("payment.amount", "支付金额（聪）")}：{request.amount}
+            {text("payment.actualSpend", "实际花费（含矿工费，聪）")}：{request.amount}
           </p>
           <p>
-            {text("payment.change", "本 Key 找零（聪）")}：{request.change}
+            {text("payment.ownReturn", "本钱包所有 P2PKH 返还（聪）")}：{request.change}
           </p>
           <p>
-            {text("payment.fee", "矿工费（聪，不计入渠道额度）")}：{request.fee}
+            {text("payment.feeIncluded", "矿工费（聪，已计入实际花费）")}：{request.fee}
           </p>
           {request.pool ? (
             <div>
@@ -117,22 +158,12 @@ function ApprovalRequest({ request, execute, text, onAnswered }: PaymentUIProps 
             {text("payment.single", "单笔免确认额度（聪）")}：
             {request.singleLimit}
           </p>
-          {request.kind === "app" ? (
-            <p>
-              {text("payment.cumulative", "会话已用／本次后累计／额度")}：
-              {request.used} /{" "}
-              {String(BigInt(request.used) + BigInt(request.amount))} /{" "}
-              {request.sessionLimit}
-            </p>
-          ) : null}
           <p>
             {request.reasons
               .map((r) =>
                 r === "single-limit"
                   ? text("payment.singleExceeded", "超过单笔额度")
-                  : r === "session-limit"
-                    ? text("payment.sessionExceeded", "超过会话累计额度")
-                    : text("payment.disabled", "免确认已关闭"),
+                  : text("payment.disabled", "免确认未设置或已关闭"),
               )
               .join("；")}
           </p>
@@ -148,19 +179,8 @@ function ApprovalRequest({ request, execute, text, onAnswered }: PaymentUIProps 
               <p key={i}>{r}</p>
             ))}
           </div>
-          {(request.reasons ?? []).includes("session-limit") ? (
-            <TextInput
-              label={text("payment.raise", "提高当前会话累计额度（聪）")}
-              inputMode="numeric"
-              value={raised}
-              onChange={(e) => setRaised(e.currentTarget.value)}
-            />
-          ) : null}
         </>
       )}
-      {(request.reasons ?? []).includes("session-limit") ? <Button size="sm" disabled={busy || !raised} onClick={() => void answer(true, true)}>
-        {text("payment.raiseApprove", "提高本会话额度并批准")}
-      </Button> : null}
       </div> : null}
     </article>
   );
@@ -195,24 +215,27 @@ function HistoryNotification({record: r, text, stateText}: {
   </article>;
 }
 
-export function PaymentNotificationList({ execute, text, onPending, visible = true }: PaymentUIProps & {
+export function PaymentNotificationList({ execute, text, onPending, onSpendNotices, visible = true }: PaymentUIProps & {
   onPending?(ids: string[]): void;
+  onSpendNotices?(ids: string[]): void;
   visible?: boolean;
 }) {
   const [pending, setPending] = useState<Pending[]>([]);
+  const [notices, setNotices] = useState<Pending[]>([]);
   const [history, setHistory] = useState<import("./signature-history.js").SignatureRecord[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const answeredIds = useRef(new Set<string>());
   const notify = useRef(onPending);
   notify.current = onPending;
+  const notifySpend = useRef(onSpendNotices);notifySpend.current = onSpendNotices;
   useEffect(() => {
     let live = true, fetching = false;
     const refresh = async () => {
       if (fetching) return;
       fetching = true;
       try {
-        const [requestsResult, historyResult] = await Promise.allSettled([execute({ action: "pending" }), execute({ action: "signature-history" })]);
+        const [requestsResult, historyResult, noticesResult] = await Promise.allSettled([execute({ action: "pending" }), execute({ action: "signature-history" }), execute({action:"spend-notices"})]);
         if (!live) return;
         const errors: string[] = [];
         if (requestsResult.status === "fulfilled" && Array.isArray(requestsResult.value)) {
@@ -227,6 +250,8 @@ export function PaymentNotificationList({ execute, text, onPending, visible = tr
         } else errors.push(requestsResult.status === "rejected" ? String(requestsResult.reason) : "invalid-pending-list");
         if (historyResult.status === "fulfilled" && Array.isArray(historyResult.value)) setHistory(historyResult.value);
         else errors.push(historyResult.status === "rejected" ? String(historyResult.reason) : "invalid-notification-history");
+        if(noticesResult.status === "fulfilled" && Array.isArray(noticesResult.value)) {setNotices(noticesResult.value);notifySpend.current?.(noticesResult.value.map(r => r.id));}
+        else errors.push(noticesResult.status === "rejected" ? String(noticesResult.reason) : "invalid-spend-notices");
         setError(errors.join("; "));
       } catch (e) { if (live) setError(e instanceof Error ? e.message : String(e)); }
       finally { fetching = false; if (live) setLoading(false); }
@@ -235,7 +260,7 @@ export function PaymentNotificationList({ execute, text, onPending, visible = tr
     const timer = setInterval(() => void refresh(), 500);
     return () => { live = false; clearInterval(timer); };
   }, [execute]);
-  const activeHistory = new Set(pending.map(r => r.historyId).filter(Boolean));
+  const activeHistory = new Set([...pending,...notices].map(r => r.historyId).filter(Boolean));
   const records = history.filter(r => !activeHistory.has(r.id));
   const states = {
     pending: text("notifications.processing", "正在处理"), completed: text("notifications.approved", "已批准"),
@@ -246,7 +271,9 @@ export function PaymentNotificationList({ execute, text, onPending, visible = tr
     <h2>{text("notifications.title", "通知历史")}{pending.length ? <span className="wallet-notifications__waiting" role="status">{text("notifications.waiting", "等待批准")} · {pending.length}</span> : null}</h2>
     {error ? <p role="alert">{error}</p> : null}
     {loading ? <p role="status">{text("notifications.loading", "正在读取通知…")}</p> : null}
-    {!loading && !pending.length && !records.length && !error ? <p>{text("notifications.empty", "暂无通知")}</p> : null}
+    {!loading && !pending.length && !notices.length && !records.length && !error ? <p>{text("notifications.empty", "暂无通知")}</p> : null}
+    {notices.map(request => <ApprovalRequest key={request.id} request={request} execute={execute} text={text}
+      onAnswered={id => setNotices(rows => rows.filter(r => r.id !== id))}/>)}
     {pending.map(request => <ApprovalRequest key={request.id} request={request} execute={execute} text={text}
       onAnswered={id => { answeredIds.current.add(id); setPending(rows => rows.filter(r => r.id !== id)); }}/>)}
     {records.map(r => <HistoryNotification key={r.id} record={r} text={text} stateText={states[r.state]}/>)}

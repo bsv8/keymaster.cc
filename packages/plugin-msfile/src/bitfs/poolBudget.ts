@@ -16,3 +16,27 @@ export async function bitfsPoolSettlementFee(keys: PoolPublicKeys, feeRate: bigi
 }
 
 function toHex(bytes: Uint8Array): string { return Array.from(bytes, value => value.toString(16).padStart(2, "0")).join(""); }
+
+/**
+ * 池内余量的内容预算分配。
+ *
+ * 中文说明：池里还剩的块按**剩余卖家数**均分（余数给最后一个卖家 ✓），每位
+ * 卖家另付自己的开池 Seed 预算（已开好的 Seed 不重复付 ✓）。不默认限制为
+ * “Seed 加一块”——那会把大文件的内容预算压到远低于实际需求 ✓。
+ */
+export function allocateBitfsRemainingContent(input: {
+  remainingBlocks: number;
+  remainingSellers: number;
+  seedCompleted: boolean;
+  seedPrice: bigint;
+  blockPrice: bigint;
+}): { assignedCount: number; seedBudget: bigint; blockBudget: bigint; contentBudget: bigint } {
+  if (!Number.isSafeInteger(input.remainingBlocks) || input.remainingBlocks < 0) throw new Error("remaining blocks must be a non-negative integer");
+  if (!Number.isSafeInteger(input.remainingSellers) || input.remainingSellers <= 0) throw new Error("remaining sellers must be a positive integer");
+  if (input.seedPrice < 0n || input.blockPrice < 0n) throw new Error("prices must not be negative");
+  const perSeller = Math.ceil(input.remainingBlocks / input.remainingSellers);
+  const assignedCount = Math.min(input.remainingBlocks, perSeller);
+  const seedBudget = input.seedCompleted ? 0n : input.seedPrice;
+  const blockBudget = BigInt(assignedCount) * input.blockPrice;
+  return { assignedCount, seedBudget, blockBudget, contentBudget: seedBudget + blockBudget };
+}
