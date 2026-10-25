@@ -8,7 +8,6 @@
 
 import type { AssetDataNotifier, CentralBroadcastService, CoordinatorP2pkhBroadcastResult, CoordinatorValueResult, P2pkhBroadcastSubmission, P2pkhUtxoBinding, VaultService } from "@keymaster/contracts";
 import { publisherPaymentChannelId } from "@keymaster/vaultlink-integration";
-import { CentralBroadcastRetryableError } from "./centralBroadcastService.js";
 import type { MessageBus } from "webloom-framework";
 import type {
   P2pkhAssetId,
@@ -188,20 +187,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
 
       const loaded = normalizeLoadedUtxos(await deps.loadSpendableUtxos({ ownerPublicKeyHex: owner.publicKeyHex, resource, purpose: context?.retry ? "retry" : "prepare", signal: context?.signal }));
       const candidates = loaded.utxos;
-      // Manager 对具体 outpoint 做 durable 占用；快照序号只服务于尚未迁移的兼容路径。
-      const utxoBinding = deps.utxoManager ? undefined
-        : loaded.utxoBinding ?? await deps.getUtxoBinding?.({ ownerPublicKeyHex: owner.publicKeyHex, resource });
-      if (!deps.utxoManager && candidates.length === 0) {
-        throw buildAllocationError({
-          available: 0,
-          amountSatoshis: validated.amountSatoshis,
-          feeSatoshis: 0,
-          required: validated.amountSatoshis,
-          reason: "no-utxos"
-        });
-      }
-
-      const sorted = [...candidates].sort((a, b) => a.value - b.value);
+      if (!deps.utxoManager) throw new Error("Transfer requires the durable UTXO manager");
       const { address: changeAddress } = await activeCrypto.deriveP2pkhAddress({
         publicKeyHex: owner.publicKeyHex,
         network
@@ -271,74 +257,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         }
       }
 
-      let bestError: AllocationFailureInfo | undefined;
-      const selections = validated.sendAll
-        ? [sorted]
-        : Array.from({ length: sorted.length }, (_, index) => sorted.slice(0, index + 1));
-      for (const selected of selections) {
-        const solution = await solveForSelectedInputs({
-          assetId: validated.assetId,
-          selected,
-          amountSatoshis: validated.amountSatoshis,
-          sendAll: validated.sendAll,
-          feeRateSatoshisPerKb: validated.feeRateSatoshisPerKb,
-          recipientAddress: validated.recipientAddress!,
-          changeAddress
-        });
-        if (solution.ok) {
-          // 关键（硬切换 002 收尾）：preview 必须携带 owner 信息，让
-          // submit 阶段可校验"同一 owner 才能广播"——避免 caller / widget
-          // 在 prepare 与 submit 之间切换 owner 导致"用 keyA 准备、
-          // 用 keyB 广播"的错位。
-          return remember({
-            ...solution.preview,
-            ...(paymentContext ? {paymentContext: {...paymentContext}} : {}),
-            ownerPublicKeyHex: owner.publicKeyHex,
-            previewId: crypto.randomUUID(),
-            ...(utxoBinding === undefined ? {} : { utxoBinding }),
-            sendAll: validated.sendAll,
-          });
-        }
-        bestError = solution.error;
-      }
-
-      // 固定金额优先保证“收款额 + fee”。若最终计算发现可用余额不够
-      // `金额 + fee`，它与用户选择“全部”是同一笔语义：使用全部可用
-      // 输入，最终收款输出 = inputs - actual fee，且不产生找零。这个
-      // 分支也覆盖余额低于手填金额本身的情形；仅余额连 fee 都不够时，
-      // all-fee 求解会明确失败。
-      if (!validated.sendAll) {
-        const feeFromAmount = await solveForSelectedInputs({
-          assetId: validated.assetId,
-          selected: sorted,
-          amountSatoshis: validated.amountSatoshis,
-          sendAll: true,
-          feeRateSatoshisPerKb: validated.feeRateSatoshisPerKb,
-          recipientAddress: validated.recipientAddress!,
-          changeAddress
-        });
-        if (feeFromAmount.ok) {
-          return remember({
-            ...feeFromAmount.preview,
-            ...(paymentContext ? {paymentContext: {...paymentContext}} : {}),
-            ownerPublicKeyHex: owner.publicKeyHex,
-            previewId: crypto.randomUUID(),
-            ...(utxoBinding === undefined ? {} : { utxoBinding }),
-            sendAll: validated.sendAll,
-          });
-        }
-        bestError = feeFromAmount.error;
-      }
-
-      throw buildAllocationError(
-        bestError ?? {
-          available: candidates.reduce((sum, u) => sum + u.value, 0),
-          amountSatoshis: validated.amountSatoshis,
-          feeSatoshis: 0,
-          required: validated.amountSatoshis,
-          reason: "insufficient"
-        }
-      );
+      throw new Error("UTXO manager reservation is required");
     },
 
     async submitPrepared(previewId, options) {
@@ -346,7 +265,9 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       return this.submit(recall(previewId), options);
     },
 
-    async submit(preview, options) {      if (options?.signal?.aborted) return { status: "not-dispatched", txid: preview.txid, rawTxHex: preview.rawTxHex, error: "broadcast retry cancelled", submissionId: "", localInputClaimIds: [], attempts: 0, reason: "cancelled" };
+    async submit(preview, options) {
+      if (!deps.utxoManager || !preview.managerAllocationId) throw new Error("Transfer submission requires a manager allocation");
+      if (options?.signal?.aborted) return { status: "not-dispatched", txid: preview.txid, rawTxHex: preview.rawTxHex, error: "broadcast retry cancelled", submissionId: "", localInputClaimIds: [], attempts: 0, reason: "cancelled" };
       const owner = await resolveOwnerKeyIdentity(deps, preview.ownerPublicKeyHex);
       const stateRepository = await deps.getStore(owner.publicKeyHex);
       const network = preview.network;
@@ -380,13 +301,8 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
               ownerPublicKeyHex: owner.publicKeyHex, resource, allocationId: currentPreview.managerAllocationId, utxos: candidates,
             })
           : undefined;
-        const currentBinding = currentPreview.managerAllocationId ? undefined
-          : loaded.utxoBinding ?? await deps.getUtxoBinding?.({ ownerPublicKeyHex: owner.publicKeyHex, resource });
         const activeCrypto = await resolveActiveKeyCrypto(deps.vault, owner.publicKeyHex);
         const { address: expectedChangeAddress } = await activeCrypto.deriveP2pkhAddress({ publicKeyHex: owner.publicKeyHex, network });
-        if (!currentPreview.managerAllocationId && currentPreview.utxoBinding && (!currentBinding || currentBinding.seq !== currentPreview.utxoBinding.seq || currentBinding.resourceId !== currentPreview.utxoBinding.resourceId)) {
-          return { submissionId: "", result: { status: "not-dispatched", reason: "snapshot-stale", currentSeq: currentBinding?.seq }, localInputClaimIds: [], preview: currentPreview };
-        }
         validateFinalTransferPreview(currentPreview, { candidates, expectedChangeAddress, ...(managerInputs ? { managerInputs } : {}) });
         const frozen = claim(currentPreview);
         if (options?.signal?.aborted) throw new Error("Transfer signing cancelled");
@@ -482,64 +398,10 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         }
       };
 
-      if (preview.managerAllocationId) {
-        // Manager intent/outbox binds one immutable transaction; never let the legacy
-        // snapshot retry loop rebuild or resubmit it under another allocation.
-        const firstAttempt = await submitPrepared(preview, deps.centralBroadcastService?.submitOnce.bind(deps.centralBroadcastService));
-        return mapTransferResult(firstAttempt.result, firstAttempt.preview, firstAttempt.submissionId, firstAttempt.localInputClaimIds, 1);
-      }
-      if (!deps.centralBroadcastService) {
-        const firstAttempt = await submitPrepared(preview);
-        return mapTransferResult(firstAttempt.result, firstAttempt.preview, firstAttempt.submissionId, firstAttempt.localInputClaimIds, 1);
-      }
-
-      // 首次尝试也必须由中心服务计数和分类。否则首次命中 consumed
-      // 时，中心会在没有新序号的情况下直接开始第二次 rebuild。
-      let first = true;
-      let latestPreview = preview;
-      let latestSubmissionId = "";
-      let latestLocalInputClaimIds: string[] = [];
-      const outcome = await deps.centralBroadcastService.submitWithRetry({
-        network,
-        boundSeq: preview.utxoBinding?.seq,
-        signal: options?.signal,
-        attempt: async ({ submitOnce }) => {
-          // 中文：sendAll 的金额随余额浮动，任何可重试失败后都不得自动重建，
-          // 必须让用户重新确认；首次尝试仍提交用户已确认的 preview。
-          if (!first && preview.sendAll) {
-            throw new Error("sendAll requires reconfirmation after a retryable failure");
-          }
-          const currentPreview = first ? preview : await this.prepare({
-            assetId: preview.assetId,
-            ownerPublicKeyHex: owner.publicKeyHex,
-            recipientAddress: preview.recipientAddress,
-            amountSatoshis: preview.amountSatoshis,
-            feeRateSatoshisPerKb: preview.feeRateSatoshisPerKb,
-            sendAll: preview.sendAll,
-            paymentContext: preview.paymentContext,
-          }, { retry: true, signal: options?.signal });
-          first = false;
-          latestPreview = currentPreview;
-          const attempt = await submitPrepared(currentPreview, submitOnce);
-          latestPreview = attempt.preview;
-          latestSubmissionId = attempt.submissionId;
-          latestLocalInputClaimIds = attempt.localInputClaimIds;
-          if (currentPreview.sendAll && attempt.result.status === "not-dispatched" && (attempt.result.reason === "snapshot-stale" || attempt.result.reason === "snapshot-consumed")) {
-            throw new Error("sendAll requires reconfirmation after the UTXO snapshot changed");
-          }
-          return { submissionId: attempt.submissionId, result: attempt.result };
-        },
-      });
-      return {
-        status: outcome.status === "local-confirmed" ? "local-confirmed" : outcome.status === "isolated" ? "isolated" : "not-dispatched",
-        txid: outcome.txid ?? latestPreview.txid,
-        rawTxHex: latestPreview.rawTxHex,
-        error: outcome.error,
-        submissionId: latestSubmissionId,
-        localInputClaimIds: latestLocalInputClaimIds,
-        attempts: outcome.attempts,
-        ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
-      };
+      // One immutable manager allocation, one signature attempt. Unknowns
+      // recover by manager exact replay, never by rebuilding or reselecting.
+      const firstAttempt = await submitPrepared(preview, deps.centralBroadcastService?.submitOnce.bind(deps.centralBroadcastService));
+      return mapTransferResult(firstAttempt.result, firstAttempt.preview, firstAttempt.submissionId, firstAttempt.localInputClaimIds, 1);
     }
   };
 }
@@ -674,55 +536,6 @@ async function resolveOwnerKeyIdentity(
   return key;
 }
 
-type AllocationFailureInfo = {
-  available: number;
-  amountSatoshis: number;
-  feeSatoshis: number;
-  required: number;
-  reason: "no-utxos" | "insufficient";
-};
-
-type SolveResult = { ok: true; preview: P2pkhTransferPreview } | { ok: false; error: AllocationFailureInfo };
-
-async function solveForSelectedInputs(params: {
-  assetId: P2pkhAssetId;
-  selected: P2pkhUtxo[];
-  amountSatoshis: number;
-  sendAll: boolean;
-  feeRateSatoshisPerKb: number;
-  recipientAddress: string;
-  changeAddress: string;
-}): Promise<SolveResult> {
-  const totalInputSatoshis = params.selected.reduce((sum, u) => sum + u.value, 0);
-  let feeSatoshis = 1;
-  for (let round = 0; round < 12; round++) {
-    const recipientSatoshis = params.sendAll ? totalInputSatoshis - feeSatoshis : params.amountSatoshis;
-    const changeSatoshis = params.sendAll ? 0 : totalInputSatoshis - recipientSatoshis - feeSatoshis;
-    if (recipientSatoshis <= 0 || changeSatoshis < 0) return {ok: false, error: {
-      available: totalInputSatoshis, amountSatoshis: recipientSatoshis, feeSatoshis,
-      required: params.sendAll ? feeSatoshis + 1 : recipientSatoshis + feeSatoshis, reason: "insufficient",
-    }};
-    const allocation = {requestedSatoshis: recipientSatoshis, feeReserveSatoshis: feeSatoshis,
-      selected: params.selected, totalInputSatoshis, changeSatoshis};
-    const unsigned = buildP2pkhTx({allocation, recipientAddress: params.recipientAddress, changeAddress: params.changeAddress});
-    // 仅计算 DER/P2PKH 解锁脚本长度上界；估费阶段不调用私钥，不产生可广播签名。
-    const bound = serializeTx(unsigned).length + unsigned.inputs.length * 108;
-    const requiredFee = Math.max(1, Math.ceil(bound * params.feeRateSatoshisPerKb / 1000));
-    if (feeSatoshis < requiredFee) { feeSatoshis = requiredFee; continue; }
-    const rawTxHex = Array.from(serializeTx(unsigned),b=>b.toString(16).padStart(2,"0")).join("");
-    const serializedSizeBytes = bound;
-    return {ok: true, preview: {
-      ownerPublicKeyHex: "", assetId: params.assetId, network: assetIdToNetworkMap[params.assetId],
-      recipientAddress: params.recipientAddress, amountSatoshis: recipientSatoshis,
-      feeRateSatoshisPerKb: params.feeRateSatoshisPerKb, allocation, changeAddress: params.changeAddress,
-      outputs: [{address: params.recipientAddress, value: recipientSatoshis},
-        ...(changeSatoshis > 0 ? [{address: params.changeAddress, value: changeSatoshis}] : [])],
-      estimatedFeeSatoshis: feeSatoshis, serializedSizeBytes, txid: "", rawTxHex, previewId: "",
-    }};
-  }
-  throw new Error("P2PKH fee calculation did not converge");
-}
-
 function validateTransferInput(input: P2pkhTransferInput): {
   assetId: P2pkhAssetId;
   recipientAddress?: string;
@@ -764,12 +577,6 @@ function normalizePositiveInteger(value: number, label: string): number {
     throw new Error(`${label} must be a positive integer`);
   }
   return value;
-}
-
-function buildAllocationError(input: AllocationFailureInfo): Error {
-  return new Error(
-    `P2PKH transfer failed: ${input.reason}. Available inputs ${input.available} sats, amount ${input.amountSatoshis} sats, final fee ${input.feeSatoshis} sats, total required ${input.required} sats.`
-  );
 }
 
 /** 校验地址是否匹配目标网络。 */

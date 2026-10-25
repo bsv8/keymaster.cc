@@ -20,10 +20,6 @@ import {
 } from "@keymaster/plugin-message";
 import { webrtcPlugin, webrtcSetup } from "@keymaster/plugin-webrtc";
 import { backgroundPlugin, backgroundSetup } from "@keymaster/plugin-background";
-import {
-  oneSatOrdinalsCollectiblePlugin,
-  oneSatOrdinalsCollectibleSetup,
-} from "@keymaster/plugin-collectible-1satordinals";
 import { contactsPlugin, contactsSetup } from "@keymaster/plugin-contacts";
 import { msfilePlugin, msfileSetup } from "@keymaster/plugin-msfile";
 import { forumPlugin, forumSetup } from "@keymaster/plugin-forum";
@@ -35,7 +31,6 @@ import {
   storagePlatformPlugin,
   storagePlatformSetup,
 } from "@keymaster/platform-storage";
-import { bsv21TokenPlugin, bsv21TokenSetup } from "@keymaster/plugin-token-bsv21";
 import { stasTokenPlugin, stasTokenSetup } from "@keymaster/plugin-token-stas";
 import { vaultPlugin, vaultSetup } from "@keymaster/plugin-vault";
 import { wocPlugin, wocSetup } from "@keymaster/plugin-woc";
@@ -60,9 +55,7 @@ export const WEB_PLUGIN_IMPLEMENTATIONS: readonly { manifest: PluginManifest; se
   { manifest: backgroundPlugin, setup: backgroundSetup },
   { manifest: wocPlugin, setup: wocSetup },
   { manifest: p2pkhPlugin, setup: p2pkhSetup },
-  { manifest: bsv21TokenPlugin, setup: bsv21TokenSetup },
   { manifest: stasTokenPlugin, setup: stasTokenSetup },
-  { manifest: oneSatOrdinalsCollectiblePlugin, setup: oneSatOrdinalsCollectibleSetup },
   { manifest: bsvPricePlugin, setup: bsvPriceSetup },
   { manifest: appsPlugin, setup: appsSetup },
 ] as const;

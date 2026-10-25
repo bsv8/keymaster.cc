@@ -9,6 +9,8 @@ import { createP2pkhProviderRegistry, createP2pkhUtxoSnapshotStore, type P2pkhUt
 import { createWorkerTransferRuntime, type WorkerTransferDependencies } from "./workerTransferRuntime.js";
 import { createP2pkhWorkerAssetReader } from "./p2pkhWorkerAssetReader.js";
 import { createP2pkhWorkerTaskDefinitions } from "./p2pkhWorkerTasks.js";
+import { createP2pkhUtxoManager } from "./p2pkhUtxoManager.js";
+import { readWorkerProtocolProtection } from "./workerProtocolRuntime.js";
 
 interface InstanceBinding {
   storage: BorrowedModuleFileStore;
@@ -22,6 +24,7 @@ export interface P2pkhWorkerPorts {
   tasks: WorkerTaskRegistrar;
   registerProviders(registry: P2pkhProviderRegistry, broadcast: WocWorkerBroadcastService): void;
   snapshotSource(query: WocService): WocService;
+  protectedOutpoints(owner: string, network: "main" | "test"): Promise<readonly { txid: string; vout: number }[]>;
   resetSettings(): void;
   refresh(signal: AbortSignal, storage: BorrowedModuleFileStore, assertActive: () => void): Promise<{ main?: number; test?: number }>;
   emit(kinds: import("@keymaster/contracts").AssetDataChangedEvent["kinds"], utxoSeqs?: { main?: number; test?: number }): void;
@@ -59,7 +62,18 @@ export function createP2pkhWorkerRuntime(ports: P2pkhWorkerPorts) {
   function initialize(source: WocService, broadcast: WocWorkerBroadcastService) {
     registry = createP2pkhProviderRegistry();
     ports.registerProviders(registry, broadcast);
-    snapshots = createP2pkhUtxoSnapshotStore({ woc: ports.snapshotSource(source) });
+    const own = binding;
+    if (!own) throw new Error("Manager projection requires an active P2PKH binding");
+    const assertActive = () => { own.assertActive(); if (binding !== own) throw new Error("P2PKH manager projection revoked"); };
+    const manager = createP2pkhUtxoManager({ files: own.storage, async listProtectedOutpoints(owner, network) {
+      assertActive();
+      const persisted = await readWorkerProtocolProtection(own.storage, owner, network);
+      const business = await ports.protectedOutpoints(owner, network);
+      assertActive();
+      const registry = transfer.protectedOutpoints()?.list({ publicKeyHex: owner, network }) ?? [];
+      return [...persisted, ...business, ...registry];
+    } });
+    snapshots = createP2pkhUtxoSnapshotStore({ woc: ports.snapshotSource(source), manager, assertActive });
   }
   const plugin = defineBuiltinWorkerPlugin("p2pkh", [P2PKH_WORKER_TRANSFER_CAPABILITY, P2PKH_WORKER_PROTOCOL_CAPABILITY, P2PKH_ASSET_READER_CAPABILITY], async context => {
     const own: InstanceBinding = {

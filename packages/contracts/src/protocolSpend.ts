@@ -122,6 +122,10 @@ export interface ProtocolSpendPrepareInput {
   inputs: ProtocolSpendInput[];
   outputs: ProtocolSpendOutput[];
   feeRateSatoshisPerKb: number;
+  /** Business miner-fee cap, checked before manager intent or signing. */
+  maxFeeSatoshis?: number;
+  /** BitFS opening: retain exact responsibility but block dispatch until Kind 3. */
+  deferDispatch?: boolean;
   changeAddress?: string;
   /**
    * 受控无找零模式。

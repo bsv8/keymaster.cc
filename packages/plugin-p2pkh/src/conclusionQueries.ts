@@ -8,6 +8,7 @@ export interface ConclusionQueryPorts {
   list(input: Scope): Promise<P2pkhConclusionRow[]>;
   runOnce(input: Scope & { allocationId: string }, assertFresh: () => void, signal: AbortSignal): Promise<SubmitResult>;
   changed(input: Scope): void;
+  recover?(input: Scope & { allocationId: string }): Promise<unknown>;
   initialDelayMs?: number;
   maxDelayMs?: number;
 }
@@ -60,6 +61,11 @@ export function createConclusionQueries(ports: ConclusionQueryPorts) {
     async execute(input: P2pkhConclusionInput): Promise<P2pkhConclusionResult> {
       const assertFresh = ports.capture(input);
       assertFresh();
+      if (input.action === "recover") {
+        if (!ports.recover) throw Error("签名执行恢复暂不可用");
+        await ports.recover(input); assertFresh(); ports.changed(input);
+        return list(input, assertFresh);
+      }
       if (input.action !== "list") {
         const key = keyOf(input);
         const previous = queries.get(key);
@@ -69,6 +75,7 @@ export function createConclusionQueries(ports: ConclusionQueryPorts) {
           const row = (await list(input, assertFresh)).items.find(row => row.allocationId === input.allocationId);
           if (!row) throw Error("原交易申请不存在");
           if (row.delivery !== "wallet") throw Error("外露交易责任不能由钱包重交");
+          if (row.retryable === false || !row.txid) throw Error(row.error ?? "原交易当前禁止派发，需先恢复签名执行证据");
           assertFresh();
           // Recheck after await: two start calls must not create two loops.
           if (row.state !== "done" && row.state !== "failed" && !queries.has(key)) {

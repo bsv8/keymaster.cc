@@ -79,17 +79,4 @@ export interface BroadcastOutcome {
 export interface CentralBroadcastService {
   /** 单次提交，不自动重试；业务服务内部使用。 */
   submitOnce(input: OneShotBroadcastInput): Promise<CoordinatorP2pkhBroadcastResult>;
-  /** 业务提供完整 rebuild 尝试，中心服务负责预算与唤醒。 */
-  submitWithRetry(input: {
-    /** 本次尝试所属网络；用于筛选对应的 utxoSeqs 事件。 */
-    network?: BsvNetwork;
-    /** 只有大于此序号的新快照才触发下一次组合。 */
-    boundSeq?: number;
-    /** 一次完整尝试：重新读快照、选币、签名、写本地记录并调用 submitOnce。 */
-    attempt: (context: {
-      submitOnce: (input: OneShotBroadcastInput) => Promise<CoordinatorP2pkhBroadcastResult>;
-    }) => Promise<{ submissionId: string; result: CoordinatorP2pkhBroadcastResult }>;
-    /** 锁钱包、切 owner 或用户取消信号。 */
-    signal?: AbortSignal;
-  }): Promise<BroadcastOutcome>;
 }

@@ -1310,13 +1310,18 @@ function parseVaultOperation(value: unknown): CoordinatorVaultOperation {
     }
     case "payment": {
       const command = expectRecord(operation.command, "payment.command");
-      const action = enumValue(command.action, ["signature-history", "backend", "signing-list", "signing-configure", "list", "pending", "spend-notices", "notice-dismiss", "connect-payment-recovery", "connect-payment-recovery-ack", "connect-payment-signed-recovery", "register", "configure", "session-open", "session-close", "session-cancel", "answer", "sign-p2pkh", "sign-standard", "sign-feepool"] as const, "payment.action");
+      const action = enumValue(command.action, ["signature-history", "backend", "signing-list", "signing-configure", "list", "pending", "spend-notices", "notice-dismiss", "connect-payment-recovery", "connect-payment-recovery-ack", "connect-payment-signed-recovery", "protocol-payment-prepare", "protocol-payment-status", "protocol-payment-ack", "protocol-payment-recovery", "register", "configure", "session-open", "session-close", "session-cancel", "answer", "sign-p2pkh", "sign-standard", "sign-feepool"] as const, "payment.action");
       const id = (key: string) => text(command[key], `payment.${key}`, 96);
       const amount = (v: unknown): string => {
         const s = text(v, "payment.amount", 20);
         if (!/^(0|[1-9][0-9]*)$/.test(s) || BigInt(s) > 0xffffffffffffffffn) throw new TypeError("payment amount is invalid");
         return s;
       };
+      const execution = () => { const value = expectRecord(command.protocolExecution, "payment.protocolExecution"); return { executionId: text(value.executionId,"execution.id",128), allocationId: text(value.allocationId,"execution.allocation",128), submissionId: text(value.submissionId,"execution.submission",128) }; };
+      if (action === "protocol-payment-status") return { type, command: { action, executionId: text(command.executionId,"execution.id",128) } };
+      if (action === "protocol-payment-ack") return { type, command: { action, executionIds: stringList(command.executionIds,"execution.ids",4096,128) } };
+      if (action === "protocol-payment-prepare") return { type, command: { action, paymentId: id("paymentId"), rawTxHex: text(command.rawTxHex,"payment.rawTxHex",16384), prevTransactionHexes: stringList(command.prevTransactionHexes,"payment.previous",10,16384), protocolExecution: execution() } };
+      if (action === "protocol-payment-recovery") return { type, command: { action } };
       if (action === "signature-history" || action === "list" || action === "pending" || action === "spend-notices" || action === "backend" || action === "signing-list" || action === "connect-payment-recovery" || action === "connect-payment-signed-recovery") return {type, command: {action}};
       if (action === "connect-payment-recovery-ack") {
         const ids = command.paymentIds;
@@ -1335,7 +1340,8 @@ function parseVaultOperation(value: unknown): CoordinatorVaultOperation {
       if (action === "session-open") return {type, command: {action, id: id("id"), owner: id("owner")}};
       if (action === "session-close" || action === "session-cancel" || action === "notice-dismiss") return {type, command: {action, id: id("id")}};
       if (action === "answer") return {type, command: {action, id: id("id"), allow: booleanValue(command.allow,"payment.allow"), ...(command.raiseSessionLimit === undefined ? {} : {raiseSessionLimit: amount(command.raiseSessionLimit)})}};
-      const transaction = {rawTxHex: text(command.rawTxHex,"payment.rawTxHex",16384), prevTransactionHexes: stringList(command.prevTransactionHexes,"payment.previous",10,16384), channelId: id("channelId"), paymentId: id("paymentId"), sessionId: command.sessionId === null ? null : id("sessionId")};
+      if (command.protocolExecution !== undefined && action !== "sign-standard" && !(action === "sign-feepool" && command.family === "bitfs" && command.stage === "fund")) throw new TypeError("Invalid protocol execution signing operation");
+      const transaction = {rawTxHex: text(command.rawTxHex,"payment.rawTxHex",16384), prevTransactionHexes: stringList(command.prevTransactionHexes,"payment.previous",10,16384), channelId: id("channelId"), paymentId: id("paymentId"), sessionId: command.sessionId === null ? null : id("sessionId"), ...(command.protocolExecution === undefined ? {} : { protocolExecution: execution() })};
       const connectPaymentReview = command.connectPaymentReview === undefined ? undefined : parseP2pkhConnectPaymentPreview(command.connectPaymentReview, "payment.connectPaymentReview");
       if (connectPaymentReview !== undefined && action !== "sign-p2pkh") throw new TypeError("connectPaymentReview is only valid for sign-p2pkh");
       let authorization: {documentHex:string;refundTemplateHex:string}|undefined;

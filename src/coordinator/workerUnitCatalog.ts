@@ -134,25 +134,11 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
     ],
   },
   {
-    unitId: "token-bsv21.coordinator-worker",
-    taskIds: ["token-bsv21.sync"],
-    serviceIds: ["token-bsv21.service"],
-    storagePurposes: ["token-state"],
-    finalIoAuditEntries: [{ taskId: "token-bsv21.sync", operation: "token-bsv21.sync" }],
-  },
-  {
     unitId: "token-stas.coordinator-worker",
     taskIds: ["token-stas.sync"],
     serviceIds: ["token-stas.service"],
     storagePurposes: ["token-state"],
     finalIoAuditEntries: [{ taskId: "token-stas.sync", operation: "token-stas.sync" }],
-  },
-  {
-    unitId: "collectible-1satordinals.coordinator-worker",
-    taskIds: ["collectible-1satordinals.sync"],
-    serviceIds: ["collectible-1satordinals.service"],
-    storagePurposes: [],
-    finalIoAuditEntries: [{ taskId: "collectible-1satordinals.sync", operation: "collectible-1satordinals.sync" }],
   },
   {
     unitId: "woc.coordinator-worker",

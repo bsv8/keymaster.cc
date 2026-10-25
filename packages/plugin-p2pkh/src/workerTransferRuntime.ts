@@ -1,6 +1,6 @@
 import type { ActiveKeyCrypto, AssetDataChangedEvent, BorrowedModuleFileStore, CoordinatorValueResult, VaultWalletState, P2pkhBroadcastSubmission, P2pkhUtxoSnapshotResult, VaultStatus, CentralBroadcastService, WocService } from "@keymaster/contracts";
 import { createMessageBus } from "webloom-framework";
-import { createCentralBroadcastService, type CentralBroadcastServiceDeps } from "./centralBroadcastService.js";
+import { createCentralBroadcastService } from "./centralBroadcastService.js";
 import { createP2pkhService } from "./p2pkhService.js";
 import { createWorkerProtocolRuntime, readWorkerProtocolProtection } from "./workerProtocolRuntime.js";
 import type { P2pkhProtocolManagerPort } from "./p2pkhProtocolSpend.js";
@@ -25,7 +25,8 @@ export interface WorkerTransferDependencies {
   broadcast(input: SnapshotInput & { submissionId: string; submission?: P2pkhBroadcastSubmission }): Promise<CoordinatorValueResult<unknown>>;
   subscribeUtxo(listener: (event: { ownerPublicKeyHex: string; network: "main" | "test"; seq: number }) => void): () => void;
   query?(): WocService | undefined;
-  retryOptions(): Pick<CentralBroadcastServiceDeps, "maxAttempts" | "deadlineMs" | "initialBackoffMs" | "maxBackoffMs"> | undefined;
+  protectedOutpoints(owner: string, network: "main" | "test"): Promise<readonly { txid: string; vout: number }[]>;
+  fundsChanged(input: SnapshotInput): void;
 }
 
 /** P2PKH owns its lazy Worker transfer service and candidate disposal. */
@@ -59,6 +60,8 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
   async function protocolContext(request: { ownerPublicKeyHex: string; network: "main" | "test" }, refresh = false) {
     const manager = utxoManager;
     if (!manager) throw new Error("P2PKH UTXO manager is not ready");
+    const session = deps.session();
+    if (!session.unlocked || session.owner?.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase()) throw new Error("Protocol manager owner mismatch");
     const address = publicKeyHexToP2pkhAddress(request.ownerPublicKeyHex, request.network);
     const resource = { resourceId: `p2pkh:${request.network}`, network: request.network, address };
     const snapshot = await deps.snapshot({ ownerPublicKeyHex: request.ownerPublicKeyHex, network: request.network }, refresh);
@@ -74,6 +77,18 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     return { manager, resource, utxos };
   }
   const protocolManagerPort: P2pkhProtocolManagerPort = {
+    async cancelProtocolSubmission(request) {
+      const manager = utxoManager;
+      if (!manager) throw new Error("Protocol manager unavailable");
+      let proof: import("@keymaster/vaultlink-integration").ProtocolExecutionProof | null = null;
+      try { proof = await deps.requestPayment({ action: "protocol-payment-status", executionId: request.submissionId }) as unknown as typeof proof; } catch { /* Missing/unreadable evidence never releases inputs. */ }
+      await manager.cancelProtocolSubmission({ ...request, proof });
+      if (proof && (proof as import("@keymaster/vaultlink-integration").ProtocolExecutionProof).state === "cancelled_before_sign") {
+        try { await deps.requestPayment({ action: "protocol-payment-ack", executionIds: [request.submissionId] }); }
+        catch (error) { console.warn("[p2pkh] Cancelled protocol ACK lost; manager cancellation retained", error); }
+      }
+      deps.fundsChanged(request);
+    },
     async selectFundingInputs(request) {
       const { manager, resource, utxos } = await protocolContext(request, true);
       const planned = await manager.selectProtocolFunding({ ...request, resource, utxos });
@@ -87,16 +102,20 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     },
     async beginProtocolIntent(request) {
       const { manager, resource, utxos } = await protocolContext(request);
-      return manager.beginProtocolIntent({ ...request, resource, utxos });
+      const result = await manager.beginProtocolIntent({ ...request, resource, utxos });
+      deps.fundsChanged(request);
+      return result;
     },
     async completeProtocolIntent(request) {
       const manager = utxoManager;
       if (!manager) throw new Error("P2PKH UTXO manager is not ready");
       const address = publicKeyHexToP2pkhAddress(request.ownerPublicKeyHex, request.network);
-      return manager.completeProtocolIntent({
+      const result = await manager.completeProtocolIntent({
         ...request,
         resource: { resourceId: `p2pkh:${request.network}`, network: request.network, address },
       });
+      deps.fundsChanged(request);
+      return result;
     },
   };
   async function ensure(): Promise<P2pkhService> {
@@ -144,21 +163,6 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
       };
       const centralService = createCentralBroadcastService({
         coordinator: { p2pkhBroadcast: broadcast },
-        subscribeTopic: listener => deps.subscribeUtxo(event => {
-          if (event.ownerPublicKeyHex.toLowerCase() !== owner.toLowerCase()) return;
-          listener({ utxoSeqs: { [event.network]: event.seq } } as AssetDataChangedEvent);
-        }),
-        getSnapshot: async network => {
-          const result = await coordinator.p2pkhUtxosGet({ ownerPublicKeyHex: owner, network });
-          assertFresh();
-          return result.status === "ok" ? result.value : { available: false, state: "unavailable", items: [] };
-        },
-        refreshSnapshot: async network => {
-          const result = await coordinator.p2pkhUtxosRefresh({ ownerPublicKeyHex: owner, network });
-          assertFresh();
-          return result.status === "ok" ? result.value : { available: false, state: "unavailable", items: [] };
-        },
-        ...deps.retryOptions(),
       });
       utxoManager = createP2pkhUtxoManager({
         files: deps.storage(),
@@ -174,6 +178,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
           const registry = activeProtocol.protectedOutpoints.list({ publicKeyHex: protectedOwner, network });
           return [
             ...persisted,
+            ...await deps.protectedOutpoints(protectedOwner, network),
             ...registry.map((row) => ({
               txid: row.txid,
               vout: row.vout,
@@ -246,6 +251,22 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
         throw error;
       }
       assertRecoveryFresh();
+      // Adopt exact/cancellation evidence before any new protocol funding.
+      // Partial or unknown executions remain held and visible, never re-signed.
+      const protocolProofs = await deps.requestPayment({ action: "protocol-payment-recovery" });
+      assertRecoveryFresh();
+      if (!Array.isArray(protocolProofs)) throw new Error("Invalid protocol execution recovery response");
+      const protocolAck: string[] = [];
+      for (const proof of protocolProofs) {
+        const adopted = await recoveryManager.recoverProtocolExecution({ ownerPublicKeyHex: owner, network: recoveryNetwork, proof: proof as unknown as import("@keymaster/vaultlink-integration").ProtocolExecutionProof });
+        assertRecoveryFresh();
+        if (adopted) protocolAck.push((proof as unknown as { executionId: string }).executionId);
+      }
+      if (protocolAck.length) {
+        try { await deps.requestPayment({ action: "protocol-payment-ack", executionIds: protocolAck }); }
+        catch (error) { console.warn("[p2pkh] Protocol journal ACK lost; manager responsibility retained", error); }
+        assertRecoveryFresh();
+      }
       const service = createP2pkhService({
         vault: { status: deps.vaultStatus, createActiveKeyCrypto: deps.crypto, requestPayment: deps.requestPayment },
         utxoManager,
@@ -347,5 +368,48 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     });
     return { allocationId: begun.allocationId, txid: completed.txid };
   }
-  return { ensure, ensureProtocol, release, occupyDeliveredArtifact, protectedOutpoints: () => protocol?.protectedOutpoints };
+  async function submitWalletExact(input: SnapshotInput & { txid: string; rawTxHex: string }) {
+    await ensure();
+    const manager = utxoManager!;
+    const entry = (await manager.listConclusions(input)).find(row => row.txid === input.txid);
+    if (!entry) throw new Error("Wallet exact has no durable manager allocation");
+    await manager.allowBusinessDispatch({ ...input, allocationId: entry.allocationId });
+    const result = await deps.broadcast({ ...input, submissionId: `manager:${entry.allocationId}`, submission: { resourceId: `p2pkh:${input.network}`, txid: input.txid, rawTxHex: input.rawTxHex, managerAllocationId: entry.allocationId } });
+    if (result.status !== "ok") throw new Error("Wallet exact dispatch failed");
+    const outcome = result.value as { status?: string; reason?: string };
+    if (outcome.status !== "local-confirmed" && outcome.status !== "already-known") throw new Error(outcome.reason ?? "Wallet exact dispatch result unknown");
+    return { outcome: outcome.status === "already-known" ? "already-known" as const : "accepted" as const };
+  }
+  async function observeBusinessReceipt(input: SnapshotInput & { rawTxHex: string }) {
+    await ensure();
+    const session = deps.session();
+    if (!session.unlocked || session.owner?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) throw new Error("Business receipt owner mismatch");
+    const resource = { resourceId: `p2pkh:${input.network}`, network: input.network, address: publicKeyHexToP2pkhAddress(input.ownerPublicKeyHex, input.network) };
+    await utxoManager!.observeAcceptedExact({ ...input, resource });
+    deps.fundsChanged(input);
+  }
+  async function recoverSigning(input: SnapshotInput & { allocationId: string }) {
+    await ensure();
+    const manager = utxoManager!, session = deps.session();
+    const assertFresh = () => { const now = deps.session(); deps.assertActive(); if (utxoManager !== manager || !now.unlocked || now.epoch !== session.epoch || now.owner?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase() || deps.settings().bsvNetwork !== input.network) throw new Error("Protocol recovery scope mismatch"); };
+    assertFresh();
+    const identity = await manager.protocolExecutionIdentity(input);
+    assertFresh();
+    if (!identity) throw new Error("No verifiable protocol execution identity; responsibility retained");
+    const proof = await deps.requestPayment({ action: "protocol-payment-status", executionId: identity.executionId });
+    assertFresh();
+    if (!proof) throw new Error("Protocol execution journal is missing; responsibility retained");
+    const recovered = await manager.recoverProtocolExecution({ ...input, proof: proof as unknown as import("@keymaster/vaultlink-integration").ProtocolExecutionProof });
+    assertFresh();
+    if (recovered) {
+      try { await deps.requestPayment({ action: "protocol-payment-ack", executionIds: [identity.executionId] }); }
+      catch (error) { console.warn("[p2pkh] Protocol recovery ACK lost", error); }
+    }
+    assertFresh();
+    deps.fundsChanged(input);
+    return recovered;
+  }
+  async function ownsWalletExact(input: SnapshotInput & { txid: string; rawTxHex: string }) { await ensure(); return utxoManager!.ownsWalletExact(input); }
+  async function previousTransaction(input: SnapshotInput & { txid: string }) { await ensure(); return utxoManager!.previousTransaction(input); }
+  return { ensure, ensureProtocol, release, occupyDeliveredArtifact, submitWalletExact, ownsWalletExact, previousTransaction, recoverSigning, observeBusinessReceipt, protectedOutpoints: () => protocol?.protectedOutpoints };
 }

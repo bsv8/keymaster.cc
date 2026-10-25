@@ -32,9 +32,7 @@ export const BUILTIN_PLUGIN_PRODUCT_IDS = [
   "background",
   "woc",
   "p2pkh",
-  "token-bsv21",
   "token-stas",
-  "collectible-1satordinals",
   "bsv-price",
   "apps",
 ] as const;
@@ -95,12 +93,8 @@ export const BUILTIN_PLUGIN_RUNTIME_UNIT_CATALOG = [
   { productId: "woc", unitId: "woc.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
   { productId: "p2pkh", unitId: "p2pkh.window", runtime: "window-main", scopeKind: "owner-session" },
   { productId: "p2pkh", unitId: "p2pkh.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
-  { productId: "token-bsv21", unitId: "token-bsv21.window", runtime: "window-main", scopeKind: "owner-session" },
-  { productId: "token-bsv21", unitId: "token-bsv21.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
   { productId: "token-stas", unitId: "token-stas.window", runtime: "window-main", scopeKind: "owner-session" },
   { productId: "token-stas", unitId: "token-stas.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
-  { productId: "collectible-1satordinals", unitId: "collectible-1satordinals.window", runtime: "window-main", scopeKind: "owner-session" },
-  { productId: "collectible-1satordinals", unitId: "collectible-1satordinals.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
   { productId: "bsv-price", unitId: "bsv-price.window", runtime: "window-main", scopeKind: "owner-session" },
   { productId: "apps", unitId: "apps.window", runtime: "window-main", scopeKind: "root" },
 ] as const satisfies readonly BuiltinPluginRuntimeUnitDeclaration[];

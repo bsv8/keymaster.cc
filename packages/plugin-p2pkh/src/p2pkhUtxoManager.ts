@@ -2,6 +2,8 @@ import type { BorrowedModuleFileStore, P2pkhConclusionRow, P2pkhPaymentLookupRes
 import { buildUnsigned, estimateFeeSats, estimateSignedSize, formatAmount, FundingKernel, parseTx, submitSigned, submitProtocolSigned, completeProtocolIntent, prepareProtocolIntent, classifyPaymentScript, buildPaymentTemplate, validatePaymentTemplate, type AllocationView, type BroadcastOutcome, type DurableStore, type ManagerConfig, type PaymentOutputRole, type PaymentType, type Scope, type SnapshotUtxo, type InputObservation, type SubmitResult, retryExact as retryManagerExact, reconcileInputs as reconcileManagerInputs } from "@keymaster/utxo-manager";
 import { p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
 import type { P2pkhKeyResource, P2pkhUtxo } from "./p2pkhContracts.js";
+import type { ProtocolExecutionProof } from "@keymaster/vaultlink-integration";
+import { createWorkerProtocolEvidence } from "./workerProtocolEvidence.js";
 
 function pathFor(network: "main" | "test"): string { return `utxo-manager/p2pkh-${network}-state.json`; }
 const SCHEMA = "keymaster.p2pkh-utxo-manager/2";
@@ -50,6 +52,12 @@ interface PersistedManagerState {
   network: "main" | "test";
   kernel: string;
   snapshotRevision: number;
+  /** Provider-reported mempool spends; only an explicit unspent observation clears them. */
+  mempoolSpent?: string[];
+  /** False until the trusted BitFS business path verifies Kind 3. */
+  businessDispatch?: Record<string, boolean>;
+  cancelledDispatch?: Record<string, string>;
+  protocolExecutions?: Record<string, { executionId: string; submissionId: string; unsignedTxHex: string; released?: boolean }>;
   intents: Record<string, string>;
   results: Record<string, string>;
   /**
@@ -148,9 +156,26 @@ export interface P2pkhProtocolIntentInput {
    * same content returns the original allocation instead of occupying again.
    */
   artifactId?: string;
+  deferDispatch?: boolean;
+  executionId?: string;
 }
 
 export interface P2pkhUtxoManager {
+  /** The only ingestion point for complete, validated chain observations. */
+  observe(input: { ownerPublicKeyHex: string; resource: Pick<P2pkhKeyResource, "resourceId" | "network" | "address">; utxos: readonly P2pkhUtxo[] }): Promise<void>;
+  /** Cancel dispatch without assuming signatures are releasable. */
+  cancelProtocolSubmission(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; allocationId?: string; txid?: string; reason?: "cancelled" | "execution-failed"; proof?: ProtocolExecutionProof | null }): Promise<void>;
+  recoverProtocolExecution(input: { ownerPublicKeyHex: string; network: "main" | "test"; proof: ProtocolExecutionProof }): Promise<boolean>;
+  protocolExecutionIdentity(input: { ownerPublicKeyHex: string; network: "main" | "test"; allocationId: string }): Promise<{ executionId: string; submissionId: string } | null>;
+  ownsWalletExact(input: { ownerPublicKeyHex: string; network: "main" | "test"; txid: string; rawTxHex: string }): Promise<boolean>;
+  /** Manager-owned parent evidence for business classification; no membership polling. */
+  previousTransaction(input: { ownerPublicKeyHex: string; network: "main" | "test"; txid: string }): Promise<string | null>;
+  /** Trusted business adapter only; binds permission to the original durable exact. */
+  allowBusinessDispatch(input: { ownerPublicKeyHex: string; network: "main" | "test"; allocationId: string; rawTxHex: string }): Promise<void>;
+  /** Trusted pool/business receipt: project returned wallet outputs without a new approval. */
+  observeAcceptedExact(input: { ownerPublicKeyHex: string; resource: Pick<P2pkhKeyResource, "resourceId" | "network" | "address">; rawTxHex: string }): Promise<void>;
+  /** Manager-owned spendable projection, including accepted local change. */
+  available(input: { ownerPublicKeyHex: string; resource: Pick<P2pkhKeyResource, "resourceId" | "network" | "address"> }): Promise<{ observed: boolean; inputs: P2pkhManagerInputEvidence[] }>;
   /** Read-only core planning. The protocol intent must still durably claim these
    * inputs before signing; a concurrent reservation may invalidate this plan. */
   selectProtocolFunding(input: {
@@ -159,6 +184,7 @@ export interface P2pkhUtxoManager {
     utxos: readonly P2pkhUtxo[];
     amountSatoshis: number;
     feeRateSatoshisPerKb: number;
+    outputs?: Array<{ scriptHex: string; value: string }>;
   }): Promise<{ selectedInputs: P2pkhManagerInputEvidence[]; totalInputSatoshis: number }>;
   reserve(input: {
     ownerPublicKeyHex: string;
@@ -362,6 +388,9 @@ function validatePersistedPaymentPlan(
 }
 
 function normalizePaymentState(value: PersistedManagerState, kernel: FundingKernel): void {
+  if (value.cancelledDispatch !== undefined && (!isPlainRecord(value.cancelledDispatch) || Object.values(value.cancelledDispatch).some(v => typeof v !== "string"))) throw new Error("Invalid cancellation state");
+  if (value.protocolExecutions !== undefined && (!isPlainRecord(value.protocolExecutions) || Object.entries(value.protocolExecutions).some(([id, v]) => !isPlainRecord(v) || typeof v.executionId !== "string" || typeof v.submissionId !== "string" || typeof v.unsignedTxHex !== "string" || (v.released !== undefined && typeof v.released !== "boolean") || (!v.released && kernel.signingIntent(id).unsignedTxHex !== v.unsignedTxHex)))) throw new Error("Invalid protocol execution state");
+  if (value.businessDispatch !== undefined && (!isPlainRecord(value.businessDispatch) || Object.values(value.businessDispatch).some(flag => typeof flag !== "boolean"))) throw new Error("Invalid business dispatch gate state");
   const states = kernelAllocationStates(kernel);
   const legacyPayments = value.payments === undefined ? {} : value.payments;
   const existingKinds = value.allocationKinds === undefined ? {} : value.allocationKinds;
@@ -495,11 +524,21 @@ function mapReservation(view: AllocationView, unsignedTxHex: string, selectedInp
   };
 }
 
+function evidenceContext(kernel: FundingKernel) {
+  const heights = (JSON.parse(kernel.serialize()) as { utxos: Record<string, { height: number }> }).utxos;
+  const parents = new Map(kernel.outboxView().filter(row => row.state === "done").map(row => [row.txid, row]));
+  return { heights, parents, parsed: new Map<string, ReturnType<typeof parseTx>>() };
+}
+function managerInputsEvidence(kernel: FundingKernel, keys: string[], owner: string, resource: Pick<P2pkhKeyResource, "resourceId" | "network" | "address">) {
+  const context = evidenceContext(kernel);
+  return keys.map(key => managerInputEvidence(kernel, key, owner, resource, context));
+}
 function managerInputEvidence(
   kernel: FundingKernel,
   outpoint: string,
   owner: string,
   resource: Pick<P2pkhKeyResource, "resourceId" | "network" | "address">,
+  context = evidenceContext(kernel),
 ): P2pkhManagerInputEvidence {
   const row = kernel.lookup(outpoint);
   if (row.spentBy || row.protected || row.isolated || row.pendingParent || row.scriptHex !== p2pkhAddressToScriptHex(resource.address, resource.network)) {
@@ -512,7 +551,7 @@ function managerInputEvidence(
   const utxo: P2pkhUtxo = {
     id: outpoint.toLowerCase(), resourceId: resource.resourceId, publicKeyHex: owner,
     network: resource.network, address: resource.address, txid: txid!, vout, value,
-    height: 0, script: row.scriptHex, status: row.status as "confirmed" | "unconfirmed",
+    height: context.heights[outpoint]?.height ?? 0, script: row.scriptHex, status: row.status as "confirmed" | "unconfirmed",
     isSpentInMempoolTx: false, syncedAt: new Date(0).toISOString(),
   };
   // Parent evidence follows the dependency (creatingTxid), not provenance.
@@ -522,12 +561,13 @@ function managerInputEvidence(
     if (row.source === "local") throw new Error(`Local UTXO has no recorded parent transaction: ${outpoint}`);
     return { utxo };
   }
-  const parent = kernel.outboxView().find((entry) => entry.txid === row.creatingTxid && entry.state === "done");
+  const parent = context.parents.get(row.creatingTxid);
   if (!parent) {
     if (row.source === "local") throw new Error(`Local UTXO parent bytes are unavailable: ${outpoint}`);
     return { utxo };
   }
-  const parsed = parseTx(parent.rawTxHex, parent.txid);
+  let parsed = context.parsed.get(parent.txid);
+  if (!parsed) { parsed = parseTx(parent.rawTxHex, parent.txid); context.parsed.set(parent.txid, parsed); }
   const output = parsed.outputs[vout];
   if (!output || formatAmount(output.value) !== row.value || output.scriptHex !== row.scriptHex) {
     throw new Error(`UTXO parent output does not match Manager facts: ${outpoint}`);
@@ -552,9 +592,10 @@ async function refreshCandidate(input: {
   listProtectedOutpoints?: (owner: string, network: "main" | "test") => Promise<readonly { txid: string; vout: number; kind?: string; source?: string; submissionId?: string }[]>;
 }): Promise<{ candidate: FundingKernel; revision: number }> {
   const candidate = input.state.kernel.clone();
-  const revision = input.state.value.snapshotRevision + 1;
-  if (!Number.isSafeInteger(revision)) throw new Error("UTXO manager snapshot revision exhausted");
-  candidate.applySnapshot({ generation: 1, revision, utxos: snapshotUtxosFor(input.resource, input.utxos) });
+  // Selection never re-ingests a host projection as a chain snapshot. Only
+  // observe() may advance chain facts; otherwise occupied/local/unknown facts
+  // could be erased by feeding a filtered spendable list back into the core.
+  const revision = input.state.value.snapshotRevision;
   candidate.setProtected(candidate.protectedOutpointKeys(), false);
   const protectedOutpoints = await input.listProtectedOutpoints?.(input.owner, input.resource.network) ?? [];
   // Every protection is kept, with its source. A protocol submission's own
@@ -573,6 +614,9 @@ async function refreshCandidate(input: {
   for (const [source, keys] of bySource) {
     candidate.setProtected([...new Set(keys)], true, source);
   }
+  const mempoolSpent = input.state.value.mempoolSpent ?? [];
+  if (!Array.isArray(mempoolSpent) || mempoolSpent.some(key => typeof key !== "string" || !/^[0-9a-f]{64}:\d+$/.test(key))) throw new Error("Invalid manager mempool observation state");
+  candidate.setProtected(mempoolSpent, true, "chain:mempool-spent");
   return { candidate, revision };
 }
 
@@ -646,6 +690,19 @@ function assertFrozenPaymentTransaction(input: {
   }
 }
 
+function bitfsFundingTemplate(unsignedTxHex: string): boolean {
+  const script = parseTx(unsignedTxHex).outputs[0]?.scriptHex;
+  return !!script && script.length === 210 && script.startsWith("52") && script.endsWith("53ae");
+}
+function assertDispatchAllowed(state: LoadedState, allocationId: string) {
+  if (state.value.cancelledDispatch?.[allocationId]) throw new Error("Protocol dispatch cancelled; signature responsibility retained");
+  if (state.value.businessDispatch?.[allocationId] === false) throw new Error("Business dispatch awaits verified Kind 3");
+}
+function verifyExecution(state: LoadedState, allocationId: string, proof: ProtocolExecutionProof) {
+  const execution = state.value.protocolExecutions?.[allocationId];
+  if (!execution || proof.owner.toLowerCase() !== state.value.owner || proof.network !== state.value.network || proof.allocationId !== allocationId || proof.executionId !== execution.executionId || proof.submissionId !== execution.submissionId || proof.unsignedTxHex !== execution.unsignedTxHex || !Number.isSafeInteger(proof.version) || proof.version < 1) throw new Error("Protocol execution proof does not match durable intent");
+  return execution;
+}
 export function createP2pkhUtxoManager(input: {
   files: BorrowedModuleFileStore;
   /**
@@ -660,6 +717,24 @@ export function createP2pkhUtxoManager(input: {
   /** Trusted chain observation used to settle outstanding exact transactions. */
   chain?: { observe(network: "main" | "test", txid: string): Promise<string | null>; observeInputs?(network: "main" | "test", outpoints: string[], diagnostic?: (value: unknown) => void): Promise<InputObservation[] | null> };
 }): P2pkhUtxoManager {
+  async function adoptLegacyCancellation(state: LoadedState, allocationId: string) {
+    if (state.value.cancelledDispatch?.[allocationId]) return;
+    const binding = state.kernel.protocolIntentView(allocationId)?.binding;
+    if (!binding) return;
+    const old = await createWorkerProtocolEvidence(input.files).getProtocolSubmission(binding.poolId);
+    const exact = state.kernel.outboxView().find(row => row.allocationId === allocationId);
+    if (old?.status === "rejected" && old.droppedReason === "prepared-spend-released") {
+      if (old.publicKeyHex.toLowerCase() !== state.value.owner || old.network !== state.value.network || (exact && exact.txid !== old.canonicalTxid)) throw new Error("Legacy cancellation identity mismatch");
+      state.value = { ...state.value, cancelledDispatch: { ...state.value.cancelledDispatch, [allocationId]: "legacy-cancelled" } };
+      await persist(input.files, state, state.kernel);
+      return;
+    }
+    // Missing legacy gate is NOT proof that a BitFS opening passed Kind 3.
+    if (state.value.businessDispatch?.[allocationId] === undefined && exact?.state !== "done" && bitfsFundingTemplate(state.kernel.signingIntent(allocationId).unsignedTxHex)) {
+      state.value = { ...state.value, businessDispatch: { ...state.value.businessDispatch, [allocationId]: false } };
+      await persist(input.files, state, state.kernel);
+    }
+  }
   async function conclusionContext(request: { ownerPublicKeyHex: string; network: "main" | "test"; allocationId: string }) {
     const state = await readStateForScope(input.files, request.ownerPublicKeyHex, request.network);
     const plan = paymentPlanForAllocation(state, request.allocationId);
@@ -671,15 +746,123 @@ export function createP2pkhUtxoManager(input: {
       broadcaster: { broadcast: async (): Promise<BroadcastOutcome> => { throw new Error("Read-only input reconciliation cannot broadcast"); } },
     } };
   }
-  return {
+  const manager: P2pkhUtxoManager = {
+    async observe(request) {
+      const owner = request.ownerPublicKeyHex.toLowerCase();
+      const state = await readState(input.files, owner, request.resource);
+      const { candidate } = await refreshCandidate({ files: input.files, state, owner, resource: request.resource, utxos: [], listProtectedOutpoints: input.listProtectedOutpoints });
+      const revision = state.value.snapshotRevision + 1;
+      if (!Number.isSafeInteger(revision)) throw new Error("UTXO manager observation revision exhausted");
+      candidate.applySnapshot({ generation: 1, revision, utxos: snapshotUtxosFor(request.resource, request.utxos) });
+      const mempoolSpent = new Set(state.value.mempoolSpent ?? []);
+      for (const row of request.utxos) {
+        const key = `${row.txid.toLowerCase()}:${row.vout}`;
+        if (row.isSpentInMempoolTx) mempoolSpent.add(key); else mempoolSpent.delete(key);
+      }
+      candidate.setProtected(state.value.mempoolSpent ?? [], false, "chain:mempool-spent");
+      candidate.setProtected([...mempoolSpent], true, "chain:mempool-spent");
+      await persist(input.files, { ...state, value: { ...state.value, snapshotRevision: revision, mempoolSpent: [...mempoolSpent] } }, candidate);
+    },
+    async protocolExecutionIdentity(request) {
+      const state = await readStateForScope(input.files, request.ownerPublicKeyHex, request.network);
+      const row = state.value.protocolExecutions?.[request.allocationId];
+      return row ? { executionId: row.executionId, submissionId: row.submissionId } : null;
+    },
+    async ownsWalletExact(request) {
+      let state: LoadedState;
+      try { state = await readStateForScope(input.files, request.ownerPublicKeyHex, request.network); } catch (error) { if (error instanceof P2pkhManagerStateMissingError) return false; throw error; }
+      const row = state.kernel.outboxView().find(entry => entry.txid === request.txid && entry.allocationId !== null && entry.delivery === "wallet");
+      if (!row) return false;
+      if (row.rawTxHex !== request.rawTxHex.toLowerCase()) throw new Error("Manager wallet exact mismatch");
+      return true;
+    },
+    async previousTransaction(request) {
+      let state: LoadedState;
+      try { state = await readStateForScope(input.files, request.ownerPublicKeyHex, request.network); } catch (error) { if (error instanceof P2pkhManagerStateMissingError) return null; throw error; }
+      const row = state.kernel.outboxView().find(entry => entry.txid === request.txid && entry.state === "done");
+      if (!row) return null;
+      parseTx(row.rawTxHex, request.txid);
+      return row.rawTxHex;
+    },
+    async cancelProtocolSubmission(request) {
+      const state = await readStateForScope(input.files, request.ownerPublicKeyHex, request.network);
+      const ids = Object.keys(state.value.allocationKinds ?? {}).filter(id => state.value.allocationKinds![id] === "protocol" && (state.value.protocolExecutions?.[id]?.submissionId === request.submissionId || state.kernel.protocolIntentView(id)?.binding?.poolId === request.submissionId));
+      if (ids.length !== 1 || (request.allocationId && request.allocationId !== ids[0])) throw new Error("Protocol cancellation identity is missing or ambiguous");
+      const id = ids[0]!, candidate = state.kernel.clone();
+      const exact = candidate.outboxView().find(row => row.allocationId === id);
+      if (request.txid && exact?.txid !== request.txid) throw new Error("Protocol cancellation exact mismatch");
+      const executions = { ...state.value.protocolExecutions };
+      if (request.proof) {
+        const execution = verifyExecution(state, id, request.proof);
+        if (request.proof.state === "cancelled_before_sign") {
+          if (!execution.released) candidate.cancelUnstarted(id);
+          executions[id] = { ...execution, released: true };
+        }
+      }
+      await persist(input.files, { ...state, value: { ...state.value, protocolExecutions: executions, cancelledDispatch: request.reason === "execution-failed" && request.proof?.state !== "cancelled_before_sign" ? state.value.cancelledDispatch : { ...state.value.cancelledDispatch, [id]: "cancelled" } } }, candidate);
+    },
+    async recoverProtocolExecution(request) {
+      const state = await readStateForScope(input.files, request.ownerPublicKeyHex, request.network), proof = request.proof;
+      const execution = verifyExecution(state, proof.allocationId, proof);
+      if (proof.state === "cancelled_before_sign") {
+        if (execution.released) return true;
+        const candidate = state.kernel.clone(); candidate.cancelUnstarted(proof.allocationId);
+        await persist(input.files, { ...state, value: { ...state.value, protocolExecutions: { ...state.value.protocolExecutions, [proof.allocationId]: { ...execution, released: true } }, cancelledDispatch: { ...state.value.cancelledDispatch, [proof.allocationId]: "cancelled-before-sign" } } }, candidate);
+        return true;
+      }
+      if (proof.state !== "signed_complete") return false;
+      if (!proof.signedTxHex || execution.released) throw new Error("Protocol signed recovery contradicts cancellation");
+      const existing = state.kernel.outboxView().find(row => row.allocationId === proof.allocationId);
+      if (existing) { if (existing.rawTxHex !== proof.signedTxHex) throw new Error("Protocol recovery exact conflict"); return true; }
+      await completeProtocolIntent(state.kernel, createDurableStore(input.files, state), proof.allocationId, proof.signedTxHex, "wallet");
+      return true;
+    },
+    async allowBusinessDispatch(request) {
+      const state = await readStateForScope(input.files, request.ownerPublicKeyHex, request.network);
+      const entry = state.kernel.outboxView().find(row => row.allocationId === request.allocationId);
+      if (!entry || entry.rawTxHex !== request.rawTxHex.toLowerCase()) throw new Error("Business dispatch must bind the durable exact");
+      await adoptLegacyCancellation(state, request.allocationId);
+      if (state.value.cancelledDispatch?.[request.allocationId]) throw new Error("Cancelled dispatch cannot be reopened by business authorization");
+      if (state.value.businessDispatch?.[request.allocationId] === undefined) return; // Older already-authorized manager exact.
+      await persist(input.files, { ...state, value: { ...state.value, businessDispatch: { ...state.value.businessDispatch, [request.allocationId]: true } } }, state.kernel);
+    },
+    async observeAcceptedExact(request) {
+      const state = await readState(input.files, request.ownerPublicKeyHex, request.resource);
+      const candidate = state.kernel.clone();
+      const parsed = parseTx(request.rawTxHex);
+      const prior = candidate.outboxView().find(row => row.txid === parsed.canonicalTxid);
+      if (prior?.state === "done") {
+        if (prior.rawTxHex !== request.rawTxHex.toLowerCase()) throw new Error("Business receipt exact mismatch");
+        return;
+      }
+      const commandId = prior?.commandId ?? candidate.importUnknown(parsed.canonicalTxid, request.rawTxHex);
+      candidate.reconcile(commandId, { found: true, rawTxHex: request.rawTxHex });
+      await persist(input.files, state, candidate);
+    },
+    async available(request) {
+      const owner = request.ownerPublicKeyHex.toLowerCase();
+      const state = await readState(input.files, owner, request.resource);
+      const { candidate } = await refreshCandidate({ files: input.files, state, owner, resource: request.resource, utxos: [], listProtectedOutpoints: input.listProtectedOutpoints });
+      const outpoints = candidate.spendableOutpoints();
+      return { observed: state.value.snapshotRevision > 0 || outpoints.length > 0, inputs: managerInputsEvidence(candidate, outpoints, owner, request.resource) };
+    },
     async listConclusions(request) {
       let state: LoadedState;
       try { state = await readStateForScope(input.files, request.ownerPublicKeyHex, request.network); }
       catch (error) { if (error instanceof P2pkhManagerStateMissingError) return []; throw error; }
-      return state.kernel.outboxView().filter(row => row.allocationId !== null).map(row => ({
+      const boxes = state.kernel.outboxView().filter(row => row.allocationId !== null);
+      const rows: P2pkhConclusionRow[] = boxes.map(row => ({
         allocationId: row.allocationId!, txid: row.txid, state: row.state, delivery: row.delivery, queryState: "stopped" as const,
+        ...((state.value.cancelledDispatch?.[row.allocationId!] || state.value.businessDispatch?.[row.allocationId!] === false) ? { retryable: false, error: state.value.cancelledDispatch?.[row.allocationId!] ? "Dispatch cancelled; signature responsibility retained" : "Awaiting verified Kind 3" } : {}),
         ...(row.conclusion ? { conclusion: { ...row.conclusion, status: row.conclusion.status as "conflict" | "failed", reason: "input-conflict" as const } } : {}),
       }));
+      for (const [id, kind] of Object.entries(state.value.allocationKinds ?? {})) {
+        if (kind !== "protocol" || boxes.some(row => row.allocationId === id)) continue;
+        const allocation = state.kernel.allocationView(id);
+        if (allocation.state !== "held") continue;
+        rows.push({ allocationId: id, txid: "", state: "unknown", delivery: "wallet", queryState: "stopped", retryable: false, signingState: "unknown", heldInputs: allocation.inputs, heldSats: allocation.totalInSats, error: "Durable signing intent awaits execution-journal recovery" });
+      }
+      return rows;
     },
     async reconcileInputs(request) {
       const { state, ports } = await conclusionContext(request);
@@ -687,6 +870,8 @@ export function createP2pkhUtxoManager(input: {
     },
     async retryExact(request) {
       const { state, ports } = await conclusionContext(request);
+      await adoptLegacyCancellation(state, request.allocationId);
+      assertDispatchAllowed(state, request.allocationId);
       return retryManagerExact(state.kernel, { ...ports, broadcaster: { broadcast: async raw => request.broadcast(raw, parseTx(raw).canonicalTxid) } }, request.allocationId);
     },
     async selectProtocolFunding(request) {
@@ -704,9 +889,9 @@ export function createP2pkhUtxoManager(input: {
         requestId: `protocol-plan-${crypto.randomUUID()}`,
         businessAmountSats: String(request.amountSatoshis),
         feeRateSatPerKb: String(request.feeRateSatoshisPerKb),
-        outputs: [{ scriptHex: configFor(resource).walletScriptHex, value: String(request.amountSatoshis) }],
+        outputs: request.outputs ?? [{ scriptHex: configFor(resource).walletScriptHex, value: String(request.amountSatoshis) }],
       });
-      const selectedInputs = view.inputs.map(key => managerInputEvidence(candidate, key, owner, resource));
+      const selectedInputs = managerInputsEvidence(candidate, view.inputs, owner, resource);
       const totalInputSatoshis = selectedInputs.reduce((sum, row) => sum + row.utxo.value, 0);
       if (!Number.isSafeInteger(totalInputSatoshis)) throw new Error("Protocol funding input total exceeds safe integer range");
       return { selectedInputs, totalInputSatoshis };
@@ -781,7 +966,7 @@ export function createP2pkhUtxoManager(input: {
         inputs: selected,
         outputs: roleMap.map((row) => ({ scriptHex: row.scriptHex, value: row.valueSats })),
       });
-      const selectedInputs = view.inputs.map((key) => managerInputEvidence(candidate, key, owner, resource));
+      const selectedInputs = managerInputsEvidence(candidate, view.inputs, owner, resource);
       const plan: PersistedPaymentPlan = {
         allocationId: view.allocationId,
         ...(request.paymentId === undefined ? {} : { paymentId: request.paymentId }),
@@ -821,10 +1006,11 @@ export function createP2pkhUtxoManager(input: {
       });
       const allocation = candidate.allocationView(request.allocationId);
       if (allocation.state !== "held") throw new Error(`UTXO manager allocation is not held: ${allocation.state}`);
+      const context = evidenceContext(candidate);
       const selectedInputs = allocation.inputs.map((key) => {
         const row = candidate.lookup(key);
         if (row.occupiedBy !== request.allocationId) throw new Error(`UTXO manager no longer owns input: ${key}`);
-        return managerInputEvidence(candidate, key, owner, resource);
+        return managerInputEvidence(candidate, key, owner, resource, context);
       });
       await persist(input.files, { ...state, value: { ...state.value, snapshotRevision: revision } }, candidate);
       return selectedInputs;
@@ -861,6 +1047,8 @@ export function createP2pkhUtxoManager(input: {
 
     async submitSigned(request) {
       const state = await readState(input.files, request.ownerPublicKeyHex, request.resource);
+      await adoptLegacyCancellation(state, request.allocationId);
+      assertDispatchAllowed(state, request.allocationId);
       const plan = paymentPlanForAllocation(state, request.allocationId);
       if (plan) {
         // Re-check the actual signed exact bytes, not the reconstructed
@@ -880,6 +1068,12 @@ export function createP2pkhUtxoManager(input: {
         broadcaster: { broadcast: async (rawTxHex: string) => request.broadcast(rawTxHex, parseTx(rawTxHex).canonicalTxid) },
         chain: { observe: async (txid: string) => input.chain?.observe(request.resource.network, txid) ?? null },
       };
+      const existing = candidate.outboxView().find(row => row.allocationId === request.allocationId);
+      if (existing) {
+        if (existing.rawTxHex !== request.signedTxHex.toLowerCase()) throw new Error("Manager exact bytes changed");
+        const result = await retryManagerExact(candidate, ports, request.allocationId);
+        return { txid: result.txid, delivery: result.delivery };
+      }
       // A protocol allocation carries its own intent rules (classified
       // inputs, fee cap, business cap); an ordinary one uses the template
       // rules. The durable ordering is identical.
@@ -1088,7 +1282,7 @@ export function createP2pkhUtxoManager(input: {
         // An unreadable ledger is not an empty ledger.
         throw error;
       }
-      return state.kernel.responsibilityView().map((row) => ({
+      const rows: P2pkhManagerResponsibility[] = state.kernel.responsibilityView().map((row) => ({
         commandId: row.commandId,
         allocationId: row.allocationId,
         txid: row.txid,
@@ -1099,6 +1293,13 @@ export function createP2pkhUtxoManager(input: {
         totalInSats: row.totalInSats,
         ownOutputs: row.ownOutputs.map((output) => ({ ...output })),
       }));
+      const boxes = state.kernel.outboxView();
+      for (const [id, kind] of Object.entries(state.value.allocationKinds ?? {})) {
+        if (kind !== "protocol" || boxes.some(row => row.allocationId === id)) continue;
+        const allocation = state.kernel.allocationView(id);
+        if (allocation.state === "held") rows.push({ commandId: `${id}:signing`, allocationId: id, txid: "", state: "signing-unknown", delivery: "wallet", reason: "Durable signing intent awaits execution evidence", inputs: allocation.inputs, totalInSats: allocation.totalInSats, ownOutputs: [] });
+      }
+      return rows;
     },
 
     async beginProtocolIntent(request) {
@@ -1116,6 +1317,7 @@ export function createP2pkhUtxoManager(input: {
         feeCapSats: request.feeCapSats,
         feePolicy: request.feePolicy,
         binding: request.binding,
+        ...(request.deferDispatch ? { deferDispatch: true } : {}),
         claims: [...(request.claims ?? [])].sort(),
       });
       const existing = artifactId === undefined ? undefined : state.value.artifacts?.[artifactId];
@@ -1142,6 +1344,8 @@ export function createP2pkhUtxoManager(input: {
           ...state.value,
           snapshotRevision: revision,
           allocationKinds: { ...(state.value.allocationKinds ?? {}), [allocationId]: "protocol" as const },
+          ...((request.deferDispatch || bitfsFundingTemplate(request.unsignedTxHex)) ? { businessDispatch: { ...state.value.businessDispatch, [allocationId]: false } } : {}),
+          ...(request.executionId ? { protocolExecutions: { ...state.value.protocolExecutions, [allocationId]: { executionId: request.executionId, submissionId: request.binding.poolId, unsignedTxHex: request.unsignedTxHex.toLowerCase() } } } : {}),
         },
       };
       const store = createDurableStore(input.files, storeState);
@@ -1212,7 +1416,25 @@ export function createP2pkhUtxoManager(input: {
       return { ok: true, protectedInputs };
     },
   };
+  // One scope write lane, including the provider call's durable dispatch boundary.
+  // Read-only proof callbacks remain reentrant; storage CAS guards other handles.
+  let tails = managerWriteTails.get(input.files);
+  if (!tails) { tails = new Map(); managerWriteTails.set(input.files, tails); }
+  const readOnly = new Set(["available", "listConclusions", "responsibilities", "paymentStatus", "protocolIntentProof", "previousTransaction", "ownsWalletExact", "protocolExecutionIdentity"]);
+  for (const name of Object.keys(manager) as Array<keyof P2pkhUtxoManager>) {
+    if (readOnly.has(name)) continue;
+    const operation = manager[name] as (request: any) => Promise<unknown>;
+    (manager as any)[name] = async (request: any) => {
+      const key = `${request.ownerPublicKeyHex.toLowerCase()}:${request.network ?? request.resource?.network}`;
+      const prior = tails!.get(key) ?? Promise.resolve();
+      const run = prior.catch(() => undefined).then(() => operation(request));
+      tails!.set(key, run);
+      try { return await run; } finally { if (tails!.get(key) === run) tails!.delete(key); }
+    };
+  }
+  return manager;
 }
+const managerWriteTails = new WeakMap<object, Map<string, Promise<unknown>>>();
 
 async function readStateForScope(files: BorrowedModuleFileStore, owner: string, network: "main" | "test"): Promise<LoadedState> {
   const statePath = pathFor(network);

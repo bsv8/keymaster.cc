@@ -1,4 +1,5 @@
 import {HardwareConnectJournal} from './hardware-connect-journal.js';
+import {ProtocolExecutionJournal} from './protocol-execution-journal.js';
 import {publisherPaymentOwner,publisherPaymentChannelId} from './app-payment-channel.js';
 import { object, type Value } from '@vaultlink/sdk';
 import { VaultLinkHardwareBackend, type HardwarePaymentResult } from './hardware-backend.js';
@@ -33,8 +34,13 @@ export class HardwareWalletPayments {
   private requests = new Map<string, {revoked:boolean}>();
   private mutations: Promise<unknown> = Promise.resolve();
   private journal?:HardwareConnectJournal;
+  private protocolJournal?:ProtocolExecutionJournal;
   constructor(private backend: VaultLinkHardwareBackend, private assertActive: () => void, storage?:{files:PaymentFileStore;key:string;network:string}) {
-    if(storage)this.journal=new HardwareConnectJournal(storage.files,storage.key,storage.network);
+    if(storage) {
+      this.journal=new HardwareConnectJournal(storage.files,storage.key,storage.network);
+      if(storage.network!=="main"&&storage.network!=="test")throw Error("network-identity-required");
+      this.protocolJournal=new ProtocolExecutionJournal(storage.files,storage.key,storage.network);
+    }
   }
   close(): void { this.closed = true; for (const token of this.requests.values()) token.revoked = true; }
   private assert(): void { this.assertActive(); if (this.closed) throw Error('payment-wallet-locked'); }
@@ -57,6 +63,13 @@ export class HardwareWalletPayments {
     if (['register','configure','session-open'].includes(frozen.action)) {
       const result = this.mutations.then(() => this.execute(frozen)); this.mutations = result.catch(() => {}); return result;
     }
+    if ((frozen.action === 'sign-standard' || frozen.action === 'sign-feepool') && frozen.protocolExecution) {
+      if (!this.protocolJournal) throw Error('protocol-execution-journal-unavailable');
+      return this.protocolJournal.execute({ ...frozen, protocolExecution: frozen.protocolExecution }, async () => {
+        try { return await this.execute(frozen,guard); }
+        catch (error) { if (error && typeof error === 'object' && 'deviceNotSigned' in error && error.deviceNotSigned === true) await this.protocolJournal!.cancel(frozen.protocolExecution!.executionId,true); throw error; }
+      });
+    }
     return this.execute(frozen,guard);
   }
   private async channels(): Promise<PaymentChannelDTO[]> {
@@ -68,6 +81,13 @@ export class HardwareWalletPayments {
   }
   private async execute(command: WalletPaymentCommand, guard: () => void = () => this.assert()): Promise<unknown> {
     this.assert();
+    if (command.action.startsWith('protocol-payment-')) {
+      if (!this.protocolJournal) throw Error('protocol-execution-journal-unavailable');
+      if (command.action === 'protocol-payment-recovery') return this.protocolJournal.recovery();
+      if (command.action === 'protocol-payment-status') return this.protocolJournal.status(command.executionId);
+      if (command.action === 'protocol-payment-ack') { await this.protocolJournal.ack(command.executionIds); return true; }
+      if (command.action === 'protocol-payment-prepare') { await this.protocolJournal.prepare(command); return true; }
+    }
     if(command.action==='backend')return 'hardware';
     if(command.action==='connect-payment-recovery')return this.journal?.recovery()??[];
     if(command.action==='connect-payment-recovery-ack')return this.journal?.ack(command.paymentIds);
@@ -99,6 +119,7 @@ export class HardwareWalletPayments {
     const input = {rawTx:bytes(command.rawTxHex),prevTransactions:command.prevTransactionHexes.map(bytes),channelId:command.channelId,
       paymentId:command.paymentId,sessionId:command.sessionId,network:config.network as "main" | "test"};
     let result: HardwarePaymentResult;
+    if (command.protocolExecution) await this.protocolJournal!.start(command.protocolExecution.executionId);
     if (command.action === 'sign-feepool') result = await this.backend.signFeePool({...input,family:command.family,stage:command.stage,...(command.role ? {role:command.role} : {}),...(command.openingRequestHex ? {openingRequest:bytes(command.openingRequestHex)} : {}),...(command.authorization ? {authorization:{document:bytes(command.authorization.documentHex),refundTemplate:bytes(command.authorization.refundTemplateHex)}} : {})});
     else if (command.action === 'sign-standard') result = await this.backend.signStandard(input);
     else if(connectReview){
@@ -115,6 +136,7 @@ export class HardwareWalletPayments {
       }
     }
     else result = await this.backend.signP2pkh(input);
+    if (command.protocolExecution) await this.protocolJournal!.material(command.protocolExecution.executionId,result.signatures.map(hex));
     guard(); return {signatures:result.signatures.map(hex),amount:String(result.amount),fee:String(result.fee)};
   }
 }

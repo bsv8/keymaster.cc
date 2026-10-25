@@ -86,7 +86,7 @@ export async function createWorkerProtocolRuntime(deps: WorkerProtocolDependenci
     protectedOutpoints: registry,
     protocolManager: deps.protocolManager,
   });
-  const planFunding = async (input: { ownerPublicKeyHex: string; network: "main" | "test"; amountSatoshis: number; feeRateSatoshisPerKb: number }) => {
+  const planFunding = async (input: { ownerPublicKeyHex: string; network: "main" | "test"; amountSatoshis: number; feeRateSatoshisPerKb: number; outputs?: Array<{ scriptHex: string; value: string }> }) => {
     check(input.ownerPublicKeyHex);
     if (!deps.protocolManager?.selectFundingInputs) throw new Error("Protocol funding requires manager selection");
     const result = await deps.protocolManager.selectFundingInputs(input);

@@ -62,6 +62,7 @@ export interface P2pkhProtocolManagerPort {
     network: BsvNetwork;
     amountSatoshis: number;
     feeRateSatoshisPerKb: number;
+    outputs?: Array<{ scriptHex: string; value: string }>;
   }): Promise<{ selected: ProtocolSpendInput[]; totalInputSatoshis: number }>;
   beginProtocolIntent(input: {
     ownerPublicKeyHex: string;
@@ -79,7 +80,10 @@ export interface P2pkhProtocolManagerPort {
     claims?: string[];
     /** Q04: stable identity of a delivered artifact (idempotent replay). */
     artifactId?: string;
+    deferDispatch?: boolean;
+    executionId?: string;
   }): Promise<{ allocationId: string }>;
+  cancelProtocolSubmission(input: { ownerPublicKeyHex: string; network: BsvNetwork; submissionId: string; allocationId?: string; txid?: string; reason?: "cancelled" | "execution-failed" }): Promise<void>;
   completeProtocolIntent(input: {
     ownerPublicKeyHex: string;
     network: BsvNetwork;
@@ -308,13 +312,15 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
    */
   const beginManagerIntent = async (intent: Parameters<P2pkhProtocolManagerPort["beginProtocolIntent"]>[0]):
     Promise<{ allocationId: string } | undefined> => {
-    if (!deps.protocolManager) return undefined;
+    if (!deps.protocolManager) throw new Error("Protocol signing requires the durable UTXO manager");
     return deps.protocolManager.beginProtocolIntent(intent);
   };
   const build=async(input:ProtocolSpendPrepareInput,sign:boolean):Promise<ProtocolSpendPreview>=>{
+      if (!deps.protocolManager) throw new Error("Protocol spend requires the durable UTXO manager");
       let protectedClaimIds: string[] = [];
       let inputClaimIds: string[] = [];
       const submissionId = crypto.randomUUID();
+      let managerAllocationId: string | undefined;
       // 放在 try 之前：签名闭包要读它，而闭包定义在 owner 解析之前。
       const resolvedOwner = await resolveOwnerKeyIdentity(deps, input.ownerPublicKeyHex);
 
@@ -335,6 +341,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
         /** 裸公钥单签输入的锁定脚本；按输入顺序给出，缺省项按 P2PKH 处理。 */
         lockingScripts?: readonly (string | undefined)[];
       }): Promise<ProtocolSpendPreview> => {
+        if (input.maxFeeSatoshis !== undefined && (!Number.isSafeInteger(input.maxFeeSatoshis) || input.maxFeeSatoshis < 0 || plan.feeSatoshis > input.maxFeeSatoshis)) throw new Error("Protocol miner fee exceeds business cap");
         const unsigned = buildUnsignedTx(plan.inputs, plan.outputs, plan.changeAddress, plan.changeSatoshis);
         if(!sign){
           const now=Date.now();for(const [id,t] of tickets)if(t.expires<=now)tickets.delete(id);
@@ -347,9 +354,8 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
         }
         await deps.assertInputsUnspent?.(input.network,input.inputs);
         // 输入占用先于额度批准/签名，竞争失败不产生第二份可花费签名。
-        inputClaimIds = (await deps.claimStore.tryClaimInputs({submissionId, resourceId: resourceIdFor(input.network), publicKeyHex: resolvedOwner.publicKeyHex, network: input.network,
-          inputs: input.inputs.map(u => ({txid: u.txid, vout: u.vout, value: u.value})),
-        })).claimIds;
+        // New wallet occupations belong exclusively to the manager. The
+        // claim store remains readable only for historical signed records.
         const previousTransactions = await Promise.all(input.inputs.map(async item => {
           if (item.previousTransactionHex !== undefined) {
             const previous = parseP2pkhTransaction(item.previousTransactionHex, item.txid);
@@ -403,6 +409,8 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           ownerPublicKeyHex: resolvedOwner.publicKeyHex,
           network: input.network,
           binding: { kind: input.protocolKind ?? "refund", poolId: submissionId },
+          deferDispatch: input.deferDispatch === true,
+          executionId: submissionId,
           unsignedTxHex: Array.from(serializeTx(unsigned), b => b.toString(16).padStart(2, "0")).join(""),
           inputs: classifiedInputs,
           outputs: plan.outputs.map((output) => ({ scriptHex: output.scriptHex.toLowerCase(), value: String(output.value) })),
@@ -419,10 +427,12 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
               .map((fact) => [fact.outpoint, { value: fact.value, scriptHex: fact.scriptHex }]),
           ),
         });
+        managerAllocationId = managerIntent!.allocationId;
         const rawTxHex = await signProtocolPayment({
           rawTxHex: Array.from(serializeTx(unsigned), b => b.toString(16).padStart(2, "0")).join(""),
           prevTransactionHexes: previousTransactions,
           publicKeyHex: resolvedOwner.publicKeyHex, network: input.network,
+          protocolExecution: { executionId: submissionId, submissionId, allocationId: managerAllocationId },
           pluginId: input.requestingPluginId ?? "p2pkh", requestPayment: c => deps.vault.requestPayment(c),
         });
         if (managerIntent) {
@@ -434,16 +444,11 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
             signedTxHex: rawTxHex,
             delivery: "wallet",
           });
+          try { await deps.vault.requestPayment({ action: "protocol-payment-ack", executionIds: [submissionId] }); }
+          catch (error) { console.warn("[p2pkh] Protocol execution ACK lost; durable manager exact retained", error); }
         }
         const serializedSizeBytes = rawTxHexByteLength(rawTxHex);
-        inputClaimIds = (await deps.claimStore.tryClaimInputs({
-          submissionId,
-          resourceId: resourceIdFor(input.network),
-          publicKeyHex: resolvedOwner.publicKeyHex,
-          network: input.network,
-          inputs: input.inputs.map((u) => ({ txid: u.txid, vout: u.vout, value: u.value })),
-          expectedCanonicalTxid: calcTxidFromRawTxHex(rawTxHex)
-        })).claimIds;
+
         if (deps.submissionStore) {
           await deps.submissionStore.putProtocolSubmission(buildProtocolSubmissionRecord({
             submissionId,
@@ -457,7 +462,6 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
             status: "prepared"
           }));
         }
-        const utxoBinding = await deps.getUtxoBinding?.({ ownerPublicKeyHex: resolvedOwner.publicKeyHex, network: input.network });
         return {
           ownerPublicKeyHex: resolvedOwner.publicKeyHex,
           requestingPluginId: input.requestingPluginId,
@@ -474,7 +478,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           inputClaimIds,
           submissionId,
           ...(managerIntent ? { managerAllocationId: managerIntent.allocationId } : {}),
-          ...(utxoBinding === undefined ? {} : { utxoBinding, utxoSeq: utxoBinding.seq })
+
         };
       };
 
@@ -540,7 +544,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
               `Protocol spend requires a larger miner fee (${feeSatoshis}) than the confirmed budget (${noChangeRule.maxMinerFeeSatoshis})`
             );
           }
-          return signAndRecord({
+          return await signAndRecord({
             inputs,
             outputs,
             changeAddress: undefined,
@@ -569,7 +573,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           // already covering the signed size is sufficient; never lower it and
           // re-enter that cycle. Output values and no-change budgets stay fixed.
           if (nextFee <= feeSatoshis) {
-            return signAndRecord({
+            return await signAndRecord({
               inputs,
               outputs,
               changeAddress: input.changeAddress,
@@ -583,6 +587,11 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
         }
         throw new Error("Protocol spend fee failed to converge");
       } catch (err) {
+        if (managerAllocationId) {
+          // No error string proves that a signer never ran. The trusted Vault
+          // journal decides release; otherwise preserve a visible responsibility.
+          await deps.protocolManager!.cancelProtocolSubmission({ ownerPublicKeyHex: input.ownerPublicKeyHex, network: input.network, submissionId, allocationId: managerAllocationId, reason: "execution-failed" });
+        }
         if (protectedClaimIds.length > 0 && deps.protectedOutpoints) {
           await deps.protectedOutpoints.releaseClaims(protectedClaimIds);
         }
@@ -618,6 +627,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           || existing.inputs.some((input, index) => input.txid !== preview.inputs[index]?.txid || input.vout !== preview.inputs[index]?.vout)) {
           throw new Error("Only a matching undispatched protocol spend can be released");
         }
+        await deps.protocolManager!.cancelProtocolSubmission({ ownerPublicKeyHex: preview.ownerPublicKeyHex, network: preview.network, submissionId, allocationId: preview.managerAllocationId, txid: preview.txid });
         const protectedClaimIds = existing.protectedClaimIds;
         const inputClaimIds = existing.localInputClaimIds;
         if (existing.status === "prepared") {
@@ -663,6 +673,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           || existing.resourceId !== resourceIdFor(input.network)) {
           throw new Error("Only a matching definitely undispatched protocol submission can be released");
         }
+        await deps.protocolManager!.cancelProtocolSubmission({ ownerPublicKeyHex: input.ownerPublicKeyHex, network: input.network, submissionId, txid: input.txid });
         if (existing.status === "prepared") {
           // 先持久化拒绝状态，之后即使释放过程被中断也不能再提交原交易。
           await deps.submissionStore!.putProtocolSubmission(buildProtocolSubmissionRecord({
@@ -697,6 +708,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
         // Rebuild and revalidate owner/protection/prevouts at actual authorization.
         preview=await build(ticket.input,true);
       }
+      if (!preview.managerAllocationId) throw new Error("Protocol submission requires a manager allocation; legacy exacts must use manager recovery");
       if(!preview.txid||calcTxidFromRawTxHex(preview.rawTxHex)!==preview.txid)throw Error("Protocol signed transaction bytes do not match txid");
       const submissionIdForLock = preview.submissionId ?? preview.txid;
       return serializeSubmissionOperation(submissionIdForLock, async () => {

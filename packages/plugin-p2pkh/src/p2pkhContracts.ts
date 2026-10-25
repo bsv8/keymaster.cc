@@ -472,8 +472,6 @@ export interface P2pkhService {
    */
   getTransactionDetail?(input: { resourceId: string; network: BsvNetwork; txid: string }): Promise<P2pkhTransactionDetail | undefined>;
 
-  allocateUtxos(request: UtxoAllocationRequest): Promise<UtxoAllocation>;
-
   /** 转移：prepare / preview。 */
   prepareTransfer(input: P2pkhTransferInput): Promise<P2pkhTransferPreview>;
   /** 转移：广播 preview 中已经生成好的最终交易。 */

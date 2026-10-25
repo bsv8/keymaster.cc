@@ -21,9 +21,7 @@ import { createP2pkhWorkerRuntime, createP2pkhWorkerOperations } from "@keymaste
 import { createContactsWorkerRuntime } from "@keymaster/plugin-contacts/worker";
 import { createWocWorkerRuntime } from "@keymaster/plugin-woc/worker";
 import { createForumWorkerPlugin } from "@keymaster/plugin-forum/worker";
-import { createTokenBsv21WorkerPlugin } from "@keymaster/plugin-token-bsv21/worker";
 import { createTokenStasWorkerPlugin } from "@keymaster/plugin-token-stas/worker";
-import { createCollectible1SatordinalsWorkerPlugin } from "@keymaster/plugin-collectible-1satordinals/worker";
 import { WalletLockBarrier } from "../walletLockBarrier.js";
 
 import { type NetworkIdentity } from "@keymaster/contracts";
@@ -840,9 +838,17 @@ const msfileWorkerLifecycle = createMsFileWorkerLifecycle({
 const msfileFundingRuntime = createWorkerFundingRuntime({
   session: () => ({ vaultStatus: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.activePublicKeyHex, sessionEpoch: coordinatorState.sessionEpoch }),
   journalStore: () => createWorkerModuleFileStore("msfile", "bitfs-journal"),
-  executor: (operation, signal?: AbortSignal) => testDomainUnitReadiness ? windowP2pWorkerRuntime.requestWindowP2pExecutorOperation(operation, signal) : msfileWorkerLifecycle.executor(operation, signal),
+  protocol: () => p2pkhWorkerRuntime.transfer.ensureProtocol(),
+  submitWalletExact: input => p2pkhWorkerRuntime.transfer.submitWalletExact(input),
+  ownsWalletExact: input => p2pkhWorkerRuntime.transfer.ownsWalletExact(input),
+  previousTransaction: input => p2pkhWorkerRuntime.transfer.previousTransaction(input),
+  observeBusinessReceipt: input => p2pkhWorkerRuntime.transfer.observeBusinessReceipt(input),
+  walletView: async input => {
+    const response = await p2pkhWorkerOperations.snapshot(generateRequestId(), input, true);
+    if (response.ack.status !== "ok") throw new Error("Manager wallet projection unavailable");
+    return response.operationResult as P2pkhUtxoSnapshotResult;
+  },
   ensureResources: ensureWorkerP2pkhResources,
-  snapshots: () => p2pkhWorkerRuntime.snapshots(),
   readP2pkhSettings: async () => currentNetworkFeeSettings(),
   maxFeeSatoshis: bitfsFundingMaxFeeSatoshis,
   deriveAddress: deriveP2pkhAddress,
@@ -864,7 +870,6 @@ const msfileBitfsRuntime = createBitfsWorkerRuntime({
   availability: coordinatorUnitAvailability,
   subscribeAvailability: subscribeCoordinatorUnitAvailability,
   ensureResources: ensureWorkerP2pkhResources,
-  snapshots: () => p2pkhWorkerRuntime.snapshots(),
   ensureChannel: () => ensureSatRuntime(),
   channel: () => satWorkerLifecycle.current(),
   buyerSubscriptions: async (runtime) => {
@@ -926,8 +931,6 @@ const msfileBitfsBuyerPurchaseTails = msfileBitfsRuntime.msfileBitfsBuyerPurchas
 const msfileBitfsWebRtcBuyerLinks = msfileBitfsRuntime.msfileBitfsWebRtcBuyerLinks;
 const msfileBitfsWebRtcSellerLinks = msfileBitfsRuntime.msfileBitfsWebRtcSellerLinks;
 const stopMsfileSellerRuntime = msfileBitfsRuntime.stopMsfileSellerRuntime;
-const filterP2pkhSnapshotByBitfsFunds = msfileBitfsRuntime.filterP2pkhSnapshotByBitfsFunds;
-const reconcileMsfileBitfsFundingInputs = msfileBitfsRuntime.reconcileMsfileBitfsFundingInputs;
 const acceptMsfileBitfsWebRtcOffer = msfileBitfsRuntime.acceptMsfileBitfsWebRtcOffer;
 const handleMsfileSellerHashRequest = msfileBitfsRuntime.handleMsfileSellerHashRequest;
 const drainMsfilePendingSellerHashRequests = msfileBitfsRuntime.drainMsfilePendingSellerHashRequests;
@@ -2077,6 +2080,7 @@ const p2pkhWorkerRuntime = createP2pkhWorkerRuntime({
   tasks: coordinatorTaskRegistrar,
   registerProviders: (registry, broadcast) => registerWocP2pkhProviders({ registry, woc: broadcast }),
   snapshotSource: createP2pkhSnapshotWocSource,
+  protectedOutpoints: (ownerPublicKeyHex, network) => currentMsfileBitfsFundingLedger().listProtectedOutpoints({ ownerPublicKeyHex, network }),
   resetSettings: () => p2pkhWorkerSettings.reset(),
   refresh: (signal, storage, assertActive) => refreshP2pkhUtxoSnapshots(signal, storage, assertActive),
   emit: (kinds, utxoSeqs) => { publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: coordinatorState.activePublicKeyHex ?? "", kinds, ...(utxoSeqs ? { utxoSeqs } : {}) }); },
@@ -2107,7 +2111,8 @@ const p2pkhWorkerRuntime = createP2pkhWorkerRuntime({
     },
     subscribeUtxo: listener => p2pkhWorkerRuntime.subscribeUtxoSeq(listener),
     query: () => p2pkhWorkerRuntime.query() ?? p2pkhWocService,
-    retryOptions: () => testSatBroadcastRetryOverrides,
+    protectedOutpoints: (ownerPublicKeyHex, network) => currentMsfileBitfsFundingLedger().listProtectedOutpoints({ ownerPublicKeyHex, network }),
+    fundsChanged: ({ ownerPublicKeyHex }) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: ownerPublicKeyHex, kinds: ["utxo", "balance"] }),
   },
 });
 const workerTransferRuntime = p2pkhWorkerRuntime.transfer;
@@ -2752,8 +2757,6 @@ const p2pkhWorkerOperations = createP2pkhWorkerOperations({
   provider: () => testP2pkhBroadcastProvider,
   broadcastLease: execute => withCoordinatorFinalIoLease("write", undefined, execute, { auditOperation: "p2pkh.broadcast" }),
   funding: {
-    reconcile: (input, snapshot) => reconcileMsfileBitfsFundingInputs(input.ownerPublicKeyHex, input.network, snapshot),
-    filter: (input, snapshot) => filterP2pkhSnapshotByBitfsFunds(input.ownerPublicKeyHex, input.network, snapshot),
     protected: input => currentMsfileBitfsFundingLedger().listProtectedOutpoints(input),
   },
   changed: event => { publishTopicEvent("asset.data-changed", event); },
@@ -3386,9 +3389,7 @@ const coordinatorRuntimePlugins = [
       },
     }
   }),
-  createTokenBsv21WorkerPlugin(workerAssetEvents),
   createTokenStasWorkerPlugin(workerAssetEvents),
-  createCollectible1SatordinalsWorkerPlugin(workerAssetEvents),
 ].map(withCoordinatorWorkerLifecycle);
 
 // Unit tests import this module in a normal Node realm. The installer above is

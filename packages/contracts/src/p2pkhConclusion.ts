@@ -2,7 +2,7 @@
 export type P2pkhConclusionInput = {
   ownerPublicKeyHex: string;
   network: "main" | "test";
-} & ({ action: "list" } | { action: "start" | "stop"; allocationId: string });
+} & ({ action: "list" } | { action: "start" | "stop" | "recover"; allocationId: string });
 export interface P2pkhInputConclusion {
   status: "conflict" | "failed";
   reason: "input-conflict";
@@ -19,6 +19,10 @@ export interface P2pkhConclusionRow {
   queryState: "stopped" | "running";
   conclusion?: P2pkhInputConclusion;
   error?: string;
+  retryable?: boolean;
+  signingState?: "unknown";
+  heldInputs?: string[];
+  heldSats?: string;
 }
 export interface P2pkhConclusionResult { items: P2pkhConclusionRow[]; }
 export interface P2pkhPaymentLookupInput { ownerPublicKeyHex: string; network: "main" | "test"; paymentId: string; }
@@ -76,7 +80,7 @@ function outpoint(v: unknown): string { const s = text(v, 80); const m = /^([0-9
 function points(v: unknown): string[] { if (!Array.isArray(v) || v.length > 100000) throw new TypeError("Invalid conclusion input list"); return v.map(outpoint); }
 export function parseP2pkhConclusionInput(value: unknown): P2pkhConclusionInput {
   const v = record(value);
-  const action = choice(v.action, ["list", "start", "stop"] as const);
+  const action = choice(v.action, ["list", "start", "stop", "recover"] as const);
   const ownerPublicKeyHex = text(v.ownerPublicKeyHex, 66);
   if (!/^(02|03)[0-9a-f]{64}$/i.test(ownerPublicKeyHex)) throw new TypeError("Invalid conclusion owner");
   const network = choice(v.network, ["main", "test"] as const);
@@ -90,12 +94,19 @@ export function parseP2pkhConclusionResult(value: unknown): P2pkhConclusionResul
   return { items: v.items.map(item => {
     const row = record(item);
     const result: P2pkhConclusionRow = {
-      allocationId: text(row.allocationId, 128), txid: txid(row.txid),
+      allocationId: text(row.allocationId, 128), txid: row.txid === "" && row.signingState === "unknown" ? "" : txid(row.txid),
       state: choice(row.state, ["pending", "dispatching", "unknown", "done", "failed"] as const),
       delivery: choice(row.delivery, ["wallet", "external"] as const),
       queryState: choice(row.queryState, ["stopped", "running"] as const),
       ...(row.error === undefined ? {} : { error: text(row.error, 2048) }),
     };
+    if (row.retryable !== undefined) { if (typeof row.retryable !== "boolean") throw new TypeError("Invalid retry permission"); result.retryable = row.retryable; }
+    if (row.signingState !== undefined) {
+      if (row.signingState !== "unknown" || row.txid !== "" || row.state !== "unknown" || row.retryable !== false) throw new TypeError("Invalid unsigned responsibility");
+      const amount = text(row.heldSats,20);
+      if (!/^(0|[1-9][0-9]*)$/.test(amount) || BigInt(amount) > 2100000000000000n) throw new TypeError("Invalid held amount");
+      result.signingState = "unknown"; result.heldInputs = points(row.heldInputs); result.heldSats = amount;
+    }
     if (row.conclusion !== undefined) {
       const c = record(row.conclusion);
       if (!Array.isArray(c.spentInputs) || c.spentInputs.length > 100000) throw new TypeError("Invalid spent facts");

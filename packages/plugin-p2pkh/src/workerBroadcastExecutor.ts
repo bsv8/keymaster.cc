@@ -42,7 +42,7 @@ export async function executeWorkerP2pkhBroadcast(
   deps: WorkerBroadcastDependencies,
 ): Promise<CoordinatorResponse> {
   deps.assertFresh();
-  if (deps.recoveringExact && !request.submission?.managerAllocationId) throw new Error("Recovered exact requires manager allocation");
+  if (!request.submission?.managerAllocationId) throw new Error("Every wallet broadcast requires a manager allocation");
   try {
   const provider = deps.provider;
   if (!provider) {
@@ -53,9 +53,6 @@ export async function executeWorkerP2pkhBroadcast(
   const walletState = deps.walletState;
   if (walletState.snapshot().activePublicKeyHex?.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
   const repository = createP2pkhStateRepository(await openP2pkhStateRepository(deps.storage()));
-  let consumed = false;
-  let snapshotResource: P2pkhUtxoSnapshotResource | undefined;
-  const consumedBinding = request.submission?.utxoBinding;
   let local = (await repository.listLocalTransactions()).find((row) => row.id === request.submissionId && row.network === request.network);
   if (!local) {
     // 页面 service 与 Worker 是两个 JS realm，页面内存中的本地提交这里读不到。
@@ -123,7 +120,10 @@ export async function executeWorkerP2pkhBroadcast(
   deps.assertFresh();
   const protectedInputKeys = new Set(protectedBitfsInputs.map((item) => `${item.txid}:${item.vout}`));
   const protectedInput = parsedInputOutpointKeys.find((key) => protectedInputKeys.has(key));
-  if (protectedInput) {
+  const bitfsManagerProof = protectedInput && request.submission?.managerAllocationId && deps.managerProtocolIntent
+    ? await deps.managerProtocolIntent({ ownerPublicKeyHex: request.ownerPublicKeyHex, network: request.network, allocationId: request.submission.managerAllocationId, txid: local.txid, inputOutpointKeys: parsedInputOutpointKeys }) : undefined;
+  deps.assertFresh();
+  if (protectedInput && !bitfsManagerProof?.ok) {
     await deps.abortNotDispatched(request, "bitfs-funds-protected");
     return {
       requestId,
@@ -198,36 +198,8 @@ export async function executeWorkerP2pkhBroadcast(
     deps.assertFresh();
   }
 
-  // Manager 已持久化具体输入占用、signing intent 与 exact-byte dispatch；
-  // 此时不再用旧的 whole-snapshot consume 序号门禁。未迁移的协议路径仍
-  // 保留原 consume 保护，直到其责任也迁入 Manager。
-  snapshotResource = await deps.resource(request.ownerPublicKeyHex, request.network);
-  deps.assertFresh();
-  const consumeResult = managerAuthorized
-    ? { status: "untouched" as const }
-    : snapshotResource && deps.snapshots
-      ? deps.snapshots.consume(snapshotResource, {
-          binding: consumedBinding,
-          inputOutpointKeys: parsedInputOutpointKeys,
-          txid: local.txid,
-        })
-    // 没有该 owner/network 资源时无法证明输入属于钱包快照，按纯协议输入
-    // 路径继续；正常 P2PKH 资源由 ensureWorkerP2pkhResources 预先材料化。
-    : { status: "untouched" as const };
-  if (consumeResult.status === "rejected") {
-    await deps.abortNotDispatched(request, consumeResult.reason);
-    return {
-      requestId,
-      sessionEpoch: deps.sessionEpoch(),
-      ack: { status: "ok" },
-      operationResult: {
-        status: "not-dispatched",
-        reason: consumeResult.reason,
-        ...(consumeResult.currentSeq === undefined ? {} : { currentSeq: consumeResult.currentSeq }),
-      },
-    };
-  }
-  consumed = consumeResult.status === "consumed";
+  // The manager owns exact input occupations and dispatch. A notification
+  // cursor is never a spend authorization and cannot be consumed or reset.
 
   const startedAt = new Date().toISOString();
   try {
@@ -305,7 +277,6 @@ export async function executeWorkerP2pkhBroadcast(
     // Only a trusted pre-dispatch marker permits rollback. Generic node text
     // and conflicts never prove every input releasable.
     if (isDefinitelyNotDispatchedBroadcastError(error)) {
-      if (consumed && snapshotResource && consumedBinding) deps.snapshots?.rollbackConsume(snapshotResource, consumedBinding);
       await deps.abortNotDispatched(request, message);
       return { requestId, sessionEpoch: deps.sessionEpoch(), ack: { status: "ok" }, operationResult: { status: "not-dispatched", reason: "coordinator-not-dispatched" } };
     }

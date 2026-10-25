@@ -718,15 +718,6 @@ const p2pkhPluginDefinition = {
     const storage = ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, "");
     const centralBroadcastService: CentralBroadcastService = createCentralBroadcastService({
       coordinator: { p2pkhBroadcast: assemblyBroadcast },
-      subscribeTopic: (listener) => publicCoordinator.subscribeTopic("asset.data-changed", listener),
-      getSnapshot: async (network) => {
-        const result = await publicCoordinator.p2pkhUtxosGet({ ownerPublicKeyHex: walletState.snapshot().activePublicKeyHex ?? "", network });
-        return result.status === "ok" ? result.value : { available: false, state: "unavailable", items: [] };
-      },
-      refreshSnapshot: async (network) => {
-        const result = await publicCoordinator.p2pkhUtxosRefresh({ ownerPublicKeyHex: walletState.snapshot().activePublicKeyHex ?? "", network });
-        return result.status === "ok" ? result.value : { available: false, state: "unavailable", items: [] };
-      },
     });
     ctx.provide(CENTRAL_BROADCAST_CAPABILITY, centralBroadcastService);
 

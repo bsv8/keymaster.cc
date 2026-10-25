@@ -1,5 +1,6 @@
 import { hex, unhex, parseTransaction, serializeTransaction, inspectStandard, inspectFeePool, standardUnlockKind } from "@vaultlink/sdk";
 import type { WalletPaymentCommand } from "./wallet-payments.js";
+import type { ProtocolExecutionIdentity } from "./protocol-execution-journal.js";
 
 /** Protocol spend 的最终整笔签名口；选币/费用求解不调用它。
  * 渠道按实际调用插件注册。费用池锁定用专用 Profile，不能重复计成普通付款。
@@ -7,6 +8,7 @@ import type { WalletPaymentCommand } from "./wallet-payments.js";
 export async function signProtocolPayment(input: {
   rawTxHex: string; prevTransactionHexes: string[]; publicKeyHex: string;
   network: "main" | "test"; pluginId: string;
+  protocolExecution?: ProtocolExecutionIdentity;
   requestPayment(command: Exclude<WalletPaymentCommand, {action: "list" | "pending" | "spend-notices" | "notice-dismiss" | "backend" | "signing-list"} | {action:"signing-configure"} | {action: "configure"} | {action: "answer"}>): Promise<unknown>;
 }): Promise<string> {
   if (!/^[a-z][a-z0-9.-]{0,63}$/.test(input.pluginId)) throw Error("invalid-payment-owner");
@@ -16,8 +18,10 @@ export async function signProtocolPayment(input: {
   const isPool = pool?.length === 105 && pool[0] === 0x52 && pool[103] === 0x53 && pool[104] === 0xae;
   const review = isPool ? await inspectFeePool(raw, previous, pub, "bitfs", "fund") : await inspectStandard(raw, previous, pub);
   const paymentType = isPool ? "feepool.bitfs" : "bsv.standard", channelId = `${input.pluginId}.${paymentType}.${input.network}`;
+  const paymentId = input.protocolExecution?.executionId ?? crypto.randomUUID();
+  if (input.protocolExecution) await input.requestPayment({ action: "protocol-payment-prepare", paymentId, rawTxHex: input.rawTxHex, prevTransactionHexes: input.prevTransactionHexes, protocolExecution: input.protocolExecution });
   await input.requestPayment({action: "register", id: channelId, owner: input.pluginId, kind: "plugin", network: input.network, paymentType});
-  const common = {channelId, paymentId: crypto.randomUUID(), sessionId: null, rawTxHex: input.rawTxHex, prevTransactionHexes: input.prevTransactionHexes};
+  const common = {channelId, paymentId, sessionId: null, rawTxHex: input.rawTxHex, prevTransactionHexes: input.prevTransactionHexes, ...(input.protocolExecution ? { protocolExecution: input.protocolExecution } : {})};
   const result = await input.requestPayment(isPool ? {action: "sign-feepool", family: "bitfs", stage: "fund", ...common} : {action: "sign-standard", ...common});
   if (!result || typeof result !== "object" || !("signatures" in result) || !Array.isArray(result.signatures) || result.signatures.length !== tx.inputs.length) throw Error("invalid-wallet-signature");
   for (let i = 0; i < tx.inputs.length; i++) {

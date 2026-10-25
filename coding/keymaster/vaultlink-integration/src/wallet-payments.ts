@@ -1,4 +1,5 @@
 import {publisherPaymentOwner, publisherPaymentChannelId} from "./app-payment-channel.js";
+import { ProtocolExecutionJournal, type ProtocolExecutionIdentity } from "./protocol-execution-journal.js";
 import {signatureFailure,signatureOwner,type SignatureRecorder,type SignatureTicket} from "./signature-history.js";
 import {
   inspectConnectEnvelope,
@@ -72,6 +73,10 @@ export type WalletPaymentCommand =
   | { action: "connect-payment-recovery" }
   | { action: "connect-payment-recovery-ack"; paymentIds: string[] }
   | { action: "connect-payment-signed-recovery" }
+  | { action: "protocol-payment-recovery" }
+  | { action: "protocol-payment-status"; executionId: string }
+  | { action: "protocol-payment-ack"; executionIds: string[] }
+  | { action: "protocol-payment-prepare"; paymentId: string; rawTxHex: string; prevTransactionHexes: string[]; protocolExecution: ProtocolExecutionIdentity }
   | {
       action: "register";
       id: string;
@@ -92,9 +97,11 @@ export type WalletPaymentCommand =
       paymentId: string;
       sessionId: string | null;
       connectPaymentReview?: P2pkhConnectPaymentPreview;
+      protocolExecution?: ProtocolExecutionIdentity;
     }
   | {
       action: "sign-feepool";
+      protocolExecution?: ProtocolExecutionIdentity;
       authorization?: { documentHex: string; refundTemplateHex: string };
       openingRequestHex?: string;
       family: "connect" | "bitfs";
@@ -354,6 +361,8 @@ export class WalletPayments {
   private signatureRecorder?:SignatureRecorder;
   setSignatureRecorder(recorder:SignatureRecorder){this.signatureRecorder=recorder;}
   private journalTail: Promise<unknown> = Promise.resolve();
+  private protocolJournal?: ProtocolExecutionJournal;
+  private protocolExecutions() { return this.protocolJournal ??= new ProtocolExecutionJournal(this.files, this.publicKeyHex, this.network); }
   private constructor(
     private gate: SoftwarePaymentGate,
     private publicKeyHex: string,
@@ -916,6 +925,10 @@ export class WalletPayments {
       this.mutations = result.catch(() => {});
       return result;
     }
+    if ((frozen.action === "sign-standard" || frozen.action === "sign-feepool") && frozen.protocolExecution) {
+      this.assertActive();
+      return this.protocolExecutions().execute({ ...frozen, protocolExecution: frozen.protocolExecution }, () => this.execute(frozen));
+    }
     return this.execute(frozen);
   }
   private async execute(command: WalletPaymentCommand): Promise<unknown> {
@@ -923,6 +936,10 @@ export class WalletPayments {
     if (command.action === "connect-payment-recovery") return this.recoverAuthorizedConnectExecutions();
     if (command.action === "connect-payment-recovery-ack") return this.acknowledgeConnectRecovery(command.paymentIds);
     if (command.action === "connect-payment-signed-recovery") return this.recoverSignedConnectExecutions();
+    if (command.action === "protocol-payment-recovery") return this.protocolExecutions().recovery();
+    if (command.action === "protocol-payment-status") return this.protocolExecutions().status(command.executionId);
+    if (command.action === "protocol-payment-ack") { await this.protocolExecutions().ack(command.executionIds); return true; }
+    if (command.action === "protocol-payment-prepare") { await this.protocolExecutions().prepare(command); return true; }
     if (command.action === "backend") return "software";
     if (command.action === "signing-list")
       return (await this.gate.snapshot()).signing ?? [];
@@ -1282,6 +1299,7 @@ export class WalletPayments {
             hex(signature) + (isPool && command.authorization ? "" : "41"),
           );
           if (connectPaymentReview) await this.persistConnectSignedMaterial(connectPaymentReview.paymentId, signatures);
+          if (command.protocolExecution) await this.protocolExecutions().material(command.protocolExecution.executionId, signatures);
         }
         if (connectPaymentReview) {
           await this.persistConnectSignedMaterial(connectPaymentReview.paymentId, signatures, buildSignedP2pkhExact(raw, tx, signatures, pub));
@@ -1291,6 +1309,7 @@ export class WalletPayments {
       async () => {
         assertRequest();
         if (connectPaymentReview) await this.markConnectSigningStarted(connectPaymentReview.paymentId);
+        if (command.protocolExecution) await this.protocolExecutions().start(command.protocolExecution.executionId);
       },
       (request, quote) => {
         if (poolOperation || quote.reasons.length || connectReview?.forceConfirm) return;

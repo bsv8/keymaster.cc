@@ -1,4 +1,3 @@
-import { selectBitfsFundingInputs } from "./fundingFee.js";
 // BitFS 买方资金账本与开池资金交易准备端口。
 //
 // 本文件只准备交易，不广播。调用方必须先把 exact bytes 写入 BitFS outbox；
@@ -826,12 +825,10 @@ export interface PreparedBitfsFunding {
 export interface BitfsFundingPrepareDeps {
   /** 每次都必须提供已绑定当前 Key 的受限协议交易准备器。 */
   protocolSpend: ProtocolSpendService;
-  /** 普通钱包快照是选币真值，历史资金账本不能限制池外余额。 */
-  getAvailableSnapshot(): Promise<P2pkhUtxoSnapshotResult>;
+  /** Wallet inputs and fee policy are planned by the manager, never by BitFS. */
+  planFunding(input: { ownerPublicKeyHex: string; network: BsvNetwork; amountSatoshis: number; feeRateSatoshisPerKb: number; outputs: Array<{ scriptHex: string; value: string }> }): Promise<{ selected: import("@keymaster/contracts").ProtocolSpendInput[]; totalInputSatoshis: number }>;
   /** 当前 Key 与网络对应的唯一找零地址和锁定脚本。 */
   resolveOwnerAddress(input: { ownerPublicKeyHex: string; network: BsvNetwork }): Promise<{ address: string; scriptHex: string }>;
-  /** 签名后消费 P2PKH 快照序号，避免并发交易选择相同输入。 */
-  reserveP2pkhInputs(input: { ownerPublicKeyHex: string; network: BsvNetwork; preview: ProtocolSpendPreview; inputOutpoints: string[] }): BitfsFundingInputReservation | Promise<BitfsFundingInputReservation>;
   /** 共识交易解析器；必须从 raw transaction 计算 txid 与 outputs。 */
   parseTransaction(rawTransactionHex: string, expectedTxid?: string): BitfsFundingTransactionView;
   /** 原样保存 exact bytes 和 txid 的专用 BitFS outbox。 */
@@ -980,26 +977,14 @@ export async function prepareBitfsFunding(input: {
     return reconstructPreparedFunding(input.sessionId, txid, priorEvidence, recoveredView, account);
   }
   if (session.phase !== "quote-selected") throw new BitfsFundingError("invalid_transition", "只能在报价固定后、Kind 2 签署前准备 FundingTx");
-  const snapshot = await deps.getAvailableSnapshot();
-  deps.assertCurrentContext({ ownerPublicKeyHex: owner, network, generation: input.generation });
-  if (!snapshot.available || snapshot.state !== "fresh") throw new BitfsFundingError("input_unavailable", "开池需要新鲜钱包余额快照");
-  const candidates = snapshot.items.filter(utxo => !utxo.isSpentInMempoolTx).map(utxo => ({
-    txid: utxo.txid, vout: utxo.vout, valueSatoshis: String(utxo.value),
-  }));
   const change = await deps.resolveOwnerAddress({ ownerPublicKeyHex: owner, network });
   const changeScript = assertScript(change.scriptHex);
-  const selection = selectBitfsFundingInputs(candidates, BigInt(outputAmount), [outputScript.length / 2, changeScript.length / 2], input.feeRateSatoshisPerKb, input.maxFeeSatoshis);
-  if (!selection) throw new BitfsFundingError("insufficient_funds", "普通钱包余额不足以覆盖开池金额和预计手续费");
-  const selected = selection.selected;
-  const selectedInputs = selected.map((utxo) => ({
-    txid: utxo.txid,
-    vout: utxo.vout,
-    value: safeSatoshiNumber(utxo.valueSatoshis),
-    address: change.address,
-  }));
+  const selection = await deps.planFunding({ ownerPublicKeyHex: owner, network, amountSatoshis: outputAmountNumber, feeRateSatoshisPerKb: input.feeRateSatoshisPerKb, outputs: [{ scriptHex: outputScript, value: outputAmount }] });
+  deps.assertCurrentContext({ ownerPublicKeyHex: owner, network, generation: input.generation });
+  const selectedInputs = selection.selected;
+  const selected = selectedInputs.map(utxo => ({ txid: utxo.txid, vout: utxo.vout, valueSatoshis: String(utxo.value) }));
 
   let preview: ProtocolSpendPreview | undefined;
-  let inputReservation: BitfsFundingInputReservation | undefined;
   let outboxDurable = false;
   try {
     preview = await deps.protocolSpend.presign({
@@ -1009,6 +994,8 @@ export async function prepareBitfsFunding(input: {
       inputs: selectedInputs,
       outputs: [{ value: outputAmountNumber, scriptHex: outputScript, label: "BitFS 开池资金" }],
       feeRateSatoshisPerKb: input.feeRateSatoshisPerKb,
+      maxFeeSatoshis: input.maxFeeSatoshis,
+      protocolKind: "fund",
       changeAddress: change.address,
     });
     deps.assertCurrentContext({ ownerPublicKeyHex: owner, network, generation: input.generation });
@@ -1033,14 +1020,8 @@ export async function prepareBitfsFunding(input: {
       actualFee,
       maxFeeSatoshis: BigInt(input.maxFeeSatoshis),
     });
-    if (!preview.utxoBinding) throw new BitfsFundingError("input_unavailable", "FundingTx 缺少新鲜 P2PKH 快照序号绑定");
+    if (!preview.managerAllocationId) throw new BitfsFundingError("input_unavailable", "FundingTx 缺少持久化 manager 输入占用");
     if (!preview.submissionId) throw new BitfsFundingError("input_unavailable", "FundingTx 预签缺少 P2PKH 持久化提交编号");
-    inputReservation = await deps.reserveP2pkhInputs({
-      ownerPublicKeyHex: owner,
-      network,
-      preview,
-      inputOutpoints,
-    });
     const opening = { txid: preview.txid, vout: 0, valueSatoshis: outputAmount, scriptHex: outputScript } as const;
     const poolId = input.sessionId;
 
@@ -1125,7 +1106,7 @@ export async function prepareBitfsFunding(input: {
           safeToRelease = true;
         }
       } catch { /* 无法证明 claim、ledger 与 outbox 可一起释放时继续保持保护 */ }
-      if (safeToRelease) inputReservation?.rollback();
+      // Signed manager responsibility is never released by a snapshot rollback.
     }
     throw error;
   }

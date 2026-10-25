@@ -475,6 +475,7 @@ export interface WalletPaymentChannel {
   id: string; owner: string; kind: "app" | "plugin"; network: string; paymentType: string;
   enabled: boolean; singleLimit: string; defaultSessionLimit: string; revision: number;
 }
+export interface ProtocolSigningExecutionIdentity { executionId: string; allocationId: string; submissionId: string; }
 /** 金额 wire 为十进制整数字符串，避免浮点与 BigInt JSON 精度问题。 */
 export type CoordinatorWalletPaymentCommand =
   | {action:"signature-history"}
@@ -486,13 +487,17 @@ export type CoordinatorWalletPaymentCommand =
   | { action: "connect-payment-recovery" }
   | { action: "connect-payment-recovery-ack"; paymentIds: string[] }
   | { action: "connect-payment-signed-recovery" }
+  | { action: "protocol-payment-recovery" }
+  | { action: "protocol-payment-status"; executionId: string }
+  | { action: "protocol-payment-ack"; executionIds: string[] }
+  | { action: "protocol-payment-prepare"; paymentId: string; rawTxHex: string; prevTransactionHexes: string[]; protocolExecution: ProtocolSigningExecutionIdentity }
   | { action: "register"; id: string; owner: string; kind: "app" | "plugin"; network: string; paymentType: string }
   | { action: "configure"; channel: WalletPaymentChannel }
   | { action: "session-open"; id: string; owner: string }
   | { action: "session-close" | "session-cancel"; id: string }
   | { action: "answer"; id: string; allow: boolean; raiseSessionLimit?: string }
-  | { action: "sign-p2pkh" | "sign-standard"; rawTxHex: string; prevTransactionHexes: string[]; channelId: string; paymentId: string; sessionId: string | null; connectPaymentReview?: import("./p2pkhConnectPayment.js").P2pkhConnectPaymentPreview }
-  | { action: "sign-feepool"; family: "connect" | "bitfs"; role?: "payer" | "cosigner"; stage: "fund" | "state"; authorization?: {documentHex:string;refundTemplateHex:string}; openingRequestHex?:string; rawTxHex: string; prevTransactionHexes: string[]; channelId: string; paymentId: string; sessionId: string | null };
+  | { action: "sign-p2pkh" | "sign-standard"; rawTxHex: string; prevTransactionHexes: string[]; channelId: string; paymentId: string; sessionId: string | null; connectPaymentReview?: import("./p2pkhConnectPayment.js").P2pkhConnectPaymentPreview; protocolExecution?: ProtocolSigningExecutionIdentity }
+  | { action: "sign-feepool"; protocolExecution?: ProtocolSigningExecutionIdentity; family: "connect" | "bitfs"; role?: "payer" | "cosigner"; stage: "fund" | "state"; authorization?: {documentHex:string;refundTemplateHex:string}; openingRequestHex?:string; rawTxHex: string; prevTransactionHexes: string[]; channelId: string; paymentId: string; sessionId: string | null };
 
 /** 钱包内部 UI 的 USB 控制面；没有 PIN、私钥或任意设备命令。 */
 export type CoordinatorHardwareCommand =

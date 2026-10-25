@@ -53,6 +53,8 @@ function outputs(value: unknown) {
 function prepare(value: unknown) {
   const row = scope(value);
   list(row.inputs, input, 1); outputs(row.outputs); number(row.feeRateSatoshisPerKb, true);
+  if (row.maxFeeSatoshis !== undefined) number(row.maxFeeSatoshis);
+  if (row.deferDispatch !== undefined && typeof row.deferDispatch !== "boolean") throw new TypeError("Invalid protocol dispatch gate");
   if (row.requestingPluginId !== undefined) text(row.requestingPluginId);
   if (row.changeAddress !== undefined) text(row.changeAddress);
   if (row.protocolKind !== undefined && !["refund", "close", "fund", "state"].includes(String(row.protocolKind))) throw new TypeError("Invalid protocol kind");

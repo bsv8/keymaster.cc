@@ -23,7 +23,7 @@ export function createP2pkhWorkerAssetReader(deps: P2pkhWorkerAssetReaderDepende
       const rows: Array<{ id: string; resourceId: string; publicKeyHex: string; network: "main" | "test"; address: string; txid: string; vout: number; value: number; height: number; script: string; status: "confirmed" | "unconfirmed"; isSpentInMempoolTx: boolean; syncedAt: string }> = [];
       for (const resource of await repository.listResourcesByKey()) {
         if (filter?.assetId && resource.network !== (filter.assetId === "bsv" ? "main" : "test")) continue;
-        const snapshot = deps.snapshots()?.get(resource);
+        const snapshot = await deps.snapshots()?.get(resource);
         if (!snapshot?.available) continue;
         for (const item of snapshot.items) {
           if (item.isSpentInMempoolTx) continue;

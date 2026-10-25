@@ -6,7 +6,7 @@ import { sameNetworkIdentity, requireUnlockedWalletIdentity } from "@keymaster/c
 // 关键设计：
 //   - 默认方法只读当前 active key namespace；跨 owner 读路径走
 //     `ensureRepositoryForOwner(publicKeyHex)`。
-//   - UTXO 唯一真值 = Coordinator Worker 内存中的 WoC `unspent/all` 快照；
+//   - 钱包余额与 UTXO 集合唯一来源 = Coordinator Worker manager 投影；
 //     service 通过 `coordinator.p2pkhUtxosGet / p2pkhUtxosRefresh` 读取，
 //     本地不再保存或派生任何 UTXO。
 //   - 历史 = WoC history 元数据（txid/height/fee）；raw tx 只在详情页
@@ -56,8 +56,7 @@ import {
 } from "./p2pkhContracts.js";
 import { createP2pkhStateRepository, disposeP2pkhStateRepository, openP2pkhStateRepository, type P2pkhStateRepositoryBundle, type P2pkhStateRepositoryHandle } from "./storage/p2pkhStateRepository.js";
 import { createP2pkhTransferService } from "./p2pkhTransferService.js";
-import { CentralBroadcastRetryableError } from "./centralBroadcastService.js";
-import { allocateUtxos, P2pkhAllocationError } from "./utxoAllocator.js";
+
 import { P2PKH_MSG } from "./p2pkhMessages.js";
 import { canonicalizeP2pkhUtxos } from "./p2pkhCanonical.js";
 import { parseP2pkhTransaction, p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
@@ -401,29 +400,17 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     loadSpendableUtxos: async ({ ownerPublicKeyHex, resource, purpose }) => {
       // 转账与其它花 UTXO 的入口共用同一道门禁。
       await protectionGate(deps)();
-      const transferPurpose = purpose ?? "prepare";
+      if (!deps.utxoManager) throw new Error("Wallet funding requires the Worker manager");
       let snapshot: P2pkhUtxoSnapshotResult;
       try {
         snapshot = await requireUtxoSnapshot({ ownerPublicKeyHex, network: resource.network }, "refresh");
       } catch (error) {
-        if (deps.utxoManager) return { utxos: [] }; // Durable local Manager outputs remain usable without WoC membership.
-        if (transferPurpose === "submit" || transferPurpose === "retry") throw new CentralBroadcastRetryableError("snapshot-refresh");
-        throw error;
-      }
-      if (!snapshot.available && !deps.utxoManager) {
-        if (snapshot.state === "consumed") {
-          if (transferPurpose === "submit" || transferPurpose === "retry") throw new CentralBroadcastRetryableError("snapshot-wait", snapshot.seq);
-          throw new Error("P2PKH UTXO snapshot is synchronizing; please wait for a fresh sequence and try again");
-        }
-        throw new Error("P2PKH UTXO snapshot is unavailable");
+        // A failed provider observation cannot erase durable manager facts.
+        // The manager still independently validates the held inputs and spend proofs.
+        return { utxos: [] };
       }
       const utxos = await listSpendableUtxosFromSnapshot({ resource, snapshot, ownerPublicKeyHex });
-      return {
-        utxos,
-        ...(snapshot.available && snapshot.state === "fresh" && snapshot.seq !== undefined
-          ? { utxoBinding: { resourceId: resource.resourceId, seq: snapshot.seq } }
-          : {}),
-      };
+      return { utxos };
     },
     getUtxoBinding: async ({ ownerPublicKeyHex, resource }) => getUtxoBinding({ ownerPublicKeyHex, network: resource.network }),
     getActiveKey: () => {
@@ -965,38 +952,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
         ? { ...balanceSnapshot.balances[BALANCE_NETWORK_KEYS[target]]!.breakdown! }
         : { ...EMPTY_BALANCE_BREAKDOWN };
     },
-    async allocateUtxos(request) {
-      // 选币门禁：保护登记恢复完成之前不放行。
-      await protectionGate(deps)();
-      if (!request.assetId || !(request.assetId in P2PKH_ASSETS)) {
-        throw new Error("P2PKH provider requires an assetId");
-      }
-      const settings = getCurrentSettings();
-      if (assetIdToNetwork(request.assetId) !== settings.bsvNetwork) {
-        throw new P2pkhAllocationError({
-          required: request.amountSatoshis,
-          available: 0,
-          feeReserve: request.feeReserveSatoshis ?? 0,
-          reason: "no-utxos"
-        });
-      }
-      const network = assetIdToNetwork(request.assetId);
-      const ownerHex = getVaultLifecycleSnapshot().activePublicKeyHex;
-      if (!ownerHex) {
-        throw new P2pkhAllocationError({ required: request.amountSatoshis, available: 0, feeReserve: request.feeReserveSatoshis ?? 0, reason: "no-utxos" });
-      }
-      const stateRepository = await ensureRepository();
-      const resource = await stateRepository.getResource(makeResourceId(network));
-      if (!resource) {
-        throw new P2pkhAllocationError({ required: request.amountSatoshis, available: 0, feeReserve: request.feeReserveSatoshis ?? 0, reason: "no-utxos" });
-      }
-      const snapshot = await requireUtxoSnapshot({ ownerPublicKeyHex: ownerHex, network }, "refresh");
-      const candidates = await listSpendableUtxosFromSnapshot({ resource, snapshot, ownerPublicKeyHex: ownerHex });
-      const result = allocateUtxos(candidates, request);
-      if (result.ok) return result.allocation;
-      throw new P2pkhAllocationError(result.error);
-    },
-
     prepareTransfer: (input) => {
       if (!input.ownerPublicKeyHex) {
         return Promise.reject(

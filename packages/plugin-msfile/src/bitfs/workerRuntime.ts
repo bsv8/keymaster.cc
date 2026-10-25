@@ -48,7 +48,6 @@ export interface BitfsWorkerDependencies {
   availability(unitId: string): { state: string };
   subscribeAvailability(listener: () => void): () => void;
   ensureResources: WorkerFundingDependencies["ensureResources"];
-  snapshots(): (NonNullable<ReturnType<WorkerFundingDependencies["snapshots"]>> & { get(resource: P2pkhUtxoSnapshotResource): P2pkhUtxoSnapshotResult }) | undefined;
   ensureChannel(): Promise<BitfsChannelPort>;
   channel(): BitfsChannelPort | undefined;
   buyerSubscriptions(runtime: BitfsChannelPort): Promise<void>;
@@ -161,7 +160,7 @@ async function arbitrationWorkflow(service?: MsFileServiceImpl): Promise<BitfsAr
     });
     const flow = new BitfsArbitrationWorkflow({
       owner, sessions, store, content: deps.files(""), contentForSession: record => buyerContentStore(owner, record.seedHashHex, record.sessionId), signer,
-      broadcaster: new BitfsTransactionBroadcaster({ journal: transactions, chain: { async broadcast(input) { return createBitfsWocChainPort(requireWoc(), network).broadcast(input); }, async lookupTransaction(txid) { return createBitfsWocChainPort(requireWoc(), network).lookupTransaction(txid); } }, nowMs: () => Date.now() }),
+      broadcaster: new BitfsTransactionBroadcaster({ journal: transactions, chain: { async broadcast(input) { return deps.funding.chain(requireWoc(), network, transactions).broadcast(input); }, async lookupTransaction(txid) { return deps.funding.chain(requireWoc(), network, transactions).lookupTransaction(txid); } }, nowMs: () => Date.now() }),
       services: async () => (await runtime.getSettingsSnapshot()).arbitrationServices,
       async settleBuyer(record, pool) {
         assertActive();
@@ -1600,10 +1599,8 @@ async function msfileBitfsKernelRefreshQuote(runtime: MsfileBitfsKernelRuntime, 
 
 /** 普通钱包快照 → 内核 wallet；已准备开池（Kind 2 已落盘）的命令视为占用已反映。 */
 async function msfileBitfsKernelWallet(runtime: MsfileBitfsKernelRuntime): Promise<{ revision: number; available: string; reflectedCommands: string[] }> {
-  const snapshot = await waitForMsfileFundingSnapshot({
-    ownerPublicKeyHex: runtime.ownerPublicKeyHex, seedHashHex: runtime.seedHashHex,
-    network: deps.network(), ledger: currentMsfileBitfsFundingLedger(),
-  });
+  const snapshot = await deps.funding.walletView({ ownerPublicKeyHex: runtime.ownerPublicKeyHex, network: deps.network() });
+  if (!snapshot.available) throw new Error("Manager wallet balance is unavailable");
   const available = snapshot.available && snapshot.state === "fresh"
     ? snapshot.items.filter((item) => !item.isSpentInMempoolTx).reduce((sum, item) => sum + BigInt(item.value), 0n)
     : 0n;
@@ -2404,11 +2401,8 @@ function watchMsfileSellerDependency(
 
 const msfileFundingRuntime = deps.funding;
 const currentMsfileBitfsFundingLedger = msfileFundingRuntime.currentLedger;
-const filterP2pkhSnapshotByBitfsFunds = msfileFundingRuntime.filterSnapshot;
-const reconcileMsfileBitfsFundingInputs = msfileFundingRuntime.reconcileInputs;
 const createMsfileBitfsProtocolSpend = msfileFundingRuntime.protocolSpend;
 const releaseMsfileBitfsPreparedSubmission = msfileFundingRuntime.releasePreparedSubmission;
-const waitForMsfileFundingSnapshot = msfileFundingRuntime.waitForSnapshot;
 const recoverMsfileBitfsFundingSplit = msfileFundingRuntime.recoverSplit;
 
 /** 为固定报价创建当前 Worker 内的买方开池任务；页面不接触账本或签名端口。 */
@@ -2427,7 +2421,6 @@ async function createMsfileBitfsBuyerTask(input: {
   /** 资金所属公链网络。 */
   network: "main" | "test";
 }): Promise<BitfsBuyerTask> {
-  const snapshots = deps.snapshots();
   const owner = input.ownerPublicKeyHex.trim().toLowerCase();
   const seed = input.seedHashHex.trim().toLowerCase();
   if (deps.session().vaultStatus !== "unlocked" || deps.session().activePublicKeyHex?.toLowerCase() !== owner) {
@@ -2445,8 +2438,7 @@ async function createMsfileBitfsBuyerTask(input: {
     if (deps.session().vaultStatus !== "unlocked"
       || deps.session().activePublicKeyHex?.toLowerCase() !== owner
       || deps.session().runGeneration !== runGeneration
-      || deps.session().sessionEpoch !== sessionEpoch
-      || deps.snapshots() !== snapshots) {
+      || deps.session().sessionEpoch !== sessionEpoch) {
       throw new Error("BitFS 买方任务的 Key、存储或会话世代已变化");
     }
   };
@@ -2497,42 +2489,13 @@ async function createMsfileBitfsBuyerTask(input: {
   assertCurrentContext();
 
   const protocolSpend = createMsfileBitfsProtocolSpend(transactions);
-  let fundingSnapshotResource: P2pkhUtxoSnapshotResource | undefined;
   const fundingDeps: BitfsFundingPrepareDeps = {
     protocolSpend,
-    getAvailableSnapshot: () => waitForMsfileFundingSnapshot({ ownerPublicKeyHex: owner, seedHashHex: seed, network: input.network, ledger }),
+    planFunding: request => deps.funding.planFunding(request),
     async resolveOwnerAddress() {
       assertCurrentContext();
       const address = deps.deriveAddress(owner, input.network);
       return { address, scriptHex: deps.addressScript(address, input.network) };
-    },
-    reserveP2pkhInputs({ preview, inputOutpoints }) {
-      assertCurrentContext();
-      const resource = fundingSnapshotResource;
-      const binding = preview.utxoBinding;
-      if (!resource || !snapshots || !binding) {
-        throw new Error("BitFS FundingTx 缺少可消费的 P2PKH 快照绑定");
-      }
-      const snapshot = snapshots.get(resource);
-      const inputKeys = new Set(inputOutpoints);
-      if (!snapshot.available || snapshot.state !== "fresh" || snapshot.seq !== binding.seq
-        || preview.inputs.length !== inputKeys.size
-        || preview.inputs.some((item) => {
-          const key = `${item.txid}:${item.vout}`;
-          const current = snapshot.items.find((utxo) => `${utxo.txid}:${utxo.vout}` === key);
-          return !inputKeys.has(key) || !current || current.isSpentInMempoolTx || current.value !== item.value;
-        })) {
-        throw new Error("BitFS FundingTx 有输入未出现在当前新鲜快照中或已被花费");
-      }
-      const consumed = snapshots.consume(resource, {
-        binding,
-        inputOutpointKeys: inputOutpoints,
-        txid: preview.txid,
-      });
-      if (consumed.status !== "consumed") {
-        throw new Error(`BitFS FundingTx 输入占用被拒绝：${consumed.status === "rejected" ? consumed.reason : "snapshot-missing"}`);
-      }
-      return { rollback: () => { snapshots?.rollbackConsume(resource, binding); } };
     },
     parseTransaction(rawTransactionHex, expectedTxid) {
       const parsed = deps.parseTransaction(rawTransactionHex, expectedTxid);
@@ -2560,7 +2523,7 @@ async function createMsfileBitfsBuyerTask(input: {
   };
 
   const woc = deps.woc();
-  const chain = woc ? createBitfsWocChainPort(woc, input.network) : {
+  const chain = woc ? deps.funding.chain(woc, input.network, transactions) : {
     async broadcast(): Promise<never> { throw new Error("BitFS Worker 内 WoC 服务未就绪"); },
     async lookupTransaction(): Promise<"unknown"> { return "unknown"; },
   };
@@ -2660,8 +2623,7 @@ async function createMsfileBitfsBuyerTask(input: {
         throw new Error("请先在 P2PKH 设置中启用测试网余额");
       }
       const resources = await deps.ensureResources(owner, settings.bsvNetwork);
-      fundingSnapshotResource = resources.find((resource) => resource.network === input.network);
-      if (!fundingSnapshotResource || !snapshots) throw new Error("BitFS FundingTx 的 P2PKH 余额快照尚未就绪");
+      if (!resources.some(resource => resource.network === input.network)) throw new Error("BitFS FundingTx 的钱包资源尚未就绪");
       for (let attempt = 0; ; attempt += 1) {
         assertCurrentContext();
         try {
@@ -2836,7 +2798,7 @@ async function configureMsfileSellerRuntime(
     });
     // WoC 未装配时仍允许派生索引和 fail-closed 协议端口启动；
     // 任何真实交易广播/高度查询都会明确失败，不会伪造链上事实。
-    const chain = woc ? createBitfsWocChainPort(woc, deps.network()) : {
+    const chain = woc ? deps.funding.chain(woc, deps.network(), transactionJournal) : {
       async broadcast(): Promise<never> { throw new Error("BitFS Worker 内 WoC 服务未就绪"); },
       async lookupTransaction(): Promise<"unknown"> { return "unknown"; },
     };
@@ -4036,8 +3998,6 @@ async function handleInboxWebRtc(webrtcBody: import("bsv8-channel-protocol/webrt
     msfileBitfsWebRtcSellerLinks,
     stopMsfileSellerRuntime,
     msfileFundingRuntime,
-    filterP2pkhSnapshotByBitfsFunds,
-    reconcileMsfileBitfsFundingInputs,
     acceptMsfileBitfsWebRtcOffer,
     get msfileSellerSessionManager() { return msfileSellerSessionManager; },
     handleMsfileSellerHashRequest,

@@ -30,8 +30,6 @@ export interface P2pkhWorkerOperationPorts {
   broadcastLease<T>(execute: () => Promise<T>): Promise<T>;
   provider(): P2pkhTransactionBroadcastProvider | undefined;
   funding: {
-    reconcile(input: Input, snapshot: P2pkhUtxoSnapshotResult): Promise<void>;
-    filter(input: Input, snapshot: P2pkhUtxoSnapshotResult): Promise<P2pkhUtxoSnapshotResult>;
     protected(input: Input): Promise<readonly { txid: string; vout: number }[]>;
   };
   changed(event: { type: "asset.data-changed"; providerId: string; publicKeyHex: string; kinds: string[]; utxoSeqs?: { main?: number; test?: number } }): void;
@@ -68,7 +66,6 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
     return refreshWorkerP2pkhResources({
       storage, ownerPublicKeyHex: owner, bsvNetwork: ports.network(), snapshots: captured.snapshots!,
       assertFresh() { assertActive(); captured.assertFresh(); },
-      afterRefresh: (network, snapshot) => ports.funding.reconcile({ ownerPublicKeyHex: owner, network }, snapshot),
     }, signal);
   }
   async function protocolProtection(input: Input) {
@@ -98,13 +95,7 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
     if (refreshSnapshot) await ensureWorkerP2pkhResources(storage, input.ownerPublicKeyHex, ports.network());
     return executeWorkerP2pkhSnapshot(requestId, input, refreshSnapshot, {
       storage, snapshots: captured.snapshots, epoch, assertFresh: captured.assertFresh,
-      reconcile: ports.funding.reconcile,
-      async filter(input, result) {
-        const filtered = await ports.funding.filter(input, result);
-        const protectedRows = await protocolProtection(input);
-        const keys = new Set(protectedRows.map(row => `${row.txid}:${row.vout}`));
-        return { ...filtered, items: filtered.items.filter(row => !keys.has(`${row.txid}:${row.vout}`)) };
-      }, publish: ports.changed,
+      publish: ports.changed,
     });
   }
   async function abortNotDispatched(request: BroadcastRequest, reason: string) {
@@ -117,6 +108,7 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
     } catch { /* 撤权后的旧存储句柄可能已失效；不能为了写证据绕过授权。 */ }
   }
   const conclusions = createConclusionQueries({
+    recover: input => ports.domain.transfer.recoverSigning(input),
     capture(input) {
       if (!ports.available() || ports.network() !== input.network) throw new Error("Conclusion query wallet/network unavailable");
       const captured = capture(input.ownerPublicKeyHex);
@@ -235,23 +227,25 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
         // the manager: it holds the durable intent, the exclusive input
         // responsibility and the exact bytes. The protocol WAL stays as
         // business/history evidence and no longer decides dispatchability.
-        if (!allocationId && !protocolSubmission) {
+        if (!allocationId) {
           await abortNotDispatched(request, "utxo-manager-required");
           return { requestId, sessionEpoch: epoch(), ack: { status: "ok" }, operationResult: { status: "not-dispatched", reason: "coordinator-not-dispatched" } };
         }
-        if (!allocationId) return await executeWorkerP2pkhBroadcast(requestId, request, dependencies);
         if (!request.submission) throw new Error("UTXO manager allocation requires an exact signed submission");
         const managerResource = await resource(request.ownerPublicKeyHex, request.network);
         captured.assertFresh();
         if (!managerResource) throw new Error("UTXO manager wallet resource is unavailable");
+        const original = (await manager.listConclusions({ ownerPublicKeyHex: request.ownerPublicKeyHex, network: request.network })).find(row => row.allocationId === allocationId);
+        const recoveringExact = original?.state === "unknown" || original?.state === "dispatching";
+        captured.assertFresh();
         let workerResponse: CoordinatorResponse | undefined;
         try {
-          await manager.submitSigned({
+          const settled = await manager.submitSigned({
             ownerPublicKeyHex: request.ownerPublicKeyHex, resource: managerResource,
             allocationId, signedTxHex: request.submission.rawTxHex,
             async broadcast(rawTxHex) {
               if (rawTxHex.toLowerCase() !== request.submission!.rawTxHex.toLowerCase()) throw new Error("UTXO manager broadcast bytes changed");
-              workerResponse = await executeWorkerP2pkhBroadcast(requestId, request, dependencies);
+              workerResponse = await executeWorkerP2pkhBroadcast(requestId, request, { ...dependencies, recoveringExact });
               captured.assertFresh();
               const outcome = workerResponse.operationResult as { status?: string; txid?: string; canonicalTxid?: string; reason?: string } | undefined;
               if (outcome?.status === "local-confirmed") return { status: "accepted", txid: outcome.canonicalTxid ?? outcome.txid ?? "" };
@@ -261,7 +255,10 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
             },
           });
           captured.assertFresh();
-          if (!workerResponse) throw new Error("UTXO manager completed without a Worker broadcast result");
+          ports.changed({ type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "balance", "submission"] });
+          if (!workerResponse) return { requestId, sessionEpoch: epoch(), ack: { status: "ok" }, operationResult: settled.delivery === "accepted" || settled.delivery === "already-known"
+            ? { status: "already-known", txid: settled.txid, canonicalTxid: settled.txid }
+            : { status: "isolated", txid: settled.txid, reason: `Manager exact remains ${settled.delivery}` } };
           return workerResponse;
         } catch (error) {
           if (workerResponse?.operationResult && (workerResponse.operationResult as { status?: string }).status !== "not-dispatched") {
@@ -313,6 +310,7 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
       captured.assertFresh();
       const preview = await service.prepareTransfer(request.input as Parameters<typeof service.prepareTransfer>[0]);
       captured.assertFresh();
+      ports.changed({ type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.input.ownerPublicKeyHex, kinds: ["utxo", "balance"] });
       return { requestId, sessionEpoch: epoch(), ack: { status: "ok" }, operationResult: preview };
     } catch (error) {
       return { requestId, sessionEpoch: epoch(), ack: { status: "error", message: `P2PKH transfer prepare failed: ${error instanceof Error ? error.message : String(error)}` } };

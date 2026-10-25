@@ -45,15 +45,11 @@ export async function refreshWorkerP2pkhResources(deps: P2pkhWorkerRefreshDepend
   for (const resource of resources) {
     if (resource.network === "test" && !bsvNetwork) continue;
     if (signal?.aborted) return utxoSeqs;
-    // consumed 快照不能仅凭“下一次 unspent 内容暂时没变”解封。
-    // 先做一次交易级只读观察：只有消费交易超过阈值且 confirmed /
-    // unconfirmed 都不存在时，才复用原序号恢复 fresh。
-    deps.assertFresh();
-    await deps.snapshots.reconcileConsumed(resource).catch(() => false);
+    // Refresh ingests provider facts into the manager; it never releases
+    // signed/unknown responsibilities based on elapsed time or missing txids.
     deps.assertFresh();
     const result = await deps.snapshots.refresh(resource, signal ? { signal } : {}).catch(() => undefined);
     deps.assertFresh();
-    if (result) await deps.afterRefresh?.(resource.network, result);
     if (result?.seq !== undefined) utxoSeqs[resource.network] = result.seq;
   }
   deps.assertFresh();

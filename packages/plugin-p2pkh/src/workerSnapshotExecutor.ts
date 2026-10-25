@@ -12,8 +12,6 @@ interface SnapshotPorts {
   snapshots?: P2pkhUtxoSnapshotStore;
   assertFresh(): void;
   epoch(): string;
-  reconcile(input: SnapshotInput, snapshot: P2pkhUtxoSnapshotResult): Promise<void>;
-  filter(input: SnapshotInput, snapshot: P2pkhUtxoSnapshotResult): Promise<P2pkhUtxoSnapshotResult>;
   publish(event: Omit<AssetDataChangedEvent, "topic" | "assetDataRevision" | "sessionEpoch">): void;
 }
 /** P2PKH owns snapshot lookup and refresh; each await remains tied to one store/session. */
@@ -24,11 +22,10 @@ export async function executeWorkerP2pkhSnapshot(requestId: string, input: Snaps
   const snapshots = ports.snapshots;
   if (!resource || !snapshots) return { requestId, sessionEpoch: ports.epoch(), ack: { status: "ok" }, operationResult: { available: false, state: "unavailable", items: [] } satisfies P2pkhUtxoSnapshotResult };
   try {
-    if (refresh) { await snapshots.reconcileConsumed(resource); ports.assertFresh(); }
-    const snapshot = refresh ? await snapshots.refresh(resource) : snapshots.get(resource);
+    const snapshot = refresh ? await snapshots.refresh(resource) : await snapshots.get(resource);
     ports.assertFresh();
-    if (refresh) { await ports.reconcile(input, snapshot); ports.assertFresh(); }
-    const result = await ports.filter(input, snapshot);
+    // Projection has already passed the manager's occupation/protection rules.
+    const result = snapshot;
     ports.assertFresh();
     if (refresh) ports.publish({ type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: input.ownerPublicKeyHex, kinds: ["utxo", "balance"], ...(result.seq === undefined ? {} : { utxoSeqs: { [input.network]: result.seq } }) });
     return { requestId, sessionEpoch: ports.epoch(), ack: { status: "ok" }, operationResult: result };

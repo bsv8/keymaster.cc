@@ -6,6 +6,7 @@ export * from "./payment.js";
 export * from "./wallet-payments.js";
 export * from "./bitfs-payments.js";
 export * from "./protocol-payments.js";
+export * from "./protocol-execution-journal.js";
 export * from "./usb-bridge.js";
 
 export { HardwareWalletPayments } from "./hardware-payments.js";
