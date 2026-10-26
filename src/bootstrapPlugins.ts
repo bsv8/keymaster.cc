@@ -5,7 +5,7 @@ import { coordinatorClientBindings } from "./assembly/coordinatorClientBindings.
 // 全部插件由依赖图登记和启动；阶段只描述页面可观察的启动状态。
 
 import { storagePrivateCapabilities, storagePrivateSlotBindings } from "./assembly/storagePrivateCapabilities.js";
-import { ASSET_DATA_NOTIFIER_CAPABILITY, APPLICATION_BOOTSTRAP_READY_CAPABILITY, COORDINATOR_ACTIVITY_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, STORAGE_RUNTIME_CONTROLLER_CAPABILITY, VAULT_SERVICE_CAPABILITY, type KeyValueCommitInput, type KeyValueCommitResult, type KeyValueEntry, type KeyValueEntryMeta, type KeyValueListInput, type KeyValueListResult, type KeyValueStore, type KeyValueValue, type PluginManifest, type AssetDataNotifier, type SessionCoordinatorClient, type StorageCoordinatorControl, type VaultCoordinatorControl, type BackgroundCoordinatorControl, type P2pkhCoordinatorControl, type MsFileCoordinatorControl, type SatCoordinatorControl, type WindowP2pCoordinatorControl, type ProtocolCoordinatorControl, type ContactsCoordinatorControl, type PluginPermission, type RuntimeIdentityTransition, CENTRAL_STORAGE_DECLARATIONS, type PluginStorageDeclaration } from "@keymaster/contracts";
+import { APPLICATION_BOOTSTRAP_READY_CAPABILITY, COORDINATOR_ACTIVITY_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, STORAGE_RUNTIME_CONTROLLER_CAPABILITY, VAULT_SERVICE_CAPABILITY, type KeyValueCommitInput, type KeyValueCommitResult, type KeyValueEntry, type KeyValueEntryMeta, type KeyValueListInput, type KeyValueListResult, type KeyValueStore, type KeyValueValue, type PluginManifest, type SessionCoordinatorClient, type StorageCoordinatorControl, type VaultCoordinatorControl, type BackgroundCoordinatorControl, type P2pkhCoordinatorControl, type MsFileCoordinatorControl, type SatCoordinatorControl, type WindowP2pCoordinatorControl, type ProtocolCoordinatorControl, type ContactsCoordinatorControl, type PluginPermission, type RuntimeIdentityTransition, CENTRAL_STORAGE_DECLARATIONS, type PluginStorageDeclaration } from "@keymaster/contracts";
 import {
   type WindowApp,
 } from "webloom-framework";
@@ -692,8 +692,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     hasUnlockedActiveKey: false,
     vaultSelectionReady: false,
     ownerAppsReady: false,
-    connectAppsReady: false,
-    assetCatalogsReady: false
+    connectAppsReady: false
   }));
   runWithBootstrapErrorContext({
     stage: "storage-status",
@@ -703,17 +702,6 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     stage: "storage-status",
     operation: "register-shell-resources"
   }, () => registerApplicationBootstrapResource(host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY), bootstrapStatus.service));
-
-  // 硬切换 003：直接转发 Coordinator event 给 runtime notifier
-  // 装配层只负责转发，合并语义由 runtime notifier 实现
-  runWithBootstrapErrorContext({
-    stage: "transport",
-    operation: "subscribe-asset-data-changes"
-  }, () => coordinatorClient.subscribeTopic("asset.data-changed", (event) => {
-    if (event.type === "asset.data-changed") {
-      host.capabilities.get(ASSET_DATA_NOTIFIER_CAPABILITY)?.emit(event);
-    }
-  }));
 
   const fullCatalog = [...WEB_PLUGIN_CATALOG];
   // 施工单 2026-07-08 001 硬切换：装配层对 plugin-bsv-price 的 Window
@@ -746,7 +734,6 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   let vaultSelectionReady = false;
   let ownerAppsReady = false;
   let connectAppsReady = false;
-  let assetCatalogsReady = false;
   let storageReadyForBootstrap = storageReady;
   let sessionStateOff: (() => void) | undefined;
   let ownerAssemblyGeneration = 0;
@@ -833,9 +820,6 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       if (!isCurrentOwnerGeneration()) return;
       ownerAppsReady = true;
       updateBootstrapStatus({ phase: "owner-apps-ready", hasUnlockedActiveKey: true, ownerAppsReady: true }, "owner-apps-ready");
-      // 聚合 UI 由真实插件 setup 和 Scope 持有，宿主只投影就绪状态。
-      assetCatalogsReady = host.state("assets").kind === "enabled" && host.state("collectibles").kind === "enabled";
-      updateBootstrapStatus({ assetCatalogsReady }, "owner-apps-ready");
       await refreshRuntime("connect-apps-ready", retryFailed);
       if (!isCurrentOwnerGeneration()) return;
       connectAppsReady = true;
@@ -847,8 +831,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
         phase: "connect-apps-ready",
         hasUnlockedActiveKey: true,
         ownerAppsReady,
-        connectAppsReady,
-        assetCatalogsReady
+        connectAppsReady
       }, "connect-apps-ready");
     })();
     ownerAppsPromise = stagePromise;
@@ -865,7 +848,6 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
           vaultSelectionReady,
           ownerAppsReady,
           connectAppsReady,
-          assetCatalogsReady,
           error: formatStartupErrorSummary(error)
         }, "owner-apps-ready");
       }
@@ -911,7 +893,6 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
         vaultSelectionReady,
         ownerAppsReady,
         connectAppsReady,
-        assetCatalogsReady,
         error: formatStartupErrorSummary(error)
       }, "vault-selection");
       throw error;
@@ -1045,12 +1026,10 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       ownerAppsPromise = undefined;
       ownerAppsReady = false;
       connectAppsReady = false;
-      assetCatalogsReady = false;
         updateBootstrapStatus({
           hasUnlockedActiveKey: nextIdentity.vaultStatus === "unlocked",
           ownerAppsReady: false,
           connectAppsReady: false,
-          assetCatalogsReady: false,
           phase: applicationBootstrapPhaseForStorageReadiness(storageReadyForBootstrap)
         }, "coordinator");
     }

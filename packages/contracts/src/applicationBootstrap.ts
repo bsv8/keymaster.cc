@@ -36,8 +36,6 @@ export interface ApplicationBootstrapSnapshot {
   ownerAppsReady: boolean;
   /** Connect apps 是否已经完成装配。 */
   connectAppsReady: boolean;
-  /** 资产与藏品目录插件是否已经就绪。 */
-  assetCatalogsReady: boolean;
   /** 装配失败时的脱敏错误信息。 */
   error?: string;
 }

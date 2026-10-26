@@ -1,89 +1,48 @@
 import { useP2pkhResources } from "../P2pkhResourceContext.js";
-// packages/plugin-p2pkh/src/widgets/P2pkhBalanceWidget.tsx
-// P2PKH 余额 widget：
-//   - 金额来源改为 `{ total }`；不再分 confirmed / unconfirmed。
-//   - testnet 行受 `bsvNetwork` 控制：false 时不展示。
-//   - 只被动订阅 data-changed / settings 变化，不暴露手动同步入口。
-//
-// 硬切换 003：使用 Resource Store 读取余额和设置数据。
-// 跨标签同步、请求去重、失效批处理由 resource 处理。
-
 import { formatSats, formatSatsWithPrice } from "@keymaster/ui";
 import { countRender } from "webloom-framework/react";
 import { usePluginBsvPrice, usePluginI18n, usePluginLocale, useResourceViewSelector } from "@keymaster/runtime";
-import { BALANCE_NETWORK_KEYS, emptyGlobalBalanceSnapshot, type GlobalBalanceSnapshot } from "@keymaster/contracts";
-import type { P2pkhBalance, P2pkhSyncStatus } from "../p2pkhContracts.js";
+import { emptyGlobalBalanceSnapshot, type GlobalBalanceSnapshot } from "@keymaster/contracts";
+import type { P2pkhSyncStatus } from "../p2pkhContracts.js";
 
-const DEFAULT_BALANCES = emptyGlobalBalanceSnapshot();
-
+const EMPTY = emptyGlobalBalanceSnapshot();
 type ReadinessState = "initializing" | "no-active-key" | "ready";
 
+/** 当前绑定钱包的 manager 可用余额，不选择资产或另一网络。 */
 export function P2pkhBalanceWidget() {
   countRender("plugin-p2pkh/P2pkhBalanceWidget");
   const { t } = usePluginI18n();
   const locale = usePluginLocale();
   const price = usePluginBsvPrice();
   const store = useP2pkhResources();
-
   const readiness = useResourceViewSelector<ReadinessState, ReadinessState>(
-    store, "p2pkh.readiness", [], (snapshot) => snapshot.data ?? "initializing"
+    store, "p2pkh.readiness", [], snapshot => snapshot.data ?? "initializing",
   );
   const status = useResourceViewSelector<P2pkhSyncStatus, P2pkhSyncStatus>(
-    store, "p2pkh.sync-status", [], (snapshot) => snapshot.data ?? "idle"
+    store, "p2pkh.sync-status", [], snapshot => snapshot.data ?? "idle",
   );
-
-  // 使用 Resource Store 读取统一的全局余额快照。
-  const balances = useResourceViewSelector<GlobalBalanceSnapshot, GlobalBalanceSnapshot>(
-    store,
-    "p2pkh.balance",
-    [],
-    (snapshot) => snapshot.data ?? DEFAULT_BALANCES,
-    (a, b) => JSON.stringify(a) === JSON.stringify(b)
+  const snapshot = useResourceViewSelector<GlobalBalanceSnapshot, GlobalBalanceSnapshot>(
+    store, "p2pkh.balance", [], state => state.data ?? EMPTY,
   );
-
+  const { balance, bsvNetwork: network } = snapshot;
+  const known = Boolean(snapshot.publicKeyHex) && balance.available === true;
   const stale = status === "failed" || status === "rate-limited";
-  // 快照不可用（冷启动/刷新失败）时显示“未知”，绝不显示 0。
-  const showAmount = (b: P2pkhBalance | undefined, network: "main" | "test") =>
-    b && b.available !== false ? formatSatsWithPrice(b.total, price, { locale, network }) : "—";
-  const breakdown = (b: P2pkhBalance | undefined) => b?.available !== false && b?.breakdown ? <dl className="home-widget__breakdown"><dt>Confirmed</dt><dd>{formatSats(b.breakdown.confirmed)}</dd><dt>Spendable</dt><dd>{formatSats(b.breakdown.spendable)}</dd></dl> : null;
-  const statusText = computeStatusText(readiness, status, t);
-
+  const statusText = readiness === "ready" ? status : t(
+    readiness === "initializing" ? "p2pkh.balanceWidget.status.initializing" : "p2pkh.balanceWidget.status.noActiveKey",
+    { defaultValue: readiness === "initializing" ? "钱包正在初始化" : "钱包尚未解锁" },
+  );
   return (
     <div className={`home-widget home-widget--p2pkh-balance ${stale ? "is-stale" : ""}`}>
-      <header className="home-widget__head">
-        <h3>{t("p2pkh.balanceWidget.title", { defaultValue: "P2PKH 余额" })}</h3>
-      </header>
-      {balances.bsvNetwork === "main" ? (
-      <section className="home-widget__row">
-        <div>
-          <p className="home-widget__label">{t("p2pkh.balanceWidget.bsvMain", { defaultValue: "BSV (main)" })}</p>
-          <p className="home-widget__amount">{showAmount(balances.balances[BALANCE_NETWORK_KEYS.main], "main")}</p>
-          {breakdown(balances.balances[BALANCE_NETWORK_KEYS.main])}
-        </div>
-      </section>
-      ) : null}
-      {balances.bsvNetwork === "test" ? (
-        <section className="home-widget__row">
-          <div>
-            <p className="home-widget__label">{t("p2pkh.balanceWidget.bsvTest", { defaultValue: "BSV Testnet (test)" })}</p>
-            <p className="home-widget__amount">{showAmount(balances.balances[BALANCE_NETWORK_KEYS.test], "test")}</p>
-            {breakdown(balances.balances[BALANCE_NETWORK_KEYS.test])}
-          </div>
-        </section>
-      ) : null}
-      <p className="home-widget__status">
-        {t("p2pkh.balanceWidget.statusLabel", { defaultValue: "状态：" })}{statusText}
-      </p>
+      <header className="home-widget__head"><h3>{t("p2pkh.balanceWidget.title", { defaultValue: "P2PKH 余额" })}</h3></header>
+      <section className="home-widget__row"><div>
+        <p className="home-widget__label">{t(network === "main" ? "p2pkh.balanceWidget.bsvMain" : "p2pkh.balanceWidget.bsvTest", { defaultValue: network === "main" ? "BSV (main)" : "BSV Testnet (test)" })}</p>
+        <p className="home-widget__amount">{known ? formatSatsWithPrice(balance.total, price, { locale, network }) : "—"}</p>
+        {known && balance.breakdown ? <dl className="home-widget__breakdown">
+          <dt>{t("p2pkh.balance.confirmed", { defaultValue: "已确认（可花费）" })}</dt><dd>{formatSats(balance.breakdown.confirmed)}</dd>
+          <dt>{t("p2pkh.balance.localSpendable", { defaultValue: "可花费" })}</dt><dd>{formatSats(balance.breakdown.spendable)}</dd>
+        </dl> : null}
+      </div></section>
+      <p className="home-widget__status">{t("p2pkh.balanceWidget.statusLabel", { defaultValue: "状态：" })}{statusText}</p>
     </div>
   );
-}
-
-function computeStatusText(
-  readiness: ReadinessState,
-  sync: string,
-  t: (key: string, values?: { defaultValue?: string; [k: string]: string | number | boolean | null | undefined }) => string
-): string {
-  if (readiness === "initializing") return t("p2pkh.balanceWidget.status.initializing", { defaultValue: "Key 正在初始化" });
-  if (readiness === "no-active-key") return t("p2pkh.balanceWidget.status.noActiveKey", { defaultValue: "请选择一个 active key" });
-  return sync;
 }

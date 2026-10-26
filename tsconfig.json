@@ -38,9 +38,6 @@
       "path": "./packages/plugin-protocol"
     },
     {
-      "path": "./packages/plugin-token-stas"
-    },
-    {
       "path": "./packages/plugin-window-p2p"
     },
     {
@@ -66,12 +63,6 @@
     },
     {
       "path": "./packages/plugin-page"
-    },
-    {
-      "path": "./packages/plugin-assets"
-    },
-    {
-      "path": "./packages/plugin-collectibles"
     },
     {
       "path": "./packages/plugin-scan"

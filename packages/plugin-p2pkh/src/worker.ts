@@ -1,13 +1,12 @@
 import {
   defineBuiltinWorkerPlugin, STORAGE_FILE_CLIENTS_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY,
   VAULT_WORKER_CRYPTO_CAPABILITY, WOC_CAPABILITY, WOC_WORKER_BROADCAST_CAPABILITY,
-  P2PKH_WORKER_TRANSFER_CAPABILITY, P2PKH_WORKER_PROTOCOL_CAPABILITY, P2PKH_ASSET_READER_CAPABILITY,
+  P2PKH_WORKER_TRANSFER_CAPABILITY, P2PKH_WORKER_PROTOCOL_CAPABILITY,
   type BorrowedModuleFileStore, type VaultWalletState, type VaultWorkerCrypto, type WocService,
   type WocWorkerBroadcastService, type P2pkhProviderRegistry, type WorkerTaskRegistrar,
 } from "@keymaster/contracts";
 import { createP2pkhProviderRegistry, createP2pkhUtxoSnapshotStore, type P2pkhUtxoSnapshotStore } from "./coordinator.js";
 import { createWorkerTransferRuntime, type WorkerTransferDependencies } from "./workerTransferRuntime.js";
-import { createP2pkhWorkerAssetReader } from "./p2pkhWorkerAssetReader.js";
 import { createP2pkhWorkerTaskDefinitions } from "./p2pkhWorkerTasks.js";
 import { createP2pkhUtxoManager } from "./p2pkhUtxoManager.js";
 import { readWorkerProtocolProtection } from "./workerProtocolRuntime.js";
@@ -75,7 +74,7 @@ export function createP2pkhWorkerRuntime(ports: P2pkhWorkerPorts) {
     } });
     snapshots = createP2pkhUtxoSnapshotStore({ woc: ports.snapshotSource(source), manager, assertActive });
   }
-  const plugin = defineBuiltinWorkerPlugin("p2pkh", [P2PKH_WORKER_TRANSFER_CAPABILITY, P2PKH_WORKER_PROTOCOL_CAPABILITY, P2PKH_ASSET_READER_CAPABILITY], async context => {
+  const plugin = defineBuiltinWorkerPlugin("p2pkh", [P2PKH_WORKER_TRANSFER_CAPABILITY, P2PKH_WORKER_PROTOCOL_CAPABILITY], async context => {
     const own: InstanceBinding = {
       storage: context.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(context.consumer, context.scope, ""),
       walletState: context.capability(VAULT_WALLET_STATE_CAPABILITY).bind(context.consumer, context.scope),
@@ -117,7 +116,6 @@ export function createP2pkhWorkerRuntime(ports: P2pkhWorkerPorts) {
       if (!identity) throw new Error("P2PKH network identity unavailable");
       return identity.bsvNetwork;
     };
-    context.provide(P2PKH_ASSET_READER_CAPABILITY, createP2pkhWorkerAssetReader({ walletState: own.walletState, storage: own.storage, snapshots: () => ownedSnapshots, bsvNetwork: network }));
     const definitions = createP2pkhWorkerTaskDefinitions({
       walletState: own.walletState, woc: query, storage: own.storage,
       isNetworkEnabled: candidate => candidate === network(), loadSettings: ports.transfer.loadSettings,

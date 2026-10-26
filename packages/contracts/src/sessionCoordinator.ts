@@ -11,7 +11,6 @@ import type { P2pkhConclusionInput, P2pkhConclusionResult, P2pkhPaymentLookupInp
 //
 // 施工单 001：signDigest 操作必须携带 format 字段
 
-import type { AssetDataInvalidationEvent } from "./assets.js";
 import type { EcdsaSignatureFormat } from "./activeKeyCrypto.js";
 import type { JSONValue, ChannelPrivateMessageEvent, ChannelOperationCaller, ChannelSubscriptionStatus } from "./channel.js";
 import type { ContactPresenceMap } from "./contacts.js";
@@ -730,7 +729,7 @@ export interface AssetDataChangedEvent {
   providerId: string;
   publicKeyHex: string;
   assetDataRevision: number;
-  kinds: AssetDataInvalidationEvent["kinds"];
+  kinds: Array<"resource" | "utxo" | "history" | "claim" | "submission" | "settings" | "protocol-snapshot" | "balance">;
   /** P2PKH 各网络最新快照序号；没有可信快照的网络省略。 */
   utxoSeqs?: { main?: number; test?: number };
 }

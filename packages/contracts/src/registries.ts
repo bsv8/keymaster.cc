@@ -6,10 +6,7 @@ import { PROTECTED_OUTPOINT_REGISTRY_CAPABILITY } from "./spendProtection.js";
 // 设计缘由：plugin 通过 capability 拿到这些 registry；类型契约放在 contracts，
 // 实现放在 runtime。这避免 plugin 直接依赖 runtime 内部模块。
 
-import type { AppRoute, AssetRegistry as IAssetRegistry, BreadcrumbProvider, HomeWidget, SettingsRoute, TransferRegistry as ITransferRegistry, VaultSettingsSection } from "./index.js";
-import type { TokenRegistry } from "./tokens.js";
-import type { CollectibleRegistry } from "./collectibles.js";
-import type { CollectibleTransferRegistry } from "./collectibleTransfer.js";
+import type { AppRoute, BreadcrumbProvider, HomeWidget, SettingsRoute, VaultSettingsSection } from "./index.js";
 import type { TopbarRegistry as ITopbarRegistry } from "./topbar.js";
 import type { BackgroundRegistry as IBackgroundRegistry, BackgroundService as IBackgroundService } from "./background.js";
 import type { NoticeRecord } from "./notice.js";
@@ -24,11 +21,6 @@ export const VAULT_SETTINGS_REGISTRY_CAPABILITY = defineCapability<VaultSettings
 export const HOME_REGISTRY_CAPABILITY = defineCapability<HomeRegistry>({ kind: "local", id: "home.registry", version: "1" });
 export const BUSINESS_REGISTRY_CAPABILITY = defineCapability<BusinessFeatureRegistry>({ kind: "local", id: "business.registry", version: "1" });
 export const COMMAND_REGISTRY_CAPABILITY = defineCapability<CommandRegistry>({ kind: "local", id: "command.registry", version: "1" });
-export const TRANSFER_REGISTRY_CAPABILITY = defineCapability<ITransferRegistry>({ kind: "local", id: "transfer.registry", version: "1" });
-export const ASSET_REGISTRY_CAPABILITY = defineCapability<IAssetRegistry>({ kind: "local", id: "asset.registry", version: "1" });
-export const TOKEN_REGISTRY_CAPABILITY = defineCapability<TokenRegistry>({ kind: "local", id: "token.registry", version: "1" });
-export const COLLECTIBLE_REGISTRY_CAPABILITY = defineCapability<CollectibleRegistry>({ kind: "local", id: "collectible.registry", version: "1" });
-export const COLLECTIBLE_TRANSFER_REGISTRY_CAPABILITY = defineCapability<CollectibleTransferRegistry>({ kind: "local", id: "collectible-transfer.registry", version: "1" });
 /** 与领域契约保持同一 capability 对象，避免同一身份出现两个 parser/type 入口。 */
 export const PROTECTED_OUTPOINT_REGISTRY_CAPABILITY_TYPED = PROTECTED_OUTPOINT_REGISTRY_CAPABILITY;
 export const NOTICE_REGISTRY_TYPED_CAPABILITY = NOTICE_REGISTRY_CAPABILITY;
@@ -123,8 +115,6 @@ export interface CommandRegistry {
 
 // 复用 keyImport/transfer/assets/topbar/background 的注册表接口，避免重复声明。
 export type {
-  ITransferRegistry as TransferRegistryContract,
-  IAssetRegistry as AssetRegistryContract,
   ITopbarRegistry as TopbarRegistryContract
 };
 export type { IBackgroundRegistry as BackgroundRegistryContract, IBackgroundService as BackgroundServiceContract };

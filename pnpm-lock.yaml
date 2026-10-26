@@ -29,18 +29,12 @@ importers:
       '@keymaster/plugin-apps':
         specifier: '*'
         version: link:packages/plugin-apps
-      '@keymaster/plugin-assets':
-        specifier: workspace:*
-        version: link:packages/plugin-assets
       '@keymaster/plugin-background':
         specifier: '*'
         version: link:packages/plugin-background
       '@keymaster/plugin-bsv-price':
         specifier: '*'
         version: link:packages/plugin-bsv-price
-      '@keymaster/plugin-collectibles':
-        specifier: workspace:*
-        version: link:packages/plugin-collectibles
       '@keymaster/plugin-contacts':
         specifier: '*'
         version: link:packages/plugin-contacts
@@ -68,9 +62,6 @@ importers:
       '@keymaster/plugin-scan':
         specifier: workspace:*
         version: link:packages/plugin-scan
-      '@keymaster/plugin-token-stas':
-        specifier: '*'
-        version: link:packages/plugin-token-stas
       '@keymaster/plugin-vault':
         specifier: '*'
         version: link:packages/plugin-vault
@@ -317,24 +308,6 @@ importers:
         specifier: 0.6.0
         version: 0.6.0(react@18.3.1)
 
-  packages/plugin-assets:
-    dependencies:
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../contracts
-      '@keymaster/runtime':
-        specifier: '*'
-        version: link:../runtime
-      '@keymaster/ui':
-        specifier: '*'
-        version: link:../ui
-      react:
-        specifier: ^18.3.1
-        version: 18.3.1
-      webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
-
   packages/plugin-background:
     dependencies:
       '@keymaster/contracts':
@@ -367,24 +340,6 @@ importers:
       bsv8-channel-protocol:
         specifier: 0.6.0
         version: 0.6.0
-      webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
-
-  packages/plugin-collectibles:
-    dependencies:
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../contracts
-      '@keymaster/runtime':
-        specifier: '*'
-        version: link:../runtime
-      '@keymaster/ui':
-        specifier: '*'
-        version: link:../ui
-      react:
-        specifier: ^18.3.1
-        version: 18.3.1
       webloom-framework:
         specifier: 0.6.0
         version: 0.6.0(react@18.3.1)
@@ -662,18 +617,6 @@ importers:
       react:
         specifier: ^18.3.1
         version: 18.3.1
-      webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
-
-  packages/plugin-token-stas:
-    dependencies:
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../contracts
-      '@keymaster/runtime':
-        specifier: '*'
-        version: link:../runtime
       webloom-framework:
         specifier: 0.6.0
         version: 0.6.0(react@18.3.1)

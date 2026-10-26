@@ -11,11 +11,10 @@ import { sameNetworkIdentity, requireUnlockedWalletIdentity } from "@keymaster/c
 //     本地不再保存或派生任何 UTXO。
 //   - 历史 = WoC history 元数据（txid/height/fee）；raw tx 只在详情页
 //     懒加载并临时解析。
-//   - 转账 prepare/submit 前各刷新一次快照；并发门禁只使用快照 seq。
+//   - 转账 prepare/submit 更新链上观察；占用、签名意图及 exact 责任归 manager。
 //   - key.deleting / vault.locked 时释放 owner K-V 句柄。
 
 import type {
-  AssetDataNotifier,
   BalanceBroadcaster,
   CentralBroadcastService,
   CoordinatorValueResult,
@@ -31,7 +30,7 @@ import type {
   P2pkhUtxoSnapshotResult,
   P2pkhWorkerTransferBinding,
 } from "@keymaster/contracts";
-import { BALANCE_NETWORK_KEYS, emptyGlobalBalanceSnapshot } from "@keymaster/contracts";
+import { emptyGlobalBalanceSnapshot } from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
 import type {
   P2pkhBalance,
@@ -49,7 +48,6 @@ import type {
 import {
   assetIdToNetwork,
   makeResourceId,
-  P2PKH_ASSETS,
   requireReadyKey,
   resolveP2pkhFeeRateSatoshisPerKb,
   type ReadyKeyIdentity
@@ -88,9 +86,7 @@ function cloneP2pkhBalance(balance: P2pkhBalance): P2pkhBalance {
 function cloneGlobalBalanceSnapshot(snapshot: GlobalBalanceSnapshot): GlobalBalanceSnapshot {
   return {
     ...snapshot,
-    balances: Object.fromEntries(
-      Object.entries(snapshot.balances).map(([network, balance]) => [network, balance ? cloneP2pkhBalance(balance) : balance])
-    ) as GlobalBalanceSnapshot["balances"],
+    balance: cloneP2pkhBalance(snapshot.balance),
   };
 }
 
@@ -103,11 +99,7 @@ function sameP2pkhBalance(left: P2pkhBalance | undefined, right: P2pkhBalance | 
 
 function sameGlobalBalanceContent(left: GlobalBalanceSnapshot, right: GlobalBalanceSnapshot): boolean {
   if (left.publicKeyHex !== right.publicKeyHex || left.bsvNetwork !== right.bsvNetwork) return false;
-  const keys = new Set([...Object.keys(left.balances), ...Object.keys(right.balances)]);
-  for (const key of keys) {
-    if (!sameP2pkhBalance(left.balances[key as keyof GlobalBalanceSnapshot["balances"]], right.balances[key as keyof GlobalBalanceSnapshot["balances"]])) return false;
-  }
-  return true;
+  return sameP2pkhBalance(left.balance, right.balance);
 }
 
 function sameGlobalSettings(left: P2pkhGlobalSettings, right: P2pkhGlobalSettings): boolean {
@@ -183,7 +175,7 @@ export interface P2pkhServiceDeps {
   centralBroadcastService?: CentralBroadcastService;
   /** SharedWorker 内部兼容面，仅供 sat top-up 装配；页面 manifest 不注入。 */
   broadcastWithCoordinator?: (input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; submission?: P2pkhBroadcastSubmission }) => Promise<CoordinatorValueResult<unknown>>;
-  assetDataNotifier?: AssetDataNotifier;
+
   chainFees?: Pick<import("@keymaster/contracts").ChainFeeReader, "get" | "subscribe">;
   effectiveFeeRate?: (network: "main" | "test") => number;
   /**
@@ -203,7 +195,7 @@ function protectionGate(deps: P2pkhServiceDeps): () => Promise<void> {
   };
 }
 
-export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { balanceBroadcaster: BalanceBroadcaster } {
+export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhService; balance: BalanceBroadcaster } {
   if (!deps.storage) throw new Error("P2PKH central storage binding is required");
   let disposed = false;
   const isCurrentInstance = () => !disposed && !deps.signal?.aborted;
@@ -219,6 +211,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
   const balanceListeners = new Set<(snapshot: GlobalBalanceSnapshot) => void>();
   let balanceRefreshGeneration = 0;
   let balanceRefreshInFlight: Promise<void> | undefined;
+  let balanceRefreshRequested = false;
 
   const balanceBroadcaster: BalanceBroadcaster = {
     getSnapshot() {
@@ -243,9 +236,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     balanceSnapshot = {
       ...candidate,
       revision: balanceSnapshot.revision + 1,
-      balances: Object.fromEntries(
-        Object.entries(candidate.balances).map(([network, balance]) => [network, balance ? cloneP2pkhBalance(balance) : balance])
-      ) as GlobalBalanceSnapshot["balances"],
+      balance: cloneP2pkhBalance(candidate.balance),
     };
     const published = cloneGlobalBalanceSnapshot(balanceSnapshot);
     publish(P2PKH_MSG.BALANCE_CHANGED, published);
@@ -256,15 +247,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
         // 余额观察者不能影响余额快照提交。
       }
     }
-    // 余额快照提交后再次通过统一失效通知器广播，保证资产总览和 transfer
-    // offer 不会停留在“失效事件先到、余额重算后到”造成的旧值上。
-    deps.assetDataNotifier?.emit({
-      providerId: "p2pkh",
-      networkIdentity: published.publicKeyHex ? {bsvNetwork:published.bsvNetwork,publicKeyHex:published.publicKeyHex} : undefined,
-      ...(published.publicKeyHex ? { publicKeyHex: published.publicKeyHex } : {}),
-      revision: published.revision,
-      kinds: ["balance"],
-    });
+
   }
 
   function clearBalanceSnapshot(): void {
@@ -273,7 +256,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     publishBalanceSnapshot({
       publicKeyHex: empty.publicKeyHex,
       bsvNetwork: empty.bsvNetwork,
-      balances: empty.balances,
+      balance: empty.balance,
     });
   }
 
@@ -395,7 +378,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     centralBroadcastService: deps.centralBroadcastService,
     broadcastWithCoordinator: deps.broadcastWithCoordinator,
     messageBus: deps.messageBus,
-    assetDataNotifier: deps.assetDataNotifier,
     getStore: (publicKeyHex) => ensureRepositoryForOwner(publicKeyHex),
     loadSpendableUtxos: async ({ ownerPublicKeyHex, resource, purpose }) => {
       // 转账与其它花 UTXO 的入口共用同一道门禁。
@@ -471,13 +453,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     return { bsvNetwork, feeRateSatoshisPerKb: fee?.effectiveSatoshisPerKb ?? deps.effectiveFeeRate?.(bsvNetwork) ?? cachedSettings.feeRateSatoshisPerKb ?? 100, ...(fee ? { feePolicy: fee.policy } : {}) };
   }
 
-  async function listAllResources(): Promise<P2pkhKeyResource[]> {
-    const stateRepository = await ensureRepository();
-    const all = await stateRepository.listAddresses();
-    const settings = getCurrentSettings();
-    return all.filter((r) => r.network === settings.bsvNetwork);
-  }
-
   function getVaultLifecycleSnapshot() {
     return deps.walletState.snapshot();
   }
@@ -538,33 +513,13 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       return;
     }
 
-    const networks = bsvNetwork === "test" ? (["test"] as const) : (["main"] as const);
-    const sameOwner = balanceSnapshot.publicKeyHex === active;
-    const sameOwnerAndSettings = sameOwner && balanceSnapshot.bsvNetwork === bsvNetwork;
-    const requiresProjection = !sameOwnerAndSettings
-      || networks.some((network) => !Object.prototype.hasOwnProperty.call(balanceSnapshot.balances, BALANCE_NETWORK_KEYS[network]));
-    if (requiresProjection) {
-      // 首次读取、owner 切换或打开 testnet 时先发布“未知”占位，保证 map
-      // 形状立即正确；同 owner 已有的主网值可以保留，避免刷新期间闪成未知。
-      const projectedBalances = Object.fromEntries(networks.map((network) => {
-        const key = BALANCE_NETWORK_KEYS[network];
-        const existing = sameOwner ? balanceSnapshot.balances[key] : undefined;
-        return [key, existing ?? unknownP2pkhBalance()];
-      })) as GlobalBalanceSnapshot["balances"];
-      publishBalanceSnapshot({ publicKeyHex: active, bsvNetwork, balances: projectedBalances });
+    if (balanceSnapshot.publicKeyHex !== active || balanceSnapshot.bsvNetwork !== bsvNetwork) {
+      publishBalanceSnapshot({ publicKeyHex: active, bsvNetwork, balance: unknownP2pkhBalance() });
     }
-    const values = await Promise.all(networks.map(async (network) => {
-      try {
-        const result = await calculateBalanceBreakdown(network);
-        return [BALANCE_NETWORK_KEYS[network], {
-          total: result.breakdown.spendable,
-          available: result.available,
-          breakdown: result.breakdown,
-        } satisfies P2pkhBalance] as const;
-      } catch {
-        return [BALANCE_NETWORK_KEYS[network], unknownP2pkhBalance()] as const;
-      }
-    }));
+    const result = await calculateBalanceBreakdown(bsvNetwork);
+    const balance: P2pkhBalance = {
+      total: result.breakdown.spendable, available: result.available, breakdown: result.breakdown,
+    };
 
     // 异步读取期间可能发生 owner/settings 切换；旧结果不能覆盖新 owner。
     if (!isCurrentInstance() || generation !== balanceRefreshGeneration || !sameWalletSession(session, deps.walletState.snapshot())) return;
@@ -575,44 +530,30 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     publishBalanceSnapshot({
       publicKeyHex: active,
       bsvNetwork,
-      balances: Object.fromEntries(values) as GlobalBalanceSnapshot["balances"],
+      balance,
     });
   }
 
   function refreshBalanceSnapshot(): Promise<void> {
-    // A balance publication invalidates several consumers at once. Their
-    // reads share the current refresh instead of each issuing more Worker
-    // calls; the owner/session fence in the implementation still rejects late
-    // results and subsequent data-change events can start a fresh refresh.
-    if (balanceRefreshInFlight) return balanceRefreshInFlight;
+    // Coalesce reads, but do not lose an observation committed while an older
+    // projection read is in flight. This is event-driven, never a poll loop.
+    if (balanceRefreshInFlight) {
+      balanceRefreshRequested = true;
+      return balanceRefreshInFlight;
+    }
+    balanceRefreshRequested = false;
     const promise = refreshBalanceSnapshotImpl();
     balanceRefreshInFlight = promise;
-    void promise.then(
-      () => {
-        if (balanceRefreshInFlight === promise) balanceRefreshInFlight = undefined;
-      },
-      () => {
-        if (balanceRefreshInFlight === promise) balanceRefreshInFlight = undefined;
+    const finish = () => {
+      if (balanceRefreshInFlight !== promise) return;
+      balanceRefreshInFlight = undefined;
+      if (balanceRefreshRequested && isCurrentInstance() && deps.vault.status() === "unlocked") {
+        balanceRefreshRequested = false;
+        void refreshBalanceSnapshot().catch(() => {});
       }
-    );
+    };
+    void promise.then(finish, finish);
     return promise;
-  }
-
-  async function ensureBalanceSnapshotReady(): Promise<void> {
-    const active = getVaultLifecycleSnapshot().activePublicKeyHex?.trim().toLowerCase() ?? "";
-    if (!active) return;
-    const bsvNetwork = getCurrentSettings().bsvNetwork;
-    const hasMainnet = Object.prototype.hasOwnProperty.call(balanceSnapshot.balances, "mainnet");
-    const hasTestnet = Object.prototype.hasOwnProperty.call(balanceSnapshot.balances, "testnet");
-    // “未知”只是占位，不是一个已完成的缓存命中。真实 WoC 刷新可能先
-    // 完成 UTXO 快照、再到达余额消费方；若这里只检查 map 形状，余额资源
-    // 会永久停留在 available=false，直到下一次无关事件再次触发刷新。
-    const requiredNetworks = bsvNetwork === "test" ? ["testnet"] as const : ["mainnet"] as const;
-    const hasUnavailableBalance = requiredNetworks.some((network) => balanceSnapshot.balances[network]?.available !== true);
-    if (balanceSnapshot.publicKeyHex !== active || balanceSnapshot.bsvNetwork !== bsvNetwork || hasMainnet !== (bsvNetwork === "main") || hasTestnet !== (bsvNetwork === "test") || hasUnavailableBalance) {
-      await refreshBalanceSnapshot();
-    }
-    if (balanceRefreshInFlight) await balanceRefreshInFlight;
   }
 
   async function rebindActiveKey() {
@@ -757,15 +698,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       });
       return;
     }
-    if (isCurrentInstance() && deps.assetDataNotifier) {
-      deps.assetDataNotifier.emit({
-        providerId: "p2pkh",
-        networkIdentity: state.activeKeyIdentity ? {bsvNetwork:state.activeKeyIdentity.bsvNetwork,publicKeyHex:state.activePublicKeyHex} : undefined,
-        publicKeyHex: state.activePublicKeyHex,
-        revision: Date.now(),
-        kinds: ["resource", "balance"],
-      });
-    }
     // 冷启动余额可见性：地址资源就绪后主动刷新一次内存 UTXO 快照。
     // 失败只保留“未知/不可用”，不写 0；成功由 Worker 发布 data-changed。
     for (const network of bsvNetwork === "test" ? ["test"] as const : ["main"] as const) {
@@ -778,7 +710,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
 
   const dataChangedListeners = new Set<() => void>();
   const coordinatorUnsubs: Array<() => void> = [];
-  function trackCoordinatorSubscribe(topic: "background.snapshot" | "session.state", handler: (event: any) => void): void {
+  function trackCoordinatorSubscribe(topic: "background.snapshot" | "session.state" | "asset.data-changed", handler: (event: any) => void): void {
     if (!deps.coordinator || typeof deps.coordinator.subscribeTopic !== "function") return;
     coordinatorUnsubs.push(deps.coordinator.subscribeTopic(topic, handler));
   }
@@ -805,28 +737,20 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     // walletState 变化回调会在 owner 真正切换后负责重算。
   });
 
-  if (deps.assetDataNotifier) {
-    messageBusUnsubs.push(
-      deps.assetDataNotifier.subscribe((event) => {
-        if (event.providerId === "p2pkh") {
-          const active = getVaultLifecycleSnapshot().activeKeyIdentity;
-          if (!active || !event.networkIdentity || !sameNetworkIdentity(active, event.networkIdentity)) return;
-          if (event.kinds.includes("balance")) {
-            void refreshBalanceSnapshot();
-          }
-          for (const l of dataChangedListeners) {
-            try { l(); } catch { /* 静默 */ }
-          }
-        }
-      })
-    );
-  }
+  trackCoordinatorSubscribe("asset.data-changed", (event) => {
+    const session = getVaultLifecycleSnapshot();
+    const active = session.activeKeyIdentity;
+    if (event?.providerId !== "p2pkh" || event.sessionEpoch !== session.sessionEpoch || !active || !event.networkIdentity || !sameNetworkIdentity(active, event.networkIdentity)) return;
+    void refreshBalanceSnapshot();
+    for (const listener of dataChangedListeners) {
+      try { listener(); } catch { /* observers do not affect money state */ }
+    }
+  });
 
   // 初次装配也发布一份当前 owner 的只读投影；无 active key 时保持空快照。
   void refreshBalanceSnapshot();
 
-  return {
-    balanceBroadcaster,
+  const service: IP2pkhService = {
     syncStatus() {
       return status;
     },
@@ -837,19 +761,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
     onDataChanged(handler) {
       dataChangedListeners.add(handler);
       return () => dataChangedListeners.delete(handler);
-    },
-
-    async getAssetBalance(assetId) {
-      const network = assetIdToNetwork(assetId);
-      await ensureBalanceSnapshotReady();
-      const balance = balanceSnapshot.balances[BALANCE_NETWORK_KEYS[network]];
-      return balance ? cloneP2pkhBalance(balance) : unknownP2pkhBalance();
-    },
-    async getResourceBalance(resourceId) {
-      const network = /:test$/.test(resourceId) ? "test" : "main";
-      await ensureBalanceSnapshotReady();
-      const balance = balanceSnapshot.balances[BALANCE_NETWORK_KEYS[network]];
-      return balance ? cloneP2pkhBalance(balance) : unknownP2pkhBalance();
     },
 
     async listResources(assetId) {
@@ -944,13 +855,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       const items = visible.filter((row) => row.network === getCurrentSettings().bsvNetwork);
       const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : undefined;
       return { items: network ? items.filter((row) => row.network === network) : items, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
-    },
-    async getBalanceBreakdown(network) {
-      const target = network ?? getCurrentSettings().bsvNetwork;
-      await ensureBalanceSnapshotReady();
-      return balanceSnapshot.balances[BALANCE_NETWORK_KEYS[target]]?.breakdown
-        ? { ...balanceSnapshot.balances[BALANCE_NETWORK_KEYS[target]]!.breakdown! }
-        : { ...EMPTY_BALANCE_BREAKDOWN };
     },
     prepareTransfer: (input) => {
       if (!input.ownerPublicKeyHex) {
@@ -1119,6 +1023,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService & { ba
       transactionDetailCache.clear();
     }
   };
+  return { service, balance: balanceBroadcaster };
 }
 
 async function resolveActiveKeyCrypto(vault: Pick<VaultService, "status" | "createActiveKeyCrypto">, publicKeyHex: string) {

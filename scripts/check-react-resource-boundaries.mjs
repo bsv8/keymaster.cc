@@ -96,7 +96,16 @@ const globalHooks = new Set(["usePluginHost", "useHost", "usePluginRuntime", "us
 for (const file of consumerSources) {
   const source = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true,
     file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
-  const trustedModule = specifier => specifier === "@keymaster/runtime/assembly" || (specifier.startsWith(".") && /(?:assembly|PluginHostProvider|keymasterHostAdapter|pluginHostContract)\.[cm]?[jt]sx?$/.test(specifier));
+  const trustedModule = specifier => {
+    // Storage's own private assembly is not the global Host assembly. Only
+    // this module-local import is allowed; imports from another plugin or
+    // imports of runtime/assembly remain forbidden (negative probes cover it).
+    const ownStorageAssembly = file.startsWith(join(root, "packages/platform-storage/src") + "/")
+      && specifier.startsWith(".")
+      && resolve(file, "..", specifier) === join(root, "packages/platform-storage/src/assembly.js");
+    if (ownStorageAssembly) return false;
+    return specifier === "@keymaster/runtime/assembly" || (specifier.startsWith(".") && /(?:assembly|PluginHostProvider|keymasterHostAdapter|pluginHostContract)\.[cm]?[jt]sx?$/.test(specifier));
+  };
   const globalModule = specifier => specifier === "@keymaster/runtime" || specifier.startsWith("@keymaster/runtime/")
     || specifier === "webloom-framework/react" || specifier.startsWith("webloom-framework/react/")
     || (specifier.startsWith(".") && resolve(file, "..", specifier).startsWith(join(root, "packages/runtime/src") + "/"));

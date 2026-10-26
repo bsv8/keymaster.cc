@@ -6,7 +6,6 @@ import type {
   BsvNetwork,
   Contact,
   P2pkhAddressCodec,
-  TransferOffer,
   TransferRecipient
 } from "@keymaster/contracts";
 import {
@@ -181,13 +180,6 @@ function makeAddressCandidate(
   };
 }
 
-function offerNetwork(offer: TransferOffer): BsvNetwork | undefined {
-  if (offer.network) return offer.network;
-  if (offer.assetId === "bsv") return "main";
-  if (offer.assetId === "bsvtest") return "test";
-  return undefined;
-}
-
 export function P2pkhTransferPage({ location }: { location: import("@keymaster/contracts").PageUiLocation }) {
   // 订阅完整 location，保证联系人动作修改 query 后页面重新解析 URL。
   useCurrentPath();
@@ -195,12 +187,6 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
   const reader = useP2pkhResources();
   const ContactPicker = useOptionalPluginCapability(CONTACTS_PICKER_CAPABILITY);
   const codec = useOptionalPluginCapability(P2PKH_ADDRESS_CODEC_CAPABILITY);
-  const offers = useResourceViewSelector<TransferOffer[], TransferOffer[]>(
-    reader,
-    "p2pkh.transfer-offers",
-    [],
-    (snapshot) => snapshot.data ?? []
-  );
   const activeState = useResourceViewSelector<VaultLifecycleSnapshot, VaultLifecycleSnapshot>(
     reader,
     "p2pkh.transfer-active",
@@ -325,15 +311,6 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
 
   const candidate = urlRecipient.kind === "none" ? manualResolution.candidate : urlCandidate;
   const candidateError = urlRecipient.kind === "invalid" ? urlRecipient.error : manualResolution.error;
-  const p2pkhOffers = useMemo(() => offers.filter((offer) => {
-    if (offer.providerId !== "p2pkh") return false;
-    if (offer.assetId !== "bsv" && offer.assetId !== "bsvtest") return false;
-    return offerNetwork(offer) === bsvNetwork;
-  }), [bsvNetwork, offers]);
-  const selectedOffer = useMemo(() => {
-    if (!candidate) return undefined;
-    return p2pkhOffers.find((offer) => offerNetwork(offer) === candidate.network);
-  }, [candidate, p2pkhOffers]);
   const contactMatches = useMemo(() => {
     const search = manualInput.trim().toLowerCase();
     if (!search || !manualResolution.searching) return [];
@@ -521,16 +498,11 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
         <p className="transfer-page__error">{t("p2pkh.transferPage.page.recipient.noCodec", { defaultValue: "P2PKH 地址能力不可用，地址反查已关闭。" })}</p>
       ) : null}
 
-      {candidate && !candidateError && canMountWidget && !selectedOffer ? (
-        <EmptyState title={t("p2pkh.transferPage.page.noRecipientProvider", { defaultValue: "当前网络没有可用的普通 BSV 转账。" })} />
-      ) : null}
-
-      {candidate && !candidateError && canMountWidget && selectedOffer ? (
+      {candidate && !candidateError && canMountWidget ? (
         <section className="transfer-page__provider-widget" data-testid="p2pkh-transfer-widget">
           <P2pkhTransferWidget
             key={location.path}
             initialAmountSatoshis={paymentAmountSatoshis(urlParams.get("requestedAmountBsv"))}
-            offer={selectedOffer}
             recipientAddress={candidate.address}
             recipientPublicKeyHex={candidate.publicKeyHex}
             onCompleted={() => router.push("/transfer")}

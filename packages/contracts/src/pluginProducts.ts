@@ -16,8 +16,6 @@ import type { KeymasterScopeKind } from "./keymasterLifecycle.js";
  */
 export const BUILTIN_PLUGIN_PRODUCT_IDS = [
   "page",
-  "assets",
-  "collectibles",
   "scan",
   "storage",
   "vault",
@@ -32,7 +30,6 @@ export const BUILTIN_PLUGIN_PRODUCT_IDS = [
   "background",
   "woc",
   "p2pkh",
-  "token-stas",
   "bsv-price",
   "apps",
 ] as const;
@@ -68,8 +65,6 @@ export interface BuiltinPluginRuntimeUnitDeclaration {
  */
 export const BUILTIN_PLUGIN_RUNTIME_UNIT_CATALOG = [
   { productId: "page", unitId: "page.window", runtime: "window-main", scopeKind: "root" },
-  { productId: "assets", unitId: "assets.window", runtime: "window-main", scopeKind: "root" },
-  { productId: "collectibles", unitId: "collectibles.window", runtime: "window-main", scopeKind: "root" },
   { productId: "scan", unitId: "scan.window", runtime: "window-main", scopeKind: "root" },
   { productId: "storage", unitId: "storage.window", runtime: "window-main", scopeKind: "storage" },
   { productId: "storage", unitId: "storage.coordinator-worker", runtime: "shared-worker", scopeKind: "storage" },
@@ -93,8 +88,6 @@ export const BUILTIN_PLUGIN_RUNTIME_UNIT_CATALOG = [
   { productId: "woc", unitId: "woc.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
   { productId: "p2pkh", unitId: "p2pkh.window", runtime: "window-main", scopeKind: "owner-session" },
   { productId: "p2pkh", unitId: "p2pkh.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
-  { productId: "token-stas", unitId: "token-stas.window", runtime: "window-main", scopeKind: "owner-session" },
-  { productId: "token-stas", unitId: "token-stas.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
   { productId: "bsv-price", unitId: "bsv-price.window", runtime: "window-main", scopeKind: "owner-session" },
   { productId: "apps", unitId: "apps.window", runtime: "window-main", scopeKind: "root" },
 ] as const satisfies readonly BuiltinPluginRuntimeUnitDeclaration[];

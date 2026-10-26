@@ -111,13 +111,6 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
     model: "kv",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
-  tokenStasState: Object.freeze({
-    moduleId: "token-stas",
-    purposeId: "token-state",
-    authority: "built-in-module",
-    model: "kv",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
   /**
    * Forum 配置、根验证证据、索引缓存、阅读位置、展示投影与发布任务。
    * 文件模型；正文本体不在这里，只存已冻结内容的 seed hash。
@@ -210,7 +203,6 @@ export const SYSTEM_STORAGE_DECLARATIONS: Readonly<Record<string, readonly Plugi
   ]),
   "sat-subscription": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.satSubscriptionFiles]),
   "token-bsv21": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.tokenBsv21State, CENTRAL_STORAGE_DECLARATIONS.tokenBsv21MintHistory]),
-  "token-stas": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.tokenStasState]),
   webrtc: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.p2pFiles, CENTRAL_STORAGE_DECLARATIONS.webrtcHistory]),
   msfile: Object.freeze([
     CENTRAL_STORAGE_DECLARATIONS.msfilesFiles,

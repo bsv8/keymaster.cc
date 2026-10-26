@@ -21,7 +21,6 @@ import { createP2pkhWorkerRuntime, createP2pkhWorkerOperations } from "@keymaste
 import { createContactsWorkerRuntime } from "@keymaster/plugin-contacts/worker";
 import { createWocWorkerRuntime } from "@keymaster/plugin-woc/worker";
 import { createForumWorkerPlugin } from "@keymaster/plugin-forum/worker";
-import { createTokenStasWorkerPlugin } from "@keymaster/plugin-token-stas/worker";
 import { WalletLockBarrier } from "../walletLockBarrier.js";
 
 import { type NetworkIdentity } from "@keymaster/contracts";
@@ -64,7 +63,7 @@ import { storagePrivateCapabilities } from "../assembly/storagePrivateCapabiliti
 
 import "../shims/buffer.js";
 
-import type { SessionEpoch, CoordinatorVaultStatus, CoordinatorClientRequest as PublicCoordinatorClientRequest, CoordinatorResponse, CoordinatorTopicEvent, CoordinatorBootstrapSnapshot, CoordinatorTopic, CoordinatorBackgroundSyncSettings, CoordinatorTopicBaseline, AssetDataInvalidationEvent, SessionStateEvent, P2pkhTransactionBroadcastProvider, P2pkhUtxoSnapshotResult, CoordinatorSatStateEvent, CoordinatorContactsPresenceEvent, CoordinatorWorkerUnitStateEvent, CoordinatorWorkerUnitPublicSnapshot, CoordinatorAuthorityRecovery, CoordinatorRpcRequest, CoordinatorRpcResponse, CoordinatorRpcCommandRequest, CoordinatorSessionOpenRequest, CoordinatorSessionBinding, CoordinatorTopicSubscription, SnapshotStore, StorageSnapshotJsonCompatible, PluginStorageDeclaration } from "@keymaster/contracts";
+import type { SessionEpoch, CoordinatorVaultStatus, CoordinatorClientRequest as PublicCoordinatorClientRequest, CoordinatorResponse, CoordinatorTopicEvent, CoordinatorBootstrapSnapshot, CoordinatorTopic, CoordinatorBackgroundSyncSettings, CoordinatorTopicBaseline, SessionStateEvent, P2pkhTransactionBroadcastProvider, P2pkhUtxoSnapshotResult, CoordinatorSatStateEvent, CoordinatorContactsPresenceEvent, CoordinatorWorkerUnitStateEvent, CoordinatorWorkerUnitPublicSnapshot, CoordinatorAuthorityRecovery, CoordinatorRpcRequest, CoordinatorRpcResponse, CoordinatorRpcCommandRequest, CoordinatorSessionOpenRequest, CoordinatorSessionBinding, CoordinatorTopicSubscription, SnapshotStore, StorageSnapshotJsonCompatible, PluginStorageDeclaration } from "@keymaster/contracts";
 /** 可信 Worker 入口内的命令联合；私有浏览不进入公共 transport parser。 */
 type CoordinatorClientRequest = PublicCoordinatorClientRequest | StorageBrowsePrivateCommand;
 
@@ -3308,12 +3307,6 @@ function withCoordinatorWorkerLifecycle(plugin: ReturnType<typeof definePlugin>)
     }
   };
 }
-const workerAssetEvents = {
-  tasks: coordinatorTaskRegistrar,
-  emit(event: AssetDataInvalidationEvent) {
-    publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds });
-  },
-};
 const coordinatorRequestRoutes = new Map<string, import("@keymaster/contracts").WorkerRequestRoute>();
 for (const route of [vaultWorkerOperations.route, vaultAutoLock.route, storageWorkerRequests.route, msfileWorkerRequests.route, windowP2pWorkerRuntime.route, channelWorkerRuntime.route, p2pkhWorkerOperations.route, p2pkhWorkerSettings.route, contactsPresenceProjection.route, backgroundWorkerRuntime.route,
 defineWorkerRequestRoute<Extract<CoordinatorClientRequest, { kind: "lock" }>>({
@@ -3389,7 +3382,6 @@ const coordinatorRuntimePlugins = [
       },
     }
   }),
-  createTokenStasWorkerPlugin(workerAssetEvents),
 ].map(withCoordinatorWorkerLifecycle);
 
 // Unit tests import this module in a normal Node realm. The installer above is
@@ -3633,6 +3625,7 @@ function startCoordinatorInitialization(_removedBootstrapState?: unknown, peerId
 export function coordinatorTestingPorts(): CoordinatorTestingPorts {
   return {
     get domainFixtureInstaller() { return domainFixtureInstaller; }, set domainFixtureInstaller(value: typeof domainFixtureInstaller) { domainFixtureInstaller = value; },
+    get reconcileCoordinatorRuntime() { return reconcileCoordinatorRuntime; },
     get getTaskSnapshots() { return getTaskSnapshots; },
     get bindCoordinatorTaskUnitsToOwner() { return bindCoordinatorTaskUnitsToOwner; },
     get createWorkerKeyValueStore() { return createWorkerKeyValueStore; },
@@ -3802,6 +3795,7 @@ export function coordinatorTestingPorts(): CoordinatorTestingPorts {
 export type { ChannelSeenMessageKind, CoordinatorPeerHandoffNotifier, BitfsNetwork, CoordinatorClientRequest, CoordinatorSettingsSnapshot };
 
 export interface CoordinatorTestingPorts {
+  reconcileCoordinatorRuntime: typeof reconcileCoordinatorRuntime;
   domainFixtureInstaller: (() => Promise<void>) | undefined;
   getTaskSnapshots: typeof getTaskSnapshots;
   bindCoordinatorTaskUnitsToOwner: typeof bindCoordinatorTaskUnitsToOwner;

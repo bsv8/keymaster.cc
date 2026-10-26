@@ -3650,7 +3650,7 @@ function parseBackgroundSnapshotEvent(value: unknown): BackgroundSnapshotEvent {
 
 function parseAssetKinds(value: unknown, field: string): AssetDataChangedEvent["kinds"] {
   if (!Array.isArray(value) || value.length > 16) throw new TypeError(`Coordinator ${field} is invalid`);
-  return value.map((kind, index) => enumValue(kind, ["resource", "utxo", "history", "holding", "claim", "submission", "settings", "protocol-snapshot", "balance"] as const, `${field}[${index}]`));
+  return value.map((kind, index) => enumValue(kind, ["resource", "utxo", "history", "claim", "submission", "settings", "protocol-snapshot", "balance"] as const, `${field}[${index}]`));
 }
 
 function parseAssetDataChangedEvent(value: unknown): AssetDataChangedEvent {

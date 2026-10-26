@@ -12,40 +12,13 @@
 //     唯一 owner 真值，UTXO / history 过滤同 owner 时直接匹配 hex。
 
 import { defineCapability } from "webloom-framework";
-import type { BalanceBroadcaster, BsvNetwork, KeyIdentity, P2pkhBalance, P2pkhBalanceBreakdown, P2pkhConnectPaymentFacts, P2pkhConnectPaymentPreview, P2pkhUtxoBinding, CentralBroadcastFailureReason } from "@keymaster/contracts";
+import type { BsvNetwork, KeyIdentity, P2pkhConnectPaymentFacts, P2pkhConnectPaymentPreview, P2pkhUtxoBinding, CentralBroadcastFailureReason } from "@keymaster/contracts";
 
 // 余额广播契约属于全局 contracts；这里重导出旧路径，兼容插件内部和外部现有 import。
 export type { P2pkhBalance, P2pkhBalanceBreakdown } from "@keymaster/contracts";
 
-/** P2PKH 资产 id。设计缘由：bsv 和 bsvtest 是同一类资产的不同网络，不是不同 provider。 */
+/** 转账/协议 DTO 的兼容网络资产标签，不再提供资产目录或余额查询选择器。 */
 export type P2pkhAssetId = "bsv" | "bsvtest";
-
-/** 资产定义。 */
-export interface P2pkhAssetDef {
-  assetId: P2pkhAssetId;
-  label: string;
-  network: BsvNetwork;
-  unit: string;
-  tags: string[];
-}
-
-/** 全部 P2PKH 资产。 */
-export const P2PKH_ASSETS: Record<P2pkhAssetId, P2pkhAssetDef> = {
-  bsv: {
-    assetId: "bsv",
-    label: "BSV",
-    network: "main",
-    unit: "sats",
-    tags: ["p2pkh", "main"]
-  },
-  bsvtest: {
-    assetId: "bsvtest",
-    label: "BSV Testnet",
-    network: "test",
-    unit: "sats",
-    tags: ["p2pkh", "test"]
-  }
-};
 
 /**
  * P2PKH 资源：当前 active key namespace 下的一个网络资源。
@@ -403,8 +376,6 @@ export interface P2pkhService {
   getRawTransaction?(network: "main" | "test", txid: string): Promise<string>;
   /** Pure local manager lookup; must never initiate signing/broadcast/chain polling. */
   getPaymentStatus?(input: import("@keymaster/contracts").P2pkhPaymentLookupInput): Promise<import("@keymaster/contracts").P2pkhPaymentLookupResult>;
-  /** 全局余额只读广播；所有余额展示/offer 都从此快照取值。 */
-  readonly balanceBroadcaster: BalanceBroadcaster;
   syncStatus(): P2pkhSyncStatus;
   onSyncStatusChange(handler: (status: P2pkhSyncStatus) => void): () => void;
 
@@ -420,7 +391,7 @@ export interface P2pkhService {
    * - 进程内缓存由 `applyGlobalSettings` 维护；
    * - 跨标签页变更通过 storage 事件被 service 接收并刷新缓存。
    * 设计缘由：所有 read 路径（listResources / listUtxos / listHistory /
-   * getAssetBalance / getResourceBalance / allocateUtxos / transfer）
+   * transfer 等）
    * 在做 testnet 过滤时都必须拿到与上一次写一致的 `bsvNetwork`，
    * 否则会出现"切换设置后同一次渲染仍按旧值过滤"的不一致。
    */
@@ -440,9 +411,6 @@ export interface P2pkhService {
    * 路径主动通知 service。
    */
   applyGlobalSettings(settings: P2pkhGlobalSettings): Promise<void>;
-
-  getAssetBalance(assetId: P2pkhAssetId): Promise<P2pkhBalance>;
-  getResourceBalance(resourceId: string): Promise<P2pkhBalance>;
 
   listResources(assetId?: P2pkhAssetId): Promise<P2pkhKeyResource[]>;
   listUtxos(filter?: P2pkhUtxoFilter): Promise<P2pkhUtxo[]>;
@@ -464,7 +432,6 @@ export interface P2pkhService {
   listHistoryPage?(filter?: P2pkhPageFilter): Promise<P2pkhPage<P2pkhHistoryRecord>>;
   listLocalTransactions?(filter?: P2pkhUtxoFilter): Promise<P2pkhLocalTransaction[]>;
   listLocalTransactionsPage?(filter?: P2pkhPageFilter): Promise<P2pkhPage<P2pkhLocalTransaction>>;
-  getBalanceBreakdown?(network?: BsvNetwork): Promise<P2pkhBalanceBreakdown>;
   /**
    * 详情页懒加载：按 txid 从 WoC 取 raw transaction 并临时解析。
    *

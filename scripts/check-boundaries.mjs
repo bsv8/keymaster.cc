@@ -61,17 +61,6 @@ for (const plugin of pluginNames) {
   }
 }
 
-/** 检查 plugin-assets 禁止 import 任何具体资产插件。 */
-const assetsSrc = join(packagesDir, "plugin-assets", "src");
-if (existsSync(assetsSrc)) {
-  for (const file of walk(assetsSrc)) {
-    const text = readFileSync(file, "utf8");
-    if (/@keymaster\/plugin-p2pkh\b/.test(text)) {
-      recordViolation(file, "plugin-assets must not import @keymaster/plugin-p2pkh");
-    }
-  }
-}
-
 /** 检查 plugin-transfer 禁止 import 任何具体资产插件、vault、contacts。 */
 const transferSrc = join(packagesDir, "plugin-transfer", "src");
 if (existsSync(transferSrc)) {

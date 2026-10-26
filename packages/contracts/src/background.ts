@@ -31,7 +31,6 @@ export const BACKGROUND_MANAGED_SYNC_TASK_IDS = [
   "chain.fee-sync",
   "p2pkh.transactions-sync",
   "token-bsv21.sync",
-  "token-stas.sync",
   "collectible-1satordinals.sync",
   "contacts.presence-probe"
 ] as const;

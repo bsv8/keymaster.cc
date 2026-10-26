@@ -15,7 +15,6 @@ export { p2pkhAddressToScriptHex, parseP2pkhTransaction } from "./p2pkhTransacti
 export { calcTxidFromRawTxHex } from "./p2pkhSigner.js";
 
 export { createP2pkhWorkerTaskDefinitions } from "./p2pkhWorkerTasks.js";
-export { createP2pkhWorkerAssetReader } from "./p2pkhWorkerAssetReader.js";
 export { ensureWorkerP2pkhResources, refreshWorkerP2pkhResources } from "./p2pkhWorkerResources.js";
 export { executeWorkerP2pkhBroadcast } from "./workerBroadcastExecutor.js";
 export { createWorkerP2pkhSettings } from "./workerSettings.js";

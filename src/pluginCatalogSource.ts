@@ -1,5 +1,3 @@
-import { assetsPlugin, assetsSetup } from "@keymaster/plugin-assets";
-import { collectiblesPlugin, collectiblesSetup } from "@keymaster/plugin-collectibles";
 import { scanPlugin, scanSetup } from "@keymaster/plugin-scan";
 // Web Window 运行单元实现注册。
 //
@@ -31,7 +29,6 @@ import {
   storagePlatformPlugin,
   storagePlatformSetup,
 } from "@keymaster/platform-storage";
-import { stasTokenPlugin, stasTokenSetup } from "@keymaster/plugin-token-stas";
 import { vaultPlugin, vaultSetup } from "@keymaster/plugin-vault";
 import { wocPlugin, wocSetup } from "@keymaster/plugin-woc";
 
@@ -39,8 +36,6 @@ import { wocPlugin, wocSetup } from "@keymaster/plugin-woc";
 /** Release choices and Window implementations share one assembly entry per product. */
 export const WEB_PLUGIN_IMPLEMENTATIONS: readonly { manifest: PluginManifest; setup: PluginSetup }[] = [
   { manifest: pagePlugin, setup: pageSetup },
-  { manifest: assetsPlugin, setup: assetsSetup },
-  { manifest: collectiblesPlugin, setup: collectiblesSetup },
   { manifest: scanPlugin, setup: scanSetup },
   { manifest: storagePlatformPlugin, setup: storagePlatformSetup },
   { manifest: vaultPlugin, setup: vaultSetup },
@@ -55,7 +50,6 @@ export const WEB_PLUGIN_IMPLEMENTATIONS: readonly { manifest: PluginManifest; se
   { manifest: backgroundPlugin, setup: backgroundSetup },
   { manifest: wocPlugin, setup: wocSetup },
   { manifest: p2pkhPlugin, setup: p2pkhSetup },
-  { manifest: stasTokenPlugin, setup: stasTokenSetup },
   { manifest: bsvPricePlugin, setup: bsvPriceSetup },
   { manifest: appsPlugin, setup: appsSetup },
 ] as const;

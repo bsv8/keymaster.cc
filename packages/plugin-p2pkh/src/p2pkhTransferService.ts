@@ -6,7 +6,7 @@
 //
 // 硬切换 002 收尾：所有签名 / 选币 / owner 真值走 `publicKeyHex`；
 
-import type { AssetDataNotifier, CentralBroadcastService, CoordinatorP2pkhBroadcastResult, CoordinatorValueResult, P2pkhBroadcastSubmission, P2pkhUtxoBinding, VaultService } from "@keymaster/contracts";
+import type { CentralBroadcastService, CoordinatorP2pkhBroadcastResult, CoordinatorValueResult, P2pkhBroadcastSubmission, P2pkhUtxoBinding, VaultService } from "@keymaster/contracts";
 import { publisherPaymentChannelId } from "@keymaster/vaultlink-integration";
 import type { MessageBus } from "webloom-framework";
 import type {
@@ -41,7 +41,6 @@ export interface P2pkhTransferServiceDeps {
   assertInputsUnspent?(network: "main" | "test", inputs: readonly Pick<P2pkhUtxo, "txid" | "vout">[]): Promise<void>;
   messageBus: MessageBus;
   /** 资产数据变更通知器：转账成功后立即通知页面重读。 */
-  assetDataNotifier?: AssetDataNotifier;
   /**
    * 硬切换 002 收尾 + 多 owner 支持：按 `publicKeyHex` 返回该 owner
    * 的 P2PKH namespace K-V。transfer 内部所有读 K-V 的入口（prepare
@@ -390,7 +389,6 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
             await stateRepository.abortUnattemptedLocalSubmission?.({ submissionId, reason: result.reason });
             return { submissionId, result, localInputClaimIds: [], preview: currentPreview };
           }
-          deps.assetDataNotifier?.emit({ providerId: "p2pkh", publicKeyHex: owner.publicKeyHex, networkIdentity: owner, revision: Date.now(), kinds: ["utxo", "submission", "balance"] });
           return { submissionId, result, localInputClaimIds, preview: currentPreview };
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);

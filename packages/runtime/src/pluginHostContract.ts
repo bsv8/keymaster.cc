@@ -5,8 +5,6 @@
 // 视图。这样旧调用者可以平滑切换到 Adapter，而不会在这里再出现 Host 状态机。
 
 import type {
-  AssetDataInvalidationEvent,
-  AssetDataNotifier,
   ChannelRuntime,
   ChannelRuntimeFactory,
   CoordinatorWorkerUnitSnapshot,
@@ -140,8 +138,6 @@ export interface CreatePluginHostOptions {
 
 /** 兼容旧模块对未使用类型导入的稳定导出。 */
 export type {
-  AssetDataInvalidationEvent,
-  AssetDataNotifier,
   ChannelRuntime,
   ChannelRuntimeFactory,
   PluginContext,

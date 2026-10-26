@@ -15,16 +15,23 @@ import { useEffect, useState } from "react";
 import { Button, TextInput } from "@keymaster/ui";
 import { useOptionalPluginCapability } from "webloom-framework/react";
 import { usePluginI18n, usePluginLocale, useOptionalResourceSelector } from "@keymaster/runtime";
-import { BALANCE_NETWORK_KEYS, emptyGlobalBalanceSnapshot, type GlobalBalanceSnapshot, type KeyIdentity, type TransferCompletion, type TransferOffer, type TransferWidgetProps } from "@keymaster/contracts";
+import { emptyGlobalBalanceSnapshot, type GlobalBalanceSnapshot, type KeyIdentity } from "@keymaster/contracts";
 import type { P2pkhAssetId, P2pkhGlobalSettings, P2pkhKeyResource, P2pkhService, P2pkhTransferPreview, P2pkhTransferResult } from "../p2pkhContracts.js";
-import { P2PKH_CAPABILITY, assetIdToNetwork, resolveP2pkhFeeRateSatoshisPerKb } from "../p2pkhContracts.js";
+import { P2PKH_CAPABILITY, resolveP2pkhFeeRateSatoshisPerKb } from "../p2pkhContracts.js";
 
 interface FormState {
   recipient: string;
   amount: string;
 }
 
-export function P2pkhTransferWidget(props: TransferWidgetProps & { initialAmountSatoshis?: string }) {
+export interface P2pkhTransferWidgetProps {
+  recipientAddress?: string;
+  recipientPublicKeyHex?: string;
+  initialAmountSatoshis?: string;
+  onCompleted(result: P2pkhTransferResult): void;
+}
+
+export function P2pkhTransferWidget(props: P2pkhTransferWidgetProps) {
   const { t } = usePluginI18n();
   // owner 作用域 capability 会在锁定时撤销；路由/首页组件在锁定瞬间仍可能
   // 完成一次渲染，必须按"暂不可用"降级而不是抛错。
@@ -40,31 +47,29 @@ export function P2pkhTransferWidget(props: TransferWidgetProps & { initialAmount
 }
 
 function P2pkhTransferWidgetInner({
-  offer,
   onCompleted,
   recipientAddress,
   recipientPublicKeyHex,
   initialAmountSatoshis,
   service
-}: TransferWidgetProps & { service: P2pkhService; initialAmountSatoshis?: string }) {
+}: P2pkhTransferWidgetProps & { service: P2pkhService }) {
   const reader = useP2pkhResources();
   const { t } = usePluginI18n();
   const locale = usePluginLocale();
   const formatNumber = (value: number) => new Intl.NumberFormat(locale).format(value);
 
-  const assetId: P2pkhAssetId = offer.assetId as P2pkhAssetId;
-  const network = assetIdToNetwork(assetId);
-
   const context = useOptionalResourceSelector<{ activePublicKeyHex?: string; identity?: KeyIdentity; resource?: P2pkhKeyResource }, { activePublicKeyHex?: string; identity?: KeyIdentity; resource?: P2pkhKeyResource }>(
     reader,
     "p2pkh.transfer-context",
-    [assetId],
+    [],
     (s) => s.data ?? {},
     {}
   );
   const activeKey = { activePublicKeyHex: context.activePublicKeyHex };
   const activeIdentity = context.identity;
   const resource = context.resource;
+  const network = activeIdentity?.bsvNetwork;
+  const assetId: P2pkhAssetId = network === "test" ? "bsvtest" : "bsv";
   const globalSettings = useOptionalResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
     reader,
     "p2pkh.settings",
@@ -79,8 +84,8 @@ function P2pkhTransferWidgetInner({
     (snapshot) => snapshot.data ?? emptyGlobalBalanceSnapshot(),
     emptyGlobalBalanceSnapshot()
   );
-  const networkBalance = balanceSnapshot.balances[BALANCE_NETWORK_KEYS[network]];
-  const displayedNetworkBalance = networkBalance;
+  const displayedNetworkBalance = balanceSnapshot.publicKeyHex === activeIdentity?.publicKeyHex.toLowerCase()
+    && balanceSnapshot.bsvNetwork === network ? balanceSnapshot.balance : undefined;
   const networkLabel = t(network === "main" ? "p2pkh.network.main" : "p2pkh.network.test", {
     defaultValue: network === "main" ? "主网" : "测试网"
   });
@@ -97,7 +102,7 @@ function P2pkhTransferWidgetInner({
   const [preview, setPreview] = useState<P2pkhTransferPreview | undefined>(undefined);
   const [previewKey, setPreviewKey] = useState<string | undefined>(undefined);
   const [result, setResult] = useState<P2pkhTransferResult | undefined>(undefined);
-  const [completion, setCompletion] = useState<TransferCompletion | undefined>(undefined);
+  const [completion, setCompletion] = useState<P2pkhTransferResult | undefined>(undefined);
   useEffect(() => {
     // 收款地址由平台完成解析、网络锁定和联系人反查；Widget 只读取这一真值，
     // 不再根据公钥静默派生或允许用户编辑地址。
@@ -107,7 +112,7 @@ function P2pkhTransferWidgetInner({
     setResult(undefined);
     setCompletion(undefined);
     setError(null);
-  }, [network, offer.id, recipientAddress, recipientPublicKeyHex]);
+  }, [network, activeIdentity?.publicKeyHex, recipientAddress, recipientPublicKeyHex]);
 
   // 硬切换 005 收尾：active key 不再有 `mode` 字段。"all 模式"被壳层守卫
   // 拦截，本 widget 顶多在 active 缺失的瞬时态出现，作为 fail-closed 防御
@@ -127,6 +132,10 @@ function P2pkhTransferWidgetInner({
   }
 
   function buildInput() {
+    if (!activeIdentity || !network || !resource || resource.network !== network) {
+      setError(t("p2pkh.transfer.locked", { defaultValue: "钱包身份尚未就绪。" }));
+      return null;
+    }
     if (!form.recipient) {
       setError(t("p2pkh.transfer.err.recipient", { defaultValue: "收款地址尚未通过平台核对" }));
       return null;
@@ -173,16 +182,7 @@ function P2pkhTransferWidgetInner({
       const r = await service.submitTransfer(preview);
       setResult(r);
       if (r.status === "local-confirmed") {
-        const c: TransferCompletion = {
-          offerId: offer.id,
-          providerId: offer.providerId,
-          assetProviderId: offer.assetProviderId,
-          assetId: offer.assetId,
-          reference: r.txid,
-          completedAt: new Date().toISOString(),
-          details: { localInputClaimIds: r.localInputClaimIds, submissionId: r.submissionId }
-        };
-        setCompletion(c);
+        setCompletion(r);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : t("p2pkh.transfer.err.submit", { defaultValue: "提交失败" }));
@@ -283,7 +283,7 @@ function P2pkhTransferWidgetInner({
               </Button>
             </div>
             <p className="p2pkh-transfer-widget__balance-reference" aria-live="polite">
-              {displayedNetworkBalance && displayedNetworkBalance.available !== false
+              {displayedNetworkBalance && displayedNetworkBalance.available === true
                 ? t("p2pkh.transfer.form.availableBalance", { defaultValue: "可用余额：{{balance}} sats（{{network}}）", balance: formatNumber(displayedNetworkBalance.total), network: networkLabel })
                 : t("p2pkh.transfer.form.availableBalanceUnknown", { defaultValue: "可用余额未知（{{network}}）", network: networkLabel })}
             </p>

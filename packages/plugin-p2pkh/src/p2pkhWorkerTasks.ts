@@ -1,4 +1,4 @@
-import type { AssetDataInvalidationEvent, BackgroundTaskDefinition, BorrowedModuleFileStore, VaultWalletState, WocService } from "@keymaster/contracts";
+import type { AssetDataChangedEvent, BackgroundTaskDefinition, BorrowedModuleFileStore, VaultWalletState, WocService } from "@keymaster/contracts";
 import { createP2pkhCoordinatorTasks } from "./p2pkhCoordinatorTasks.js";
 export interface P2pkhWorkerTaskDependencies {
   walletState: VaultWalletState;
@@ -7,7 +7,7 @@ export interface P2pkhWorkerTaskDependencies {
   isNetworkEnabled(network: "main" | "test"): boolean;
   loadSettings(ownerPublicKeyHex?: string): Promise<void>;
   refreshUtxos(signal: AbortSignal): Promise<{ main?: number; test?: number }>;
-  emitDataChanged(kinds: AssetDataInvalidationEvent["kinds"], seqs?: { main?: number; test?: number }): void;
+  emitDataChanged(kinds: AssetDataChangedEvent["kinds"], seqs?: { main?: number; test?: number }): void;
 }
 export type P2pkhWorkerTaskDefinition = BackgroundTaskDefinition & { unitId: string; syncPolicy: "managed" | "smart" };
 /** P2PKH owns the task definitions and domain execution. The coordinator owns

@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, formatSats, formatSatsWithPrice, type DataTableColumn } from "@keymaster/ui";
 import { useOptionalPluginCapability } from "webloom-framework/react";
 import { router, usePluginBsvPrice, usePluginI18n, usePluginLocale, useOptionalResourceSelector } from "@keymaster/runtime";
-import { BALANCE_NETWORK_KEYS, emptyGlobalBalanceSnapshot, P2PKH_COORDINATOR_CONTROL_CAPABILITY, type GlobalBalanceSnapshot, type P2pkhCoordinatorControl } from "@keymaster/contracts";
+import { emptyGlobalBalanceSnapshot, P2PKH_COORDINATOR_CONTROL_CAPABILITY, type GlobalBalanceSnapshot, type P2pkhCoordinatorControl } from "@keymaster/contracts";
 import type { P2pkhBalanceBreakdown, P2pkhGlobalSettings, P2pkhHistoryRecord, P2pkhKeyResource, P2pkhLocalTransaction, P2pkhService, P2pkhSyncStatus, P2pkhTransactionSyncState, P2pkhUtxo } from "../p2pkhContracts.js";
 import { P2PKH_CAPABILITY } from "../p2pkhContracts.js";
 import { detailPath, listPath, parseStoredTransaction, readPage, type P2pkhNetwork, type P2pkhWalletView } from "./p2pkhTransactionView.js";
@@ -135,9 +135,9 @@ function P2pkhWalletPageInner({
   };
   const networkEnabled = network === settings.bsvNetwork;
   // 钱包余额唯一读取来源是全局广播；页面不再维护第二份余额状态。
-  const resourceBalance = networkEnabled ? balanceSnapshot.balances[BALANCE_NETWORK_KEYS[network]] : undefined;
+  const resourceBalance = networkEnabled && balanceSnapshot.bsvNetwork === network ? balanceSnapshot.balance : undefined;
   const balance = resourceBalance;
-  const balanceKnown = Boolean(balance && balance.available !== false);
+  const balanceKnown = Boolean(balance && balance.available === true);
   const sync = wallet.sync.find((row) => row.resourceId === `p2pkh:${network}`);
   const selectedResources = useMemo(() => networkEnabled ? wallet.resources.filter((resource) => resource.network === network) : [], [wallet.resources, network, networkEnabled]);
 

@@ -255,7 +255,6 @@ function ApplicationBootstrapResourceApp({ path, host, hostVersion, bootstrap }:
     && bootstrapSnapshot.hasUnlockedActiveKey
     && bootstrapSnapshot.ownerAppsReady
     && bootstrapSnapshot.connectAppsReady
-    && bootstrapSnapshot.assetCatalogsReady
     && hasVaultService
     && hasVaultWalletState;
   if (!applicationReady && hasUnlockEntry.current && !isProtocolPopupPath(path)) {

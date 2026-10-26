@@ -1,20 +1,17 @@
 import { createElement } from "react";
 import { router } from "@keymaster/runtime";
 import { BUSINESS_REGISTRY_CAPABILITY, CONTACTS_SERVICE_CAPABILITY, CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, OWNED_RESOURCE_ACCESS_CAPABILITY, PAGE_UI_REGISTRY_CAPABILITY,
-  type PluginContext, type VaultWalletState, type TransferProvider, type AssetDataNotifier } from "@keymaster/contracts";
+  type PluginContext, type VaultWalletState } from "@keymaster/contracts";
 import { P2pkhResourceProvider } from "../P2pkhResourceContext.js";
 import { P2pkhTransferPage } from "./P2pkhTransferPage.js";
 
-export function registerP2pkhTransferUi(ctx: PluginContext, { walletState, transferProvider, assetDataNotifier, path }: {
-  walletState: VaultWalletState; transferProvider: TransferProvider; assetDataNotifier?: AssetDataNotifier; path: "/transfer";
+export function registerP2pkhTransferUi(ctx: PluginContext, { walletState, path }: {
+  walletState: VaultWalletState; path: "/transfer";
 }): void {
   const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
   resources.register<import("@keymaster/contracts").VaultLifecycleSnapshot, readonly string[]>({ id: "p2pkh.transfer-active", scope: "active-key",
     key: (_args, context) => ["p2pkh.transfer-active", context.activePublicKeyHex ?? "none"], load: async () => walletState.snapshot(),
     subscribe: (_args, _context, invalidate) => walletState.subscribe(invalidate), invalidation: "immediate" });
-  resources.register<import("@keymaster/contracts").TransferOffer[], readonly string[]>({ id: "p2pkh.transfer-offers", scope: "active-key",
-    key: (_args, context) => ["p2pkh.transfer-offers", context.activePublicKeyHex ?? "none"], load: () => transferProvider.listOffers(),
-    subscribe: (_args, _context, invalidate) => { const off = transferProvider.onChange(invalidate); const offNotifier = assetDataNotifier?.subscribe(invalidate); return () => { off(); offNotifier?.(); }; }, invalidation: "immediate" });
   resources.register<import("@keymaster/contracts").Contact[], readonly string[]>({ id: "p2pkh.transfer-contacts", scope: "active-key",
     key: (_args, context) => ["p2pkh.transfer-contacts", context.activePublicKeyHex ?? "none"],
     load: () => ctx.consumer.optionalCapability(CONTACTS_SERVICE_CAPABILITY)?.listContacts() ?? Promise.resolve([]),

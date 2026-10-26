@@ -70,7 +70,6 @@
     "@keymaster/plugin-p2pkh": "*",
     "@keymaster/plugin-protocol": "*",
     "@keymaster/plugin-sat-subscription": "*",
-    "@keymaster/plugin-token-stas": "*",
     "@keymaster/plugin-vault": "*",
     "@keymaster/plugin-webrtc": "*",
     "@keymaster/plugin-window-p2p": "*",
@@ -89,8 +88,6 @@
     "sat-subscription-protocol": "0.3.0",
     "webloom-framework": "0.6.0",
     "@keymaster/plugin-page": "*",
-    "@keymaster/plugin-assets": "workspace:*",
-    "@keymaster/plugin-collectibles": "workspace:*",
     "@keymaster/plugin-scan": "workspace:*"
   },
   "description": "本地优先的 BSV 浏览器钱包。基于插件架构，按\"基础设施 / 平台 / 业务\"三层分离。",

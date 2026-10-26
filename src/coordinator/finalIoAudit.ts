@@ -41,7 +41,6 @@ export type FinalIoAuditOperation =
   | "chain.fee-sync"
   | "p2pkh.sync"
   | "p2pkh.utxo-snapshot"
-  | "token-stas.sync"
   | "vault.operation"
   | "p2pkh.broadcast";
 

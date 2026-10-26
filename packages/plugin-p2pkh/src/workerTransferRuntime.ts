@@ -267,7 +267,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
         catch (error) { console.warn("[p2pkh] Protocol journal ACK lost; manager responsibility retained", error); }
         assertRecoveryFresh();
       }
-      const service = createP2pkhService({
+      const { service } = createP2pkhService({
         vault: { status: deps.vaultStatus, createActiveKeyCrypto: deps.crypto, requestPayment: deps.requestPayment },
         utxoManager,
         woc: deps.query?.(),
