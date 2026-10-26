@@ -8,9 +8,6 @@
       "path": "./packages/contracts"
     },
     {
-      "path": "./packages/connect"
-    },
-    {
       "path": "./packages/runtime"
     },
     {

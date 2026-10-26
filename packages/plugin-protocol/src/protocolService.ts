@@ -2,11 +2,13 @@ import { validateNetworkIdentity, sameNetworkIdentity, type NetworkIdentity } fr
 import { requireUnlockedWalletIdentity, parseP2pkhPaymentLookupResult } from "@keymaster/contracts";
 import { authenticateAppWallet, publisherPaymentOwner, publisherPaymentChannelId, publisherPaymentSessionId } from "@keymaster/vaultlink-integration";
 import { createProviderDispatch } from "./providerDispatch.js";
+import { KeymasterConnectReceiver, type ReceiverRequest } from "keymaster-connect/server";
+import type * as ConnectPublic from "keymaster-connect/protocol";
 import type { AppStorageBinding, AppStorageClient } from "@keymaster/contracts";
 // packages/plugin-protocol/src/protocolService.ts
-// 协议 service：transport + 校验 + 解锁/确认调度 + 全局串行执行 +
-// 调用 vault / walletState + 构造 envelope + 签名/加解密 + 命令流历史 +
-// p2pkh.transfer / feepool.prepare / feepool.commit 执行。
+// 钱包 Connect 宿主：解锁/授权 UI 调度、串行执行、Vault 与实际业务、持久责任。
+// Client/Receiver 的协议校验、来源/绑定、在途去重与封包统一由独立 KeymasterConnect 实现。
+// 历史费用池执行代码保留责任处理用途，不代表公开 Connect v1 开放费用池。
 //
 // 设计缘由（施工单 2026-06-27 001 硬切换 + 施工单 2026-06-28 002 硬切换 +
 // Connect Storage 施工单）：
@@ -27,10 +29,8 @@ import type { AppStorageBinding, AppStorageClient } from "@keymaster/contracts";
 //       * locked + auto → `waiting_unlock_auto`
 //       * unlocked + manual → `confirming`（启动 timeout）
 //       * unlocked + auto → `queued`
-//   - **所有外部业务方法**（identity.get / intent.sign / cipher.encrypt /
-//     cipher.decrypt / p2pkh.transfer / feepool.prepare / feepool.commit /
-//     storage.*）
-//     强制要求 `walletPublicKeyHex` 入参（施工单 2026-06-28 002 硬切换）。
+//   - 本类消费 Receiver 已验证的请求，internalExecutionParams 再附加内部钱包上下文。
+//     `walletPublicKeyHex` 只属于内部执行 DTO，外部 wire 不接受钱包或网络选择字段。
 //     accept 阶段同步预校验 session 真值（fail-fast）：
 //       - session 不存在 / 已 revoke / origin 不匹配 / owner key 不 ready
 //         → 直接 phase=failed，对外回 user_rejected / invalid_origin；
@@ -47,8 +47,7 @@ import type { AppStorageBinding, AppStorageClient } from "@keymaster/contracts";
 //   - `cancel(id)` 按 `source + origin + transportRequestId` 命中具体
 //     request；命中后转 rejected，并写本地 `failureReason=client_canceled`；
 //     对外仍回原 request 的 user_rejected。
-//   - 重复 `requestId` 拒绝：同 source + origin + transportRequestId
-//     只要存在未终态记录，后续相同 id 直接忽略。
+//   - 在途 `requestId` 去重由 Receiver 唯一持有，业务卡不再维护第二套协议判定。
 //   - 解锁后批量推进：所有 `waiting_unlock_*` 一次性扫描，manual →
 //     `confirming`（启动 timeout），auto → `queued`。
 //   - 全局串行执行：每条确认 / auto 的 request 进 `executionQueue`；
@@ -64,8 +63,7 @@ import type { AppStorageBinding, AppStorageClient } from "@keymaster/contracts";
 // operationId，**全部**对外回 `user_rejected`；本地原因只写
 // `ProtocolCommandRecord.failureReason`。
 //
-// K-V 不可用差异化降级：p2pkh 仍可用（auto-approve 被禁用、manual
-// confirm 仍可走通）；feepool 直接 fail-closed。
+// Payment 缺少持久幂等账本时必须拒绝；协议运行态清理不能抹除已签责任。
 //
 // 不依赖 React；可单测。
 
@@ -170,7 +168,7 @@ import {
   type VaultService
 } from "@keymaster/contracts";
 import { AppIdentityValidationError, identityDigestBytes, verifyAppIdentityProof } from "./appIdentity.js";
-import { ProtocolValidationError, assertConnectV1Scope, parseCancelMessage, parseRequestMessage } from "./protocolValidation.js";
+import { ProtocolValidationError, internalExecutionParams, validateExactChannel } from "./protocolValidation.js";
 import {
   aesGcmDecrypt,
   aesGcmEncrypt,
@@ -374,6 +372,8 @@ export interface ProtocolServiceDeps {
  * 历史都对应一个 RequestRecord；recordId 与 transport requestId 解耦。
  */
 interface RequestRecord {
+  /** 协议权威由独立 Receiver 签发，UI/业务记录不能自行重建。 */
+  readonly protocol: ReceiverRequest;
   readonly walletGeneration: string;
   readonly runGeneration: string;
   readonly bindingId?: string;
@@ -501,8 +501,6 @@ interface ConfirmTimeoutState {
   startedFromFallback: boolean;
 }
 
-const READY_MESSAGE: ProtocolReadyMessage = { v: PROTOCOL_VERSION, type: "ready" };
-const CLOSING_MESSAGE: ProtocolClosingMessage = { v: PROTOCOL_VERSION, type: "closing" };
 
 function requireVaultCommandAccepted(result: Awaited<ReturnType<import("@keymaster/contracts").VaultService["unlock"]>>, operation: string): void {
   if (result.status === "accepted" || result.status === "already-unlocked" || (operation === "lock" && result.status === "ok")) return;
@@ -582,7 +580,6 @@ export class ProtocolServiceImpl implements ProtocolService {
   private originCache: Map<string, ProtocolOriginSettingsRecord> = new Map();
 
   /** popup 当前会话是否已经向 opener 发过 `closing`。 */
-  private closingSent = false;
   /** auth 页触发的解锁是否还在进行中；用于抑制全局 unlock 批量推进。 */
   private authUnlockInProgress: string | null = null;
 
@@ -732,10 +729,8 @@ export class ProtocolServiceImpl implements ProtocolService {
   private lastPriceBroadcast: PriceValue | undefined;
   private readonly channelQuotaBySessionId: Map<string, { publishes: number[]; bytes: Array<{ at: number; size: number }>; inFlight: number }> = new Map();
   private channelSessionEpoch = 0;
-  /** Transport authority, separate from durable payment/session records. */
-  private readonly connectBindings = new Map<Window, {
-    id: string; origin: string; identity: NetworkIdentity; walletGeneration: string; runGeneration: string;
-  }>();
+  /** 协议绑定/在途关联只由独立 Receiver 持有；本类只保存业务执行记录。 */
+  private readonly receiver: KeymasterConnectReceiver;
 
   private assertWalletGeneration(rec: RequestRecord): void {
     const lifecycle = this.deps.walletState.snapshot();
@@ -824,6 +819,19 @@ export class ProtocolServiceImpl implements ProtocolService {
   constructor(private readonly deps: ProtocolServiceDeps) {
     this.historyAvailableFlag = Boolean(deps.storageRepository);
     this.bootModeValue = deps.bootMode ?? "connect";
+    this.receiver = new KeymasterConnectReceiver({
+      peer: () => this.bootModeValue === "appView"
+        ? { mode: "appView", origin: this.currentAppViewContext?.appOrigin ?? "", source: this.currentAppClientSource }
+        : { mode: "popup", source: this.getOpener() },
+      lifecycle: () => { const snapshot = deps.walletState.snapshot(); return { walletGeneration: snapshot.walletGeneration, runGeneration: snapshot.runGeneration }; },
+      identity: async () => validateNetworkIdentity(await deps.vault.getCurrentKey()),
+      send: (target, origin, message) => this.postMessage(target as Window, origin, message),
+      control: (target, message) => {
+        if (message.type === "ready" && deps.postReady) deps.postReady(target as Window, message);
+        else if (message.type === "closing" && deps.postClosing) deps.postClosing(target as Window, message);
+        else target.postMessage(message, "*");
+      },
+    });
     // Channel 事件已经在 Coordinator 完成验签、解密和固定协议分派。
     // Session Window 只做当前 session + exact channel 的最后一层隔离。
     if (deps.connectChannelRuntime) {
@@ -941,7 +949,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    * origin 会残留到新会话里——违反 ProtocolService.startSession 接口契约。
    */
   startSession(): void {
-    this.connectBindings.clear();
+    this.receiver.reset();
     this.releaseAllChannelSessions();
     this.channelSessionBySource.clear();
     this.channelSubscriptionsBySessionId.clear();
@@ -978,7 +986,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 6. 重置会话级 phase / lockState / closing 标志。
     this.phase = "waiting";
     this.lockStateValue = this.readVaultLockState();
-    this.closingSent = false;
     // 7. 清空 appView 启动上下文 + launchToken 缓存 + bootstrap 监听：
     //    Session Window 重新启动会话时不允许复用旧 launcher handoff。
     this.currentAppViewContext = null;
@@ -1006,7 +1013,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - 不发 `closing`（closing 由 pageUnloading 路径负责）。
    */
   endSession(): void {
-    this.connectBindings.clear();
+    this.receiver.clear();
     this.releaseAllChannelSessions();
     this.channelSessionBySource.clear();
     this.channelSubscriptionsBySessionId.clear();
@@ -1211,29 +1218,18 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 识别出来——它**不是** request / cancel，是 transport-ready 信号，
     // 由 child app 主动向 Session Window（opener）发，方向对称于传统
     // popup 流的 `Session Window -> client web`。
-    if (looksLikeReady(event.data)) {
+    if ((event.data as { type?: unknown } | null)?.type === "ready") {
       this.tryAcceptChildReady(event);
       return;
     }
-    // 施工单 2026-07-01 002 硬切换：event 是 server-pushed 方向
-    // （protocolService -> caller），**不**应从 caller 接收；
-    // inbound event 一律忽略，避免对端伪造 dirty 事件。
-    if (looksLikeEvent(event.data)) {
-      return;
-    }
-    // 先尝试按 cancel 解析：失败 / 不是 cancel 都按 request 走。
-    if (looksLikeCancel(event.data)) {
-      let parsed: { id: string };
-      try {
-        parsed = parseCancelMessage(event.data);
-      } catch {
-        return;
-      }
+    // 宿主只选择处理分支，控制帧与请求合法性都由 Receiver 判断。
+    if ((event.data as { type?: unknown } | null)?.type === "cancel") {
+      const parsed = this.receiver.acceptCancel(event);
+      if (!parsed) return;
       // 命中：source + origin + transportRequestId 都匹配 + 当前 phase
       // **不**是 executing。
       const rec = this.findRequestByTransportId(event.source as Window | null, event.origin, parsed.id);
       if (!rec) return;
-      if (rec.bindingId && (event.data as { bindingId?: unknown }).bindingId !== rec.bindingId) return;
       if (!this.isRequestCancellable(rec)) return;
       // 施工单 2026-06-30 003 硬切换：cancel 与首条 request 同属"合法
       // child 协议消息"——即便 record 是从已 bound source 创建的
@@ -1246,76 +1242,13 @@ export class ProtocolServiceImpl implements ProtocolService {
       return;
     }
 
-    if (!looksLikeRequest(event.data)) return;
+    const context = await this.receiver.accept(event);
+    if (!context) return;
+    if (this.bootModeValue === "appView") this.currentAppClientSource = context.source as Window;
+    const parsed = { ...context, protocol: context, params: internalExecutionParams(context.method, context.params, context.networkIdentity) };
 
-    let parsed;
-    try {
-      const raw = event.data as Record<string, unknown>;
-      const method = raw.method as ProtocolMethod;
-      if (!this.isAllowedRequestSource(event, method)) return;
-      if (raw.v !== PROTOCOL_VERSION) throw new ProtocolValidationError("invalid_request", "Unsupported protocol version; update Connect SDK");
-      const establishing = ["connect.login", "connect.resume", "connect.launch"].includes(method);
-      const lifecycle = this.deps.walletState.snapshot();
-      if (!lifecycle.walletGeneration) throw new ProtocolValidationError("invalid_request", "Wallet is not initialized");
-      const binding = this.connectBindings.get(event.source as Window);
-      if (!establishing && (!binding || binding.origin !== event.origin || raw.bindingId !== binding.id
-        || binding.walletGeneration !== lifecycle.walletGeneration || binding.runGeneration !== lifecycle.runGeneration)) {
-        throw new ProtocolValidationError("connection_expired", "Wallet connection expired; reconnect explicitly");
-      }
-      if (establishing && raw.bindingId !== undefined) throw new ProtocolValidationError("invalid_request", "Establishment must not reuse a binding");
-      const stored = establishing ? await this.deps.vault.getCurrentKey() : undefined;
-      const identity = establishing ? stored && validateNetworkIdentity(stored) : binding?.identity;
-      if (!identity) throw new ProtocolValidationError("invalid_request", "Wallet identity unavailable");
-      if (this.deps.walletState.snapshot().walletGeneration !== lifecycle.walletGeneration
-        || this.deps.walletState.snapshot().runGeneration !== lifecycle.runGeneration) throw new ProtocolValidationError("connection_expired", "Wallet changed during connection");
-      parsed = { ...parseRequestMessage(event.data, identity), walletGeneration: lifecycle.walletGeneration,
-        runGeneration: lifecycle.runGeneration, bindingId: establishing ? undefined : binding!.id };
-    } catch (err) {
-      const failure = err instanceof ProtocolValidationError ? err
-        : new ProtocolValidationError("internal_error", "Wallet identity could not be read");
-      const raw=event.data as {id?:unknown;method?:unknown};
-      if(typeof raw.id === "string" && typeof raw.method === "string" && this.isAllowedRequestSource(event,raw.method as ProtocolMethod) && event.source) {
-        this.postMessage(event.source as Window,event.origin,{v:PROTOCOL_VERSION,type:"result",id:raw.id,ok:false,error:{code:failure.code,message:failure.message}});
-      }
-      return;
-    }
-
-    // transport 对端校验：
-    //   - connect mode：只接受 `window.opener`；
-    //   - appView mode：只接受当前 app client window；launcher 只是 bootstrap
-    //     提供方，不再是运行期 request source。
-    if (!this.isAllowedRequestSource(event, parsed.method)) return;
-
-    if (this.deps.connectV1Scope) {
-      try {
-        assertConnectV1Scope(parsed.method, parsed.params);
-      } catch (err) {
-        if (err instanceof ProtocolValidationError) {
-          this.postMessage(event.source as Window, event.origin, {v:PROTOCOL_VERSION,type:"result",id:parsed.id,networkIdentity:parsed.networkIdentity,ok:false,error:{code:err.code,message:err.message}});
-          return;
-        }
-        throw err;
-      }
-    }
-
-    // 施工单 2026-06-30 003 硬切换：appView mode 下首条合法 child 协议
-    // 消息（无论是顶层 `ready`，还是首条 `connect.launch` 等 request）
-    // 都应把 `childReady` 翻 true，让 UI 从 `show app` 切回传统 popup。
-    // `isAllowedRequestSource` 已经在必要时绑定 `currentAppClientSource`，
-    // 这里再统一翻 childReady + 清等待态 / 软超时提示。
+    // 来源、绑定、公开范围、wire 参数和重复在途 ID 已由独立 Receiver 校验。
     this.markChildAliveFromBoundSource();
-
-    // 重复 requestId 拒绝：同 source + origin + transportRequestId 还有
-    // 未终态记录，则忽略。
-    const existing = this.findRequestByTransportId(
-      event.source as Window | null,
-      event.origin,
-      parsed.id
-    );
-    if (existing && this.isAliveRequest(existing)) {
-      return;
-    }
-
     await this.acceptRequest(event, parsed);
   }
 
@@ -2597,17 +2530,8 @@ export class ProtocolServiceImpl implements ProtocolService {
    *     本函数仅处理显式 `ready` 路径；两路汇到同一份真值。
    */
   private tryAcceptChildReady(event: MessageEvent): void {
-    if (this.bootModeValue !== "appView") return;
-    const ctx = this.currentAppViewContext;
-    if (!ctx) return;
-    if (event.origin !== ctx.appOrigin) return;
-    const source = event.source as Window | null;
-    if (!source) return;
-    // 已绑定 source：必须严格匹配，错误窗口的 ready 直接忽略。
-    if (this.currentAppClientSource && this.currentAppClientSource !== source) return;
-    if (!this.currentAppClientSource) {
-      this.currentAppClientSource = source;
-    }
+    if (!this.receiver.acceptReady(event)) return;
+    this.currentAppClientSource = event.source as Window;
     if (this.childReadyFlag) {
       // 已 ready：重复 ready 直接忽略；source 绑定已稳定，重复 ready
       // 不再触发 UI 切段、不再 emit。
@@ -2657,14 +2581,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *     语义是幂等的。
    */
   private postReadyToTarget(target: Window): void {
-    if (this.deps.postReady) {
-      this.deps.postReady(target, READY_MESSAGE);
-      return;
-    }
-    try {
-      target.postMessage(READY_MESSAGE, "*");
-    } catch {
-    }
+    this.receiver.sendReady(target);
   }
 
   /**
@@ -2730,7 +2647,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    */
   private async acceptRequest(
     event: MessageEvent,
-    parsed: { id: string; networkIdentity: NetworkIdentity; method: ProtocolMethod; params: MethodParams<ProtocolMethod>; walletGeneration: string; runGeneration: string; bindingId?: string }
+    parsed: { protocol: ReceiverRequest; id: string; networkIdentity: NetworkIdentity; method: ProtocolMethod; params: MethodParams<ProtocolMethod>; walletGeneration: string; runGeneration: string; bindingId?: string }
   ): Promise<void> {
     // origin 切换：触发历史载入 + 立即清空旧 origin 视图（施工单 2026-06-27
     // origin 切换：触发历史载入 + 立即清空旧 origin 视图（施工单 2026-06-27
@@ -2758,6 +2675,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const method = parsed.method;
 
     const rec: RequestRecord = {
+      protocol: parsed.protocol,
       recordId,
       transportRequestId: parsed.id,
       walletGeneration: parsed.walletGeneration,
@@ -3883,7 +3801,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     rec.abortController = new AbortController();
     try {
       this.assertWalletGeneration(rec);
-      if (rec.bindingId && this.connectBindings.get(rec.source)?.id !== rec.bindingId) throw new ProtocolValidationError("connection_expired", "Connection binding was revoked");
+      this.receiver.assertCurrent(rec.protocol);
       const boot = rec.walletPublicKeyHex ? this.ownerRuntimesBySessionId.get(rec.walletPublicKeyHex)?.runtime : undefined;
       const activeIdentity = boot?.networkIdentity ?? this.requireCurrentOwnerKey(rec.networkIdentity.publicKeyHex);
       if (!activeIdentity || !sameNetworkIdentity(activeIdentity, rec.networkIdentity)) throw new ProtocolValidationError("invalid_request", "Network identity mismatch");
@@ -4295,7 +4213,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       throw localFailure("internal_error", "connect session not found / revoked");
     }
     this.assertWalletGeneration(rec);
-    if (rec.bindingId && this.connectBindings.get(rec.source)?.id !== rec.bindingId) throw new ProtocolValidationError("connection_expired", "Connection binding was revoked");
+    this.receiver.assertCurrent(rec.protocol);
     // 施工单 2026-06-30 002 硬切换：session 真值上不再带 runtime 来源。
     if (!session.networkIdentity || session.networkIdentity.publicKeyHex.toLowerCase() !== session.ownerPublicKeyHex.toLowerCase() || !sameNetworkIdentity(session.networkIdentity, rec.networkIdentity)) throw localFailure("session_owner_mismatch", "Connect network identity mismatch");
     // 业务路径一律走 `resolveOwnerRuntime(session)`；accept 阶段
@@ -5000,7 +4918,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       throw protocolError("invalid_request", "channel.subscription_set exceeds 64 channels");
     }
     for (const channel of params.channels) {
-      validateExactChannelValue(channel);
+      validateExactChannel(channel);
       if (isReservedInboxChannel(channel)) {
         throw protocolError("invalid_request", "bsv8.inbox.* is a reserved private channel");
       }
@@ -6301,35 +6219,14 @@ export class ProtocolServiceImpl implements ProtocolService {
   /* ============== 发送 ============== */
 
   private async replyResultToRec(rec: RequestRecord, result: MethodResult): Promise<void> {
-    const target = rec.source;
-    if (!this.canPostToTarget(target)) return;
     this.assertWalletGeneration(rec);
-    const establishing = ["connect.login", "connect.resume", "connect.launch"].includes(rec.method);
-    let wireResult: import("@keymaster/contracts").ConnectWireResult = result;
-    let bindingId = rec.bindingId;
-    if (establishing) {
+    // 只在宿主适配内部 DTO；协议封包、绑定签发、失效围栏与关联终态归 Receiver。
+    let wireResult: unknown = result;
+    if (["connect.login", "connect.resume", "connect.launch"].includes(rec.method)) {
       const { walletPublicKeyHex: _wallet, ownerPublicKeyHex: _owner, ...identityResult } = result as ConnectLoginResult;
-      if (!sameNetworkIdentity(validateNetworkIdentity(identityResult.networkIdentity), rec.networkIdentity)) throw new ProtocolValidationError("invalid_request", "Connection result identity mismatch");
-      wireResult = { ...identityResult, networkIdentity: rec.networkIdentity };
-      bindingId = crypto.randomUUID();
-      this.connectBindings.set(rec.source, { id: bindingId, origin: rec.origin, identity: rec.networkIdentity,
-        walletGeneration: rec.walletGeneration, runGeneration: rec.runGeneration });
-    } else if (rec.method === "connect.logout") {
-      wireResult = { revokedAt: (result as ConnectLogoutResult).revokedAt };
-      this.connectBindings.delete(rec.source);
-    } else if (this.connectBindings.get(rec.source)?.id !== rec.bindingId) {
-      throw new ProtocolValidationError("connection_expired", "Connection binding was revoked");
-    }
-    const message: ProtocolResultMessage = {
-      v: PROTOCOL_VERSION,
-      type: "result",
-      networkIdentity: rec.networkIdentity,
-      bindingId,
-      id: rec.transportRequestId,
-      ok: true,
-      result: wireResult
-    };
-    this.postMessage(target, rec.origin, message);
+      wireResult = identityResult;
+    } else if (rec.method === "connect.logout") wireResult = { revokedAt: (result as ConnectLogoutResult).revokedAt };
+    this.receiver.replyResult(rec.protocol, wireResult as ConnectPublic.MethodResult);
   }
 
   private async replyErrorToRec(
@@ -6337,37 +6234,11 @@ export class ProtocolServiceImpl implements ProtocolService {
     code: ProtocolErrorCode,
     errorMessage: string
   ): Promise<void> {
-    const target = rec.source;
-    if (!this.canPostToTarget(target)) return;
-    const message: ProtocolResultMessage = {
-      v: PROTOCOL_VERSION,
-      type: "result",
-      networkIdentity: rec.networkIdentity,
-      id: rec.transportRequestId,
-      ok: false,
-      error: { code, message: errorMessage }
-    };
-    this.postMessage(target, rec.origin, message);
+    this.receiver.replyError(rec.protocol, { code, message: errorMessage });
   }
 
   private postEventMessage(target: Window, origin: string, message: ProtocolEventMessage): void {
-    try {
-      const binding = this.connectBindings.get(target);
-      const lifecycle = this.deps.walletState.snapshot();
-      if (!binding || binding.origin !== origin || binding.walletGeneration !== lifecycle.walletGeneration || binding.runGeneration !== lifecycle.runGeneration) return;
-      target.postMessage({ ...message, networkIdentity: binding.identity, bindingId: binding.id }, origin);
-    } catch {
-    }
-  }
-
-  private canPostToTarget(target: Window): boolean {
-    try {
-      const s = target as Window & { closed?: boolean };
-      if (s.closed === true) return false;
-    } catch {
-      return false;
-    }
-    return true;
+    this.receiver.sendEvent(target, origin, message);
   }
 
   private postMessage(target: Window, origin: string, message: ProtocolResultMessage): void {
@@ -6382,39 +6253,9 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   private sendClosingBestEffort(): void {
-    if (this.closingSent) return;
-    // 优先取当前任意一条活请求的 source；否则取 opener。
-    let target: Window | null = null;
-    let origin = "*";
-    for (const [, rec] of this.requestsByRecordId) {
-      target = rec.source;
-      origin = rec.origin;
-      break;
-    }
-    if (!target) {
-      target = this.getOpener();
-    }
-    if (!target) {
-      this.closingSent = true;
-      return;
-    }
-    if (!this.canPostToTarget(target)) {
-      this.closingSent = true;
-      return;
-    }
-    this.closingSent = true;
-    if (this.deps.postClosing) {
-      try {
-        this.deps.postClosing(target, CLOSING_MESSAGE);
-      } catch {
-      }
-      return;
-    }
-    try {
-      target.postMessage(CLOSING_MESSAGE, "*");
-    } catch {
-    }
-    void origin;
+    // 宿主只决定窗口归属，closing 帧及幂等门禁由协议栈实现。
+    const target = this.requestsByRecordId.values().next().value?.source ?? this.getOpener();
+    if (target) this.receiver.sendClosing(target);
   }
 
   private getOpener(): Window | null {
@@ -6447,24 +6288,6 @@ export class ProtocolServiceImpl implements ProtocolService {
    *     仍走 connect mode 旧逻辑（opener 白名单）。
    *   - 不再需要 method 维度判断。
    */
-  private isAllowedRequestSource(event: MessageEvent, _method: ProtocolMethod): boolean {
-    const source = event.source as Window | null;
-    if (!source) return false;
-    if (this.bootModeValue !== "appView") {
-      const opener = this.getOpener();
-      return Boolean(opener && source === opener);
-    }
-    const ctx = this.currentAppViewContext;
-    if (!ctx) return false;
-    if (event.origin !== ctx.appOrigin) return false;
-    if (this.currentAppClientSource) {
-      return source === this.currentAppClientSource;
-    }
-    // 首条合法 child request 即绑 source。`handleMessage` 紧随其后调
-    // `markChildAliveFromBoundSource`，把 childReady 翻 true。
-    this.currentAppClientSource = source;
-    return true;
-  }
 
   /* ============== 命令流（feed）+ K-V ============== */
 
@@ -7195,78 +7018,6 @@ function bytesToTxid(b: Uint8Array): string {
     out.push(b[i]!.toString(16).padStart(2, "0"));
   }
   return out.join("");
-}
-
-function looksLikeRequest(v: unknown): boolean {
-  if (!v || typeof v !== "object") return false;
-  const o = v as Record<string, unknown>;
-  return (
-    typeof o.v === "number" &&
-    o.type === "request" &&
-    typeof o.id === "string" &&
-    typeof o.method === "string"
-  );
-}
-
-function looksLikeCancel(v: unknown): boolean {
-  if (!v || typeof v !== "object") return false;
-  const o = v as Record<string, unknown>;
-  return (
-    o.v === PROTOCOL_VERSION &&
-    o.type === "cancel" &&
-    typeof o.id === "string"
-  );
-}
-
-/**
- * 顶层 `ready` 报文形状判定（施工单 2026-06-30 003）。
- *
- * 设计缘由：
- *   - `ready` 是顶层协议消息（无 method / 无 id），与 request / cancel
- *     互斥。
- *   - 不带 `id`：与 cancel 区分；不带 `method`：与 request 区分。
- *   - 这里**只**做结构判定，合法性（origin + source）由 `handleMessage`
- *     调用 `tryAcceptChildReady` 时集中判定。
- */
-function looksLikeReady(v: unknown): boolean {
-  if (!v || typeof v !== "object") return false;
-  const o = v as Record<string, unknown>;
-  return o.v === PROTOCOL_VERSION && o.type === "ready";
-}
-
-/**
- * 顶层 `event` 报文形状判定（施工单 2026-07-03 001 硬切换）。
- *
- * 设计缘由：
- *   - v1 只引入一种 event：`channel.message_received`；
- *   - 由 protocolService 主动向当前 origin 的 caller 推送（不是 caller
- *     发来）；handleMessage 路径忽略 inbound event（只接受 outbound
- *     即 server-pushed 的方向；这里结构判定**仅**用于兼容 inbound 噪声）。
- *   - event 只由 Session Window 服务端推送，caller 发来的 event 会被忽略。
- */
-function looksLikeEvent(v: unknown): boolean {
-  if (!v || typeof v !== "object") return false;
-  const o = v as Record<string, unknown>;
-  return (
-    o.v === PROTOCOL_VERSION &&
-    o.type === "event" &&
-    typeof o.event === "string"
-  );
-}
-
-/** Channel App/API 使用的精确频道校验；通配符和控制字符一律拒绝。 */
-function validateExactChannelValue(channel: string): void {
-  if (typeof channel !== "string" || channel.length === 0 || channel === "*") {
-    throw protocolError("invalid_request", "channel must be a non-empty exact string");
-  }
-  if (new TextEncoder().encode(channel).byteLength > 256) {
-    throw protocolError("invalid_request", "channel exceeds 256 UTF-8 bytes");
-  }
-  for (const codePoint of channel) {
-    if (codePoint < " " || codePoint === "\u007f") {
-      throw protocolError("invalid_request", "channel contains a control character");
-    }
-  }
 }
 
 /** Connect App 不能直接发布或订阅 owner inbox；仅 Coordinator 内部使用。 */

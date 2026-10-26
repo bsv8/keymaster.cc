@@ -150,58 +150,17 @@ import type {
  * base64 / hex 字符串塞进协议层。
  */
 import type { VaultService } from "./vault.js";
+import { PROTOCOL_METHODS as CONNECT_PUBLIC_METHODS } from "keymaster-connect/protocol";
+import type * as ConnectPublic from "keymaster-connect/protocol";
+export { PROTOCOL_VERSION } from "keymaster-connect/protocol";
+import { PROTOCOL_VERSION } from "keymaster-connect/protocol";
 
-export interface BinaryField {
-  /** 固定 "binary"。缺省 / 其它值一律拒绝。 */
-  $type: "binary";
-  /** 真实字节；`structured clone` 会原样传过去。 */
-  bytes: ArrayBuffer;
-  /** 可选的内容类型；密文 / 图片 / 文件等有明确类型时填写。 */
-  mime?: string;
-}
-
-/** 协议版本号；当前固定为 1。 */
-// 产品尚未上线，公开协议持续在 v1 内演进，不维护旧字段兼容分支。
-export const PROTOCOL_VERSION = 1;
+/** 对外二进制形状来自独立 Connect；内部执行 DTO 不重新定义 wire。 */
+export type BinaryField = ConnectPublic.BinaryField;
 
 /** 协议方法名常量集合。 */
-export const PROTOCOL_METHODS = [
-  "identity.get",
-  "intent.sign",
-  "cipher.encrypt",
-  "cipher.decrypt",
-  "p2pkh.transfer",
-  "payment.pay",
-  "payment.status",
-  "payment.channel.register",
-  "feepool.prepare",
-  "feepool.commit",
-  "connect.login",
-  "connect.resume",
-  "connect.logout",
-  "connect.launch",
-  // Channel 是唯一的公开频道 API，见 docs/SatSubscription与Channel.md。
-  "channel.publish",
-  "channel.subscription_set",
-  // BSV 价格只读展示能力：金额 + 单位，不暴露行情源 / 频道 / 交易对。
-  // `price.get` 一次获取；`price.subscribe` / `price.unsubscribe` 控制
-  // `price.changed` 推送。
-  "price.get",
-  "price.subscribe",
-  "price.unsubscribe",
-  "storage.list",
-  "storage.directory.create",
-  "storage.directory.delete",
-  "storage.put",
-  "storage.get",
-  "storage.delete",
-  // MSFile 对外方法族，见 docs/MSFile.md。与 storage.* 同为
-  // session-bound 且强制要求 verified App Identity；Seed/Block 显式区分，
-  // Read 不接受 maxPriceSatoshis（金额只能来自 Keymaster 设置或用户确认）。
-  "msfile.stat",
-  "msfile.seed.read",
-  "msfile.block.read"
-] as const;
+// 费用池只保留钱包内部历史处理类型，不进入独立 Connect 的公开方法表。
+export const PROTOCOL_METHODS = [...CONNECT_PUBLIC_METHODS, "feepool.prepare", "feepool.commit"] as const;
 
 /** 协议方法名联合类型。 */
 export type ProtocolMethod = (typeof PROTOCOL_METHODS)[number];
@@ -1963,16 +1922,12 @@ export type MethodResult<M extends ProtocolMethod = ProtocolMethod> = M extends 
 /** Wire parameters never select a wallet or its network. Internal execution parameters
  * above carry receiver-derived authorization context, not caller-supplied identity. */
 type PublicBusinessParams<T> = Omit<T, "walletPublicKeyHex" | "assetId">;
-export type ConnectWireParams<M extends ProtocolMethod = ProtocolMethod> = M extends ProtocolMethod
-  ? keyof PublicBusinessParams<MethodParamsMap[M]> extends never ? Record<string, never> : PublicBusinessParams<MethodParamsMap[M]>
-  : never;
+export type ConnectWireParams<M extends ProtocolMethod = ProtocolMethod> = M extends ConnectPublic.ProtocolMethod
+  ? ConnectPublic.MethodParams<M> : M extends ProtocolMethod ? PublicBusinessParams<MethodParamsMap[M]> : never;
 /** Receiver-generated wire event context; internal event producers do not choose it. */
-export type ConnectWireEvent = ProtocolEventMessage & { networkIdentity: NetworkIdentity; bindingId: string };
-export type ConnectWireResult<M extends ProtocolMethod = ProtocolMethod> = M extends ProtocolMethod
-  ? M extends "connect.login" | "connect.resume" | "connect.launch"
-    ? Omit<MethodResultMap[M], "walletPublicKeyHex" | "ownerPublicKeyHex">
-    : M extends "connect.logout" ? Omit<MethodResultMap[M], "walletPublicKeyHex"> : MethodResultMap[M]
-  : never;
+export type ConnectWireEvent = ConnectPublic.ProtocolEventMessage;
+export type ConnectWireResult<M extends ProtocolMethod = ProtocolMethod> = M extends ConnectPublic.ProtocolMethod
+  ? ConnectPublic.MethodResult<M> : M extends ProtocolMethod ? MethodResultMap[M] : never;
 
 /* ============== popup 命令流（施工单 002：popup 复用与命令流） ============== */
 

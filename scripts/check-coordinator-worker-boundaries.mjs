@@ -13,6 +13,8 @@ import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, extname, join, relative, resolve } from "node:path";
 
 const root = process.cwd();
+// 生产实际安装的 SDK 仍纳入 Worker 导入图；不读取相邻 SDK 源码仓库。
+const connectRoots = new Set();
 const entry = resolve(root, "src/keymasterSessionCoordinator.worker.ts");
 const appRequire = createRequire(resolve(root, "package.json"));
 const violations = [];
@@ -26,7 +28,11 @@ function display(file) {
 
 function isInsideWorkspace(file) {
   const path = realpathSync(file);
-  return path === root || path.startsWith(`${root}/`);
+  return path === root || path.startsWith(`${root}/`) || [...connectRoots].some(sdk => path === sdk || path.startsWith(`${sdk}/`));
+}
+
+function shouldWalk(file) {
+  return isInsideWorkspace(file) && (!file.includes("/node_modules/") || [...connectRoots].some(sdk => file === sdk || file.startsWith(`${sdk}/`)));
 }
 
 function sourceCandidates(path) {
@@ -54,13 +60,17 @@ function resolveSpecifier(specifier, importer) {
   }
   try {
     // 从实际导入模块解析依赖，才能遍历 pnpm 隔离依赖中的 SDK，而不是漏掉其运行时代码。
-    try { return realpathSync(createRequire(importer).resolve(specifier)); }
-    catch { return realpathSync(appRequire.resolve(specifier)); }
+    let resolved;
+    try { resolved = realpathSync(createRequire(importer).resolve(specifier)); }
+    catch { resolved = realpathSync(appRequire.resolve(specifier)); }
+    // 固定发布版的三个入口均在 dist/，记录真实安装目录及其内部 chunk。
+    if (specifier === "keymaster-connect" || specifier.startsWith("keymaster-connect/")) connectRoots.add(resolve(dirname(resolved), ".."));
+    return resolved;
   } catch {
     // ESM-only third-party packages can reject createRequire resolution even
     // though Vite resolves them correctly. We only need to walk workspace
     // source here; direct forbidden package specifiers are checked below.
-    if (specifier.startsWith("@keymaster/")) unresolvedWorkspaceImports.push({ importer, specifier });
+    if (specifier.startsWith("@keymaster/") || specifier === "keymaster-connect" || specifier.startsWith("keymaster-connect/")) unresolvedWorkspaceImports.push({ importer, specifier });
     return undefined;
   }
 }
@@ -149,8 +159,7 @@ function inspectImport(file, node, specifier, resolved) {
   if (specifier === "react" || specifier === "react-dom" || specifier === "webloom-framework/react" || specifier === "@vitejs/plugin-react" || specifier.includes("react-refresh")) {
     recordViolation(file, node, `Worker runtime code must not import ${specifier}`);
   }
-  if (resolved && isInsideWorkspace(resolved)) {
-    if (resolved.includes("/node_modules/")) return;
+  if (resolved && shouldWalk(resolved)) {
     if (resolved.endsWith("/packages/runtime/src/index.ts")) {
       recordViolation(file, node, `Worker runtime reached the Window runtime barrel: ${display(resolved)}`);
     }
@@ -163,7 +172,7 @@ function inspectImport(file, node, specifier, resolved) {
 function walk(file) {
   if (!file || visited.has(file)) return;
   visited.add(file);
-  if (!isInsideWorkspace(file) || file.includes("/node_modules/")) return;
+  if (!shouldWalk(file)) return;
   if (/\.(?:tsx|jsx)$/u.test(file)) {
     violations.push(`${display(file)}: Worker runtime graph contains a JSX module`);
     return;
@@ -184,7 +193,7 @@ function walk(file) {
       unresolvedLocalImports.push({ importer: file, specifier });
     }
     inspectImport(file, node, specifier, resolved);
-    if (resolved && isInsideWorkspace(resolved) && !resolved.includes("/node_modules/")) walk(resolved);
+    if (resolved && shouldWalk(resolved)) walk(resolved);
   }
 }
 
