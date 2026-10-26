@@ -1,24 +1,9 @@
 import { validateNetworkIdentity, type NetworkIdentity } from "@keymaster/contracts";
-// packages/plugin-protocol/src/protocolValidation.ts
-// 协议层校验：顶层 message 结构 / BinaryField 形状 / aud / iat / exp /
-// p2pkh 地址 / feepool 公钥 hex / 金额正整数。
-//
-// 设计缘由（施工单 001 + 002 + 2026-06-28 002 硬切换）：
-//   - 校验与业务执行分离：service 只调用这里抛错 / 返回值的接口。
-//   - 校验失败全部映射为 ProtocolError，方便 service 直接组装 result。
-//   - 不允许把"已经经过一轮校验的 request"再做一次隐式归一化。
-//   - `aud` 严格按字节比较；不补默认端口、不 lower host、不改协议。
-//   - 二进制字段必须含 `$type: "binary"` + ArrayBuffer；缺 mime 也接受。
-//   - p2pkh 地址按 `assetId` 校验：缺省 `bsv-mainnet`（version 0x00），
-//     `bsv-testnet` 要求 version 0x6f（施工单 2026-09-18 001）。
-//   - 公钥 hex 必须是 33-byte compressed secp256k1（66 个 hex 字符）。
-//   - amountSatoshis 必须是正整数；feeRateSatoshisPerKb 必须 >= 1。
-//   - **所有外部业务方法**（identity.get / intent.sign / cipher.encrypt /
-//     cipher.decrypt / p2pkh.transfer / feepool.prepare / feepool.commit）
-//     强制要求 `walletPublicKeyHex` 入参（施工单 2026-06-28 002 硬切换）。
-//     缺该字段直接 `invalid_request` 拒绝——不允许 fallback 到"当前 session"
-//     / "全局 active key"。`connect.login` 是唯一不要求 `walletPublicKeyHex`
-//     的入口方法（它本身负责建 session）。
+// Wire v2: first reject removed caller wallet/network selectors, then form internal
+// execution parameters from the receiver-verified connection identity. These
+// parameters carry authorization context, not an externally selectable wallet.
+// Business validators below preserve strict aud, binary, amount, path and recipient
+// checks. Address network comes from the bound wallet, never an App assetId.
 
 import type {
   BinaryField,
@@ -103,7 +88,8 @@ export function assertConnectV1Scope(method: ProtocolMethod, params: MethodParam
 }
 
 export function parseRequestMessage(
-  raw: unknown
+  raw: unknown,
+  receiverIdentity: NetworkIdentity
 ): { id: string; networkIdentity: NetworkIdentity; method: ProtocolMethod; params: MethodParams<ProtocolMethod> } {
   if (!isPlainObject(raw)) {
     throw new ProtocolValidationError("invalid_request", "Request must be a plain object");
@@ -121,11 +107,21 @@ export function parseRequestMessage(
     throw new ProtocolValidationError("invalid_request", "Unknown method");
   }
   const method = raw.method as ProtocolMethod;
-  let networkIdentity: NetworkIdentity;
-  try { networkIdentity = validateNetworkIdentity(raw.networkIdentity); } catch { throw new ProtocolValidationError("invalid_request", "Complete network identity is required"); }
+  if ("networkIdentity" in raw || "walletPublicKeyHex" in raw) {
+    throw new ProtocolValidationError("invalid_request", "Wallet selectors have been removed");
+  }
+  if (!isPlainObject(raw.params)) throw new ProtocolValidationError("invalid_request", "Params must be an object");
+  for (const field of ["walletPublicKeyHex", "networkIdentity", "bsvNetwork", "assetId"]) {
+    if (field in raw.params) throw new ProtocolValidationError("invalid_request", `Removed wallet selector: ${field}`);
+  }
+  const networkIdentity = validateNetworkIdentity(receiverIdentity);
   const payment = method === "p2pkh.transfer" || method === "payment.pay" || method.startsWith("feepool.") || method === "payment.channel.register";
-  const parameters = payment && isPlainObject(raw.params) && raw.params.assetId === undefined
-    ? { ...raw.params, assetId: networkIdentity.bsvNetwork === "test" ? "bsv-testnet" : "bsv-mainnet" } : raw.params;
+  // Authorization context is receiver-derived. It is never accepted from the wire.
+  const parameters = { ...raw.params,
+    ...(!["connect.login", "connect.launch", "channel.publish", "channel.subscription_set"].includes(method)
+      ? { walletPublicKeyHex: networkIdentity.publicKeyHex } : {}),
+    ...(payment ? { assetId: networkIdentity.bsvNetwork === "test" ? "bsv-testnet" : "bsv-mainnet" } : {})
+  };
   const params = validateParams(method, parameters, raw.id);
   if (payment && isPlainObject(params) && "assetId" in params && params.assetId !== (networkIdentity.bsvNetwork === "test" ? "bsv-testnet" : "bsv-mainnet")) throw new ProtocolValidationError("asset_not_enabled", "Payment network differs from identity");
   return { id: raw.id, networkIdentity, method, params };

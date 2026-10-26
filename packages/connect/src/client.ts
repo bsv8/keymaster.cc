@@ -70,7 +70,8 @@ export type KeymasterTransportErrorCode =
   | "send_failed"
   | "no_opener"
   | "appview_session_lost"
-  | "client_closed";
+  | "client_closed"
+  | "unsupported_protocol";
 
 /** A browser transport failure. Protocol rejections use {@link KeymasterProtocolError}. */
 export class KeymasterTransportError extends Error {
@@ -119,8 +120,6 @@ export interface KeymasterBrowserEnvironment {
 
 /** Configuration for {@link KeymasterConnectClient}. */
 export interface KeymasterConnectOptions {
-  /** 完整身份约束；网络和公钥都不可在会话内漂移。 */
-  networkIdentity: NetworkIdentity;
   /** Exact Keymaster deployment origin supplied by the host application. */
   targetOrigin: string;
   /** `popup` for direct integrations; `appView` for apps launched by Keymaster. */
@@ -218,7 +217,11 @@ const DEFAULT_CLOSE_POLL_MS = 500;
  * Manage the Session Window and send lower-level protocol requests.
  */
 export class KeymasterConnectClient {
-  readonly networkIdentity: NetworkIdentity;
+  private identityValue: Readonly<NetworkIdentity> | null = null;
+  private bindingId: string | null = null;
+
+  /** Identity returned by the authenticated wallet, or null before establishment. */
+  get networkIdentity(): Readonly<NetworkIdentity> | null { return this.identityValue; }
   private readonly targetOrigin: string;
   private readonly mode: KeymasterConnectMode;
   private readonly environment: KeymasterBrowserEnvironment;
@@ -237,7 +240,7 @@ export class KeymasterConnectClient {
   private closePoller: number | null = null;
 
   constructor(options: KeymasterConnectOptions) {
-    this.networkIdentity = validateNetworkIdentity(options.networkIdentity);
+    if ("networkIdentity" in options) throw new TypeError("networkIdentity option has been removed; read identity from the connection result");
     this.targetOrigin = normalizeHttpOrigin(options.targetOrigin);
     this.mode = options.mode ?? "popup";
     this.options = {
@@ -287,7 +290,18 @@ export class KeymasterConnectClient {
     options: KeymasterRequestOptions = {}
   ): Promise<MethodResult<M>> {
     if (options.signal?.aborted) throw abortReason(options.signal);
+    if (!params || typeof params !== "object" || Array.isArray(params)) throw new TypeError("params must be an object");
+    for (const field of ["walletPublicKeyHex", "networkIdentity", "bsvNetwork", "assetId"]) {
+      if (field in params) throw new TypeError(`Removed wallet selector: ${field}`);
+    }
+    const establishing = ["connect.login", "connect.resume", "connect.launch"].includes(method);
+    if (establishing && this.pending.size) throw new TypeError("Cannot establish a connection while requests are pending");
+    if (!establishing && !this.bindingId) throw new KeymasterProtocolError("invalid_request", "Login, resume or launch before making business requests");
+    if ([...this.pending.values()].some(request => ["connect.login", "connect.resume", "connect.launch"].includes(request.method))) throw new TypeError("Connection establishment is already pending");
     await this.connect();
+    if (establishing && this.pending.size) throw new TypeError("Cannot establish a connection while requests are pending");
+    if ([...this.pending.values()].some(request => ["connect.login", "connect.resume", "connect.launch"].includes(request.method))) throw new TypeError("Connection establishment is already pending");
+    if (options.signal?.aborted) throw abortReason(options.signal);
 
     const target = this.sessionWindow;
     if (!target || isWindowClosed(target)) {
@@ -326,7 +340,7 @@ export class KeymasterConnectClient {
         target.postMessage({
           v: PROTOCOL_VERSION,
           type: "request",
-          networkIdentity: this.networkIdentity,
+          ...(!establishing ? { bindingId: this.bindingId } : {}),
           id: requestId,
           method,
           params
@@ -353,8 +367,8 @@ export class KeymasterConnectClient {
    *
    * @group Connect
    */
-  resume(identity: string | ConnectResumeParams, options?: KeymasterRequestOptions): Promise<ConnectResumeResult> {
-    return this.request("connect.resume", typeof identity === "string" ? { walletPublicKeyHex: identity } : identity, options);
+  resume(params: ConnectResumeParams = {}, options?: KeymasterRequestOptions): Promise<ConnectResumeResult> {
+    return this.request("connect.resume", params, options);
   }
 
   /**
@@ -362,8 +376,9 @@ export class KeymasterConnectClient {
    *
    * @group Connect
    */
-  logout(walletPublicKeyHex: string, options?: KeymasterRequestOptions): Promise<ConnectLogoutResult> {
-    return this.request("connect.logout", { walletPublicKeyHex }, options);
+  logout(options?: KeymasterRequestOptions): Promise<ConnectLogoutResult> {
+    if (options !== undefined && (typeof options !== "object" || options === null)) return Promise.reject(new TypeError("logout no longer accepts a wallet public key"));
+    return this.request("connect.logout", {}, options);
   }
 
   /**
@@ -614,6 +629,8 @@ export class KeymasterConnectClient {
    * @group Transport
    */
   close(): void {
+    this.identityValue = null;
+    this.bindingId = null;
     const error = new KeymasterTransportError("client_closed", "Keymaster client was closed");
     this.rejectAll(error);
     this.failReady(error);
@@ -694,7 +711,11 @@ export class KeymasterConnectClient {
   private readonly handleMessage = (event: MessageEvent): void => {
     if (!this.sessionWindow || event.origin !== this.targetOrigin || event.source !== this.sessionWindow) return;
     const value = event.data as Record<string, unknown> | null;
-    if (!value || value.v !== PROTOCOL_VERSION || typeof value.type !== "string") return;
+    if (!value || typeof value.type !== "string") return;
+    if (value.v !== PROTOCOL_VERSION) {
+      if (value.type === "ready" || value.type === "result") this.disconnect(new KeymasterTransportError("unsupported_protocol", "Incompatible Keymaster protocol version"));
+      return;
+    }
 
     if (value.type === "ready" && this.mode === "popup") {
       this.finishReady();
@@ -705,7 +726,7 @@ export class KeymasterConnectClient {
       return;
     }
     if (value.type === "event") {
-      try { if (!sameNetworkIdentity(this.networkIdentity, validateNetworkIdentity(value.networkIdentity))) return; } catch { return; }
+      try { if (!this.identityValue || value.bindingId !== this.bindingId || !sameNetworkIdentity(this.identityValue, validateNetworkIdentity(value.networkIdentity))) return; } catch { return; }
       try {
         this.options.onEvent?.(event.data as ProtocolEventMessage);
       } catch {
@@ -719,19 +740,26 @@ export class KeymasterConnectClient {
     const pending = this.pending.get(result.id);
     if (!pending) return;
     this.deletePending(result.id);
-    let validIdentity = false;
-    try { validIdentity = sameNetworkIdentity(this.networkIdentity, validateNetworkIdentity(value.networkIdentity)); } catch { /* reject missing identity */ }
-    if (validIdentity && result.ok && ["connect.login", "connect.resume", "connect.launch"].includes(pending.method)) {
-      try {
-        const connected = result.result as { networkIdentity: unknown; ownerPublicKeyHex: unknown };
-        const identity = validateNetworkIdentity(connected.networkIdentity);
-        validIdentity = sameNetworkIdentity(this.networkIdentity, identity)
-          && typeof connected.ownerPublicKeyHex === "string" && connected.ownerPublicKeyHex.toLowerCase() === identity.publicKeyHex;
-      } catch { validIdentity = false; }
+    if (!result.ok) {
+      if (result.error.code === "connection_expired") { this.identityValue = null; this.bindingId = null; }
+      pending.reject(new KeymasterProtocolError(result.error.code, result.error.message));
+      return;
     }
-    if (!validIdentity) pending.reject(new KeymasterProtocolError("invalid_request", "Keymaster network identity mismatch"));
-    else if (result.ok) pending.resolve(result.result);
-    else pending.reject(new KeymasterProtocolError(result.error.code, result.error.message));
+    try {
+      const identity = validateNetworkIdentity(value.networkIdentity);
+      if (["connect.login", "connect.resume", "connect.launch"].includes(pending.method)) {
+        const connected = result.result as { networkIdentity: unknown };
+        if (!sameNetworkIdentity(identity, validateNetworkIdentity(connected.networkIdentity)) || typeof value.bindingId !== "string" || !value.bindingId) throw new Error("Invalid connection identity or binding");
+        this.identityValue = Object.freeze({ ...identity });
+        this.bindingId = value.bindingId;
+      } else if (!this.identityValue || value.bindingId !== this.bindingId || !sameNetworkIdentity(this.identityValue, identity)) {
+        throw new Error("Keymaster connection identity mismatch");
+      }
+      if (pending.method === "connect.logout") { this.identityValue = null; this.bindingId = null; }
+      pending.resolve(result.result);
+    } catch (error) {
+      pending.reject(new KeymasterProtocolError("invalid_request", errorMessage(error, "Invalid connection result")));
+    }
   };
 
   private isConnected(): boolean {
@@ -765,6 +793,8 @@ export class KeymasterConnectClient {
   }
 
   private disconnect(reason: unknown): void {
+    this.identityValue = null;
+    this.bindingId = null;
     this.rejectAll(reason);
     this.failReady(reason);
     this.stopClosePolling();
@@ -813,7 +843,7 @@ export class KeymasterConnectClient {
 
   private postCancel(id: string): void {
     try {
-      this.sessionWindow?.postMessage({ v: PROTOCOL_VERSION, type: "cancel", id }, this.targetOrigin);
+      this.sessionWindow?.postMessage({ v: PROTOCOL_VERSION, type: "cancel", id, ...(this.bindingId ? { bindingId: this.bindingId } : {}) }, this.targetOrigin);
     } catch {
       // Protocol cancellation is best-effort.
     }

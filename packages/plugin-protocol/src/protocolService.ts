@@ -374,6 +374,9 @@ export interface ProtocolServiceDeps {
  * 历史都对应一个 RequestRecord；recordId 与 transport requestId 解耦。
  */
 interface RequestRecord {
+  readonly walletGeneration: string;
+  readonly runGeneration: string;
+  readonly bindingId?: string;
   networkIdentity: NetworkIdentity;
   /** service 内部稳定主键；与 transport requestId 解耦。 */
   recordId: string;
@@ -410,7 +413,7 @@ interface RequestRecord {
    *
    * 业务方法：取自 `connectSession.ownerPublicKeyHex`（由 accept 阶段
    * 预校验 session 真值时同步落到 record）。
-   * `connect.login`：取自用户在 UI 选定的 key（`connectLoginSelected`）。
+   * `connect.login`：用户确认当前唯一钱包后固定为该钱包公钥。
    *
    * 后续写卡**不**再读 walletState.snapshot() / 钱包全局 active key；
    * 旧卡片的 `ownerPublicKeyHex` 字段保持 record 创建时的快照值，不被
@@ -436,17 +439,10 @@ interface RequestRecord {
   /** 本地终态原因（写本地）；隐私敏感场景与对外解耦。 */
   failureReason?: ProtocolFailureReason;
   /* ============== 施工单 2026-06-28 001：connect.* 字段 ============== */
-  /**
-   * `connect.login` 当前候选 key 列表（来自 `walletState.listKeys` 过滤掉
-   * 非 ready 的）。只在 `method === "connect.login"` 时有值。
-   */
-  connectLoginCandidates?: Array<{ publicKeyHex: string; label: string }>;
+  /** Read-only presentation of the receiver's only wallet; not a selection list. */
+  connectLoginWallet?: { publicKeyHex: string; label: string };
   connectAuthBackend?: "software" | "hardware";
-  /**
-   * `connect.login` 用户在 UI 选定的那把 key 公钥 hex。用户在 confirming
-   * 视图点"确认选 key"时由 `confirmConnectLogin` 写入；执行阶段读此字段。
-   */
-  connectLoginSelected?: string;
+
   /** connect.* auth 是否已经提交过；用于阻止未提交 login 被 resume 抢占。 */
   connectAuthSubmittedAt?: number;
   /**
@@ -736,6 +732,17 @@ export class ProtocolServiceImpl implements ProtocolService {
   private lastPriceBroadcast: PriceValue | undefined;
   private readonly channelQuotaBySessionId: Map<string, { publishes: number[]; bytes: Array<{ at: number; size: number }>; inFlight: number }> = new Map();
   private channelSessionEpoch = 0;
+  /** Transport authority, separate from durable payment/session records. */
+  private readonly connectBindings = new Map<Window, {
+    id: string; origin: string; identity: NetworkIdentity; walletGeneration: string; runGeneration: string;
+  }>();
+
+  private assertWalletGeneration(rec: RequestRecord): void {
+    const lifecycle = this.deps.walletState.snapshot();
+    if (!rec.walletGeneration || lifecycle.walletGeneration !== rec.walletGeneration || lifecycle.runGeneration !== rec.runGeneration) {
+      throw new ProtocolValidationError("connection_expired", "Wallet connection expired; reconnect explicitly");
+    }
+  }
 
   private disposeSessionRuntimeBootstrap(
     runtime: SessionRuntimeBootstrap | undefined,
@@ -934,6 +941,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    * origin 会残留到新会话里——违反 ProtocolService.startSession 接口契约。
    */
   startSession(): void {
+    this.connectBindings.clear();
     this.releaseAllChannelSessions();
     this.channelSessionBySource.clear();
     this.channelSubscriptionsBySessionId.clear();
@@ -998,6 +1006,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - 不发 `closing`（closing 由 pageUnloading 路径负责）。
    */
   endSession(): void {
+    this.connectBindings.clear();
     this.releaseAllChannelSessions();
     this.channelSessionBySource.clear();
     this.channelSubscriptionsBySessionId.clear();
@@ -1224,6 +1233,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       // **不**是 executing。
       const rec = this.findRequestByTransportId(event.source as Window | null, event.origin, parsed.id);
       if (!rec) return;
+      if (rec.bindingId && (event.data as { bindingId?: unknown }).bindingId !== rec.bindingId) return;
       if (!this.isRequestCancellable(rec)) return;
       // 施工单 2026-06-30 003 硬切换：cancel 与首条 request 同属"合法
       // child 协议消息"——即便 record 是从已 bound source 创建的
@@ -1240,15 +1250,32 @@ export class ProtocolServiceImpl implements ProtocolService {
 
     let parsed;
     try {
-      parsed = parseRequestMessage(event.data);
+      const raw = event.data as Record<string, unknown>;
+      const method = raw.method as ProtocolMethod;
+      if (!this.isAllowedRequestSource(event, method)) return;
+      if (raw.v !== PROTOCOL_VERSION) throw new ProtocolValidationError("invalid_request", "Unsupported protocol version; update Connect SDK");
+      const establishing = ["connect.login", "connect.resume", "connect.launch"].includes(method);
+      const lifecycle = this.deps.walletState.snapshot();
+      if (!lifecycle.walletGeneration) throw new ProtocolValidationError("invalid_request", "Wallet is not initialized");
+      const binding = this.connectBindings.get(event.source as Window);
+      if (!establishing && (!binding || binding.origin !== event.origin || raw.bindingId !== binding.id
+        || binding.walletGeneration !== lifecycle.walletGeneration || binding.runGeneration !== lifecycle.runGeneration)) {
+        throw new ProtocolValidationError("connection_expired", "Wallet connection expired; reconnect explicitly");
+      }
+      if (establishing && raw.bindingId !== undefined) throw new ProtocolValidationError("invalid_request", "Establishment must not reuse a binding");
+      const stored = establishing ? await this.deps.vault.getCurrentKey() : undefined;
+      const identity = establishing ? stored && validateNetworkIdentity(stored) : binding?.identity;
+      if (!identity) throw new ProtocolValidationError("invalid_request", "Wallet identity unavailable");
+      if (this.deps.walletState.snapshot().walletGeneration !== lifecycle.walletGeneration
+        || this.deps.walletState.snapshot().runGeneration !== lifecycle.runGeneration) throw new ProtocolValidationError("connection_expired", "Wallet changed during connection");
+      parsed = { ...parseRequestMessage(event.data, identity), walletGeneration: lifecycle.walletGeneration,
+        runGeneration: lifecycle.runGeneration, bindingId: establishing ? undefined : binding!.id };
     } catch (err) {
-      if (err instanceof ProtocolValidationError) {
-        const raw=event.data as {id?:unknown;method?:unknown;networkIdentity?:unknown};
-        try {
-          const identity=validateNetworkIdentity(raw.networkIdentity);
-          if(typeof raw.id === "string" && typeof raw.method === "string" && this.isAllowedRequestSource(event,raw.method as ProtocolMethod) && event.source) this.postMessage(event.source as Window,event.origin,{v:PROTOCOL_VERSION,type:"result",id:raw.id,networkIdentity:identity,ok:false,error:{code:err.code,message:err.message}});
-        } catch { /* 非法身份或未经绑定的来源不进入协议会话。 */ }
-        return;
+      const failure = err instanceof ProtocolValidationError ? err
+        : new ProtocolValidationError("internal_error", "Wallet identity could not be read");
+      const raw=event.data as {id?:unknown;method?:unknown};
+      if(typeof raw.id === "string" && typeof raw.method === "string" && this.isAllowedRequestSource(event,raw.method as ProtocolMethod) && event.source) {
+        this.postMessage(event.source as Window,event.origin,{v:PROTOCOL_VERSION,type:"result",id:raw.id,ok:false,error:{code:failure.code,message:failure.message}});
       }
       return;
     }
@@ -1550,14 +1577,14 @@ export class ProtocolServiceImpl implements ProtocolService {
   connectLoginRecord(recordId?: string): {
     recordId: string;
     method: "connect.login";
-    availableKeys: Array<{ publicKeyHex: string; label: string }>;
+    wallet?: { publicKeyHex: string; label: string };
   } | null {
     const rec = this.pickConnectRecord("connect.login", recordId);
     if (!rec) return null;
     return {
       recordId: rec.recordId,
       method: "connect.login",
-      availableKeys: rec.connectLoginCandidates ?? []
+      wallet: rec.connectLoginWallet
     };
   }
 
@@ -1591,15 +1618,14 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
-   * UI 选定 key 后调用：把 connect.login record 推进到 queued，并触发
-   * 全局串行执行。
+   * UI 确认当前唯一钱包后调用；认证并校验世代后推进串行执行。
    *
    * 行为：
    *   - 校验 recordId 存在 + method === "connect.login" + 当前 phase
    *     处于 `waiting_unlock_manual` 或 `confirming`；
-   *   - 校验 ownerPublicKeyHex 必须是 record 候选列表里的一员；
+   *   - 钱包公钥取自接收端固定的当前钱包，不接受 UI 选择；
    *   - 清 timer（与 confirmByUser 同语义）；
-   *   - 写入 rec.connectLoginSelected；切到 queued；入执行队列；
+   *   - 固定 rec.ownerPublicKeyHex；切到 queued；入执行队列；
    *     drainExecutionQueue 异步触发。
    *
    * 失败语义：
@@ -1607,16 +1633,15 @@ export class ProtocolServiceImpl implements ProtocolService {
    *     `connectLoginRecord()` 检查）；任何路径出错时保持 best-effort，不阻塞
    *     其它请求。
    */
-  async confirmConnectLogin(recordId: string, ownerPublicKeyHex: string, password: string): Promise<void> {
+  async confirmConnectLogin(recordId: string, password: string): Promise<void> {
     const rec = this.requestsByRecordId.get(recordId);
     if (!rec) return;
     if (rec.method !== "connect.login") return;
     if (rec.phase !== "waiting_unlock_manual" && rec.phase !== "confirming") return;
     if (rec.connectAuthSubmittedAt) return;
-    const candidates = rec.connectLoginCandidates ?? [];
-    if (!candidates.some((c) => c.publicKeyHex === ownerPublicKeyHex)) {
-      return;
-    }
+    this.assertWalletGeneration(rec);
+    const ownerPublicKeyHex = rec.connectLoginWallet?.publicKeyHex;
+    if (!ownerPublicKeyHex || ownerPublicKeyHex.toLowerCase() !== rec.networkIdentity.publicKeyHex) return;
     if (rec.connectAuthBackend === "hardware" && this.lockStateValue === "locked") throw new Error("Connect and unlock RocKey on the device before continuing");
     if (this.lockStateValue === "locked") {
       this.authUnlockInProgress = recordId;
@@ -1641,7 +1666,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     // 认证 RPC 在等待期间允许取消；旧结果不能重新把已拒绝请求排入执行队列。
     if (rec.cancelRequested || (rec.phase !== "waiting_unlock_manual" && rec.phase !== "confirming")) return;
-    rec.connectLoginSelected = ownerPublicKeyHex;
+    this.assertWalletGeneration(rec);
     // 关键（施工单 2026-06-28 002 硬切换）：login record 在用户点确认时
     // 立即把 ownerPublicKeyHex 落到 rec；executeConnectLogin 之后建的
     // session record 与该 ownerPublicKeyHex 一致。
@@ -2399,12 +2424,12 @@ export class ProtocolServiceImpl implements ProtocolService {
       return {
         ownerType: "login",
         recordId: login.recordId,
-        canSubmit: !login.connectAuthSubmittedAt && (login.connectLoginCandidates?.length ?? 0) > 0,
+        canSubmit: !login.connectAuthSubmittedAt && Boolean(login.connectLoginWallet),
         submitted: Boolean(login.connectAuthSubmittedAt),
         backend: login.connectAuthBackend ?? "software",
         login: {
           recordId: login.recordId,
-          availableKeys: login.connectLoginCandidates ?? []
+          wallet: login.connectLoginWallet
         },
         resume: null
       };
@@ -2705,7 +2730,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    */
   private async acceptRequest(
     event: MessageEvent,
-    parsed: { id: string; networkIdentity: NetworkIdentity; method: ProtocolMethod; params: MethodParams<ProtocolMethod> }
+    parsed: { id: string; networkIdentity: NetworkIdentity; method: ProtocolMethod; params: MethodParams<ProtocolMethod>; walletGeneration: string; runGeneration: string; bindingId?: string }
   ): Promise<void> {
     // origin 切换：触发历史载入 + 立即清空旧 origin 视图（施工单 2026-06-27
     // origin 切换：触发历史载入 + 立即清空旧 origin 视图（施工单 2026-06-27
@@ -2735,6 +2760,9 @@ export class ProtocolServiceImpl implements ProtocolService {
     const rec: RequestRecord = {
       recordId,
       transportRequestId: parsed.id,
+      walletGeneration: parsed.walletGeneration,
+      runGeneration: parsed.runGeneration,
+      bindingId: parsed.bindingId,
       networkIdentity: parsed.networkIdentity,
       source,
       origin,
@@ -3203,7 +3231,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
-   * 准备 `connect.login` record：拉取 ready key 列表作为选 key 候选。
+   * 准备 `connect.login` record：读取当前唯一钱包的公开元数据。
    * 任何 K-V / walletState 异常都**不**当场拒掉 request——service 仍按 manual
    * 路径推进；执行阶段会再次校验，失败时回 `user_rejected` + 本地 reason。
    */
@@ -3211,13 +3239,14 @@ export class ProtocolServiceImpl implements ProtocolService {
     try {
       // 单 Key 本地钱包：候选列表最多只有一个元素——当前唯一 Key。
       // connect.login 不再让用户在多把 Key 之间选择。
-      const current = this.requireCurrentOwnerKey(this.deps.walletState.snapshot().activePublicKeyHex ?? "");
+      const current = await this.publicOwnerKey(rec.networkIdentity);
+      this.assertWalletGeneration(rec);
       rec.connectAuthBackend = current?.backend ?? "software";
-      rec.connectLoginCandidates = current
-        ? [{ publicKeyHex: current.publicKeyHex, label: current.label }]
-        : [];
+      rec.connectLoginWallet = current
+        ? { publicKeyHex: current.publicKeyHex, label: current.label }
+        : undefined;
     } catch (err) {
-      rec.connectLoginCandidates = [];
+      rec.connectLoginWallet = undefined;
     }
   }
 
@@ -3853,6 +3882,8 @@ export class ProtocolServiceImpl implements ProtocolService {
   private async runRequest(rec: RequestRecord): Promise<void> {
     rec.abortController = new AbortController();
     try {
+      this.assertWalletGeneration(rec);
+      if (rec.bindingId && this.connectBindings.get(rec.source)?.id !== rec.bindingId) throw new ProtocolValidationError("connection_expired", "Connection binding was revoked");
       const boot = rec.walletPublicKeyHex ? this.ownerRuntimesBySessionId.get(rec.walletPublicKeyHex)?.runtime : undefined;
       const activeIdentity = boot?.networkIdentity ?? this.requireCurrentOwnerKey(rec.networkIdentity.publicKeyHex);
       if (!activeIdentity || !sameNetworkIdentity(activeIdentity, rec.networkIdentity)) throw new ProtocolValidationError("invalid_request", "Network identity mismatch");
@@ -4263,6 +4294,8 @@ export class ProtocolServiceImpl implements ProtocolService {
       }
       throw localFailure("internal_error", "connect session not found / revoked");
     }
+    this.assertWalletGeneration(rec);
+    if (rec.bindingId && this.connectBindings.get(rec.source)?.id !== rec.bindingId) throw new ProtocolValidationError("connection_expired", "Connection binding was revoked");
     // 施工单 2026-06-30 002 硬切换：session 真值上不再带 runtime 来源。
     if (!session.networkIdentity || session.networkIdentity.publicKeyHex.toLowerCase() !== session.ownerPublicKeyHex.toLowerCase() || !sameNetworkIdentity(session.networkIdentity, rec.networkIdentity)) throw localFailure("session_owner_mismatch", "Connect network identity mismatch");
     // 业务路径一律走 `resolveOwnerRuntime(session)`；accept 阶段
@@ -4513,14 +4546,14 @@ export class ProtocolServiceImpl implements ProtocolService {
    *
    * 关键不变量（施工单 2026-06-28 002 硬切换）：
    *   - ownerPublicKeyHex 必须是用户在 UI 上选定的那把 key 公钥 hex
-   *     （来自 rec.connectLoginSelected；用户在 confirmConnectLogin 时写入）；
+   *     （来自当前钱包；用户在 confirmConnectLogin 时确认）；
    *   - owner 唯一真值 = `ownerPublicKeyHex`；`ownerKeyId` **不**落
    *   - owner key 必须在 walletState 内可查，且 identityStatus === "ready"；
    *   - K-V 不可用时直接拒掉（fail-closed）。
    */
   private async executeConnectLogin(rec: RequestRecord): Promise<ConnectLoginResult> {
     const params = rec.params as ConnectLoginParams;
-    const ownerPublicKeyHex = rec.connectLoginSelected;
+    const ownerPublicKeyHex = rec.ownerPublicKeyHex;
     if (!ownerPublicKeyHex) {
       throw localFailure("internal_error", "connect.login: no owner selected");
     }
@@ -6270,13 +6303,31 @@ export class ProtocolServiceImpl implements ProtocolService {
   private async replyResultToRec(rec: RequestRecord, result: MethodResult): Promise<void> {
     const target = rec.source;
     if (!this.canPostToTarget(target)) return;
+    this.assertWalletGeneration(rec);
+    const establishing = ["connect.login", "connect.resume", "connect.launch"].includes(rec.method);
+    let wireResult: import("@keymaster/contracts").ConnectWireResult = result;
+    let bindingId = rec.bindingId;
+    if (establishing) {
+      const { walletPublicKeyHex: _wallet, ownerPublicKeyHex: _owner, ...identityResult } = result as ConnectLoginResult;
+      if (!sameNetworkIdentity(validateNetworkIdentity(identityResult.networkIdentity), rec.networkIdentity)) throw new ProtocolValidationError("invalid_request", "Connection result identity mismatch");
+      wireResult = { ...identityResult, networkIdentity: rec.networkIdentity };
+      bindingId = crypto.randomUUID();
+      this.connectBindings.set(rec.source, { id: bindingId, origin: rec.origin, identity: rec.networkIdentity,
+        walletGeneration: rec.walletGeneration, runGeneration: rec.runGeneration });
+    } else if (rec.method === "connect.logout") {
+      wireResult = { revokedAt: (result as ConnectLogoutResult).revokedAt };
+      this.connectBindings.delete(rec.source);
+    } else if (this.connectBindings.get(rec.source)?.id !== rec.bindingId) {
+      throw new ProtocolValidationError("connection_expired", "Connection binding was revoked");
+    }
     const message: ProtocolResultMessage = {
       v: PROTOCOL_VERSION,
       type: "result",
       networkIdentity: rec.networkIdentity,
+      bindingId,
       id: rec.transportRequestId,
       ok: true,
-      result
+      result: wireResult
     };
     this.postMessage(target, rec.origin, message);
   }
@@ -6301,9 +6352,10 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   private postEventMessage(target: Window, origin: string, message: ProtocolEventMessage): void {
     try {
-      const identity = this.channelSessionBySource.get(target)?.networkIdentity;
-      if (!identity) return;
-      target.postMessage({ ...message, networkIdentity: validateNetworkIdentity(identity) }, origin);
+      const binding = this.connectBindings.get(target);
+      const lifecycle = this.deps.walletState.snapshot();
+      if (!binding || binding.origin !== origin || binding.walletGeneration !== lifecycle.walletGeneration || binding.runGeneration !== lifecycle.runGeneration) return;
+      target.postMessage({ ...message, networkIdentity: binding.identity, bindingId: binding.id }, origin);
     } catch {
     }
   }
@@ -7149,7 +7201,7 @@ function looksLikeRequest(v: unknown): boolean {
   if (!v || typeof v !== "object") return false;
   const o = v as Record<string, unknown>;
   return (
-    o.v === PROTOCOL_VERSION &&
+    typeof o.v === "number" &&
     o.type === "request" &&
     typeof o.id === "string" &&
     typeof o.method === "string"

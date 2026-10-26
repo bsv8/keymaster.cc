@@ -850,23 +850,21 @@ function ConnectLoginView({
   t,
   service,
   recordId,
-  availableKeys
+  wallet
 }: {
   t: (k: string, v?: { defaultValue?: string }) => string;
   service: ProtocolService;
   recordId: string;
-  availableKeys: Array<{ publicKeyHex: string; label: string }>;
+  wallet?: { publicKeyHex: string; label: string };
 }) {
-  // 受控：用户当前选中的 key publicKeyHex（不写入 rec，由 confirm 时一次性传）。
-  const [selected, setSelected] = useState<string>("");
   const [busy, setBusy] = useState(false);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!selected || busy) return;
+    if (!wallet || busy) return;
     setBusy(true);
     try {
-      await service.confirmConnectLogin(recordId, selected, "");
+      await service.confirmConnectLogin(recordId, "");
     } finally {
       setBusy(false);
     }
@@ -876,17 +874,17 @@ function ConnectLoginView({
     <section className="protocol-connect protocol-connect--login" aria-label="connect login">
       <header className="protocol-connect__header">
         <h2 className="protocol-connect__title">
-          {t("protocol.connect.login.title", { defaultValue: "选择登录身份" })}
+          {t("protocol.connect.login.title", { defaultValue: "连接当前钱包" })}
         </h2>
         <p className="protocol-connect__desc">
           {t("protocol.connect.login.desc", {
             defaultValue:
-              "该站点请求建立 connect 会话。请选择一把 key 作为本次会话的绑定身份；后续所有外部业务方法（identity.get / intent.sign / cipher.encrypt / cipher.decrypt / p2pkh.transfer / feepool.prepare / feepool.commit）都将只走这把 key，不再读取全局 active key。"
+              "该站点请求连接当前钱包。后续操作绑定当前钱包身份，不能切换私钥或网络。"
           })}
         </p>
       </header>
       <form onSubmit={submit} className="protocol-connect__form">
-        {availableKeys.length === 0 ? (
+        {!wallet ? (
           <div className="protocol-connect__empty">
             {t("protocol.connect.login.empty", {
               defaultValue:
@@ -894,29 +892,9 @@ function ConnectLoginView({
             })}
           </div>
         ) : (
-          <ul className="protocol-connect__keylist" role="radiogroup">
-            {availableKeys.map((k) => {
-              const checked = selected === k.publicKeyHex;
-              return (
-                <li key={k.publicKeyHex} className="protocol-connect__keyitem">
-                  <label className="protocol-connect__keylabel">
-                    <input
-                      type="radio"
-                      name="connect-login-key"
-                      value={k.publicKeyHex}
-                      checked={checked}
-                      disabled={busy}
-                      onChange={(e) => setSelected(e.currentTarget.value)}
-                    />
-                    <span className="protocol-connect__keylabel-text">{k.label}</span>
-                    <code className="protocol-connect__keylabel-hex">
-                      {formatShortPublicKey(k.publicKeyHex)}
-                    </code>
-                  </label>
-                </li>
-              );
-            })}
-          </ul>
+          <div className="protocol-connect__keylabel">
+            <span>{wallet.label}</span><code>{formatShortPublicKey(wallet.publicKeyHex)}</code>
+          </div>
         )}
         <div className="protocol-popup__actions">
           <button
@@ -932,9 +910,9 @@ function ConnectLoginView({
           <button
             type="submit"
             className="protocol-popup__back-top protocol-popup__back-top--primary"
-            disabled={busy || !selected || availableKeys.length === 0}
+            disabled={busy || !wallet}
           >
-            {t("protocol.connect.login.confirm", { defaultValue: "用此 key 登录" })}
+            {t("protocol.connect.login.confirm", { defaultValue: "连接钱包" })}
           </button>
         </div>
       </form>
@@ -1047,7 +1025,7 @@ function ConnectSection({
         t={t}
         service={service}
         recordId={login.recordId}
-        availableKeys={login.availableKeys}
+        wallet={login.wallet}
       />
     );
   }
@@ -1096,18 +1074,17 @@ function ConnectLoginAuthPage({
 }) {
   const login = auth.login;
   const hardware = auth.backend === "hardware";
-  const [selected, setSelected] = useState<string>("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (busy || !login || !selected || (!hardware && !password) || !auth.canSubmit) return;
+    if (busy || !login?.wallet || (!hardware && !password) || !auth.canSubmit) return;
     setBusy(true);
     setError(null);
     try {
-      await service.confirmConnectLogin(auth.recordId!, selected, hardware ? "" : password);
+      await service.confirmConnectLogin(auth.recordId!, hardware ? "" : password);
       setPassword("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");
@@ -1129,35 +1106,15 @@ function ConnectLoginAuthPage({
           <p className="protocol-auth__desc">
             {hardware ? t("protocol.connect.hardware.desc", {defaultValue: "使用当前已连接并在设备上解锁的 RocKey。PIN 只在设备上输入；后续超额度支付由设备确认。"}) : t("protocol.connect.login.desc", {
               defaultValue:
-                "该站点请求重新认证。请选择一把 key，并再次输入密码。成功后会创建新的 connect session，并吊销同 origin 的旧 session。"
+                "该站点请求连接当前钱包。请再次输入密码授权；成功后将替换同来源的旧连接。"
             })}
           </p>
         </header>
         <form onSubmit={submit} className="protocol-auth__form">
-          {login && login.availableKeys.length > 0 ? (
-            <ul className="protocol-connect__keylist" role="radiogroup" aria-label="connect login keys">
-              {login.availableKeys.map((k) => {
-                const checked = selected === k.publicKeyHex;
-                return (
-                  <li key={k.publicKeyHex} className="protocol-connect__keyitem">
-                    <label className="protocol-connect__keylabel">
-                      <input
-                        type="radio"
-                        name="connect-login-key"
-                        value={k.publicKeyHex}
-                        checked={checked}
-                        disabled={busy || auth.submitted}
-                        onChange={(e) => setSelected(e.currentTarget.value)}
-                      />
-                      <span className="protocol-connect__keylabel-text">{k.label}</span>
-                      <code className="protocol-connect__keylabel-hex">
-                        {formatShortPublicKey(k.publicKeyHex)}
-                      </code>
-                    </label>
-                  </li>
-                );
-              })}
-            </ul>
+          {login?.wallet ? (
+            <div className="protocol-connect__keylabel">
+              <span>{login.wallet.label}</span><code>{formatShortPublicKey(login.wallet.publicKeyHex)}</code>
+            </div>
           ) : (
             <div className="protocol-connect__empty">
               {t("protocol.connect.login.empty", {
@@ -1196,7 +1153,7 @@ function ConnectLoginAuthPage({
             <button
               type="submit"
               className="protocol-popup__back-top protocol-popup__back-top--primary"
-              disabled={busy || auth.submitted || !auth.canSubmit || !selected || (!hardware && !password)}
+              disabled={busy || auth.submitted || !auth.canSubmit || !login?.wallet || (!hardware && !password)}
             >
               {t("protocol.connect.login.confirm", {
                 defaultValue: "重新认证并建立新会话"

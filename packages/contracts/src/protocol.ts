@@ -161,6 +161,7 @@ export interface BinaryField {
 }
 
 /** 协议版本号；当前固定为 1。 */
+// 产品尚未上线，公开协议持续在 v1 内演进，不维护旧字段兼容分支。
 export const PROTOCOL_VERSION = 1;
 
 /** 协议方法名常量集合。 */
@@ -230,6 +231,8 @@ export type ProtocolMethod = (typeof PROTOCOL_METHODS)[number];
  * "locked 时直接拒绝"的中间态都不属于 V1 公开语义。
  */
 export type ProtocolErrorCode =
+  /** Transport authority was revoked or belongs to another wallet/Worker generation. */
+  | "connection_expired"
   | "invalid_request"
   | "invalid_origin"
   | "user_rejected"
@@ -325,6 +328,8 @@ export interface ProtocolClosingMessage {
  *     进入不可逆 executing 终态。
  */
 export interface ProtocolCancelMessage {
+  /** Present for cancellation of an already-bound business request. */
+  bindingId?: string;
   v: typeof PROTOCOL_VERSION;
   type: "cancel";
   /** 要取消的原 `request.id`。 */
@@ -367,13 +372,14 @@ export type ProtocolEventMessage =
 
 /** 顶层 request 报文。 */
 export interface ProtocolRequestMessage<M extends ProtocolMethod = ProtocolMethod> {
-  networkIdentity: NetworkIdentity;
+  /** Opaque transport binding returned by login/resume/launch; never a wallet selector. */
+  bindingId?: string;
   v: typeof PROTOCOL_VERSION;
   type: "request";
   /** 请求唯一标识；同时承担 transport 关联 id 与业务操作 id 双重角色。 */
   id: string;
   method: M;
-  params: MethodParams<M>;
+  params: ConnectWireParams<M>;
 }
 
 /** 顶层 result 报文。 */
@@ -384,12 +390,13 @@ export type ProtocolResultMessage =
       networkIdentity: NetworkIdentity;
       id: string;
       ok: true;
-      result: MethodResult;
+      bindingId?: string;
+      result: ConnectWireResult;
     }
   | {
       v: typeof PROTOCOL_VERSION;
       type: "result";
-      networkIdentity: NetworkIdentity;
+      networkIdentity?: NetworkIdentity;
       id: string;
       ok: false;
       error: ProtocolError;
@@ -1394,10 +1401,10 @@ export interface ProtocolConnectAuthSnapshot {
   canSubmit: boolean;
   /** 当前 auth 请求是否已经提交过；用于 UI 呈现 busy / 禁用态。 */
   submitted: boolean;
-  /** login auth owner 的候选 key；无 login owner 时为 null。 */
+  /** Current single wallet; no wallet selection. */
   login: {
     recordId: string;
-    availableKeys: Array<{ publicKeyHex: string; label: string }>;
+    wallet?: { publicKeyHex: string; label: string };
   } | null;
   /** resume auth owner 的只读会话信息；无 resume owner 时为 null。 */
   resume: {
@@ -1951,6 +1958,20 @@ export interface MethodResultMap {
 
 export type MethodResult<M extends ProtocolMethod = ProtocolMethod> = M extends keyof MethodResultMap
   ? MethodResultMap[M]
+  : never;
+
+/** Wire parameters never select a wallet or its network. Internal execution parameters
+ * above carry receiver-derived authorization context, not caller-supplied identity. */
+type PublicBusinessParams<T> = Omit<T, "walletPublicKeyHex" | "assetId">;
+export type ConnectWireParams<M extends ProtocolMethod = ProtocolMethod> = M extends ProtocolMethod
+  ? keyof PublicBusinessParams<MethodParamsMap[M]> extends never ? Record<string, never> : PublicBusinessParams<MethodParamsMap[M]>
+  : never;
+/** Receiver-generated wire event context; internal event producers do not choose it. */
+export type ConnectWireEvent = ProtocolEventMessage & { networkIdentity: NetworkIdentity; bindingId: string };
+export type ConnectWireResult<M extends ProtocolMethod = ProtocolMethod> = M extends ProtocolMethod
+  ? M extends "connect.login" | "connect.resume" | "connect.launch"
+    ? Omit<MethodResultMap[M], "walletPublicKeyHex" | "ownerPublicKeyHex">
+    : M extends "connect.logout" ? Omit<MethodResultMap[M], "walletPublicKeyHex"> : MethodResultMap[M]
   : never;
 
 /* ============== popup 命令流（施工单 002：popup 复用与命令流） ============== */
@@ -2926,7 +2947,7 @@ export interface ProtocolService {
   connectLoginRecord(recordId?: string): {
     recordId: string;
     method: "connect.login";
-    availableKeys: Array<{ publicKeyHex: string; label: string }>;
+    wallet?: { publicKeyHex: string; label: string };
   } | null;
   /**
    * 当前 popup 是否存在"等待用户恢复"的 connect resume 流程。
@@ -2943,7 +2964,7 @@ export interface ProtocolService {
    * 若 vault 当前已锁定，则会先解锁再建立新 session，成功后原子吊销
    * 同 origin 旧 session。
    */
-  confirmConnectLogin(recordId: string, ownerPublicKeyHex: string, password: string): Promise<void>;
+  confirmConnectLogin(recordId: string, password: string): Promise<void>;
   /**
    * 用户在 connect resume 视图提交密码。service 先验密；若 vault 当前
    * 已锁定，则会先解锁再恢复既有 session。
