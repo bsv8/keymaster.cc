@@ -10,7 +10,7 @@ export const transferResources: I18nPluginResources = {
       "p2pkh.transferPage.action.toContact": "Transfer",
       "p2pkh.transferPage.observation.confirmed": "WOC confirmed",
       "p2pkh.transferPage.observation.unconfirmed": "WOC observed (unconfirmed)",
-      "p2pkh.transferPage.page.desc.default": "Choose a recipient address, enter the amount and fee rate, then verify the read-only transfer details before submitting.",
+      "p2pkh.transferPage.page.desc.default": "Choose a recipient address and amount, then verify the read-only transfer details before submitting.",
       "p2pkh.transferPage.page.recipient.title": "Recipient",
       "p2pkh.transferPage.page.recipient.hint": "Search a contact or paste a compressed public key or P2PKH address.",
       "p2pkh.transferPage.page.recipient.contacts": "From contacts",
@@ -35,7 +35,7 @@ export const transferResources: I18nPluginResources = {
       "p2pkh.transferPage.page.recipient.searchEmpty": "No matching local contact.",
       "p2pkh.transferPage.page.recipient.invalidPublicKey": "Public key must be a compressed 33-byte hex key.",
       "p2pkh.transferPage.page.recipient.invalidAddress": "This is not a valid P2PKH address. Use the corresponding asset transfer entry.",
-      "p2pkh.transferPage.page.recipient.testnetDisabled": "The recipient network differs from the current identity.",
+      "p2pkh.transferPage.page.recipient.networkMismatch": "The recipient network differs from the current identity.",
       "p2pkh.transferPage.page.recipient.conflict": "The public key and address do not match; transfer is blocked.",
       "p2pkh.transferPage.page.recipient.networkChanged": "Address updated; verify again before submitting.",
       "p2pkh.transferPage.page.empty.noKey.title": "No key yet",
@@ -54,7 +54,7 @@ export const transferResources: I18nPluginResources = {
       "p2pkh.transferPage.action.toContact": "转账",
       "p2pkh.transferPage.observation.confirmed": "WOC 已确认",
       "p2pkh.transferPage.observation.unconfirmed": "WOC 已观察（未确认）",
-      "p2pkh.transferPage.page.desc.default": "选择收款地址，填写金额与矿工费率，再核对只读转账信息后提交。",
+      "p2pkh.transferPage.page.desc.default": "选择收款地址并填写金额，核对只读转账信息后提交。",
       "p2pkh.transferPage.page.recipient.title": "收款方",
       "p2pkh.transferPage.page.recipient.hint": "搜索联系人，或粘贴压缩公钥、P2PKH 地址。",
       "p2pkh.transferPage.page.recipient.contacts": "从通讯录选择",
@@ -79,7 +79,7 @@ export const transferResources: I18nPluginResources = {
       "p2pkh.transferPage.page.recipient.searchEmpty": "没有匹配的本地联系人。",
       "p2pkh.transferPage.page.recipient.invalidPublicKey": "公钥必须是压缩格式的 33 字节 hex 公钥。",
       "p2pkh.transferPage.page.recipient.invalidAddress": "这不是有效的 P2PKH 地址，请从对应资产入口转账。",
-      "p2pkh.transferPage.page.recipient.testnetDisabled": "收款地址的网络与当前身份不一致。",
+      "p2pkh.transferPage.page.recipient.networkMismatch": "收款地址的网络与当前身份不一致。",
       "p2pkh.transferPage.page.recipient.conflict": "公钥与地址不一致，已阻断转账。",
       "p2pkh.transferPage.page.recipient.networkChanged": "地址已更新，请重新核对。",
       "p2pkh.transferPage.page.empty.noKey.title": "还没有 key",
@@ -92,4 +92,3 @@ export const transferResources: I18nPluginResources = {
     }
   }
 };
-

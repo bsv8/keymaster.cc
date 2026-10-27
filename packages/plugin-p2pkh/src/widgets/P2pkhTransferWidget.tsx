@@ -16,8 +16,8 @@ import { Button, TextInput } from "@keymaster/ui";
 import { useOptionalPluginCapability } from "webloom-framework/react";
 import { usePluginI18n, usePluginLocale, useOptionalResourceSelector } from "@keymaster/runtime";
 import { emptyGlobalBalanceSnapshot, type GlobalBalanceSnapshot, type KeyIdentity } from "@keymaster/contracts";
-import type { P2pkhGlobalSettings, P2pkhKeyResource, P2pkhService, P2pkhTransferPreview, P2pkhTransferResult } from "../p2pkhContracts.js";
-import { P2PKH_CAPABILITY, resolveP2pkhFeeRateSatoshisPerKb } from "../p2pkhContracts.js";
+import type { P2pkhService, P2pkhTransferPreview, P2pkhTransferResult } from "../p2pkhContracts.js";
+import { P2PKH_CAPABILITY } from "../p2pkhContracts.js";
 
 interface FormState {
   recipient: string;
@@ -58,24 +58,17 @@ function P2pkhTransferWidgetInner({
   const locale = usePluginLocale();
   const formatNumber = (value: number) => new Intl.NumberFormat(locale).format(value);
 
-  const context = useOptionalResourceSelector<{ activePublicKeyHex?: string; identity?: KeyIdentity; resource?: P2pkhKeyResource }, { activePublicKeyHex?: string; identity?: KeyIdentity; resource?: P2pkhKeyResource }>(
+  const context = useOptionalResourceSelector<{ identity?: KeyIdentity; address?: string }, { identity?: KeyIdentity; address?: string }>(
     reader,
-    "p2pkh.transfer-context",
+    "p2pkh.wallet-context",
     [],
     (s) => s.data ?? {},
     {}
   );
-  const activeKey = { activePublicKeyHex: context.activePublicKeyHex };
   const activeIdentity = context.identity;
-  const resource = context.resource;
+  const networkAddress = context.address;
+  const activeKey = { activePublicKeyHex: activeIdentity?.publicKeyHex };
   const network = activeIdentity?.bsvNetwork;
-  const globalSettings = useOptionalResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
-    reader,
-    "p2pkh.settings",
-    [],
-    (snapshot) => snapshot.data ?? { bsvNetwork: "main" },
-    { bsvNetwork: "main" }
-  );
   const balanceSnapshot = useOptionalResourceSelector<GlobalBalanceSnapshot, GlobalBalanceSnapshot>(
     reader,
     "p2pkh.balance",
@@ -88,7 +81,6 @@ function P2pkhTransferWidgetInner({
   const networkLabel = t(network === "main" ? "p2pkh.network.main" : "p2pkh.network.test", {
     defaultValue: network === "main" ? "主网" : "测试网"
   });
-  const feeRate = resolveP2pkhFeeRateSatoshisPerKb(globalSettings);
   const [form, setForm] = useState<FormState>(() => {
     return {
       recipient: recipientAddress ?? "",
@@ -116,9 +108,7 @@ function P2pkhTransferWidgetInner({
   // 硬切换 005 收尾：active key 不再有 `mode` 字段。"all 模式"被壳层守卫
   // 拦截，本 widget 顶多在 active 缺失的瞬时态出现，作为 fail-closed 防御
   // ——但正常业务流下不会进入 hasNoActiveKey 分支。
-  const hasNoActiveKey = !activeKey.activePublicKeyHex;
-
-  const networkAddress = resource?.address;
+  const hasNoActiveKey = !activeIdentity?.publicKeyHex;
 
   function update<K extends keyof FormState>(k: K, v: FormState[K]) {
     setForm((f) => ({ ...f, [k]: v }));
@@ -131,7 +121,8 @@ function P2pkhTransferWidgetInner({
   }
 
   function buildInput() {
-    if (!activeIdentity || !network || !resource || resource.network !== network) {
+    // 身份只绑定、不选择：resourceId 需要时从绑定网络派生，不进入页面上下文。
+    if (!activeIdentity || !network || !networkAddress) {
       setError(t("p2pkh.transfer.locked", { defaultValue: "钱包身份尚未就绪。" }));
       return null;
     }
@@ -149,7 +140,6 @@ function P2pkhTransferWidgetInner({
       recipientAddress: form.recipient,
       amountSatoshis: sendAll ? 0 : amount,
       sendAll,
-      feeRateSatoshisPerKb: feeRate
     };
   }
 
@@ -256,7 +246,7 @@ function P2pkhTransferWidgetInner({
       ) : (
         <>
           <section className="p2pkh-transfer-widget__step-card" aria-labelledby="p2pkh-transfer-step-2">
-            <div className="p2pkh-transfer-widget__step-heading"><span>2</span><div><h4 id="p2pkh-transfer-step-2">{t("p2pkh.transfer.step.addressAmount", { defaultValue: "金额与矿工费率" })}</h4><p>{t("p2pkh.transfer.step.addressAmountHint", { defaultValue: "收款地址已由平台核对并锁定；这里只输入金额和矿工费率。" })}</p></div></div>
+            <div className="p2pkh-transfer-widget__step-heading"><span>2</span><div><h4 id="p2pkh-transfer-step-2">{t("p2pkh.transfer.step.addressAmount", { defaultValue: "金额" })}</h4><p>{t("p2pkh.transfer.step.addressAmountHint", { defaultValue: "收款地址已由平台核对并锁定；手续费按当前钱包策略计算，并显示在交易预览中。" })}</p></div></div>
             <div className="p2pkh-transfer-widget__readonly-address" data-testid="p2pkh-recipient-address">
               <span>{t("p2pkh.transfer.form.recipient", { defaultValue: "收款地址（只读）" })}</span>
               <code>{form.recipient || t("p2pkh.transfer.loading", { defaultValue: "加载中…" })}</code>
@@ -285,7 +275,6 @@ function P2pkhTransferWidgetInner({
                 : t("p2pkh.transfer.form.availableBalanceUnknown", { defaultValue: "可用余额未知（{{network}}）", network: networkLabel })}
             </p>
             {/^(all|全部)$/i.test(form.amount.trim()) ? <p className="p2pkh-transfer-widget__amount-hint">{t("p2pkh.transfer.form.sendAllHint", { defaultValue: "最终到账额会自动扣除实际矿工费。" })}</p> : null}
-            <p className="p2pkh-transfer-widget__fee-rate">{t("p2pkh.transfer.form.feeRate", { defaultValue: "矿工费率" })}: {feeRate} sat/KB</p>
             {error ? <p className="p2pkh-transfer-widget__error">{error}</p> : null}
             <div className="p2pkh-transfer-widget__actions">
               <Button onClick={doPrepare} loading={busy} disabled={!form.recipient || !form.amount}>

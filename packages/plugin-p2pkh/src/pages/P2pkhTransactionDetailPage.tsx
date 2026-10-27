@@ -3,14 +3,15 @@ import { useEffect, useMemo, useState } from "react";
 import { Button, EmptyState, PageHeader, formatSats } from "@keymaster/ui";
 import { useOptionalPluginCapability } from "webloom-framework/react";
 import { router, usePluginI18n, useOptionalResourceSelector } from "@keymaster/runtime";
-import type { P2pkhGlobalSettings, P2pkhHistoryRecord, P2pkhLocalTransaction, P2pkhService, P2pkhTransactionDetail } from "../p2pkhContracts.js";
+import type { KeyIdentity } from "@keymaster/contracts";
+import type { P2pkhHistoryRecord, P2pkhLocalTransaction, P2pkhService, P2pkhTransactionDetail } from "../p2pkhContracts.js";
 import { P2PKH_CAPABILITY } from "../p2pkhContracts.js";
 import { formatLocalTime, listPath, readPage, readTransactionId, readTransactionSource, readTransactionSubmissionId } from "./p2pkhTransactionView.js";
 import { type WalletSnapshot } from "./P2pkhWalletPage.js";
 
 function emptyWallet(): WalletSnapshot {
   return {
-    resources: [], history: [], locals: [], utxoResult: { hasResult: false, utxos: null, seq: null, syncedAt: null }, sync: [], syncStatus: "idle",
+    resources: [], history: [], locals: [], utxoResult: { hasResult: false, utxos: null, seq: null, syncedAt: null }, sync: [],
     historyCursors: {}, localCursors: {}
   };
 }
@@ -47,12 +48,10 @@ export function P2pkhTransactionDetailPage() {
 function P2pkhTransactionDetailPageInner({ service }: { service: P2pkhService }) {
   const resources = useP2pkhResources();
   const { t } = usePluginI18n();
-  const network = service.getGlobalSettings().bsvNetwork;
   const page = readPage();
   const source = readTransactionSource();
   const txid = readTransactionId();
   const submissionId = readTransactionSubmissionId();
-  const routeResourceId = `p2pkh:${network}`;
   const wallet = useOptionalResourceSelector<WalletSnapshot, WalletSnapshot & { error?: string; loaded: boolean }>(
     resources,
     "p2pkh.wallet",
@@ -68,6 +67,15 @@ function P2pkhTransactionDetailPageInner({ service }: { service: P2pkhService })
       : { ...emptyWallet(), error: snapshot.error?.message, loaded: false },
     { ...emptyWallet(), loaded: false }
   );
+  const identity = useOptionalResourceSelector<{ identity?: KeyIdentity; address?: string }, { identity?: KeyIdentity; address?: string; error?: string }>(
+    resources,
+    "p2pkh.wallet-context",
+    [],
+    (snapshot) => ({ ...snapshot.data, error: snapshot.error?.message }),
+    {}
+  );
+  const network = identity.identity?.bsvNetwork;
+  const routeResourceId = network ? `p2pkh:${network}` : "";
   const snapshotHistory = useMemo(() => source === "transactions" && txid ? wallet.history.find((row) => row.network === network && row.txid.toLowerCase() === txid.toLowerCase()) : undefined, [wallet.history, network, txid, source]);
   const snapshotLocal = useMemo(() => {
     if (source !== "local-transactions" || !txid) return undefined;
@@ -131,12 +139,16 @@ function P2pkhTransactionDetailPageInner({ service }: { service: P2pkhService })
   const timestamp = record ? formatLocalTime(record.firstSeenAt) : formatLocalTime(local?.updatedAt);
   const back = () => router.push(listPath(page, source));
 
+  if (!network) {
+    return <div className="p2pkh-tx-detail"><PageHeader title={t("p2pkh.txDetail.title", { defaultValue: "Transaction details" })} /><EmptyState title={t("p2pkh.wallet.identityPending", { defaultValue: "正在读取钱包身份…" })} description={identity.error ?? ""} /></div>;
+  }
   if (!txid || (!record && !local)) {
     return <div className="p2pkh-tx-detail"><PageHeader title={t("p2pkh.txDetail.title", { defaultValue: "Transaction details" })} actions={<Button variant="ghost" onClick={back}>{t("p2pkh.action.backToTransactions", { defaultValue: "Back to transactions" })}</Button>} /><EmptyState title={t("p2pkh.txDetail.unavailable", { defaultValue: "本地没有这笔交易" })} description={wallet.error ?? t("p2pkh.txDetail.unavailableDescription", { defaultValue: "此页面只展示本钱包已知的历史记录。" })} /></div>;
   }
 
   return <div className="p2pkh-tx-detail">
     <PageHeader title={t("p2pkh.txDetail.title", { defaultValue: "Transaction details" })} description={`${network === "main" ? "Mainnet" : "Testnet"} · ${txid}`} actions={<Button variant="ghost" onClick={back}>{t("p2pkh.action.backToTransactions", { defaultValue: "Back to transactions" })}</Button>} />
+    {wallet.error ? <p role="alert">{wallet.error}</p> : null}
     <section className="p2pkh-tx-detail__summary" aria-label={t("p2pkh.txDetail.summary", { defaultValue: "Transaction summary" })}>
       <dl>
         <div><dt>{t("p2pkh.txDetail.txid", { defaultValue: "Transaction ID" })}</dt><dd><code>{txid}</code></dd></div>

@@ -40,7 +40,8 @@ export interface BitfsWorkerDependencies {
   ensureService(): Promise<MsFileServiceImpl>;
   files(purpose: string): BorrowedModuleFileStore;
   woc(): WocWorkerChainPort | undefined;
-  p2pkhSettings(): ReturnType<WorkerFundingDependencies["readP2pkhSettings"]>;
+  walletIdentity: WorkerFundingDependencies["walletIdentity"];
+  effectiveFeeRate: WorkerFundingDependencies["effectiveFeeRate"];
   crypto(owner: string): Promise<ActiveKeyCrypto>;
   requestPayment(command: import("@keymaster/contracts").CoordinatorWalletPaymentCommand): Promise<unknown>;
   blockHeight(network: "main" | "test"): Promise<number>;
@@ -1285,8 +1286,7 @@ async function ensureMsfileBitfsBuyerProtocol(
       throw new Error("BitFS 买方购买期间 Key、存储或 DataChannel 已变化");
     }
   };
-  const settings = await deps.p2pkhSettings();
-  const feeRate = settings.feeRateSatoshisPerKb;
+  const feeRate = deps.effectiveFeeRate();
   if (!Number.isSafeInteger(feeRate) || feeRate < 1) throw new Error("BitFS 池内手续费率配置无效");
   const cryptoPort = await deps.crypto(owner);
   assertCurrentContext();
@@ -1531,7 +1531,7 @@ async function msfileBitfsKernelArbiter(quoteView: import("@keymaster/contracts"
 async function msfileBitfsKernelQuoteFees(quoteView: import("@keymaster/contracts").MsFileBitfsQuoteView): Promise<SchedulerFees> {
   const display: { base?: string; perItem?: string } = {};
   await arbitrationReserve(await deps.ensureService(), quoteView.supportedArbiterPublicKeys, display);
-  const feeRate = BigInt((await deps.p2pkhSettings()).feeRateSatoshisPerKb);
+  const feeRate = BigInt(deps.effectiveFeeRate());
   if (feeRate < 1n) throw new Error("BitFS 池内手续费率配置无效");
   const owner = deps.session().activePublicKeyHex!.trim().toLowerCase();
   const minerFee = await bitfsPoolSettlementFee({
@@ -1718,7 +1718,7 @@ async function msfileBitfsKernelOpenPool(runtime: MsfileBitfsKernelRuntime, comm
   const seedBudget = seedPurchased ? 0n : BigInt(command.quote.seedPrice);
   if (contentBudget < seedBudget) throw new Error("内核内容预算小于 Seed 价");
   const blockBudget = contentBudget - seedBudget;
-  const feeRate = BigInt((await deps.p2pkhSettings()).feeRateSatoshisPerKb);
+  const feeRate = BigInt(deps.effectiveFeeRate());
   if (feeRate < 1n) throw new Error("BitFS 池内手续费率配置无效");
   const arbitrationDisplay: { base?: string; perItem?: string } = {};
   const arbitrationBudget = await arbitrationReserve(await deps.ensureService(), quoteView.supportedArbiterPublicKeys, arbitrationDisplay);
@@ -2617,11 +2617,9 @@ async function createMsfileBitfsBuyerTask(input: {
     },
     async prepareFunding(fundingInput) {
       assertCurrentContext();
-      const settings = await deps.p2pkhSettings();
-      if (input.network === "test" && !settings.bsvNetwork) {
-        throw new Error("请先在 P2PKH 设置中启用测试网余额");
-      }
-      const resources = await deps.ensureResources(owner, settings.bsvNetwork);
+      const identity = deps.walletIdentity();
+      if (input.network !== identity.bsvNetwork) throw new Error("FundingTx network does not match the active wallet identity");
+      const resources = await deps.ensureResources(owner, identity.bsvNetwork);
       if (!resources.some(resource => resource.network === input.network)) throw new Error("BitFS FundingTx 的钱包资源尚未就绪");
       for (let attempt = 0; ; attempt += 1) {
         assertCurrentContext();
@@ -2633,7 +2631,7 @@ async function createMsfileBitfsBuyerTask(input: {
             network: input.network,
             generation,
             openingOutput: fundingInput.openingOutput,
-            feeRateSatoshisPerKb: settings.feeRateSatoshisPerKb,
+            feeRateSatoshisPerKb: deps.effectiveFeeRate(),
             maxFeeSatoshis: deps.maxFeeSatoshis(),
           }, fundingDeps);
         } catch (error) {

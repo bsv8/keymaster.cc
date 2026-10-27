@@ -16,7 +16,8 @@ export interface WorkerFundingDependencies {
   previousTransaction(input: { ownerPublicKeyHex: string; network: "main" | "test"; txid: string }): Promise<string | null>;
   observeBusinessReceipt(input: { ownerPublicKeyHex: string; network: "main" | "test"; rawTxHex: string }): Promise<void>;
   ensureResources(owner: string, bsvNetwork: "main" | "test"): Promise<FundingResource[]>;
-  readP2pkhSettings(): Promise<{ bsvNetwork: "main" | "test"; feeRateSatoshisPerKb: number }>;
+  walletIdentity(): Readonly<import("@keymaster/contracts").NetworkIdentity>;
+  effectiveFeeRate(): number;
   maxFeeSatoshis(): number;
   deriveAddress(owner: string, network: "main" | "test"): string;
   addressScript(address: string, network: "main" | "test"): string;

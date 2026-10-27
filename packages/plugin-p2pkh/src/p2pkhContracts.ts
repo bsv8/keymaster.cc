@@ -136,17 +136,6 @@ export interface P2pkhTransactionSyncState {
   lastError?: string;
 }
 
-/** 网络由当前身份确定；有效费率只读，feePolicy 用于更新全局费率策略。 */
-export interface P2pkhGlobalSettings {
-  bsvNetwork: "main" | "test";
-  feeRateSatoshisPerKb?: number;
-  feePolicy?: import("@keymaster/contracts").ChainFeePolicy;
-}
-export function resolveP2pkhFeeRateSatoshisPerKb(settings?: P2pkhGlobalSettings): number {
-  const value = settings?.feeRateSatoshisPerKb;
-  return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : 100;
-}
-
 export interface P2pkhUtxo {
   id: string;
   resourceId: string;
@@ -213,7 +202,12 @@ export interface UtxoAllocationError {
 }
 
 /** 同步状态。 */
-export type P2pkhSyncStatus = "idle" | "syncing" | "ok" | "failed" | "rate-limited" | "blocked";
+export type P2pkhSyncStatus = "idle" | "syncing" | "ok" | "failed" | "blocked";
+export interface P2pkhSyncSnapshot {
+  status: P2pkhSyncStatus;
+  lastCompletedAt?: string;
+  error?: string;
+}
 
 /** Pending transfer。 */
 /** 历史/协议兼容的本地输入 claim；普通 P2PKH 转账不创建、不读取。 */
@@ -363,27 +357,6 @@ export interface P2pkhService {
   getRawTransaction(txid: string): Promise<string>;
   /** Pure local manager lookup; must never initiate signing/broadcast/chain polling. */
   getPaymentStatus(input: Pick<import("@keymaster/contracts").P2pkhPaymentLookupInput, "paymentId">): Promise<import("@keymaster/contracts").P2pkhPaymentLookupResult>;
-  syncStatus(): P2pkhSyncStatus;
-  onSyncStatusChange(handler: (status: P2pkhSyncStatus) => void): () => void;
-
-  /**
-   * 订阅 P2PKH data-changed 事件。
-   * 设计缘由：后台任务原子提交 K-V 后发布，页面收到后重读本地 K-V。
-   * 不再依赖 sync status 变化猜测数据是否已提交。
-   */
-  onDataChanged(handler: () => void): () => void;
-
-  /** 当前绑定身份的网络及有效手续费策略；身份失效即拒绝读取。 */
-  getGlobalSettings(): P2pkhGlobalSettings;
-  /**
-   * 订阅全局设置变更。包括：
-   * - 本标签页通过 `applyGlobalSettings` 写入的变更；
-   * - 跨标签页由 storage 事件带回来的变更。
-   * 返回取消订阅句柄。
-   */
-  onGlobalSettingsChange(handler: (settings: P2pkhGlobalSettings) => void): () => void;
-  /** 更新手续费策略并通知订阅者；不能通过设置选择钱包网络。 */
-  applyGlobalSettings(settings: Pick<P2pkhGlobalSettings, "feePolicy">): Promise<void>;
 
   /** 同步观察的本地只读投影；不刷新链、不占用或释放输入。 */
   getAvailableUtxos(): Promise<P2pkhAvailableUtxos>;

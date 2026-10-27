@@ -5,7 +5,7 @@ import { createMigrationJournalService, createHardwareToSoftwareMigration, reque
 import type { KeyIdentity } from "@keymaster/contracts";
 import { WALLET_MIGRATION_PATH } from "@keymaster/contracts/storage-internal";
 import { verifyMigratedHardwareLedger } from "./coordinator.js";
-import type { BsvNetwork, CoordinatorVaultStatus, CoordinatorClientRequest, VaultWorkerWalletControl } from "@keymaster/contracts";
+import type { CoordinatorVaultStatus, CoordinatorClientRequest, VaultWorkerWalletControl } from "@keymaster/contracts";
 import type { createVaultWorkerKeys } from "./workerKeys.js";
 import type { createVaultWalletWorker } from "./workerWallet.js";
 export interface VaultWorkerOperationsPorts {
@@ -16,7 +16,6 @@ export interface VaultWorkerOperationsPorts {
   cleanupPending(): unknown;
   peerRevoked(peerId: string): boolean;
   newEpoch(): string;
-  network(network: BsvNetwork): void;
   publishWallet(): void;
   publishSession(cause: "unlock" | "lock" | "change-password" | "reset-wallet"): void;
   clearActivationCredential(): void;
@@ -345,7 +344,6 @@ bsvNetwork: document.bsvNetwork, backend: "hardware", publicKeyHex: document.pub
     ports.commit({ activePublicKeyHex: input.publicKeyHex });
     ports.keys.replaceActivePrivateKey(input.privateKeyBytes);
     ports.keys.setCoordinatorActiveKeySummary(input.identity);
-    ports.network(input.identity.bsvNetwork);
     // The authenticated session is committed before owner-unit construction reads it.
     ports.publishWallet();
     ports.clearActivationCredential();

@@ -3,7 +3,7 @@ import { formatSats, formatSatsWithPrice } from "@keymaster/ui";
 import { countRender } from "webloom-framework/react";
 import { usePluginBsvPrice, usePluginI18n, usePluginLocale, useResourceViewSelector } from "@keymaster/runtime";
 import { emptyGlobalBalanceSnapshot, type GlobalBalanceSnapshot } from "@keymaster/contracts";
-import type { P2pkhSyncStatus } from "../p2pkhContracts.js";
+import type { P2pkhSyncSnapshot } from "../p2pkhContracts.js";
 
 const EMPTY = emptyGlobalBalanceSnapshot();
 type ReadinessState = "initializing" | "no-active-key" | "ready";
@@ -18,16 +18,16 @@ export function P2pkhBalanceWidget() {
   const readiness = useResourceViewSelector<ReadinessState, ReadinessState>(
     store, "p2pkh.readiness", [], snapshot => snapshot.data ?? "initializing",
   );
-  const status = useResourceViewSelector<P2pkhSyncStatus, P2pkhSyncStatus>(
-    store, "p2pkh.sync-status", [], snapshot => snapshot.data ?? "idle",
+  const sync = useResourceViewSelector<P2pkhSyncSnapshot, P2pkhSyncSnapshot>(
+    store, "p2pkh.sync-status", [], snapshot => snapshot.data ?? { status: "idle" as const },
   );
   const snapshot = useResourceViewSelector<GlobalBalanceSnapshot, GlobalBalanceSnapshot>(
     store, "p2pkh.balance", [], state => state.data ?? EMPTY,
   );
   const { balance, bsvNetwork: network } = snapshot;
   const known = Boolean(snapshot.publicKeyHex && network) && balance.available === true;
-  const stale = status === "failed" || status === "rate-limited";
-  const statusText = readiness === "ready" ? status : t(
+  const stale = sync.status === "failed" || sync.status === "blocked";
+  const statusText = readiness === "ready" ? t(`p2pkh.syncStatus.${sync.status}`, { defaultValue: sync.status }) : t(
     readiness === "initializing" ? "p2pkh.balanceWidget.status.initializing" : "p2pkh.balanceWidget.status.noActiveKey",
     { defaultValue: readiness === "initializing" ? "钱包正在初始化" : "钱包尚未解锁" },
   );

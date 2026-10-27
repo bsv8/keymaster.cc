@@ -1,4 +1,4 @@
-import { deriveP2pkhAddress } from "@keymaster/contracts";
+import { deriveP2pkhAddress, requireUnlockedWalletIdentity } from "@keymaster/contracts";
 import { requireWocNetwork } from "@keymaster/contracts";
 import type { ActiveKeyCrypto, AssetDataChangedEvent, BorrowedModuleFileStore, CoordinatorValueResult, VaultWalletState, P2pkhBroadcastSubmission, P2pkhUtxoSnapshotResult, VaultStatus, CentralBroadcastService, WocService } from "@keymaster/contracts";
 import { createMessageBus } from "webloom-framework";
@@ -18,7 +18,7 @@ export interface WorkerTransferDependencies {
   assertActive(): void;
   session(): { owner?: string; epoch: string; unlocked: boolean };
   loadSettings(owner: string): Promise<void>;
-  settings(): { bsvNetwork: "main" | "test"; feeRateSatoshisPerKb?: number };
+  effectiveFeeRate(network: "main" | "test"): number;
   walletState(): VaultWalletState;
   storage(): BorrowedModuleFileStore;
   crypto(owner: string): Promise<ActiveKeyCrypto>;
@@ -34,6 +34,7 @@ export interface WorkerTransferDependencies {
 /** P2PKH owns its lazy Worker transfer service and candidate disposal. */
 export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
   let current: P2pkhService | undefined;
+  let currentIdentity: Readonly<import("@keymaster/contracts").NetworkIdentity> | undefined;
   let currentOwner: string | undefined;
   let currentEpoch: string | undefined;
   let starting: Promise<P2pkhService> | undefined;
@@ -49,6 +50,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     protocol = undefined; protocolStarting = undefined; central = undefined;
     const old = current;
     current = undefined;
+    currentIdentity = undefined;
     currentOwner = undefined;
     currentEpoch = undefined;
     try { old?.onVaultLocked(); } catch { /* cleanup remains idempotent */ }
@@ -126,11 +128,17 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     const owner = session.owner;
     const epoch = session.epoch;
     if (!session.unlocked || !owner) throw new Error("P2PKH requires the current unlocked owner");
+    const identity = requireUnlockedWalletIdentity(deps.walletState().snapshot());
+    if (identity.publicKeyHex.toLowerCase() !== owner.toLowerCase()) throw new Error("P2PKH transfer identity does not match the current owner");
+    const network = identity.bsvNetwork;
     const token = generation;
     const assertFresh = () => {
       deps.assertActive();
       const now = deps.session();
-      if (token !== generation || !now.unlocked || now.owner !== owner || now.epoch !== epoch) throw new Error("P2PKH transfer service became stale");
+      const nowIdentity = requireUnlockedWalletIdentity(deps.walletState().snapshot());
+      if (token !== generation || !now.unlocked || now.owner !== owner || now.epoch !== epoch
+        || nowIdentity.publicKeyHex.toLowerCase() !== identity.publicKeyHex.toLowerCase()
+        || nowIdentity.bsvNetwork !== network) throw new Error("P2PKH transfer service became stale");
     };
     await deps.loadSettings(owner);
     assertFresh();
@@ -157,14 +165,13 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
         return result;
       };
       const coordinator = {
-        getBootstrapSnapshot: () => ({ p2pkhSettings: deps.settings() }),
         p2pkhUtxosGet: (input: SnapshotInput) => deps.snapshot(input, false),
         p2pkhUtxosRefresh: (input: SnapshotInput) => deps.snapshot(input, true),
         // 占用是 Worker 内部动作：Window 只能经 Coordinator 请求它发生。
         p2pkhArtifactOccupy: async () => { throw new Error("P2PKH artifact occupation is worker-internal"); },
       };
       const centralService = createCentralBroadcastService({
-        binding: { identity: { publicKeyHex: owner, bsvNetwork: deps.settings().bsvNetwork }, assertActive: assertFresh },
+        binding: { identity, assertActive: assertFresh },
         coordinator: { p2pkhBroadcast: broadcast },
       });
       utxoManager = createP2pkhUtxoManager({
@@ -207,8 +214,8 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
           },
         },
       });
-      const recoveryManager = utxoManager, recoveryNetwork = deps.settings().bsvNetwork;
-      const assertRecoveryFresh = () => { assertFresh(); if (utxoManager !== recoveryManager || deps.settings().bsvNetwork !== recoveryNetwork) throw new Error('Connect recovery scope changed'); };
+      const recoveryManager = utxoManager, recoveryNetwork = network;
+      const assertRecoveryFresh = () => { assertFresh(); const current = requireUnlockedWalletIdentity(deps.walletState().snapshot()); if (utxoManager !== recoveryManager || current.publicKeyHex.toLowerCase() !== owner.toLowerCase() || current.bsvNetwork !== recoveryNetwork) throw new Error('Connect recovery scope changed'); };
       try {
         const recovered = await deps.requestPayment({ action: "connect-payment-recovery" });
         assertRecoveryFresh();
@@ -274,7 +281,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
         vault: { status: deps.vaultStatus, createActiveKeyCrypto: async () => { assertFresh(); const crypto = await deps.crypto(owner); assertFresh(); return crypto; }, requestPayment: deps.requestPayment },
         utxoManager,
         woc: deps.query?.(),
-        effectiveFeeRate: () => deps.settings().feeRateSatoshisPerKb ?? 100,
+        effectiveFeeRate: deps.effectiveFeeRate,
         coordinator, centralBroadcastService: centralService, broadcastWithCoordinator: broadcast,
         walletState: deps.walletState(), storage: deps.storage(), messageBus: createMessageBus(),
       });
@@ -294,6 +301,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
           assertFresh();
         }
         central = centralService;
+        currentIdentity = Object.freeze({ ...identity });
         current = service; currentOwner = owner; currentEpoch = epoch;
         return service;
       } catch (error) {
@@ -311,8 +319,8 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     if (protocol) return protocol;
     if (protocolStarting) return protocolStarting;
     const owner = currentOwner!; const epoch = currentEpoch!; const token = generation;
-    const network = deps.settings().bsvNetwork;
-    const assertActive = () => { deps.assertActive(); const now = deps.session(); if (generation !== token || !now.unlocked || now.owner !== owner || now.epoch !== epoch || deps.settings().bsvNetwork !== network) throw new Error("Protocol wallet instance revoked"); };
+    const network = requireUnlockedWalletIdentity(deps.walletState().snapshot()).bsvNetwork;
+    const assertActive = () => { deps.assertActive(); const now = deps.session(); const current = requireUnlockedWalletIdentity(deps.walletState().snapshot()); if (generation !== token || !now.unlocked || now.owner !== owner || now.epoch !== epoch || current.publicKeyHex.toLowerCase() !== owner.toLowerCase() || current.bsvNetwork !== network) throw new Error("Protocol wallet instance revoked"); };
     const run = createWorkerProtocolRuntime({
       requestPayment: deps.requestPayment, assertActive, owner, network, storage: deps.storage(), crypto: deps.crypto,
       central: central!, transfer, query: () => deps.query?.(), snapshot: async network => { const result = await deps.snapshot({ ownerPublicKeyHex: owner, network }, false); assertActive(); return result.status === "ok" ? result.value : { hasResult: false, items: null, seq: null, syncedAt: null }; },
@@ -321,6 +329,10 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     protocolStarting = run;
     try { const candidate = await run; try { assertActive(); } catch (error) { candidate.dispose(); throw error; } protocol = candidate; return candidate; }
     finally { if (protocolStarting === run) protocolStarting = undefined; }
+  }
+  function identityFor(service: P2pkhService): Readonly<import("@keymaster/contracts").NetworkIdentity> {
+    if (current !== service || !currentIdentity) throw new Error("P2PKH transfer identity is no longer active");
+    return currentIdentity;
   }
   /**
    * 占用一件**已签名、即将外露**的 artifact 的钱包输入。
@@ -395,7 +407,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
   async function recoverSigning(input: SnapshotInput & { allocationId: string }) {
     await ensure();
     const manager = utxoManager!, session = deps.session();
-    const assertFresh = () => { const now = deps.session(); deps.assertActive(); if (utxoManager !== manager || !now.unlocked || now.epoch !== session.epoch || now.owner?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase() || deps.settings().bsvNetwork !== input.network) throw new Error("Protocol recovery scope mismatch"); };
+    const assertFresh = () => { const now = deps.session(); deps.assertActive(); const identity = requireUnlockedWalletIdentity(deps.walletState().snapshot()); if (utxoManager !== manager || !now.unlocked || now.epoch !== session.epoch || now.owner?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase() || identity.publicKeyHex.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase() || identity.bsvNetwork !== input.network) throw new Error("Protocol recovery scope mismatch"); };
     assertFresh();
     const identity = await manager.protocolExecutionIdentity(input);
     assertFresh();
@@ -415,5 +427,5 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
   }
   async function ownsWalletExact(input: SnapshotInput & { txid: string; rawTxHex: string }) { await ensure(); return utxoManager!.ownsWalletExact(input); }
   async function previousTransaction(input: SnapshotInput & { txid: string }) { await ensure(); return utxoManager!.previousTransaction(input); }
-  return { ensure, ensureProtocol, release, occupyDeliveredArtifact, submitWalletExact, ownsWalletExact, previousTransaction, recoverSigning, observeBusinessReceipt, protectedOutpoints: () => protocol?.protectedOutpoints };
+  return { ensure, ensureProtocol, identityFor, release, occupyDeliveredArtifact, submitWalletExact, ownsWalletExact, previousTransaction, recoverSigning, observeBusinessReceipt, protectedOutpoints: () => protocol?.protectedOutpoints };
 }

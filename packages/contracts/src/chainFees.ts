@@ -55,3 +55,9 @@ export interface ChainFeeReader {
   dispose(): void;
 }
 export const CHAIN_FEE_READER_CAPABILITY = defineCapability<ChainFeeReader>({ kind: "local", id: "chain-fee.reader", version: "1" });
+
+/** Policy writes are granted separately from the shared read-only fee snapshot. */
+export interface ChainFeePolicyWriter {
+  setPolicy(policy: ChainFeePolicy): Promise<void>;
+}
+export const CHAIN_FEE_POLICY_WRITER_CAPABILITY = defineCapability<ChainFeePolicyWriter>({ kind: "local", id: "chain-fee.policy-writer", version: "1" });

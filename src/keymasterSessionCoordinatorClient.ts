@@ -1117,8 +1117,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
   }
 
-  async p2pkhSettingsUpdate(settings: { bsvNetwork: "main" | "test"; feePolicy?: ChainFeePolicy }): Promise<CoordinatorCommandResult> {
-    return this.requestCommand({ kind: "p2pkh.settings.update", clientId: this.clientId, requestId: this.generateRequestId(), settings, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
+  async chainFeePolicyUpdate(policy: ChainFeePolicy): Promise<CoordinatorCommandResult> {
+    return this.requestCommand({ kind: "chain.fee-policy.update", clientId: this.clientId, requestId: this.generateRequestId(), policy, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
   }
 
   async p2pkhProviderConfigGet(providerId: string): Promise<import("@keymaster/contracts").CoordinatorValueResult<P2pkhProviderConfig>> {
@@ -1430,6 +1430,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         runGeneration: event.runGeneration,
         walletGeneration: event.walletGeneration,
         authorityRecovery: event.authorityRecovery,
+        // owner 投影与 session 同一提交点替换；缺省即清除旧 owner，不沿用旧值。
+        storageIoOwnerPeer: event.storageIoOwnerPeer,
         ...(event.autoLockTimeoutMs === undefined
           ? {}
           : { autoLockTimeoutMs: event.autoLockTimeoutMs }),
@@ -1463,7 +1465,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       this.bootstrapSnapshotCache = {
         ...this.bootstrapSnapshotCache,
         taskSnapshots: [...event.snapshots],
-        ...(event.p2pkhSettings ? { p2pkhSettings: { ...event.p2pkhSettings } } : {}),
       };
     } else if (event.topic === "storage.state") {
       this.bootstrapSnapshotCache = {

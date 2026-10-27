@@ -19,7 +19,6 @@ import type {
   BalanceBroadcaster,
   CentralBroadcastService,
   CoordinatorValueResult,
-  CoordinatorBootstrapSnapshot,
   GlobalBalanceSnapshot,
   VaultWalletState,
   BorrowedModuleFileStore,
@@ -36,10 +35,8 @@ import type { MessageBus } from "webloom-framework";
 import type {
   P2pkhBalance,
   P2pkhBalanceBreakdown,
-  P2pkhGlobalSettings,
   P2pkhKeyResource,
   P2pkhService as IP2pkhService,
-  P2pkhSyncStatus,
   P2pkhTransactionDetail,
   P2pkhUtxo,
   P2pkhAvailableUtxos,
@@ -50,7 +47,6 @@ import {
   assetIdToNetwork,
   makeResourceId,
   requireReadyKey,
-  resolveP2pkhFeeRateSatoshisPerKb,
   type ReadyKeyIdentity
 } from "./p2pkhContracts.js";
 import { createP2pkhStateRepository, disposeP2pkhStateRepository, openP2pkhStateRepository, type P2pkhStateRepositoryBundle, type P2pkhStateRepositoryHandle } from "./storage/p2pkhStateRepository.js";
@@ -118,13 +114,6 @@ function sameGlobalBalanceContent(left: GlobalBalanceSnapshot, right: GlobalBala
   return sameP2pkhBalance(left.balance, right.balance);
 }
 
-function sameGlobalSettings(left: P2pkhGlobalSettings, right: P2pkhGlobalSettings): boolean {
-  if (left.bsvNetwork !== right.bsvNetwork) return false;
-  const a = resolveP2pkhFeeRateSatoshisPerKb(left);
-  const b = resolveP2pkhFeeRateSatoshisPerKb(right);
-  return a === b && JSON.stringify(left.feePolicy) === JSON.stringify(right.feePolicy);
-}
-
 /** UTXO 快照项 → service 内部 UTXO 视图（script 由地址确定性生成）。 */
 function snapshotItemToUtxo(input: {
   item: NonNullable<P2pkhUtxoSnapshotResult["items"]>[number];
@@ -173,8 +162,7 @@ export function calculateP2pkhBalanceBreakdown(input: {
 export interface P2pkhServiceDeps {
   vault: Pick<VaultService, "status" | "createActiveKeyCrypto" | "requestPayment">;
   coordinator?: Pick<P2pkhCoordinatorControl, "p2pkhUtxosGet" | "p2pkhUtxosRefresh" | "p2pkhArtifactOccupy">
-    & Partial<Pick<P2pkhCoordinatorControl, "subscribeTopic" | "p2pkhSettingsUpdate" | "p2pkhPaymentStatus">>
-    & { getBootstrapSnapshot(): Pick<CoordinatorBootstrapSnapshot, "p2pkhSettings"> };
+    & Partial<Pick<P2pkhCoordinatorControl, "subscribeTopic" | "p2pkhPaymentStatus">>;
   messageBus: MessageBus;
   /** Issuing runtime instance; fences publications before asynchronous cleanup. */
   signal?: AbortSignal;
@@ -191,8 +179,11 @@ export interface P2pkhServiceDeps {
   centralBroadcastService?: CentralBroadcastService;
   /** SharedWorker 内部兼容面，仅供 sat top-up 装配；页面 manifest 不注入。 */
   broadcastWithCoordinator?: (input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; submission?: P2pkhBroadcastSubmission }) => Promise<CoordinatorValueResult<unknown>>;
-
-  chainFees?: Pick<import("@keymaster/contracts").ChainFeeReader, "get" | "subscribe">;
+  /**
+   * Worker 实际准备交易时的必需手续费端口：本次 prepare 开始构造计划时读取一次有效费率。
+   * Window 路径（存在 workerTransfer）不得使用它，Window 原样转交可选费率，不补默认值。
+   * 缺省/非法/未装配一律报错停止，不做 `?? 100` 降级；100 fallback 只在 chainFees 解析逻辑中保留。
+   */
   effectiveFeeRate?: (network: "main" | "test") => number;
   /**
    * 选币前的门禁：等待受保护输出登记恢复完成。
@@ -211,7 +202,11 @@ function protectionGate(deps: P2pkhServiceDeps): () => Promise<void> {
   };
 }
 
-export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhService; balance: BalanceBroadcaster } {
+export function createP2pkhService(deps: P2pkhServiceDeps): {
+  service: IP2pkhService;
+  balance: BalanceBroadcaster;
+  dataChanges: { subscribe(handler: () => void): () => void };
+} {
   if (!deps.storage) throw new Error("P2PKH central storage binding is required");
   const walletBinding = bindWalletIdentity(deps.walletState, deps.signal);
   const walletIdentity = walletBinding.identity;
@@ -225,8 +220,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
     if (isCurrentInstance()) { const identity=deps.walletState.snapshot().activeKeyIdentity; deps.messageBus.publish(type, identity && payload && typeof payload === "object" ? {...payload,networkIdentity:{bsvNetwork:identity.bsvNetwork,publicKeyHex:identity.publicKeyHex}} : payload); }
   }
   let activeIdentity: ReadyKeyIdentity | undefined = requireReadyKey(walletIdentity);
-  let cachedSettings: P2pkhGlobalSettings = { bsvNetwork: walletIdentity.bsvNetwork };
-  const settingsListeners = new Set<(s: P2pkhGlobalSettings) => void>();
   let balanceSnapshot = emptyGlobalBalanceSnapshot();
   const balanceListeners = new Set<(snapshot: GlobalBalanceSnapshot) => void>();
   let balanceRefreshGeneration = 0;
@@ -278,15 +271,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
       bsvNetwork: empty.bsvNetwork,
       balance: empty.balance,
     });
-  }
-
-  function setCachedSettingsAndEmit(next: P2pkhGlobalSettings): void {
-    if (sameGlobalSettings(cachedSettings, next)) return;
-    const bsvNetworkChanged = cachedSettings.bsvNetwork !== next.bsvNetwork;
-    cachedSettings = next;
-    publish(P2PKH_MSG.SETTINGS_CHANGED, next);
-    for (const l of [...settingsListeners]) l(next);
-    if (bsvNetworkChanged) void refreshBalanceSnapshot();
   }
 
   /** 详情页懒加载缓存：只存解析结果，不落盘；上限 32 条。 */
@@ -447,32 +431,19 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
     }
   });
 
-  const statusListeners = new Set<(s: P2pkhSyncStatus) => void>();
   const messageBusUnsubs: Array<() => void> = [];
   function trackSubscribe<TPayload>(type: string, handler: (p: TPayload) => void) {
     const off = deps.messageBus.subscribe<TPayload>(type, handler);
     messageBusUnsubs.push(off);
     return off;
   }
-  const removeFeeListener = deps.chainFees?.subscribe(() => {
-    for (const listener of settingsListeners) { try { listener(getCurrentSettings()); } catch { /* observer isolation */ } }
-  });
-  if (removeFeeListener) messageBusUnsubs.push(removeFeeListener);
-  let status: P2pkhSyncStatus = "idle";
-
-  function setStatus(next: P2pkhSyncStatus) {
-    if (!isCurrentInstance()) return;
-    status = next;
-    for (const l of statusListeners) l(next);
-    publish(P2PKH_MSG.SYNC, { status: next });
-  }
-
-  function getCurrentSettings(): P2pkhGlobalSettings {
+  function requireWorkerEffectiveFeeRate(): number {
     assertWalletSession();
-    const bsvNetwork = walletIdentity.bsvNetwork;
-    const fee = deps.chainFees?.get();
-    if (fee && fee.network !== bsvNetwork) throw new Error("P2PKH chain fee identity mismatch");
-    return { bsvNetwork, feeRateSatoshisPerKb: fee?.effectiveSatoshisPerKb ?? deps.effectiveFeeRate?.(bsvNetwork) ?? cachedSettings.feeRateSatoshisPerKb ?? 100, ...(fee ? { feePolicy: fee.policy } : {}) };
+    // Worker 必需端口：未装配、非法快照一律报错停止，不做 fallback 掩盖。
+    if (!deps.effectiveFeeRate) throw new Error("P2PKH fee rate capability is unavailable");
+    const rate = deps.effectiveFeeRate(walletIdentity.bsvNetwork);
+    if (!Number.isSafeInteger(rate) || rate < 1) throw new Error("P2PKH effective fee rate is invalid");
+    return rate;
   }
 
   function getVaultLifecycleSnapshot() {
@@ -532,7 +503,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
     const session = deps.walletState.snapshot();
     const generation = ++balanceRefreshGeneration;
     const active = getVaultLifecycleSnapshot().activePublicKeyHex?.trim().toLowerCase() ?? "";
-    const bsvNetwork = getCurrentSettings().bsvNetwork;
+    const bsvNetwork = walletIdentity.bsvNetwork;
     if (!active || deps.vault.status() !== "unlocked") {
       clearBalanceSnapshot();
       return;
@@ -549,7 +520,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
     // 异步读取期间可能发生 owner/settings 切换；旧结果不能覆盖新 owner。
     if (!isCurrentInstance() || generation !== balanceRefreshGeneration || !sameWalletSession(session, deps.walletState.snapshot())) return;
     const currentOwner = getVaultLifecycleSnapshot().activePublicKeyHex?.trim().toLowerCase() ?? "";
-    if (!currentOwner || currentOwner !== active || getCurrentSettings().bsvNetwork !== bsvNetwork || deps.vault.status() !== "unlocked") {
+    if (!currentOwner || currentOwner !== active || walletIdentity.bsvNetwork !== bsvNetwork || deps.vault.status() !== "unlocked") {
       return;
     }
     publishBalanceSnapshot({
@@ -685,7 +656,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
 
   function onVaultLocked() {
     abortTransferRetries();
-    setStatus("idle");
     disposeP2pkhStateRepository();
     activeIdentity = undefined;
     transactionDetailCache.clear();
@@ -733,18 +703,11 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
 
   const dataChangedListeners = new Set<() => void>();
   const coordinatorUnsubs: Array<() => void> = [];
-  function trackCoordinatorSubscribe(topic: "background.snapshot" | "session.state" | "asset.data-changed", handler: (event: any) => void): void {
+  function trackCoordinatorSubscribe(topic: "session.state" | "asset.data-changed", handler: (event: any) => void): void {
     if (!deps.coordinator || typeof deps.coordinator.subscribeTopic !== "function") return;
     coordinatorUnsubs.push(deps.coordinator.subscribeTopic(topic, handler));
   }
 
-  // Coordinator 的背景快照是跨 tab 设置同步入口；client 已把 p2pkhSettings
-  // 合并进 bootstrap cache，这里只读取事件，不发起额外 RPC。
-  trackCoordinatorSubscribe("background.snapshot", (event) => {
-    if (event?.type !== "background.snapshot.changed" || !event.p2pkhSettings) return;
-    const bsvNetwork = event.p2pkhSettings.bsvNetwork;
-    setCachedSettingsAndEmit({ ...cachedSettings, bsvNetwork });
-  });
   // session.state 先于 walletState 异步回调到达时，也要立即清掉旧 owner 的余额。
   trackCoordinatorSubscribe("session.state", (event) => {
     if (event?.type !== "session.state.changed") return;
@@ -774,18 +737,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
   void refreshBalanceSnapshot();
 
   const service: IP2pkhService = {
-    syncStatus() {
-      return status;
-    },
-    onSyncStatusChange(handler) {
-      statusListeners.add(handler);
-      return () => statusListeners.delete(handler);
-    },
-    onDataChanged(handler) {
-      dataChangedListeners.add(handler);
-      return () => dataChangedListeners.delete(handler);
-    },
-
     async getPaymentStatus(input) {
       assertWalletSession();
       if (Object.keys(input).some(key => key !== "paymentId")) throw new TypeError("Payment status accepts only paymentId");
@@ -828,14 +779,19 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
     async prepareTransfer(input) {
       assertWalletSession();
       assertP2pkhTransferRequestFields(input);
-      const request = { ...input, feeRateSatoshisPerKb: input.feeRateSatoshisPerKb ?? resolveP2pkhFeeRateSatoshisPerKb(getCurrentSettings()) };
-      const preparedInput = { ...request, ownerPublicKeyHex: walletIdentity.publicKeyHex, assetId: walletIdentity.bsvNetwork === "test" ? "bsvtest" as const : "bsv" as const };
-      let result: P2pkhTransferPreview;
+      // Window 只转交、不补默认值；Worker 在本次 prepare 开始构造计划时读取一次有效费率并冻结进预览。
+      // 显式费率按现有契约校验后使用；修改策略不改变已有预览，重新 prepare 才使用新策略。
       if (deps.workerTransfer) {
         const worker = await deps.workerTransfer.getService();
         assertWalletSession();
-        result = await worker.prepareTransfer(request) as P2pkhTransferPreview;
-      } else result = await transfer.prepare(preparedInput);
+        const result = await worker.prepareTransfer({ ...input }) as P2pkhTransferPreview;
+        assertWalletSession();
+        return result;
+      }
+      const feeRateSatoshisPerKb = input.feeRateSatoshisPerKb ?? requireWorkerEffectiveFeeRate();
+      if (!Number.isSafeInteger(feeRateSatoshisPerKb) || feeRateSatoshisPerKb < 1) throw new Error("P2PKH effective fee rate is invalid");
+      const preparedInput = { ...input, feeRateSatoshisPerKb, ownerPublicKeyHex: walletIdentity.publicKeyHex, assetId: walletIdentity.bsvNetwork === "test" ? "bsvtest" as const : "bsv" as const };
+      const result: P2pkhTransferPreview = await transfer.prepare(preparedInput);
       assertWalletSession();
       return result;
     },
@@ -886,29 +842,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
       return transfer.submitPrepared(previewId, { signal: controller.signal }).finally(() => {
         transferRetryControllers.delete(controller);
       });
-    },
-
-    getGlobalSettings() { return getCurrentSettings(); },
-    onGlobalSettingsChange(handler) {
-      settingsListeners.add(handler);
-      return () => settingsListeners.delete(handler);
-    },
-    async applyGlobalSettings(settings) {
-      assertWalletSession();
-      if (Object.keys(settings).some(key => key !== "feePolicy")) throw new TypeError("P2PKH settings only accept feePolicy");
-      const update = structuredClone(settings);
-      if (deps.coordinator?.p2pkhSettingsUpdate) {
-        const result = await deps.coordinator.p2pkhSettingsUpdate({
-          bsvNetwork: walletIdentity.bsvNetwork,
-          ...(update.feePolicy === undefined ? {} : { feePolicy: update.feePolicy })
-        });
-        if (result.status !== "accepted" && result.status !== "ok") {
-          const detail = "message" in result && typeof result.message === "string" ? result.message : "";
-          throw new Error(`保存手续费率失败（${result.status}）${detail ? `：${detail}` : ""}`);
-        }
-      }
-      assertWalletSession();
-      setCachedSettingsAndEmit({ ...cachedSettings, ...update, bsvNetwork: walletIdentity.bsvNetwork });
     },
 
     async onKeyImported() {
@@ -973,7 +906,17 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
         // swallow
       }
       transactionDetailCache.clear();
+      dataChangedListeners.clear();
     }
   };
-  return { service, balance: balanceBroadcaster };
+  return {
+    service,
+    balance: balanceBroadcaster,
+    dataChanges: {
+      subscribe(handler: () => void) {
+        dataChangedListeners.add(handler);
+        return () => dataChangedListeners.delete(handler);
+      },
+    },
+  };
 }

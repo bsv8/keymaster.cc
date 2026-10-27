@@ -158,7 +158,7 @@ const COORDINATOR_REQUEST_KINDS = new Set<string>([
   "window-p2p.executor.acquire", "window-p2p.executor.release", "window-p2p.executor.spike.transfer",
   "window-p2p.executor.identity.sign-noise", "window-p2p.executor.identity.sign-peer-record",
   "sat.operation", "channel.operation", "channel.cancel", "contacts.presence.snapshot",
-  "p2pkh.settings.update", "p2pkh.provider-config.get", "p2pkh.provider-config.update",
+  "chain.fee-policy.update", "p2pkh.provider-config.get", "p2pkh.provider-config.update",
   "p2pkh.utxos.get", "p2pkh.utxos.refresh",
   "p2pkh.broadcast",
   "p2pkh.transfer.prepare", "p2pkh.transfer.submit", "p2pkh.conclusion", "p2pkh.payment.status",
@@ -495,7 +495,7 @@ type CoordinatorRpcVoidRequest =
       | "msfile.session.abort"
       | "window-p2p.executor.release"
       | "channel.cancel"
-      | "p2pkh.settings.update"
+      | "chain.fee-policy.update"
       | "p2pkh.provider-config.update"
   }>
   | (Extract<CoordinatorRpcRequest, { kind: "storage.control" }> & {
@@ -1593,17 +1593,7 @@ function parseCoordinatorRequest(value: unknown): CoordinatorRpcRequest {
     case "background.cancel-by-key": return { kind, networkIdentity: validateNetworkIdentity(request.networkIdentity), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "background.settings.update": return { kind, settings: parseBackgroundSettings(request.settings), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "autolock.settings.update": return { kind, settings: parseAutoLockSettings(request.settings), expectedSessionEpoch: epoch("expectedSessionEpoch") };
-    case "p2pkh.settings.update": {
-      const settings = expectRecord(request.settings, kind + ".settings");
-      return {
-        kind,
-        settings: {
-          bsvNetwork: enumValue(settings.bsvNetwork, ["main", "test"] as const, kind + ".settings.bsvNetwork"),
-          ...(settings.feePolicy === undefined ? {} : { feePolicy: parseChainFeePolicy(settings.feePolicy) })
-        },
-        expectedSessionEpoch: epoch("expectedSessionEpoch")
-      };
-    }
+    case "chain.fee-policy.update": return { kind, policy: parseChainFeePolicy(request.policy), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "p2pkh.provider-config.get": return { kind, providerId: text(request.providerId, kind + ".providerId", 256), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "p2pkh.provider-config.update": return { kind, providerId: text(request.providerId, kind + ".providerId", 256), config: parseJsonRecord(request.config, kind + ".config"), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "p2pkh.utxos.get":
@@ -1878,27 +1868,8 @@ function parseCoordinatorBootstrapSnapshot(value: unknown, field: string): Coord
       return snapshot.coordinatorWorkerUnits.map((unit, index) => parseWorkerUnitSnapshot(unit, `${field}.coordinatorWorkerUnits[${index}]`));
     })();
   const workerRevision = optionalBoundedNumber(snapshot.coordinatorWorkerUnitSnapshotRevision, field + ".coordinatorWorkerUnitSnapshotRevision");
-  const p2pkhSettings = snapshot.p2pkhSettings === undefined
-    ? undefined
-    : (() => {
-      const settings = expectRecord(snapshot.p2pkhSettings, field + ".p2pkhSettings");
-      return { bsvNetwork: enumValue(settings.bsvNetwork, ["main", "test"] as const, field + ".p2pkhSettings.bsvNetwork") };
-    })();
   const walletGeneration = optionalText(snapshot.walletGeneration, field + ".walletGeneration", 256);
-  const storageIoOwnerPeer = snapshot.storageIoOwnerPeer === undefined
-    ? undefined
-    : (() => {
-      const owner = expectRecord(snapshot.storageIoOwnerPeer, field + ".storageIoOwnerPeer");
-      const binding = expectRecord(owner.binding, field + ".storageIoOwnerPeer.binding");
-      return {
-        peerId: text(owner.peerId, field + ".storageIoOwnerPeer.peerId", 256),
-        binding: {
-          runtimeInstanceId: text(binding.runtimeInstanceId, field + ".storageIoOwnerPeer.binding.runtimeInstanceId", 256),
-          connectionId: text(binding.connectionId, field + ".storageIoOwnerPeer.binding.connectionId", 256),
-        },
-        handoffRevision: boundedNumber(owner.handoffRevision, field + ".storageIoOwnerPeer.handoffRevision"),
-      };
-    })();
+  const storageIoOwnerPeer = parseStorageIoOwnerPeer(snapshot.storageIoOwnerPeer, field + ".storageIoOwnerPeer");
   return {
     ...(snapshot.lockCleanup === undefined ? {} : { lockCleanup: parseLockCleanup(snapshot.lockCleanup) }),
     ...(snapshot.activeKeyIdentity === undefined ? {} : { activeKeyIdentity: parsePublicKeyIdentity(snapshot.activeKeyIdentity) }),
@@ -1920,7 +1891,6 @@ function parseCoordinatorBootstrapSnapshot(value: unknown, field: string): Coord
       const autoLockTimeoutMs = parseAutoLockTimeoutMsField(snapshot.autoLockTimeoutMs, field + ".autoLockTimeoutMs");
       return autoLockTimeoutMs === undefined ? {} : { autoLockTimeoutMs };
     })(),
-    ...(p2pkhSettings === undefined ? {} : { p2pkhSettings }),
     ...(walletGeneration === undefined ? {} : { walletGeneration }),
     ...(storageIoOwnerPeer === undefined ? {} : { storageIoOwnerPeer }),
   };
@@ -3443,7 +3413,7 @@ function isVoidCoordinatorRequest(request: CoordinatorRpcRequest): boolean {
     case "msfile.session.abort":
     case "window-p2p.executor.release":
     case "channel.cancel":
-    case "p2pkh.settings.update":
+    case "chain.fee-policy.update":
     case "p2pkh.provider-config.update":
       return true;
     case "storage.owner.data":
@@ -3550,11 +3520,26 @@ function parseAuthorityRecovery(value: unknown, field: string): CoordinatorAutho
   };
 }
 
+function parseStorageIoOwnerPeer(value: unknown, field: string): CoordinatorBootstrapSnapshot["storageIoOwnerPeer"] {
+  if (value === undefined) return undefined;
+  const owner = expectRecord(value, field);
+  const binding = expectRecord(owner.binding, field + ".binding");
+  return {
+    peerId: text(owner.peerId, field + ".peerId", 256),
+    binding: {
+      runtimeInstanceId: text(binding.runtimeInstanceId, field + ".binding.runtimeInstanceId", 256),
+      connectionId: text(binding.connectionId, field + ".binding.connectionId", 256),
+    },
+    handoffRevision: boundedNumber(owner.handoffRevision, field + ".handoffRevision"),
+  };
+}
+
 function parseSessionStateEvent(value: unknown): SessionStateEvent {
   const event = topicEnvelope(value, "session.state", "session.state.changed");
   const authorityRecovery = event.authorityRecovery === undefined ? undefined : parseAuthorityRecovery(event.authorityRecovery, "event.authorityRecovery");
   const autoLockTimeoutMs = parseAutoLockTimeoutMsField(event.autoLockTimeoutMs, "event.autoLockTimeoutMs");
   const walletGeneration = optionalText(event.walletGeneration, "event.walletGeneration", 256);
+  const storageIoOwnerPeer = parseStorageIoOwnerPeer(event.storageIoOwnerPeer, "event.storageIoOwnerPeer");
   return {
     topic: "session.state",
     type: "session.state.changed",
@@ -3564,11 +3549,12 @@ function parseSessionStateEvent(value: unknown): SessionStateEvent {
     sessionEpoch: text(event.sessionEpoch, "event.sessionEpoch", 256),
     runGeneration: text(event.runGeneration, "event.runGeneration", 256),
     ...(walletGeneration === undefined ? {} : { walletGeneration }),
-    cause: enumValue(event.cause, ["bootstrap", "initialize", "unlock", "lock", "change-password", "rename-key", "reset-wallet", "autolock-settings"] as const, "event.cause"),
+    cause: enumValue(event.cause, ["bootstrap", "initialize", "unlock", "lock", "change-password", "rename-key", "reset-wallet", "autolock-settings", "storage-owner"] as const, "event.cause"),
     vaultStatus: enumValue(event.vaultStatus, ["booting", "uninitialized", "locked", "unlocked", "fatal"] as const, "event.vaultStatus"),
     activePublicKeyHex: nullableText(event.activePublicKeyHex, "event.activePublicKeyHex", 256),
     ...(autoLockTimeoutMs === undefined ? {} : { autoLockTimeoutMs }),
     ...(authorityRecovery === undefined ? {} : { authorityRecovery }),
+    ...(storageIoOwnerPeer === undefined ? {} : { storageIoOwnerPeer }),
   };
 }
 
@@ -3623,12 +3609,6 @@ function parseBackgroundSnapshotEvent(value: unknown): BackgroundSnapshotEvent {
   const event = topicEnvelope(value, "background.snapshot", "background.snapshot.changed");
   if (!Array.isArray(event.snapshots) || event.snapshots.length > 4_096) throw new TypeError("Coordinator background snapshots are invalid");
   const scheduleSettings = event.scheduleSettings === undefined ? undefined : parseBackgroundSettings(event.scheduleSettings);
-  const p2pkhSettings = event.p2pkhSettings === undefined
-    ? undefined
-    : (() => {
-      const settings = expectRecord(event.p2pkhSettings, "event.p2pkhSettings");
-      return { bsvNetwork: enumValue(settings.bsvNetwork, ["main", "test"] as const, "event.p2pkhSettings.bsvNetwork") };
-    })();
   return {
     topic: "background.snapshot",
     type: "background.snapshot.changed",
@@ -3636,7 +3616,6 @@ function parseBackgroundSnapshotEvent(value: unknown): BackgroundSnapshotEvent {
     backgroundSnapshotRevision: boundedNumber(event.backgroundSnapshotRevision, "event.backgroundSnapshotRevision"),
     snapshots: event.snapshots.map((snapshot, index) => parseTaskSnapshot(snapshot, `event.snapshots[${index}]`)),
     ...(scheduleSettings === undefined ? {} : { scheduleSettings }),
-    ...(p2pkhSettings === undefined ? {} : { p2pkhSettings }),
   };
 }
 

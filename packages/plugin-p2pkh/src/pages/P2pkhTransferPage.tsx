@@ -2,9 +2,9 @@ import { useP2pkhResources } from "../P2pkhResourceContext.js";
 import { P2pkhTransferWidget } from "../widgets/P2pkhTransferWidget.js";
 import { useEffect, useMemo, useState } from "react";
 import type {
-  VaultLifecycleSnapshot,
   BsvNetwork,
   Contact,
+  KeyIdentity,
   P2pkhAddressCodec,
   TransferRecipient
 } from "@keymaster/contracts";
@@ -52,14 +52,14 @@ interface UrlRecipientState {
   /** 地址解析结果，用于公钥与地址的一致性核对。 */
   parsedAddress?: { network: BsvNetwork; hash160Hex: string };
   /** 阻断页面时向用户展示的原因。 */
-  error?: "invalidPublicKey" | "invalidAddress" | "testnetDisabled" | "conflict";
+  error?: "invalidPublicKey" | "invalidAddress" | "networkMismatch" | "conflict";
 }
 
 interface ManualResolution {
   /** 手工输入解析出的收款方候选。 */
   candidate?: RecipientCandidate;
   /** 需要阻断继续操作的错误文案 key。 */
-  error?: "invalidAddress" | "testnetDisabled";
+  error?: "invalidAddress" | "networkMismatch";
   /** 是否应继续作为通讯录搜索文本处理。 */
   searching: boolean;
 }
@@ -67,10 +67,6 @@ interface ManualResolution {
 function normalizePublicKey(value: string): string | undefined {
   const normalized = value.trim().toLowerCase();
   return COMPRESSED_PUBLIC_KEY.test(normalized) ? normalized : undefined;
-}
-
-function networkFromParam(value: string | null): BsvNetwork {
-  return value === "test" || value === "testnet" ? "test" : "main";
 }
 
 function isAddressLike(value: string): boolean {
@@ -181,13 +177,13 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
   const reader = useP2pkhResources();
   const ContactPicker = useOptionalPluginCapability(CONTACTS_PICKER_CAPABILITY);
   const codec = useOptionalPluginCapability(P2PKH_ADDRESS_CODEC_CAPABILITY);
-  const activeState = useResourceViewSelector<VaultLifecycleSnapshot, VaultLifecycleSnapshot>(
+  const walletContext = useResourceViewSelector<{ identity?: KeyIdentity; address?: string }, { identity?: KeyIdentity; address?: string }>(
     reader,
-    "p2pkh.transfer-active",
+    "p2pkh.wallet-context",
     [],
-    (snapshot) => snapshot.data ?? { status: "booting", sessionEpoch: "boot", runGeneration: "boot", vaultLifecycleRevision: 0 }
+    (snapshot) => snapshot.data ?? {}
   );
-  const bsvNetwork = activeState.activeKeyIdentity?.bsvNetwork;
+  const bsvNetwork = walletContext.identity?.bsvNetwork;
   const contacts = useResourceViewSelector<Contact[], Contact[]>(
     reader,
     "p2pkh.transfer-contacts",
@@ -223,7 +219,7 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
       const parsedAddress = codec.parseAddress(address);
       if (!parsedAddress) return { kind: "invalid", error: "invalidAddress" };
       if (parsedAddress.network !== bsvNetwork) {
-        return { kind: "invalid", error: "testnetDisabled" };
+        return { kind: "invalid", error: "networkMismatch" };
       }
       if (publicKeyHex) {
         try {
@@ -242,7 +238,6 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
       };
     }
 
-    const requestedNetwork = networkFromParam(urlParams.get("network"));
     return {
       kind: "public-key",
       publicKeyHex,
@@ -279,7 +274,7 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
     if (codec) {
       const parsedAddress = codec.parseAddress(value);
       if (parsedAddress) {
-        if (parsedAddress.network !== bsvNetwork) return { error: "testnetDisabled", searching: false };
+        if (parsedAddress.network !== bsvNetwork) return { error: "networkMismatch", searching: false };
         return {
           candidate: makeAddressCandidate(value, parsedAddress.network, parsedAddress, contacts, codec),
           searching: false
@@ -341,7 +336,7 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
       : t("p2pkh.transferPage.page.recipient.mainnet", { defaultValue: "主网" });
   }
 
-  if (activeState.status !== "unlocked" || !activeState.activePublicKeyHex || !bsvNetwork) {
+  if (!bsvNetwork || !walletContext.identity) {
     return (
       <div className="transfer-page">
         <PageHeader title={t("p2pkh.transferPage.route.title", { defaultValue: "转账" })} />
@@ -356,8 +351,8 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
   if (urlRecipient.kind === "invalid") {
     const errorText = urlRecipient.error === "conflict"
       ? t("p2pkh.transferPage.page.recipient.conflict", { defaultValue: "公钥与地址不一致，已阻断转账。" })
-      : urlRecipient.error === "testnetDisabled"
-        ? t("p2pkh.transferPage.page.recipient.testnetDisabled", { defaultValue: "收款地址的网络与当前身份不一致。" })
+      : urlRecipient.error === "networkMismatch"
+        ? t("p2pkh.transferPage.page.recipient.networkMismatch", { defaultValue: "收款地址的网络与当前身份不一致。" })
         : urlRecipient.error === "invalidPublicKey"
           ? t("p2pkh.transferPage.page.recipient.invalidPublicKey", { defaultValue: "公钥必须是压缩格式的 33 字节 hex 公钥。" })
           : t("p2pkh.transferPage.page.recipient.invalidAddress", { defaultValue: "这不是有效的 P2PKH 地址，请从对应资产入口转账。" });
@@ -456,8 +451,8 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
 
         {candidateError ? (
           <p className="transfer-page__error">
-            {candidateError === "testnetDisabled"
-              ? t("p2pkh.transferPage.page.recipient.testnetDisabled", { defaultValue: "收款地址的网络与当前身份不一致。" })
+            {candidateError === "networkMismatch"
+              ? t("p2pkh.transferPage.page.recipient.networkMismatch", { defaultValue: "收款地址的网络与当前身份不一致。" })
               : t("p2pkh.transferPage.page.recipient.invalidAddress", { defaultValue: "这不是有效的 P2PKH 地址，请从对应资产入口转账。" })}
           </p>
         ) : null}

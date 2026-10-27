@@ -1971,6 +1971,11 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           },
           {
             "kind": "local",
+            "id": "chain-fee.policy-writer",
+            "version": "1"
+          },
+          {
+            "kind": "local",
             "id": "woc.service",
             "version": "1"
           },
@@ -2112,11 +2117,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "kind": "local",
             "id": "p2pkh.address-codec",
-            "version": "1"
-          },
-          {
-            "kind": "local",
-            "id": "p2pkh.settings-reader",
             "version": "1"
           },
           {
@@ -2300,6 +2300,15 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             },
             "sourceRuntime": "window-main",
             "reason": "消费全局有效手续费率"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "chain-fee.policy-writer",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "设置页更新当前钱包网络的手续费策略"
           },
           {
             "capability": {

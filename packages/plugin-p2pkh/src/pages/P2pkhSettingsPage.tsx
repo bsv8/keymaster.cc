@@ -2,32 +2,29 @@ import { useEffect, useState } from "react";
 import { Button, TextInput } from "@keymaster/ui";
 import { useOptionalPluginCapability } from "webloom-framework/react";
 import { AppLink, usePluginI18n, useOptionalResourceSelector } from "@keymaster/runtime";
-import type { ChainFeePolicy, ChainFeeSnapshot } from "@keymaster/contracts";
-import { P2PKH_CAPABILITY, type P2pkhGlobalSettings, type P2pkhService } from "../p2pkhContracts.js";
+import { CHAIN_FEE_POLICY_WRITER_CAPABILITY, type ChainFeePolicy, type ChainFeePolicyWriter, type ChainFeeSnapshot } from "@keymaster/contracts";
 import { useP2pkhResources } from "../P2pkhResourceContext.js";
 
 /** 当前钱包的费率设置；只保存策略，不选择网络。 */
 export function P2pkhSettingsPage() {
-  const service = useOptionalPluginCapability(P2PKH_CAPABILITY);
+  const writer = useOptionalPluginCapability(CHAIN_FEE_POLICY_WRITER_CAPABILITY);
   const { t } = usePluginI18n();
-  return service ? <P2pkhSettingsEditor service={service} /> : <p>{t("p2pkh.settings.unavailable")}</p>;
+  return writer ? <P2pkhSettingsEditor writer={writer} /> : <p>{t("p2pkh.settings.unavailable")}</p>;
 }
-function P2pkhSettingsEditor({ service }: { service: P2pkhService }) {
+function P2pkhSettingsEditor({ writer }: { writer: ChainFeePolicyWriter }) {
   const reader = useP2pkhResources();
   const { t } = usePluginI18n();
-  const [initialSettings] = useState(() => service.getGlobalSettings());
-  const settings = useOptionalResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(reader, "p2pkh.settings", [], snapshot => snapshot.data ?? initialSettings, initialSettings);
   const fee = useOptionalResourceSelector<ChainFeeSnapshot, ChainFeeSnapshot | undefined>(reader, "p2pkh.chain-fee", [], snapshot => snapshot.data, undefined);
   const [draft, setDraft] = useState(() => fee ? String(fee.effectiveSatoshisPerKb) : "");
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
-  useEffect(() => { setDirty(false); setError(undefined); }, [settings.bsvNetwork]);
+  useEffect(() => { setDirty(false); setError(undefined); }, [fee?.network]);
   useEffect(() => { if (fee && !dirty) setDraft(String(fee.effectiveSatoshisPerKb)); }, [fee?.effectiveSatoshisPerKb, dirty]);
   async function save(policy: ChainFeePolicy) {
-    if (!service || busy) return;
+    if (busy) return;
     setBusy(true); setError(undefined);
-    try { await service.applyGlobalSettings({ feePolicy: policy }); setDirty(false); }
+    try { await writer.setPolicy(policy); setDirty(false); }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setBusy(false); }
   }
@@ -40,7 +37,7 @@ function P2pkhSettingsEditor({ service }: { service: P2pkhService }) {
   }
   if (!fee) return <p>{t("p2pkh.settings.feePending")}</p>;
   return <div className="p2pkh-settings">
-    <p>{settings.bsvNetwork === "test" ? "Testnet" : "Mainnet"}</p>
+    <p>{fee.network === "test" ? "Testnet" : "Mainnet"}</p>
     <section className="p2pkh-settings__fee-rates" aria-labelledby="p2pkh-fee-rates-title">
       <h3 id="p2pkh-fee-rates-title">{t("p2pkh.settings.feeRates")}</h3>
       <p>{t("p2pkh.settings.feeRatesHint")}</p>

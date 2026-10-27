@@ -198,9 +198,9 @@ export type ProtocolErrorCode =
   | "active_key_unavailable"
   | "decrypt_failed"
   /**
-   * 请求了当前资产但 Keymaster 设置里未开启（施工单 2026-09-18 001）。
-   * 例如 `p2pkh.transfer` / `feepool.*` 传 `assetId: "bsv-testnet"` 而
-   * P2PKH 设置里没有打开 testnet。accept 阶段 fail-fast，不进确认流。
+   * 请求资产与当前钱包身份绑定的网络不一致。
+   * 例如 `p2pkh.transfer` / `feepool.*` 请求 testnet 资产而当前身份绑定 mainnet。
+   * accept 阶段 fail-fast，不进确认流。
    */
   | "asset_not_enabled"
   /** Connect v1 明确排除的方法族（新费用池签名等）。 */
@@ -561,9 +561,9 @@ export interface PaymentChannelRegisterResult { channelId: string; }
  * 设计缘由（施工单 2026-09-18 001 多资产硬切换）：
  *   - 公开命名固定 `bsv-mainnet` / `bsv-testnet`，不暴露 p2pkh 内部
  *     的 `bsv` / `bsvtest`；
- *   - `bsv-testnet` 只属于测试网身份，
+ *   - `bsv-testnet` 只与绑定测试网的钱包身份匹配，
  *     否则 accept 阶段 fail-fast `asset_not_enabled`；
- *   - 缺省（不传 assetId）等同 `bsv-mainnet`，旧调用方零改动。
+ *   - 不传 `assetId` 时使用绑定钱包身份对应的网络。
  */
 export type P2pkhTransferAssetId = "bsv-mainnet" | "bsv-testnet";
 
@@ -578,11 +578,10 @@ export type P2pkhTransferAssetId = "bsv-mainnet" | "bsv-testnet";
  *     按方法语义生成；不允许 site 伪装转账为登录确认。
  *   - `aud` 不接受：connect popup 已天然拿到 `event.origin` 真值，origin
  *     等价检查由 service 自动执行。
- *   - `feeRateSatoshisPerKb` 可选；缺省时由 service 走一个保守默认值。
+ *   - `feeRateSatoshisPerKb` 可选；缺省时由 P2PKH service 按当前钱包网络的有效费率策略决定。
  *   - amountSatoshis 是整数 satoshis，不接受小数；feeSatoshis 在 result 里
  *     回。
- *   - `assetId` 可选；缺省 `bsv-mainnet`。`bsv-testnet` 需要 Keymaster
- *     当前身份属于测试网。
+ *   - `assetId` 可选；缺省使用当前钱包身份的网络。显式网络必须与该身份匹配。
  *   - `walletPublicKeyHex` 是**强制**输入字段（施工单 2026-06-28 002 硬切换）：
  *     资金 owner 取自 session 绑定 owner，**不**读取全局 active key。
  *     旧 session 失效时直接 fail-fast，不再静默 fallback 到 active key。
@@ -1090,10 +1089,10 @@ export type ProtocolFailureReason =
   | "cross_origin_operation"
   | "request_timeout"
   /**
-   * 请求资产在 Keymaster 设置里未开启（施工单 2026-09-18 001）。
+   * 请求资产与当前钱包身份绑定的网络不一致。
    *
-   * 触发：p2pkh.transfer / feepool.* 传 `assetId: "bsv-testnet"` 但
-   * P2PKH 设置里没有打开 testnet。对外稳定 code = `asset_not_enabled`。
+   * 触发：p2pkh.transfer / feepool.* 请求 testnet 资产但当前身份绑定 mainnet。
+   * 对外稳定 code = `asset_not_enabled`。
    */
   | "asset_not_enabled"
   /**

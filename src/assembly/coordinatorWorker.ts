@@ -17,6 +17,7 @@ import { createVaultWorkerRuntime } from "@keymaster/plugin-vault/worker";
 import { createStorageWorkerPlugin } from "@keymaster/platform-storage/worker";
 import { createWindowP2pWorkerPlugin } from "@keymaster/plugin-window-p2p/worker";
 import { createSatSubscriptionWorkerPlugin, createSatWorkerLifecycle, type SatWorkerRuntimeState } from "@keymaster/plugin-sat-subscription/worker";
+import type { SatP2pkhService } from "@keymaster/plugin-sat-subscription";
 import { createMsfileWorkerPlugin, createMsFileWorkerLifecycle, productArbitrationServices } from "@keymaster/plugin-msfile/worker";
 import { createP2pkhWorkerRuntime, createP2pkhWorkerOperations } from "@keymaster/plugin-p2pkh/worker";
 import { createContactsWorkerRuntime } from "@keymaster/plugin-contacts/worker";
@@ -208,7 +209,6 @@ interface CoordinatorRuntimeSettings {
   scheduleSettings: CoordinatorBackgroundSyncSettings;
   autoLockTimeoutMs: number;
   p2pkhProviderConfigs: Record<string, Record<string, unknown>>;
-  p2pkhSettings: { bsvNetwork: "main" | "test" };
 }
 /** 桶级 Coordinator snapshot 保存同步间隔、自动锁与按网络的费率策略；WoC Provider 配置归 owner。 */
 type CoordinatorSettingsSnapshot = Pick<CoordinatorRuntimeSettings, "scheduleSettings" | "autoLockTimeoutMs" | "chainFeePolicies">;
@@ -218,7 +218,6 @@ function defaultCoordinatorRuntimeSettings(): CoordinatorRuntimeSettings {
     scheduleSettings: { taskIntervals: {} },
     autoLockTimeoutMs: AUTO_LOCK_DEFAULT_TIMEOUT_MS,
     p2pkhProviderConfigs: {},
-    p2pkhSettings: { bsvNetwork: "main" },
   };
 }
 const coordinatorMeta: CoordinatorRuntimeSettings = defaultCoordinatorRuntimeSettings();
@@ -293,7 +292,7 @@ const vaultWalletWorker = createVaultWalletWorker({
   session: () => ({ walletGeneration: coordinatorState.walletGeneration, sessionEpoch: coordinatorState.sessionEpoch, runGeneration: coordinatorState.runGeneration }),
   commit: patch => Object.assign(coordinatorState, patch),
   createStore: () => storageWorkerRoot.activity.wrap(createIndexedDbWalletStore()), bootstrapStorage: createVaultBootstrapStorage,
-  unavailable: storageUnavailableError, network: bsvNetwork => { coordinatorMeta.p2pkhSettings = { bsvNetwork }; },
+  unavailable: storageUnavailableError,
   transitions: { revokeGrants: revokeWalletGrants, establishSession: establishWalletSession, adoptUnlockedKey: input => vaultWorkerOperations.adoptUnlockedKey(input) },
   clearAppRoot: clearThirdPartyAppRoot,
   binding: {
@@ -396,7 +395,7 @@ const vaultWorkerOperations = createVaultWorkerOperations({
   keys: vaultWorkerKeys, wallet: vaultWalletWorker,
   session: () => ({ vaultStatus: coordinatorState.vaultStatus, sessionEpoch: coordinatorState.sessionEpoch, runGeneration: coordinatorState.runGeneration, walletGeneration: coordinatorState.walletGeneration, activePublicKeyHex: coordinatorState.activePublicKeyHex }),
   commit: patch => Object.assign(coordinatorState, patch), cleanupPending: () => walletLockBarrier.snapshot(), peerRevoked: peerId => revokedCoordinatorPeerIds.has(peerId), newEpoch: generateEpoch,
-  network: bsvNetwork => { coordinatorMeta.p2pkhSettings = { bsvNetwork }; }, publishWallet: () => workerWalletState.publish(), publishSession: cause => publishSessionState(cause), clearActivationCredential: () => { testHarnessActivationSecret = undefined; },
+  publishWallet: () => workerWalletState.publish(), publishSession: cause => publishSessionState(cause), clearActivationCredential: () => { testHarnessActivationSecret = undefined; },
   storage: {
     token: () => storageWorkerRoot.token, hasRoot: () => Boolean(storageWorkerRoot.root), payments: () => workerStorageClients.platformFiles("vault", "payments"),
     revokeGrants: () => storageWorkerRequests.revokeStorageSessionGrants(), invalidateClients: () => workerStorageClients.invalidateAll(), unavailable: storageUnavailableError, failure: markStorageIoFailure, errorResponse: storageErrorResponse, changed: () => emitStorageState(), revokeBindingAndDrain: reason => revokeStorageBindingAndDrain(reason), discardBinding: () => discardCurrentPlatformStorageBinding()
@@ -504,7 +503,6 @@ function replaceCoordinatorMeta(next: CoordinatorRuntimeSettings): void {
   coordinatorMeta.autoLockTimeoutMs = normalizeAutoLockTimeoutMs(
     (next as Partial<CoordinatorRuntimeSettings>).autoLockTimeoutMs
   );
-  coordinatorMeta.p2pkhSettings ??= { bsvNetwork: "main" };
   coordinatorMeta.p2pkhProviderConfigs ??= {};
 }
 
@@ -653,25 +651,62 @@ let lockRevocationPending = false;
 let globalLockRunning: Promise<void> | undefined;
 let walletRevocationCleanup: Promise<void>[] | undefined;
 
+/**
+ * Session 唯一投影：三个出口共用同一事实来源。
+ * 只读权威状态，不修改状态、不推进 revision；提交/发布时才推进通知 revision。
+ * 缺省字段表示“当前不存在”，客户端继续清除旧值。
+ * storage owner 切换不改变钱包身份和 session epoch。
+ */
+function readSessionProjection(): {
+  vaultStatus: typeof coordinatorState.vaultStatus;
+  lockCleanup: ReturnType<typeof walletLockBarrier.snapshot>;
+  activePublicKeyHex?: string;
+  activeKeyIdentity?: NonNullable<ReturnType<typeof vaultWorkerKeys.coordinatorActiveKeySummary>>;
+  runGeneration: string;
+  walletGeneration?: string;
+  autoLockTimeoutMs: number;
+  authorityRecovery?: typeof coordinatorAuthority.coordinatorAuthorityRecovery;
+  storageIoOwnerPeer?: NonNullable<CoordinatorBootstrapSnapshot["storageIoOwnerPeer"]>;
+} {
+  const unlocked = coordinatorState.vaultStatus === "unlocked";
+  const activePublicKeyHex = unlocked ? coordinatorState.activePublicKeyHex : undefined;
+  const storageIoOwnerPeer = coordinatorStorageIoOwnerPeerSnapshot();
+  const activeKeyIdentity = unlocked ? vaultWorkerKeys.coordinatorActiveKeySummary() ?? undefined : undefined;
+  return {
+    vaultStatus: coordinatorState.vaultStatus,
+    lockCleanup: walletLockBarrier.snapshot(),
+    ...(activePublicKeyHex ? { activePublicKeyHex } : {}),
+    ...(activeKeyIdentity ? { activeKeyIdentity } : {}),
+    runGeneration: coordinatorState.runGeneration,
+    ...(coordinatorState.walletGeneration ? { walletGeneration: coordinatorState.walletGeneration } : {}),
+    autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs ?? AUTO_LOCK_DEFAULT_TIMEOUT_MS,
+    ...(coordinatorAuthority.coordinatorAuthorityRecovery ? { authorityRecovery: coordinatorAuthority.coordinatorAuthorityRecovery } : {}),
+    ...(storageIoOwnerPeer ? { storageIoOwnerPeer } : {}),
+  };
+}
+
 function publishSessionState(cause: SessionStateEvent["cause"], deferCleanup = false): void {
   // 服务目录与 owner/session 可见性共享同一状态提交点。锁定、解锁、换
   // Key、Storage Root 重绑都会改变 identity；先同步撤权/旋转 exposure，
   // 再广播业务状态，避免页面看到已 unlocked 但仍持有旧 service proxy。
   if (!deferCleanup) reconcileCoordinatorSessionExposures();
+  const projection = readSessionProjection();
   const state: SessionStateEvent = {
     topic: "session.state",
     type: "session.state.changed",
     cause,
     sessionRevision: 0,
     sessionEpoch: coordinatorState.sessionEpoch,
-    vaultStatus: coordinatorState.vaultStatus,
-    lockCleanup: walletLockBarrier.snapshot(),
-    activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex ?? null : null,
-    ...(coordinatorState.vaultStatus === "unlocked" ? { activeKeyIdentity: vaultWorkerKeys.coordinatorActiveKeySummary() } : {}),
-    runGeneration: coordinatorState.runGeneration,
-    ...(coordinatorState.walletGeneration ? { walletGeneration: coordinatorState.walletGeneration } : {}),
-    autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs ?? AUTO_LOCK_DEFAULT_TIMEOUT_MS,
-    ...(coordinatorAuthority.coordinatorAuthorityRecovery ? { authorityRecovery: coordinatorAuthority.coordinatorAuthorityRecovery } : {}),
+    vaultStatus: projection.vaultStatus,
+    lockCleanup: projection.lockCleanup,
+    activePublicKeyHex: projection.activePublicKeyHex ?? null,
+    ...(projection.activeKeyIdentity ? { activeKeyIdentity: projection.activeKeyIdentity } : {}),
+    runGeneration: projection.runGeneration,
+    ...(projection.walletGeneration ? { walletGeneration: projection.walletGeneration } : {}),
+    autoLockTimeoutMs: projection.autoLockTimeoutMs,
+    ...(projection.authorityRecovery ? { authorityRecovery: projection.authorityRecovery } : {}),
+    // owner 投影与 session 同一提交点推送：Window 只读缓存据此判断真实 owner。
+    ...(projection.storageIoOwnerPeer ? { storageIoOwnerPeer: projection.storageIoOwnerPeer } : {}),
   };
   publishTopicEvent("session.state", state);
   if (!deferCleanup) { workerWalletState.publish(); publishCoordinatorContactsPresence(); }
@@ -850,7 +885,8 @@ const msfileFundingRuntime = createWorkerFundingRuntime({
     return response.operationResult as P2pkhUtxoSnapshotResult;
   },
   ensureResources: ensureWorkerP2pkhResources,
-  readP2pkhSettings: async () => currentNetworkFeeSettings(),
+  walletIdentity: () => vaultWorkerKeys.requireCoordinatorNetworkIdentity(),
+  effectiveFeeRate: () => currentWalletFeeRate(),
   maxFeeSatoshis: bitfsFundingMaxFeeSatoshis,
   deriveAddress: deriveP2pkhAddress,
   addressScript: p2pkhAddressToScriptHex,
@@ -863,7 +899,8 @@ const msfileBitfsRuntime = createBitfsWorkerRuntime({
   ensureService: () => ensureMsfileRuntime(),
   files: (purpose) => createWorkerModuleFileStore("msfile", purpose),
   woc: () => testDomainUnitReadiness ? p2pkhWocService : msfileWorkerLifecycle.chain(),
-  p2pkhSettings: async () => currentNetworkFeeSettings(),
+  walletIdentity: () => vaultWorkerKeys.requireCoordinatorNetworkIdentity(),
+  effectiveFeeRate: () => currentWalletFeeRate(),
   crypto: (owner) => vaultWorkerKeys.createWorkerActiveKeyCrypto(owner),
   blockHeight: readCoordinatorBitfsBlockHeight,
   executor: (operation, signal?: AbortSignal) => testDomainUnitReadiness ? windowP2pWorkerRuntime.requestWindowP2pExecutorOperation(operation, signal) : msfileWorkerLifecycle.executor(operation, signal),
@@ -1403,6 +1440,8 @@ function selectCoordinatorStorageIoOwner(): void {
       commitOrder: ++coordinatorStorageIoHandoffRevision,
     };
   notifyCoordinatorStorageIoHandoff(storageIoOwner);
+  // 仅推送投影：owner 变化不改变钱包或 session epoch，不能触发撤权重算。
+  publishSessionState("storage-owner", true);
 }
 
 function abortCoordinatorPeerInflight(peerId: string): void {
@@ -2097,7 +2136,7 @@ const p2pkhWorkerRuntime = createP2pkhWorkerRuntime({
     },
     session: () => ({ owner: coordinatorState.activePublicKeyHex, epoch: coordinatorState.sessionEpoch, unlocked: coordinatorState.vaultStatus === "unlocked" }),
     loadSettings: (owner) => loadP2pkhSettingForOwner(owner),
-    settings: () => ({ ...coordinatorMeta.p2pkhSettings, feeRateSatoshisPerKb: wocWorkerRuntime.fees.snapshot()[coordinatorMeta.p2pkhSettings.bsvNetwork].effectiveSatoshisPerKb }),
+    effectiveFeeRate: network => wocWorkerRuntime.fees.snapshot()[network].effectiveSatoshisPerKb,
     walletState: () => testDomainUnitReadiness ? createWorkerWalletState() : p2pkhWorkerRuntime.binding()!.walletState,
     storage: () => testDomainUnitReadiness ? createWorkerModuleFileStore("p2pkh", "") : p2pkhWorkerRuntime.binding()!.storage,
     crypto: (owner) => testDomainUnitReadiness ? vaultWorkerKeys.createWorkerActiveKeyCrypto(owner) : p2pkhWorkerRuntime.binding()!.crypto.createActiveKeyCrypto(),
@@ -2121,7 +2160,15 @@ const p2pkhWorkerRuntime = createP2pkhWorkerRuntime({
   },
 });
 const workerTransferRuntime = p2pkhWorkerRuntime.transfer;
-const ensureSatP2pkhService = workerTransferRuntime.ensure;
+const ensureSatP2pkhService: () => Promise<SatP2pkhService> = async () => {
+  const service = await workerTransferRuntime.ensure();
+  const identity = workerTransferRuntime.identityFor(service);
+  return {
+    identity,
+    prepareTransfer(input) { return service.prepareTransfer(input); },
+    submitTransfer(preview) { return service.submitTransfer(preview as Parameters<typeof service.submitTransfer>[0]); },
+  };
+};
 
 /**
  * 快照 store 的 WoC 数据源包装。
@@ -2304,12 +2351,17 @@ async function buildTopicBaselines(
     }
     const baselineRevision = topic === "session.state" ? sessionRevision : backgroundSnapshotRevision;
     const snapshot = topic === "session.state"
-      ? {
-        topic, type: "session.state.changed" as const, sessionRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, cause: "bootstrap" as const, vaultStatus: coordinatorState.vaultStatus,
-        lockCleanup: walletLockBarrier.snapshot(), activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex ?? null : null,
-        ...(coordinatorState.vaultStatus === "unlocked" ? { activeKeyIdentity: vaultWorkerKeys.coordinatorActiveKeySummary() } : {}), runGeneration: coordinatorState.runGeneration, ...(coordinatorState.walletGeneration ? { walletGeneration: coordinatorState.walletGeneration } : {}), autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs ?? AUTO_LOCK_DEFAULT_TIMEOUT_MS
-      }
-      : { topic, type: "background.snapshot.changed" as const, backgroundSnapshotRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshots: getTaskSnapshots(), scheduleSettings: coordinatorState.scheduleSettings, p2pkhSettings: coordinatorMeta.p2pkhSettings };
+      ? (() => {
+        const sessionProjection = readSessionProjection();
+        return {
+          topic, type: "session.state.changed" as const, sessionRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, cause: "bootstrap" as const, vaultStatus: sessionProjection.vaultStatus,
+          lockCleanup: sessionProjection.lockCleanup, activePublicKeyHex: sessionProjection.activePublicKeyHex ?? null,
+          ...(sessionProjection.activeKeyIdentity ? { activeKeyIdentity: sessionProjection.activeKeyIdentity } : {}), runGeneration: sessionProjection.runGeneration, ...(sessionProjection.walletGeneration ? { walletGeneration: sessionProjection.walletGeneration } : {}), autoLockTimeoutMs: sessionProjection.autoLockTimeoutMs,
+          ...(sessionProjection.authorityRecovery ? { authorityRecovery: sessionProjection.authorityRecovery } : {}),
+          ...(sessionProjection.storageIoOwnerPeer ? { storageIoOwnerPeer: sessionProjection.storageIoOwnerPeer } : {}),
+        };
+      })()
+      : { topic, type: "background.snapshot.changed" as const, backgroundSnapshotRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshots: getTaskSnapshots(), scheduleSettings: coordinatorState.scheduleSettings };
     return [{ topic, baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot }];
   });
 
@@ -2695,10 +2747,10 @@ function performGlobalLock(reason: string): Promise<void> {
 
 let testFailNextP2pkhSettingWrite = false;
 
-/** 全局费率是纯内存投影；交易消费者无需读取 owner 的 Provider 设置文件。 */
-function currentNetworkFeeSettings() {
-  const bsvNetwork = vaultWorkerKeys.requireCoordinatorNetworkIdentity().bsvNetwork;
-  return { bsvNetwork, feeRateSatoshisPerKb: wocWorkerRuntime.fees.snapshot()[bsvNetwork].effectiveSatoshisPerKb };
+/** Current fee comes from the fee projection for the active wallet network. */
+function currentWalletFeeRate(): number {
+  const network = vaultWorkerKeys.requireCoordinatorNetworkIdentity().bsvNetwork;
+  return wocWorkerRuntime.fees.snapshot()[network].effectiveSatoshisPerKb;
 }
 
 const p2pkhWorkerSettings = createWorkerP2pkhSettings({
@@ -2707,16 +2759,6 @@ const p2pkhWorkerSettings = createWorkerP2pkhSettings({
   storage: () => createWorkerModuleFileStore("p2pkh", ""),
   session: () => ({ sessionEpoch: coordinatorState.sessionEpoch, activePublicKeyHex: coordinatorState.activePublicKeyHex }),
   projection: coordinatorMeta,
-  async updateFeePolicy(network, policy) {
-    const sessionEpoch = coordinatorState.sessionEpoch;
-    const settingsStore = coordinatorSettingsSnapshot;
-    const chainFeePolicies = { ...coordinatorMeta.chainFeePolicies, [network]: parseChainFeePolicy(policy) };
-    await persistCoordinatorSettings({ scheduleSettings: coordinatorMeta.scheduleSettings, autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs, chainFeePolicies });
-    // 写入属于原平台根；锁定或切换根后的迟到结果不能覆盖当前运行时镜像。
-    if (sessionEpoch !== coordinatorState.sessionEpoch || settingsStore !== coordinatorSettingsSnapshot) throw new Error("Fee settings write became stale");
-    coordinatorMeta.chainFeePolicies = chainFeePolicies;
-    wocWorkerRuntime.fees.changed();
-  },
   beforeWrite: () => {
     if (testFailNextP2pkhSettingWrite) {
       testFailNextP2pkhSettingWrite = false;
@@ -2725,8 +2767,6 @@ const p2pkhWorkerSettings = createWorkerP2pkhSettings({
   },
   clearSnapshots: () => p2pkhWorkerRuntime.snapshots()?.clearAll(),
   reschedule: () => cancelP2pkhSyncForProviderChange(),
-  taskSnapshots: getTaskSnapshots,
-  publishSnapshot: (event) => { publishTopicEvent("background.snapshot", event); },
   woc: () => testDomainUnitReadiness ? p2pkhWocService : p2pkhWorkerRuntime.query(),
 });
 const loadP2pkhSettingForOwner = p2pkhWorkerSettings.load;
@@ -2756,7 +2796,7 @@ const p2pkhWorkerOperations = createP2pkhWorkerOperations({
     },
   },
   walletState: workerWalletState,
-  network: () => coordinatorMeta.p2pkhSettings.bsvNetwork,
+  network: () => vaultWorkerKeys.requireCoordinatorNetworkIdentity().bsvNetwork,
   storage: currentP2pkhDomainStorage,
   available: () => isCoordinatorProductRegistered("p2pkh"),
   blocked: requestId => coordinatorProductBlockedResponse(requestId, "p2pkh"),
@@ -2774,10 +2814,29 @@ async function refreshP2pkhUtxoSnapshots(signal?: AbortSignal, storage = current
 
 function cancelP2pkhSyncForProviderChange() { return backgroundWorkerRuntime.restartTasks(["p2pkh.transactions-sync", "p2pkh.utxo-snapshot"], "provider-change"); }
 
-async function handleP2pkhSettingsUpdate(requestId: string, request: Extract<CoordinatorClientRequest, { kind: "p2pkh.settings.update" }>): Promise<CoordinatorResponse> {
-  if (!isCoordinatorProductRegistered("p2pkh")) return coordinatorProductBlockedResponse(requestId, "p2pkh");
-  return p2pkhWorkerSettings.update(requestId, request);
+async function handleChainFeePolicyUpdate(requestId: string, request: Extract<CoordinatorClientRequest, { kind: "chain.fee-policy.update" }>): Promise<CoordinatorResponse> {
+  // 手续费策略由手续费运行时拥有：经 Coordinator 设置事务持久化，成功后只发布 chain.fees。
+  // 不检查 P2PKH 产品可用性，不重启历史/UTXO 同步，不发布 background 快照。
+  // 存储位置：CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings（字段 chainFeePolicies），保留其他设置字段、CAS 与会话/存储根围栏。
+  const network = vaultWorkerKeys.requireCoordinatorNetworkIdentity().bsvNetwork;
+  const policy = parseChainFeePolicy(request.policy);
+  const sessionEpoch = coordinatorState.sessionEpoch;
+  const settingsStore = coordinatorSettingsSnapshot;
+  const chainFeePolicies = { ...coordinatorMeta.chainFeePolicies, [network]: policy };
+  await persistCoordinatorSettings({ scheduleSettings: coordinatorMeta.scheduleSettings, autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs, chainFeePolicies });
+  // 写入属于原平台根；锁定或切换根后的迟到结果不能覆盖当前运行时镜像。失败/撤权不污染当前状态。
+  if (sessionEpoch !== coordinatorState.sessionEpoch || settingsStore !== coordinatorSettingsSnapshot) throw new Error("Fee settings write became stale");
+  coordinatorMeta.chainFeePolicies = chainFeePolicies;
+  wocWorkerRuntime.fees.changed();
+  return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "accepted" } };
 }
+const chainFeePolicyRoute = defineWorkerRequestRoute<Extract<CoordinatorClientRequest, { kind: "chain.fee-policy.update" }>>({
+  kinds: ["chain.fee-policy.update"],
+  policy: () => ({ scheduling: "serial", validateEpoch: true }),
+  async execute(request, call) {
+    return handleChainFeePolicyUpdate(call.requestId, request);
+  },
+});
 async function handleP2pkhProviderConfigGet(requestId: string, request: Extract<CoordinatorClientRequest, { kind: "p2pkh.provider-config.get" }>): Promise<CoordinatorResponse> {
   if (!isCoordinatorProductRegistered("woc")) return coordinatorProductBlockedResponse(requestId, "woc");
   return p2pkhWorkerSettings.getProviderConfig(requestId, request);
@@ -2823,27 +2882,26 @@ function coordinatorStorageIoOwnerPeerSnapshot(): CoordinatorBootstrapSnapshot["
 }
 
 function buildSnapshot(): CoordinatorBootstrapSnapshot {
-  const storageIoOwnerPeer = coordinatorStorageIoOwnerPeerSnapshot();
+  const projection = readSessionProjection();
   return {
     authorityInstanceId: coordinatorAuthority.coordinatorAuthorityInstanceId,
-    runGeneration: coordinatorState.runGeneration,
+    runGeneration: projection.runGeneration,
     buildId: COORDINATOR_BUILD_ID,
     sessionEpoch: coordinatorState.sessionEpoch,
-    vaultStatus: coordinatorState.vaultStatus,
-    lockCleanup: walletLockBarrier.snapshot(),
-    activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex : undefined,
-    ...(coordinatorState.vaultStatus === "unlocked" ? { activeKeyIdentity: vaultWorkerKeys.coordinatorActiveKeySummary() } : {}),
+    vaultStatus: projection.vaultStatus,
+    lockCleanup: projection.lockCleanup,
+    ...(projection.activePublicKeyHex ? { activePublicKeyHex: projection.activePublicKeyHex } : {}),
+    ...(projection.activeKeyIdentity ? { activeKeyIdentity: projection.activeKeyIdentity } : {}),
     // 钱包身份世代：单 Key 模型下没有 selectedPublicKeyHex（没有可切换的
     // Key），页面只用它判断重置/重新初始化后旧授权是否已经失效。
-    walletGeneration: coordinatorState.walletGeneration || undefined,
-    ...(coordinatorAuthority.coordinatorAuthorityRecovery ? { authorityRecovery: coordinatorAuthority.coordinatorAuthorityRecovery } : {}),
+    ...(projection.walletGeneration ? { walletGeneration: projection.walletGeneration } : {}),
+    ...(projection.authorityRecovery ? { authorityRecovery: projection.authorityRecovery } : {}),
     coordinatorWorkerUnits: coordinatorRuntimeUnitSnapshots(),
     coordinatorWorkerUnitSnapshotRevision: coordinatorRuntimeUnitRevision(),
     taskSnapshots: getTaskSnapshots(),
     scheduleSettings: coordinatorState.scheduleSettings,
-    autoLockTimeoutMs: coordinatorMeta.autoLockTimeoutMs ?? AUTO_LOCK_DEFAULT_TIMEOUT_MS,
-    p2pkhSettings: coordinatorMeta.p2pkhSettings,
-    ...(storageIoOwnerPeer ? { storageIoOwnerPeer } : {}),
+    autoLockTimeoutMs: projection.autoLockTimeoutMs,
+    ...(projection.storageIoOwnerPeer ? { storageIoOwnerPeer: projection.storageIoOwnerPeer } : {}),
   };
 }
 
@@ -2870,7 +2928,6 @@ function publishTopicEvent(topic: CoordinatorTopic, event: any): CoordinatorTopi
       ? {
         scheduleSettings: coordinatorState.scheduleSettings,
         // 所有 background 快照都带当前设置，保证新订阅者和跨 tab 更新使用同一份值。
-        p2pkhSettings: coordinatorMeta.p2pkhSettings,
       }
       : {})
   } as CoordinatorTopicEvent;
@@ -3163,6 +3220,7 @@ async function openCoordinatorSession(
           commitOrder: ++coordinatorStorageIoHandoffRevision,
         };
         notifyCoordinatorStorageIoHandoff(storageIoOwner);
+        publishSessionState("storage-owner", true);
         return {
           sessionEpoch: coordinatorState.sessionEpoch,
           ack: { status: "ok" },
@@ -3315,7 +3373,7 @@ function withCoordinatorWorkerLifecycle(plugin: ReturnType<typeof definePlugin>)
   };
 }
 const coordinatorRequestRoutes = new Map<string, import("@keymaster/contracts").WorkerRequestRoute>();
-for (const route of [vaultWorkerOperations.route, vaultAutoLock.route, storageWorkerRequests.route, msfileWorkerRequests.route, windowP2pWorkerRuntime.route, channelWorkerRuntime.route, p2pkhWorkerOperations.route, p2pkhWorkerSettings.route, contactsPresenceProjection.route, backgroundWorkerRuntime.route,
+for (const route of [vaultWorkerOperations.route, vaultAutoLock.route, storageWorkerRequests.route, msfileWorkerRequests.route, windowP2pWorkerRuntime.route, channelWorkerRuntime.route, p2pkhWorkerOperations.route, p2pkhWorkerSettings.route, chainFeePolicyRoute, contactsPresenceProjection.route, backgroundWorkerRuntime.route,
 defineWorkerRequestRoute<Extract<CoordinatorClientRequest, { kind: "lock" }>>({
   kinds: ["lock"], policy: () => ({ scheduling: "parallel", cleanupOnly: true, validateEpoch: false }), execute: (request, call) => handleLock(call.requestId, request, call.peerId),
 }),
@@ -3543,7 +3601,6 @@ async function initializeCoordinatorInternal(skipStorageBootstrap = false, propa
         vaultWalletWorker.storageColdStartState = coldStart;
         switch (coldStart?.state) {
           case "ready":
-            coordinatorMeta.p2pkhSettings = { bsvNetwork: coldStart.key!.bsvNetwork };
             coordinatorState.walletGeneration = coldStart.walletGeneration ?? coordinatorState.walletGeneration;
             coordinatorState.vaultStatus = "locked";
             coordinatorState.activePublicKeyHex = undefined;

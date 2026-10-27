@@ -4,7 +4,8 @@ import { Button, DataTable, EmptyState, PageHeader, formatSats, formatSatsWithPr
 import { useOptionalPluginCapability } from "webloom-framework/react";
 import { router, usePluginBsvPrice, usePluginI18n, usePluginLocale, useOptionalResourceSelector } from "@keymaster/runtime";
 import { emptyGlobalBalanceSnapshot, P2PKH_COORDINATOR_CONTROL_CAPABILITY, type GlobalBalanceSnapshot, type P2pkhCoordinatorControl } from "@keymaster/contracts";
-import type { P2pkhBalanceBreakdown, P2pkhGlobalSettings, P2pkhHistoryRecord, P2pkhKeyResource, P2pkhLocalTransaction, P2pkhService, P2pkhSyncStatus, P2pkhTransactionSyncState, P2pkhAvailableUtxos } from "../p2pkhContracts.js";
+import type { KeyIdentity } from "@keymaster/contracts";
+import type { P2pkhBalanceBreakdown, P2pkhHistoryRecord, P2pkhKeyResource, P2pkhLocalTransaction, P2pkhService, P2pkhSyncSnapshot, P2pkhTransactionSyncState, P2pkhAvailableUtxos } from "../p2pkhContracts.js";
 import { P2PKH_CAPABILITY } from "../p2pkhContracts.js";
 import { detailPath, listPath, parseStoredTransaction, readPage, type P2pkhNetwork, type P2pkhWalletView } from "./p2pkhTransactionView.js";
 
@@ -18,9 +19,6 @@ export type WalletSnapshot = {
   locals: P2pkhLocalTransaction[];
   utxoResult: P2pkhAvailableUtxos;
   sync: P2pkhTransactionSyncState[];
-  syncStatus: P2pkhSyncStatus;
-  lastSyncedAt?: string;
-  syncError?: string;
   historyCursors: Record<string, string | undefined>;
   localCursors: Record<string, string | undefined>;
 };
@@ -42,7 +40,7 @@ function amountLabel(value: number | undefined): string {
 
 const EMPTY_WALLET_SNAPSHOT: WalletSnapshot = {
   resources: [], history: [], locals: [], utxoResult: { hasResult: false, utxos: null, seq: null, syncedAt: null },
-  sync: [], syncStatus: "idle", historyCursors: {}, localCursors: {}
+  sync: [], historyCursors: {}, localCursors: {}
 };
 
 const EMPTY_BALANCE_SNAPSHOT = emptyGlobalBalanceSnapshot();
@@ -96,6 +94,13 @@ function P2pkhWalletPageInner({
       : { ...EMPTY_WALLET_SNAPSHOT, error: snapshot.error?.message },
     EMPTY_WALLET_SNAPSHOT
   );
+  const identity = useOptionalResourceSelector<{ identity?: KeyIdentity; address?: string }, { identity?: KeyIdentity; address?: string; error?: string }>(
+    resources,
+    "p2pkh.wallet-context",
+    [],
+    (snapshot) => ({ ...snapshot.data, error: snapshot.error?.message }),
+    {}
+  );
   const balanceSnapshot = useOptionalResourceSelector<GlobalBalanceSnapshot, GlobalBalanceSnapshot>(
     resources,
     "p2pkh.balance",
@@ -103,13 +108,20 @@ function P2pkhWalletPageInner({
     (snapshot) => snapshot.data ?? EMPTY_BALANCE_SNAPSHOT,
     EMPTY_BALANCE_SNAPSHOT
   );
+  const syncSnapshot = useOptionalResourceSelector<P2pkhSyncSnapshot, P2pkhSyncSnapshot | undefined>(
+    resources,
+    "p2pkh.sync-status",
+    [],
+    (snapshot) => snapshot.data,
+    undefined
+  );
   const [loadedHistory, setLoadedHistory] = useState<P2pkhHistoryRecord[]>(wallet.history);
   const [loadedLocals, setLoadedLocals] = useState<P2pkhLocalTransaction[]>(wallet.locals);
   const [historyCursors, setHistoryCursors] = useState<Record<string, string | undefined>>(wallet.historyCursors);
   const [localCursors, setLocalCursors] = useState<Record<string, string | undefined>>(wallet.localCursors);
   const [loadingMore, setLoadingMore] = useState<"history" | "locals" | null>(null);
 
-  const network = service.getGlobalSettings().bsvNetwork;
+  const network = identity.identity?.bsvNetwork;
 
   useEffect(() => {
     setLoadedHistory(wallet.history);
@@ -127,7 +139,7 @@ function P2pkhWalletPageInner({
   const resourceBalance = balanceSnapshot.bsvNetwork === network ? balanceSnapshot.balance : undefined;
   const balance = resourceBalance;
   const balanceKnown = Boolean(balance && balance.available === true);
-  const sync = wallet.sync.find((row) => row.resourceId === `p2pkh:${network}`);
+  const sync = wallet.sync.find((row) => row.resourceId === (network ? `p2pkh:${network}` : ""));
   const selectedResources = useMemo(() => wallet.resources.filter((resource) => resource.network === network), [wallet.resources, network]);
 
   const txRows = useMemo<P2pkhTransactionListRow[]>(() => {
@@ -237,13 +249,14 @@ function P2pkhWalletPageInner({
     { key: "time", header: t("p2pkh.col.syncedAt", { defaultValue: "最近观察" }), render: (row) => row.time },
     { key: "action", header: "", render: (row) => <Button variant="ghost" onClick={() => router.push(detailPath(row.txid, page, "local-transactions", row.local?.id))}>{t("p2pkh.action.details", { defaultValue: "Details" })}</Button> }
   ];
-  const networkTitle = network === "main" ? t("p2pkh.wallet.mainnet", { defaultValue: "Mainnet" }) : t("p2pkh.wallet.testnet", { defaultValue: "Testnet" });
+  const networkTitle = network === "main" ? t("p2pkh.wallet.mainnet", { defaultValue: "Mainnet" }) : network === "test" ? t("p2pkh.wallet.testnet", { defaultValue: "Testnet" }) : "";
   const viewTitle = view === "transactions"
     ? t("p2pkh.wallet.transactions.title", { defaultValue: "On-chain transactions" })
     : t("p2pkh.wallet.localTransactions.title", { defaultValue: "Local transactions" });
   const viewDescription = view === "transactions"
     ? t("p2pkh.wallet.transactions.description", { defaultValue: "WoC 历史元数据（txid / 高度）。详情页按需懒加载 raw transaction。" })
     : t("p2pkh.wallet.localTransactions.description", { defaultValue: "本地提交与按 txid 的链上收敛状态。" });
+  if (!network) return <EmptyState title={t("p2pkh.wallet.identityPending", { defaultValue: "正在读取钱包身份…" })} description={identity.error ?? ""} />;
   return (
     <div className="p2pkh-wallet">
       <PageHeader
@@ -257,14 +270,14 @@ function P2pkhWalletPageInner({
           <h2>{networkTitle}</h2>
           <strong>{balanceKnown ? formatSatsWithPrice(balance!.total, price, { locale, network }) : t("p2pkh.balance.unknown", { defaultValue: "未知（尚未取得 UTXO 结果）" })}</strong>
           <BalanceBreakdown breakdown={balanceKnown ? balance?.breakdown : undefined} />
-          <Button variant="ghost" disabled={refreshing || selectedResources.length === 0} onClick={() => void refreshUtxos()}>{refreshing ? t("p2pkh.action.inProgress", { defaultValue: "处理中…" }) : t("p2pkh.action.refreshUtxos", { defaultValue: "刷新 UTXO" })}</Button>
+          <Button variant="ghost" disabled={refreshing} onClick={() => void refreshUtxos()}>{refreshing ? t("p2pkh.action.inProgress", { defaultValue: "处理中…" }) : t("p2pkh.action.refreshUtxos", { defaultValue: "刷新 UTXO" })}</Button>
         </article>
       </section>
       <section className="p2pkh-wallet__sync" aria-label={t("p2pkh.wallet.syncStatus", { defaultValue: "Confirmed synchronization status" })}>
-        <p>{t("p2pkh.wallet.lastCompleteSync", { defaultValue: "Last complete sync: {{time}}", time: wallet.lastSyncedAt ?? sync?.lastSuccessAt ?? "—" })}</p>
-        <p>{t("p2pkh.wallet.taskStatus", { defaultValue: "Task status: {{status}}", status: t(`p2pkh.syncStatus.${wallet.syncStatus}`, { defaultValue: wallet.syncStatus }) })}</p>
+        <p>{t("p2pkh.wallet.lastCompleteSync", { defaultValue: "Last complete sync: {{time}}", time: syncSnapshot?.lastCompletedAt ?? sync?.lastSuccessAt ?? "—" })}</p>
+        <p>{t("p2pkh.wallet.taskStatus", { defaultValue: "Task status: {{status}}", status: syncSnapshot ? t(`p2pkh.syncStatus.${syncSnapshot.status}`, { defaultValue: syncSnapshot.status }) : "—" })}</p>
         {wallet.utxoResult.hasResult ? <p>{t("p2pkh.wallet.utxoSnapshot", { defaultValue: "UTXO 结果：{{time}}（{{count}} 个输出）", time: wallet.utxoResult.syncedAt, count: wallet.utxoResult.utxos.length })}</p> : null}
-        {(wallet.syncError ?? sync?.lastError) ? <p role="alert">{t("p2pkh.wallet.syncError", { defaultValue: "Sync error: {{error}}", error: wallet.syncError ?? sync?.lastError })}</p> : null}
+        {(syncSnapshot?.error ?? sync?.lastError) ? <p role="alert">{t("p2pkh.wallet.syncError", { defaultValue: "Sync error: {{error}}", error: syncSnapshot?.error ?? sync?.lastError })}</p> : null}
         {actionError ? <p role="alert">{actionError}</p> : null}
       </section>
       {view === "local-transactions" && typeof coordinator.p2pkhConclusion === "function" && coordinator.getActivePublicKeyHex() && <P2pkhConclusionPanel coordinator={coordinator} owner={coordinator.getActivePublicKeyHex()!} network={network} />}

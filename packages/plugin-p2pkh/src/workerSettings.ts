@@ -1,17 +1,14 @@
 import { defineWorkerRequestRoute } from "@keymaster/contracts";
-import type { BorrowedModuleFileStore, CoordinatorClientRequest, CoordinatorResponse, CoordinatorTaskSnapshot, WocService } from "@keymaster/contracts";
+import type { BorrowedModuleFileStore, CoordinatorClientRequest, CoordinatorResponse, WocService } from "@keymaster/contracts";
 import { createP2pkhFileRepository } from "./storage/p2pkhFileRepository.js";
 export interface WorkerSettingsDependencies {
   storage(): BorrowedModuleFileStore;
   network(): "main" | "test";
   session(): { sessionEpoch: string; activePublicKeyHex?: string };
-  projection: { p2pkhSettings: { bsvNetwork: "main" | "test" }; p2pkhProviderConfigs?: Record<string, Record<string, unknown>> };
-  updateFeePolicy(network: "main" | "test", policy: import("@keymaster/contracts").ChainFeePolicy): Promise<void>;
+  projection: { p2pkhProviderConfigs?: Record<string, Record<string, unknown>> };
   beforeWrite(): void;
   clearSnapshots(): void;
   reschedule(): Promise<void>;
-  taskSnapshots(): CoordinatorTaskSnapshot[];
-  publishSnapshot(event: { type: "background.snapshot.changed"; snapshots: CoordinatorTaskSnapshot[]; p2pkhSettings: { bsvNetwork: "main" | "test" } }): void;
   woc(): WocService | undefined;
   admission?: { available(productId: string): boolean; blocked(requestId: string, productId: string): CoordinatorResponse };
 }
@@ -34,7 +31,6 @@ export function createWorkerP2pkhSettings(deps: WorkerSettingsDependencies) {
     try {
       const setting = await repository().readSetting();
       if (generation !== revision || deps.session().sessionEpoch !== epoch || deps.session().activePublicKeyHex?.toLowerCase() !== owner) throw new Error("P2PKH settings load became stale");
-      deps.projection.p2pkhSettings = { bsvNetwork: deps.network() };
       // 旧 providerConfigs 中的 junglebus 等配置已由解析器丢弃。
       deps.projection.p2pkhProviderConfigs = structuredClone(setting.providerConfigs);
       p2pkhSettingOwner = owner;
@@ -54,7 +50,6 @@ export function createWorkerP2pkhSettings(deps: WorkerSettingsDependencies) {
 
   /** 读-改-写 setting.json；failure 时调用方不得更新内存镜像。 */
   async function writeP2pkhSettingFile(patch: {
-    bsvNetwork?: "main" | "test";
     providerConfigs?: Record<string, Record<string, unknown>>;
   }): Promise<void> {
     deps.beforeWrite();
@@ -68,25 +63,6 @@ export function createWorkerP2pkhSettings(deps: WorkerSettingsDependencies) {
       providerConfigs: patch.providerConfigs ?? current.providerConfigs,
     });
     assertFresh();
-  }
-
-  async function handleP2pkhSettingsUpdate(
-    requestId: string,
-    request: Extract<CoordinatorClientRequest, { kind: "p2pkh.settings.update" }>
-  ): Promise<CoordinatorResponse> {
-    if (request.settings.bsvNetwork !== deps.network()) {
-      return { requestId, sessionEpoch: deps.session().sessionEpoch, ack: { status: "validation-error", message: "Identity network is immutable" } };
-    }
-    if (request.settings.feePolicy !== undefined) await deps.updateFeePolicy(request.settings.bsvNetwork, request.settings.feePolicy);
-    deps.projection.p2pkhSettings = { bsvNetwork: request.settings.bsvNetwork };
-    await deps.reschedule();
-    deps.publishSnapshot({
-      type: "background.snapshot.changed",
-      snapshots: deps.taskSnapshots(),
-      // 设置写入成功后随同快照广播，窗口无需再发起 RPC 才能收敛身份网络投影。
-      p2pkhSettings: deps.projection.p2pkhSettings,
-    });
-    return { requestId, sessionEpoch: deps.session().sessionEpoch, ack: { status: "accepted" } };
   }
 
   async function handleP2pkhProviderConfigGet(
@@ -139,18 +115,17 @@ export function createWorkerP2pkhSettings(deps: WorkerSettingsDependencies) {
     return { requestId, sessionEpoch: deps.session().sessionEpoch, ack: { status: "accepted" } };
   }
 
-  const route = defineWorkerRequestRoute<Extract<CoordinatorClientRequest, { kind: "p2pkh.settings.update" | "p2pkh.provider-config.get" | "p2pkh.provider-config.update" }>>({
-    kinds: ["p2pkh.settings.update", "p2pkh.provider-config.get", "p2pkh.provider-config.update"],
+  const route = defineWorkerRequestRoute<Extract<CoordinatorClientRequest, { kind: "p2pkh.provider-config.get" | "p2pkh.provider-config.update" }>>({
+    kinds: ["p2pkh.provider-config.get", "p2pkh.provider-config.update"],
     policy: () => ({ scheduling: "serial", validateEpoch: true }),
     async execute(request, call) {
-      const product = request.kind === "p2pkh.settings.update" ? "p2pkh" : "woc";
+      const product = "woc";
       if (deps.admission && !deps.admission.available(product)) return deps.admission.blocked(call.requestId, product);
       switch (request.kind) {
-        case "p2pkh.settings.update": return handleP2pkhSettingsUpdate(call.requestId, request);
         case "p2pkh.provider-config.get": return handleP2pkhProviderConfigGet(call.requestId, request);
         case "p2pkh.provider-config.update": return handleP2pkhProviderConfigUpdate(call.requestId, request);
       }
     },
   });
-  return { route, load: loadP2pkhSettingForOwner, reset: resetP2pkhSettingsRuntime, write: writeP2pkhSettingFile, update: handleP2pkhSettingsUpdate, getProviderConfig: handleP2pkhProviderConfigGet, updateProviderConfig: handleP2pkhProviderConfigUpdate };
+  return { route, load: loadP2pkhSettingForOwner, reset: resetP2pkhSettingsRuntime, write: writeP2pkhSettingFile, getProviderConfig: handleP2pkhProviderConfigGet, updateProviderConfig: handleP2pkhProviderConfigUpdate };
 }

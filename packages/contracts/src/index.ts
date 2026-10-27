@@ -12,7 +12,6 @@ export * from "./vault.js";
 export * from "./networkIdentity.js";
 export * from "./keyImport.js";
 export * from "./p2pkhAddress.js";
-export * from "./p2pkhSettings.js";
 export * from "./navigation.js";
 export * from "./business.js";
 export * from "./settings.js";

@@ -23,7 +23,7 @@ export function assertP2pkhTransferRequestFields(request: unknown): void {
 }
 
 export interface P2pkhWorkerTransfer {
-  getGlobalSettings(): { bsvNetwork: "main" | "test"; feeRateSatoshisPerKb?: number };
+  readonly identity: Readonly<import("./networkIdentity.js").NetworkIdentity>;
   prepareTransfer(input: P2pkhTransferRequest): Promise<unknown>;
   submitTransfer(preview: unknown): Promise<{ status: "local-confirmed" | "isolated" | "not-dispatched"; txid?: string; error?: string; rawTxHex: string; submissionId: string; localInputClaimIds: string[]; attempts: number; reason?: string }>;
 }

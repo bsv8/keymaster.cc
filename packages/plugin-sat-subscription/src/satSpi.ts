@@ -33,12 +33,8 @@ import type {
 
 /** plugin-p2pkh 由 capability 动态注入；这里仅声明本插件使用的最小子集。 */
 export interface SatP2pkhService {
-  /** 读取当前产品费率；没有该方法时使用中档默认值。 */
-  getGlobalSettings?(): {
-    /** 是否允许使用 P2PKH 测试网资产、地址和交易。 */
-    bsvNetwork?: "main" | "test";
-    feeRateSatoshisPerKb?: number;
-  };
+  /** Identity captured by the active Worker transfer service. */
+  identity: Readonly<import("@keymaster/contracts").NetworkIdentity>;
   /** 创建 owner 绑定的 P2PKH 交易预览。 */
   prepareTransfer(input: {
     recipientAddress: string;
@@ -214,8 +210,8 @@ function selectBsvAccount(
 }
 
 function assertP2pkhNetworkEnabled(p2pkh: SatP2pkhService, mapping: ReturnType<typeof mapSpiBsvNetwork>): void {
-  if (mapping.p2pkhNetwork !== p2pkh.getGlobalSettings?.().bsvNetwork) {
-    throw new SatSubscriptionError("unavailable", "P2PKH 设置未启用测试网，请先在 P2PKH 设置中启用测试网");
+  if (mapping.p2pkhNetwork !== p2pkh.identity.bsvNetwork) {
+    throw new SatSubscriptionError("unavailable", "供应商网络与当前钱包身份绑定的网络不一致");
   }
 }
 
@@ -349,14 +345,11 @@ export class SatSpiService implements SatSubscriptionSpiService {
     if (!p2pkh) throw new SatSubscriptionError("unavailable", "P2PKH service is unavailable");
     assertP2pkhNetworkEnabled(p2pkh, mapping);
     const amountNumber = safeNumber(input.amountSatoshis, "amountSatoshis");
-    const configuredFee = p2pkh.getGlobalSettings?.().feeRateSatoshisPerKb;
-    const feeRate = Number.isSafeInteger(configuredFee) && Number(configuredFee) > 0 ? Number(configuredFee) : 1000;
     let p2pkhPreview: unknown;
     try {
       p2pkhPreview = await p2pkh.prepareTransfer({
         recipientAddress: account.paymentAddress,
         amountSatoshis: amountNumber,
-        feeRateSatoshisPerKb: feeRate
       });
     } catch (error) {
       throw new SatSubscriptionError("balance", messageFromFailure(error));

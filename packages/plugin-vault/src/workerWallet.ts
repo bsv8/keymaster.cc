@@ -1,4 +1,4 @@
-import type { WalletColdStartSnapshot, WalletInitializePlan, WalletInitializeResult, WalletLifecycleEvent, WalletLifecycleService, BsvNetwork } from "@keymaster/contracts";
+import type { WalletColdStartSnapshot, WalletInitializePlan, WalletInitializeResult, WalletLifecycleEvent, WalletLifecycleService } from "@keymaster/contracts";
 import { WALLET_MIGRATION_PATH, StorageRuntimeError, type WalletStore } from "@keymaster/contracts/storage-internal";
 import {
   createWalletKeyRepository, type WalletKeyRepository, createWalletLifecycleService,
@@ -13,7 +13,6 @@ export interface VaultWalletWorkerPorts {
     migration: Parameters<typeof createMigrationJournalService>[0]["store"];
   };
   unavailable(message: string): Error;
-  network(network: BsvNetwork): void;
   transitions: Pick<Parameters<typeof createWalletLifecycleService>[0], "revokeGrants" | "establishSession" | "adoptUnlockedKey">;
   clearAppRoot(name: string): Promise<void>;
   binding: { installRoot(): Promise<void>; loadSettings(): Promise<void>; ensureStorage(): Promise<unknown>; ensureTasks(): Promise<void>; complete(cause: "initialize"): Promise<void>; lock(reason: string): Promise<void> };
@@ -89,7 +88,6 @@ export function createVaultWalletWorker(ports: VaultWalletWorkerPorts) {
     // 冷启动只读 meta 与固定 KeyHold；这里不恢复任何运行态授权。
     storageColdStartState = await walletLifecycle.coldStart();
     if (storageColdStartState.state === "ready") {
-      ports.network(storageColdStartState.key!.bsvNetwork);
       ports.commit({ walletGeneration: storageColdStartState.walletGeneration ?? ports.session().walletGeneration });
       await ports.binding.installRoot();
       return;

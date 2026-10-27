@@ -1,5 +1,6 @@
-import { CHAIN_FEE_READER_CAPABILITY, bindWalletIdentity } from "@keymaster/contracts";
+import { CHAIN_FEE_POLICY_WRITER_CAPABILITY, CHAIN_FEE_READER_CAPABILITY, bindWalletIdentity } from "@keymaster/contracts";
 import { createChainFeeReader } from "./chainFeeReader.js";
+import { createChainFeePolicyWriter } from "./chainFeePolicyWriter.js";
 import { VAULT_WALLET_STATE_CAPABILITY, WOC_WORKER_BROADCAST_CAPABILITY } from "@keymaster/contracts";
 import { WOC_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
 import { createElement } from "react";
@@ -29,6 +30,7 @@ import {
   RUNTIME_MESSAGE_BUS,
   RESOURCE_REGISTRY_CAPABILITY,
   WOC_COORDINATOR_CONTROL_CAPABILITY,
+  type WocCoordinatorControl,
   type P2pkhCoordinatorControl,
   WOC_CAPABILITY,
   CHAIN_HEIGHT_READER_CAPABILITY,
@@ -101,7 +103,7 @@ const wocPluginDefinition = {
     id: "woc.window",
     runtime: "window-main",
     scopeKind: "owner-session",
-    provides: [capabilityDescriptor(CHAIN_FEE_READER_CAPABILITY),
+    provides: [capabilityDescriptor(CHAIN_FEE_READER_CAPABILITY), capabilityDescriptor(CHAIN_FEE_POLICY_WRITER_CAPABILITY),
       capabilityDescriptor(WOC_CAPABILITY),
       capabilityDescriptor(WOC_COORDINATOR_CONTROL_CAPABILITY),
       capabilityDescriptor(CHAIN_HEIGHT_READER_CAPABILITY),
@@ -126,9 +128,11 @@ const wocPluginDefinition = {
   i18n: wocResources,
   async setup(ctx) {
     const wallet = bindWalletIdentity(ctx.capability(VAULT_WALLET_STATE_CAPABILITY).bind(ctx.consumer, ctx.scope), ctx.scope.signal);
-    const coordinator = ctx.capability(WOC_COORDINATOR_CLIENT_BINDING_CAPABILITY).bind(ctx.consumer, ctx.scope) as P2pkhCoordinatorControl | undefined;
+    const coordinator = ctx.capability(WOC_COORDINATOR_CLIENT_BINDING_CAPABILITY).bind(ctx.consumer, ctx.scope) as WocCoordinatorControl | undefined;
     if (!coordinator) throw new Error("WOC Coordinator control is unavailable");
-    ctx.provide(WOC_COORDINATOR_CONTROL_CAPABILITY, coordinator);
+    const { chainFeePolicyUpdate, ...publicCoordinator } = coordinator;
+    void chainFeePolicyUpdate;
+    ctx.provide(WOC_COORDINATOR_CONTROL_CAPABILITY, Object.freeze(publicCoordinator) as P2pkhCoordinatorControl);
     const messageBus = ctx.capability(RUNTIME_MESSAGE_BUS);
     const bootstrap: Partial<WocConfig> = {};
     const bootstrapResult = await coordinator.p2pkhProviderConfigGet("woc");
@@ -159,6 +163,7 @@ const wocPluginDefinition = {
     ctx.provide(CHAIN_HEIGHT_READER_CAPABILITY, chainHeightReader);
     const chainFeeReader = createChainFeeReader(coordinator, wallet);
     ctx.provide(CHAIN_FEE_READER_CAPABILITY, chainFeeReader);
+    ctx.provide(CHAIN_FEE_POLICY_WRITER_CAPABILITY, createChainFeePolicyWriter(coordinator, wallet));
 
     // chain.height：页面用 Resource Store 读链高度；订阅即退订，跨标签
     // 更新由 Coordinator 单点广播驱动。

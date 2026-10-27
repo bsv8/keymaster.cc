@@ -9,9 +9,6 @@ export function registerP2pkhTransferUi(ctx: PluginContext, { walletState, path 
   walletState: VaultWalletState; path: "/transfer";
 }): void {
   const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
-  resources.register<import("@keymaster/contracts").VaultLifecycleSnapshot, readonly string[]>({ id: "p2pkh.transfer-active", scope: "active-key",
-    key: (_args, context) => ["p2pkh.transfer-active", context.activePublicKeyHex ?? "none"], load: async () => walletState.snapshot(),
-    subscribe: (_args, _context, invalidate) => walletState.subscribe(invalidate), invalidation: "immediate" });
   resources.register<import("@keymaster/contracts").Contact[], readonly string[]>({ id: "p2pkh.transfer-contacts", scope: "active-key",
     key: (_args, context) => ["p2pkh.transfer-contacts", context.activePublicKeyHex ?? "none"],
     load: () => ctx.consumer.optionalCapability(CONTACTS_SERVICE_CAPABILITY)?.listContacts() ?? Promise.resolve([]),

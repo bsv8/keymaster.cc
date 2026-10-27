@@ -1,5 +1,5 @@
 import { requireWocNetwork } from "@keymaster/contracts";
-import { CHAIN_FEE_READER_CAPABILITY } from "@keymaster/contracts";
+import { CHAIN_FEE_POLICY_WRITER_CAPABILITY, CHAIN_FEE_READER_CAPABILITY } from "@keymaster/contracts";
 import { requireUnlockedWalletIdentity, bindWalletIdentity } from "@keymaster/contracts";
 import { setupP2pkhUriActions } from "./setupUriActions.js";
 import { IdentityHomeButton } from "./IdentityHomeButton.js";
@@ -65,14 +65,13 @@ import {
   WOC_CAPABILITY,
   P2PKH_COORDINATOR_CONTROL_CAPABILITY,
   P2PKH_ADDRESS_CODEC_CAPABILITY,
-  P2PKH_SETTINGS_READER_CAPABILITY,
   BSV_PRICE_READER_CAPABILITY,
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
-import type { P2pkhGlobalSettings, P2pkhSyncStatus, P2pkhKeyResource, P2pkhHistoryRecord, P2pkhLocalTransaction, P2pkhTransactionSyncState, P2pkhAvailableUtxos } from "./p2pkhContracts.js";
+import type { P2pkhSyncSnapshot, P2pkhKeyResource, P2pkhHistoryRecord, P2pkhLocalTransaction, P2pkhTransactionSyncState, P2pkhAvailableUtxos } from "./p2pkhContracts.js";
 
 type ReadinessState = "initializing" | "no-active-key" | "ready";
-import { createP2pkhService } from "./p2pkhService.js";
+import { createP2pkhService, P2PKH_TASK_TRANSACTIONS_SYNC } from "./p2pkhService.js";
 import { P2PKH_CAPABILITY } from "./p2pkhContracts.js";
 import { p2pkhAddressCodec } from "./p2pkhAddressCodec.js";
 import { createProtocolFundingService } from "./p2pkhProtocolFunding.js";
@@ -87,6 +86,7 @@ import { transactionSourceListPath } from "./pages/p2pkhTransactionView.js";
 import { P2pkhBalanceWidget } from "./widgets/P2pkhBalanceWidget.js";
 import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 import { emptyGlobalBalanceSnapshot } from "@keymaster/contracts";
+import { readP2pkhSyncStatus, subscribeP2pkhSyncStatus } from "./p2pkhSyncStatus.js";
 
 export { P2PKH_CAPABILITY } from "./p2pkhContracts.js";
 
@@ -96,7 +96,7 @@ export const p2pkhResources: I18nPluginResources = {
   resources: {
     en: {
       "p2pkh.provider.name": "P2PKH",
-      "p2pkh.provider.description": "BSV P2PKH transfers: bsv / bsvtest networks (testnet is gated by the bsvNetwork setting).",
+      "p2pkh.provider.description": "BSV P2PKH transfers on the network bound to the active wallet identity.",
       "p2pkh.route.transactions": "P2PKH on-chain transactions",
       "p2pkh.route.localTransactions": "P2PKH local transactions",
       "p2pkh.route.transaction": "P2PKH transaction",
@@ -110,7 +110,7 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.crumb.localTransactions": "Local transactions",
       "p2pkh.crumb.transaction": "Transaction",
       "p2pkh.settings.label": "P2PKH",
-      "p2pkh.settings.description": "P2PKH product settings (bsvNetwork, etc.). WOC settings are on the WOC page.",
+      "p2pkh.settings.description": "Configure transaction fee policy for the active wallet network.",
       "p2pkh.home.balance": "P2PKH balance",
       "p2pkh.task.transactions.label": "P2PKH confirmed transactions",
       "p2pkh.task.transactions.description": "Sync WoC history metadata and refresh the in-memory UTXO snapshot.",
@@ -184,7 +184,7 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.asset.all": "All",
       "p2pkh.balance.line": "Balance: {{total}}",
       "p2pkh.settings.title": "P2PKH settings",
-      "p2pkh.settings.desc": "P2PKH product settings: network scope, fee rates and the WoC endpoint.",
+      "p2pkh.settings.desc": "Configure transaction fee policy for the active wallet network.",
       "p2pkh.settings.unavailable": "Wallet is locked or the P2PKH service is temporarily unavailable; unlock to continue configuring.",
       "p2pkh.wallet.locked.title": "Wallet is locked",
       "p2pkh.wallet.locked.description": "Unlock to view transactions again.",
@@ -192,6 +192,7 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.detail.locked.description": "Unlock to view transaction details again.",
       "p2pkh.wallet.settings": "Provider settings",
       "p2pkh.wallet.loadFailed": "Wallet data unavailable",
+      "p2pkh.wallet.identityPending": "Reading wallet identity…",
       "p2pkh.wallet.transactions.title": "On-chain transactions",
       "p2pkh.wallet.transactions.description": "WoC history metadata (txid / height); the detail page lazily loads the raw transaction.",
       "p2pkh.wallet.localTransactions.title": "Local transactions",
@@ -227,6 +228,7 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.direction.self": "Self transfer",
       "p2pkh.txDetail.title": "Transaction details",
       "p2pkh.txDetail.loading": "Loading local transaction",
+      "p2pkh.txDetail.rawUnavailable": "The raw transaction has not loaded or is unavailable.",
       "p2pkh.txDetail.unavailable": "Transaction is not available locally",
       "p2pkh.txDetail.unavailableDescription": "This page only displays transaction information stored in this wallet.",
       "p2pkh.txDetail.summary": "Transaction summary",
@@ -256,7 +258,6 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.syncStatus.ok": "Up to date",
       "p2pkh.syncStatus.failed": "Failed",
       "p2pkh.syncStatus.blocked": "Blocked",
-      "p2pkh.syncStatus.rate-limited": "Rate limited",
       "p2pkh.network.main": "Mainnet",
       "p2pkh.network.test": "Testnet",
       "p2pkh.action.inProgress": "Working…",
@@ -270,10 +271,6 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.state.spent": "Spent",
       "p2pkh.state.claimed": "Claimed",
       "p2pkh.state.protected": "Protected",
-      "p2pkh.settings.bsvNetwork": "Include testnet assets",
-      "p2pkh.settings.bsvNetwork.yes": "Yes",
-      "p2pkh.settings.bsvNetwork.no": "No (recommended)",
-      "p2pkh.settings.bsvNetworkHint": "The network is fixed when the identity is created or imported.",
       "p2pkh.settings.feeEffective": "Effective rate",
       "p2pkh.settings.feeRecommended": "WoC recommendation",
       "p2pkh.settings.feePending": "Not received yet; using fallback",
@@ -321,14 +318,13 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.transfer.form.contactSelect": "Pick from contacts",
       "p2pkh.transfer.form.contactPlaceholder": "Unselected",
       "p2pkh.transfer.form.amount": "Amount (sats)",
-      "p2pkh.transfer.form.feeRate": "Fee rate (sats/kB)",
       "p2pkh.transfer.form.amountPlaceholder": "Enter sats or choose All",
       "p2pkh.transfer.form.sendAll": "All",
       "p2pkh.transfer.form.sendAllHint": "The final received amount automatically subtracts the actual miner fee.",
       "p2pkh.transfer.form.availableBalance": "Available balance: {{balance}} sats ({{network}})",
       "p2pkh.transfer.form.availableBalanceUnknown": "Available balance: Unknown ({{network}})",
-      "p2pkh.transfer.step.addressAmount": "Amount and miner fee rate",
-      "p2pkh.transfer.step.addressAmountHint": "The platform verified and locked the recipient address. Only amount and miner fee rate can be entered here.",
+      "p2pkh.transfer.step.addressAmount": "Amount",
+      "p2pkh.transfer.step.addressAmountHint": "The platform verified and locked the recipient address. The current wallet fee policy determines the fee shown in the transaction preview.",
       "p2pkh.transfer.preview.stepHint": "Verify the recipient, received amount, change, and miner fee before broadcasting.",
       "p2pkh.transfer.result.stepHint": "The final transaction has been submitted to the broadcast service.",
       "p2pkh.transfer.form.prepare": "Generate final transaction",
@@ -364,7 +360,7 @@ export const p2pkhResources: I18nPluginResources = {
     },
     "zh-CN": {
       "p2pkh.provider.name": "P2PKH",
-      "p2pkh.provider.description": "BSV P2PKH 转移：bsv / bsvtest 两个网络（testnet 受 bsvNetwork 设置控制）。",
+      "p2pkh.provider.description": "BSV P2PKH 转账使用当前钱包身份绑定的网络。",
       "p2pkh.route.transactions": "P2PKH 链上交易",
       "p2pkh.route.localTransactions": "P2PKH 本地交易",
       "p2pkh.route.transaction": "P2PKH 交易",
@@ -378,7 +374,7 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.crumb.localTransactions": "本地交易",
       "p2pkh.crumb.transaction": "交易",
       "p2pkh.settings.label": "P2PKH",
-      "p2pkh.settings.description": "P2PKH 产品设置（bsvNetwork 等）。WOC 设置请到独立 WOC 设置页。",
+      "p2pkh.settings.description": "配置当前钱包网络的交易手续费策略。",
       "p2pkh.home.balance": "P2PKH 余额",
       "p2pkh.task.transactions.label": "P2PKH 确认交易",
       "p2pkh.task.transactions.description": "同步 WoC 历史元数据并刷新内存 UTXO 快照。",
@@ -452,7 +448,7 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.asset.all": "全部",
       "p2pkh.balance.line": "余额：{{total}}",
       "p2pkh.settings.title": "P2PKH 设置",
-      "p2pkh.settings.desc": "P2PKH 产品设置：网络范围、矿工费率与 WoC 端点。",
+      "p2pkh.settings.desc": "配置当前钱包网络的交易手续费策略。",
       "p2pkh.settings.unavailable": "钱包已锁定或 P2PKH 服务暂不可用；解锁后可继续配置。",
       "p2pkh.wallet.locked.title": "钱包已锁定",
       "p2pkh.wallet.locked.description": "解锁后可继续查看交易。",
@@ -460,6 +456,7 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.detail.locked.description": "解锁后可继续查看交易详情。",
       "p2pkh.wallet.settings": "供应商设置",
       "p2pkh.wallet.loadFailed": "钱包数据不可用",
+      "p2pkh.wallet.identityPending": "正在读取钱包身份…",
       "p2pkh.wallet.transactions.title": "链上交易",
       "p2pkh.wallet.transactions.description": "WoC 历史元数据（txid / 高度）；详情页按需懒加载 raw transaction。",
       "p2pkh.wallet.localTransactions.title": "本地交易",
@@ -495,6 +492,7 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.direction.self": "自转",
       "p2pkh.txDetail.title": "交易详情",
       "p2pkh.txDetail.loading": "正在读取本地交易",
+      "p2pkh.txDetail.rawUnavailable": "raw transaction 尚未加载或不可用。",
       "p2pkh.txDetail.unavailable": "本地没有这笔交易",
       "p2pkh.txDetail.unavailableDescription": "此页面只展示本钱包已保存的交易信息。",
       "p2pkh.txDetail.summary": "交易摘要",
@@ -524,7 +522,6 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.syncStatus.ok": "已同步",
       "p2pkh.syncStatus.failed": "失败",
       "p2pkh.syncStatus.blocked": "已阻断",
-      "p2pkh.syncStatus.rate-limited": "受限流影响",
       "p2pkh.network.main": "主网",
       "p2pkh.network.test": "测试网",
       "p2pkh.action.inProgress": "处理中…",
@@ -538,10 +535,6 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.state.spent": "已花费",
       "p2pkh.state.claimed": "已占用",
       "p2pkh.state.protected": "受保护",
-      "p2pkh.settings.bsvNetwork": "包含 testnet 货币",
-      "p2pkh.settings.bsvNetwork.yes": "是",
-      "p2pkh.settings.bsvNetwork.no": "否（推荐）",
-      "p2pkh.settings.bsvNetworkHint": "网络在创建或导入身份时确定，之后不可修改。",
       "p2pkh.settings.feeEffective": "当前有效费率",
       "p2pkh.settings.feeRecommended": "WoC 建议费率",
       "p2pkh.settings.feePending": "尚未获取，使用备用值",
@@ -589,14 +582,13 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.transfer.form.contactSelect": "从联系人选择",
       "p2pkh.transfer.form.contactPlaceholder": "未选择",
       "p2pkh.transfer.form.amount": "金额 (sats)",
-      "p2pkh.transfer.form.feeRate": "矿工费 (sats/kB)",
       "p2pkh.transfer.form.amountPlaceholder": "输入 sats，或选择全部",
       "p2pkh.transfer.form.sendAll": "全部",
       "p2pkh.transfer.form.sendAllHint": "最终到账额会自动扣除实际矿工费。",
       "p2pkh.transfer.form.availableBalance": "可用余额：{{balance}} sats（{{network}}）",
       "p2pkh.transfer.form.availableBalanceUnknown": "可用余额未知（{{network}}）",
-      "p2pkh.transfer.step.addressAmount": "金额与矿工费率",
-      "p2pkh.transfer.step.addressAmountHint": "收款地址已由平台核对并锁定；这里只能输入金额和矿工费率。",
+      "p2pkh.transfer.step.addressAmount": "金额",
+      "p2pkh.transfer.step.addressAmountHint": "收款地址已由平台核对并锁定；手续费按当前钱包策略计算，并显示在交易预览中。",
       "p2pkh.transfer.preview.stepHint": "请核对收款地址、到账金额、找零与矿工费，再广播。",
       "p2pkh.transfer.result.stepHint": "最终交易已提交到广播服务。",
       "p2pkh.transfer.form.prepare": "生成最终交易",
@@ -644,7 +636,7 @@ const p2pkhPluginDefinition = {
       runtime: "window-main",
     connect: { providerMethods: ["p2pkh.transfer", "payment.pay", "payment.status", "feepool.prepare", "feepool.commit"] },
       scopeKind: "owner-session",
-      provides: [PROTECTED_OUTPOINT_REGISTRY_CAPABILITY, P2PKH_CAPABILITY, BALANCE_BROADCAST_CAPABILITY, P2PKH_ADDRESS_CODEC_CAPABILITY, P2PKH_SETTINGS_READER_CAPABILITY, P2PKH_PROTOCOL_SPEND_CAPABILITY, P2PKH_FUNDING_CAPABILITY, P2PKH_SUBMISSION_OBSERVER_CAPABILITY, CENTRAL_BROADCAST_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY],
+      provides: [PROTECTED_OUTPOINT_REGISTRY_CAPABILITY, P2PKH_CAPABILITY, BALANCE_BROADCAST_CAPABILITY, P2PKH_ADDRESS_CODEC_CAPABILITY, P2PKH_PROTOCOL_SPEND_CAPABILITY, P2PKH_FUNDING_CAPABILITY, P2PKH_SUBMISSION_OBSERVER_CAPABILITY, CENTRAL_BROADCAST_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY],
       storage: CENTRAL_STORAGE_DECLARATIONS.p2pkhFiles,
       dependencies: defineRuntimeUnitDependencies([
       { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "声明存储客户端及用途授权" },
@@ -664,6 +656,7 @@ const p2pkhPluginDefinition = {
       { capability: OWNED_RESOURCE_ACCESS_CAPABILITY, reason: "UI 读取所属实例资源" },
       { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "注册 P2PKH resources" },
       { capability: CHAIN_FEE_READER_CAPABILITY, reason: "消费全局有效手续费率" },
+      { capability: CHAIN_FEE_POLICY_WRITER_CAPABILITY, reason: "设置页更新当前钱包网络的手续费策略" },
         { capability: RUNTIME_MESSAGE_BUS, reason: "订阅 key lifecycle events" },
         ]),
     },
@@ -750,7 +743,7 @@ const p2pkhPluginDefinition = {
       return protectionRestore;
     };
 
-    const { service, balance: broadcaster } = createP2pkhService({
+    const { service, balance: broadcaster, dataChanges } = createP2pkhService({
       signal: ctx.scope.signal,
       vault,
       workerTransfer,
@@ -760,15 +753,11 @@ const p2pkhPluginDefinition = {
       storage,
       woc,
       centralBroadcastService,
-      chainFees,
+      // Window 不补默认费率：只转交可选费率，默认由实际准备交易的 Worker 决定。
       // 选币前必须等保护登记恢复：见上面 startProtectionRestore 的注释。
       awaitProtectionRestore: () => protectionRestore,
     });
     ctx.provide(P2PKH_CAPABILITY, service);
-    ctx.provide(P2PKH_SETTINGS_READER_CAPABILITY, {
-      bsvNetwork: () => service.getGlobalSettings().bsvNetwork,
-      onChange: listener => service.onGlobalSettingsChange(listener),
-    });
     ctx.provide(BALANCE_BROADCAST_CAPABILITY, broadcaster);
     ctx.provide(P2PKH_ADDRESS_CODEC_CAPABILITY, p2pkhAddressCodec);
     // Window retains the plugin interface, never a signer or a local claim
@@ -965,21 +954,6 @@ const p2pkhPluginDefinition = {
       load: async () => { assertWalletSession(); return chainFees.get(); },
       subscribe: (_args, _context, invalidate) => chainFees.subscribe(invalidate), invalidation: "immediate"
     });
-    // p2pkh.settings：P2PKH 全局设置
-    resources.register<P2pkhGlobalSettings, readonly string[]>({
-      id: "p2pkh.settings",
-      scope: "global",
-      key: () => ["p2pkh.settings"],
-      load: async () => service.getGlobalSettings(),
-      subscribe: (_args, _ctx, invalidate) => service.onGlobalSettingsChange(invalidate),
-      equals: (prev, next) => {
-        if (!prev || !next) return prev === next;
-        return prev.bsvNetwork === next.bsvNetwork
-          && prev.feeRateSatoshisPerKb === next.feeRateSatoshisPerKb && JSON.stringify(prev.feePolicy) === JSON.stringify(next.feePolicy);
-      },
-      invalidation: "immediate"
-    });
-
     resources.register<ReadinessState, readonly string[]>({
       id: "p2pkh.readiness",
       scope: "active-key",
@@ -990,19 +964,12 @@ const p2pkhPluginDefinition = {
       invalidation: "immediate"
     });
 
-    resources.register<P2pkhSyncStatus, readonly string[]>({
+    resources.register<P2pkhSyncSnapshot, readonly string[]>({
       id: "p2pkh.sync-status",
       scope: "global",
       key: () => ["p2pkh.sync-status"],
-      load: async () => {
-        const task = coordinator.getBootstrapSnapshot().taskSnapshots.find((snapshot) => snapshot.id === "p2pkh.transactions-sync");
-        if (!task) return service.syncStatus();
-        if (task.state === "running") return "syncing";
-        if (task.state === "blocked") return "blocked";
-        if (task.error) return "failed";
-        return task.lastCompletedAt ? "ok" : "idle";
-      },
-      subscribe: (_args, _ctx, invalidate) => { const offService = service.onSyncStatusChange(invalidate); const offCoordinator = coordinator.subscribeTopic("background.snapshot", invalidate); return () => { offService(); offCoordinator(); }; },
+      load: async () => readP2pkhSyncStatus(coordinator),
+      subscribe: (_args, _ctx, invalidate) => subscribeP2pkhSyncStatus(coordinator, invalidate),
       invalidation: "immediate"
     });
 
@@ -1012,14 +979,10 @@ const p2pkhPluginDefinition = {
       locals: P2pkhLocalTransaction[];
       utxoResult: P2pkhAvailableUtxos;
       sync: P2pkhTransactionSyncState[];
-      syncStatus: P2pkhSyncStatus;
-      /** 最近一次完整同步成功时间（来自 Coordinator 任务快照，跨进程可见）。 */
-      lastSyncedAt?: string;
-      syncError?: string;
       historyCursors: Record<string, string | undefined>;
       localCursors: Record<string, string | undefined>;
     };
-    const emptyWallet = (): P2pkhWalletResource => ({ resources: [], history: [], locals: [], utxoResult: { hasResult: false, utxos: null, seq: null, syncedAt: null }, sync: [], syncStatus: "idle", historyCursors: {}, localCursors: {} });
+    const emptyWallet = (): P2pkhWalletResource => ({ resources: [], history: [], locals: [], utxoResult: { hasResult: false, utxos: null, seq: null, syncedAt: null }, sync: [], historyCursors: {}, localCursors: {} });
     const loadWalletResource = async (context: { activePublicKeyHex?: string }): Promise<P2pkhWalletResource> => {
       if (!context.activePublicKeyHex) return emptyWallet();
       const stateRepository = createP2pkhStateRepository(await openP2pkhStateRepository(storage));
@@ -1039,19 +1002,12 @@ const p2pkhPluginDefinition = {
         stateRepository.listTransactionSyncStates(),
         service.getAvailableUtxos()
       ]);
-      const task = coordinator.getBootstrapSnapshot().taskSnapshots.find((snapshot) => snapshot.id === "p2pkh.transactions-sync");
-      const syncStatus: P2pkhSyncStatus = !task ? "idle" : task.state === "running" ? "syncing" : task.state === "blocked" ? "blocked" : task.error ? "failed" : task.lastCompletedAt ? "ok" : "idle";
-      const blockedReason = task?.blockedReason;
-      const syncError = (typeof blockedReason === "string" ? blockedReason : blockedReason?.fallback) ?? task?.error ?? sync.find((row) => row.lastError)?.lastError;
       return {
         resources: resourcesForKey,
         history: historyPage.items,
         locals: localsPage.items,
         utxoResult,
         sync,
-        syncStatus,
-        ...(task?.lastCompletedAt === undefined ? {} : { lastSyncedAt: task.lastCompletedAt }),
-        ...(syncError === undefined ? {} : { syncError }),
         historyCursors: historyPage.cursors,
         localCursors: localsPage.cursors,
       };
@@ -1059,9 +1015,9 @@ const p2pkhPluginDefinition = {
     resources.register<P2pkhWalletResource, readonly string[]>({
       id: "p2pkh.wallet",
       scope: "active-key",
-      key: (_args, context) => ["p2pkh.wallet", context.activePublicKeyHex ?? "none", String(service.getGlobalSettings().bsvNetwork)],
+      key: (_args, context) => ["p2pkh.wallet", context.activePublicKeyHex ?? "none", walletIdentity.bsvNetwork],
       load: async (_args, context) => loadWalletResource(context),
-      subscribe: (_args, _ctx, invalidate) => { const offs = [service.onDataChanged(invalidate), service.onGlobalSettingsChange(invalidate), walletState.subscribe(invalidate), coordinator.subscribeTopic("background.snapshot", invalidate)]; return () => offs.forEach((off) => off()); },
+      subscribe: (_args, _ctx, invalidate) => { const offData = dataChanges.subscribe(invalidate); const offWallet = walletState.subscribe(invalidate); return () => { offData(); offWallet(); }; },
       invalidation: "microtask"
     });
     resources.register<{ history: P2pkhHistoryRecord[]; locals: P2pkhLocalTransaction[]; sync: P2pkhTransactionSyncState[] }, readonly string[]>({
@@ -1069,7 +1025,7 @@ const p2pkhPluginDefinition = {
       scope: "active-key",
       key: (_args, context) => ["p2pkh.transactions", context.activePublicKeyHex ?? "none"],
       load: async (_args, context) => { const wallet = await loadWalletResource(context); return { history: wallet.history, locals: wallet.locals, sync: wallet.sync }; },
-      subscribe: (_args, _ctx, invalidate) => { const off = service.onDataChanged(invalidate); return () => off(); },
+      subscribe: (_args, _ctx, invalidate) => dataChanges.subscribe(invalidate),
       invalidation: "microtask"
     });
     resources.register<P2pkhAvailableUtxos, readonly string[]>({
@@ -1077,25 +1033,22 @@ const p2pkhPluginDefinition = {
       scope: "active-key",
       key: (_args, context) => ["p2pkh.coins", context.activePublicKeyHex ?? "none"],
       load: async (_args, context) => (await loadWalletResource(context)).utxoResult,
-      subscribe: (_args, _ctx, invalidate) => { const off = service.onDataChanged(invalidate); return () => off(); },
+      subscribe: (_args, _ctx, invalidate) => dataChanges.subscribe(invalidate),
       invalidation: "microtask"
     });
-    resources.register<{ activePublicKeyHex?: string; identity?: KeyIdentity; resource?: P2pkhKeyResource }, readonly string[]>({
-      id: "p2pkh.transfer-context",
+    resources.register<{ identity?: KeyIdentity; address?: string }, readonly string[]>({
+      id: "p2pkh.wallet-context",
       scope: "active-key",
-      key: (_args, context) => ["p2pkh.transfer-context", context.activePublicKeyHex ?? "none"],
+      key: (_args, context) => ["p2pkh.wallet-context", context.activePublicKeyHex ?? "none"],
       load: async (_args, context) => {
         const publicKeyHex = context.activePublicKeyHex;
         if (!publicKeyHex) return {};
+        // 页面只读投影：只依赖身份和地址派生，不依赖历史、余额、UTXO 或手续费查询成功。
         const identity = requireUnlockedWalletIdentity(walletState.snapshot());
         if (identity.publicKeyHex !== publicKeyHex) throw new Error("P2PKH transfer identity revoked");
-        return { activePublicKeyHex: publicKeyHex, identity, resource: currentWalletResource() };
+        return { identity, address: p2pkhAddressCodec.deriveAddress(identity.publicKeyHex, identity.bsvNetwork) };
       },
-      subscribe: (_args, _ctx, invalidate) => {
-        const off = walletState.subscribe(invalidate);
-        const offData = service.onDataChanged(invalidate);
-        return () => { off(); offData(); };
-      },
+      subscribe: (_args, _ctx, invalidate) => walletState.subscribe(invalidate),
       invalidation: "immediate"
     });
 

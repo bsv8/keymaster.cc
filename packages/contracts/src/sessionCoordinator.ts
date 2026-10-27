@@ -403,7 +403,7 @@ export type CoordinatorClientRequest =
     | { kind: "background.cancel-by-key"; clientId: string; requestId: string; networkIdentity: NetworkIdentity; expectedSessionEpoch: SessionEpoch }
     | { kind: "background.settings.update"; clientId: string; requestId: string; settings: CoordinatorBackgroundSyncSettings; expectedSessionEpoch: SessionEpoch }
     | { kind: "autolock.settings.update"; clientId: string; requestId: string; settings: AutoLockSettings; expectedSessionEpoch: SessionEpoch }
-    | { kind: "p2pkh.settings.update"; clientId: string; requestId: string; settings: { bsvNetwork: "main" | "test"; feePolicy?: ChainFeePolicy }; expectedSessionEpoch: SessionEpoch }
+    | { kind: "chain.fee-policy.update"; clientId: string; requestId: string; policy: ChainFeePolicy; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.provider-config.get"; clientId: string; requestId: string; providerId: string; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.provider-config.update"; clientId: string; requestId: string; providerId: string; config: P2pkhProviderConfig; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.utxos.get"; clientId: string; requestId: string; ownerPublicKeyHex: string; network: "main" | "test"; expectedSessionEpoch: SessionEpoch }
@@ -685,10 +685,16 @@ export interface SessionStateEvent {
     | "change-password"
     | "rename-key"
     | "reset-wallet"
-    | "autolock-settings";
+    | "autolock-settings"
+    | "storage-owner";
   vaultStatus: CoordinatorVaultStatus;
   /** 唯一钱包 Key；未初始化或锁定时省略。 */
   activePublicKeyHex: string | null;
+  /**
+   * 当前 storage-I/O owner 的脱敏投影。owner 切换（打开/关闭 peer）时随
+   * `session.state` 推送给所有 Window；缺省表示当前没有可报告的 owner。
+   */
+  storageIoOwnerPeer?: CoordinatorBootstrapSnapshot["storageIoOwnerPeer"];
   /** 自动锁定超时毫秒；0 = 永不。页面无需额外 RPC 即可读取。 */
   autoLockTimeoutMs?: number;
   /** Coordinator 启动接管被旧最终 I/O 租约阻塞时的脱敏诊断。 */
@@ -703,8 +709,6 @@ export interface BackgroundSnapshotEvent {
   snapshots: CoordinatorTaskSnapshot[];
   /** 同步管理设置；快照事件携带它以便页面无需额外 RPC 即可读取。 */
   scheduleSettings?: CoordinatorBackgroundSyncSettings;
-  /** P2PKH 网络范围设置；余额/资产页面据此决定是否显示 testnet。 */
-  p2pkhSettings?: { bsvNetwork: "main" | "test" };
 }
 
 /** Coordinator Worker 实际运行单元快照；这是 Window 汇总后台状态的唯一入口。 */
@@ -778,8 +782,6 @@ export interface CoordinatorBootstrapSnapshot {
   scheduleSettings: CoordinatorBackgroundSyncSettings;
   /** 自动锁定超时毫秒；0 = 永不。缺省 5 分钟。 */
   autoLockTimeoutMs?: number;
-  /** P2PKH 网络范围配置，保存在 Coordinator 平台 K-V。 */
-  p2pkhSettings?: { bsvNetwork: "main" | "test" };
   /** 当前钱包身份世代；重置后变化，各 Tab 据此使旧授权失效。 */
   walletGeneration?: string;
   /** 插件产品启用意图；不代表运行单元已经启动。 */
@@ -888,9 +890,8 @@ export interface SessionCoordinatorClient {
   channelOperation(operation: CoordinatorChannelOperation, signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
   /** 读取 Coordinator 内唯一联系人在线状态快照；不会触发新的网络探测。 */
   contactsPresenceSnapshot(): Promise<CoordinatorValueResult<ContactPresenceMap>>;
-  /** 读取 SharedWorker 唯一插件意图快照。 */
-  /** 提交绝对启停意图；accepted 只表示 Worker 已持久化。 */
-  p2pkhSettingsUpdate(settings: { bsvNetwork: "main" | "test"; feePolicy?: ChainFeePolicy }): Promise<CoordinatorCommandResult>;
+  /** Persist the current wallet network's fee policy in the Coordinator Worker. */
+  chainFeePolicyUpdate(policy: ChainFeePolicy): Promise<CoordinatorCommandResult>;
   p2pkhProviderConfigGet(providerId: string): Promise<CoordinatorValueResult<P2pkhProviderConfig>>;
   p2pkhProviderConfigUpdate(providerId: string, config: P2pkhProviderConfig): Promise<CoordinatorCommandResult>;
   /** 读取 Coordinator Worker 内存中的 UTXO 快照；`available=false` 表示尚无可信快照。 */
@@ -960,13 +961,18 @@ export type BackgroundCoordinatorControl = Pick<SessionCoordinatorClient,
   reportRecoverableCoordinatorFailure?: SessionCoordinatorClient["reportRecoverableCoordinatorFailure"];
 };
 
-/** P2PKH / WOC 插件共享的 P2PKH 设置、UTXO 快照与广播面。 */
+/** P2PKH 插件的 Coordinator 面；不包含手续费策略写权限。 */
 export type P2pkhCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
-  "p2pkhSettingsUpdate" |
   "p2pkhProviderConfigGet" | "p2pkhProviderConfigUpdate" |
   "p2pkhUtxosGet" | "p2pkhUtxosRefresh" |
   "p2pkhTransferPrepare" | "p2pkhTransferSubmit" | "p2pkhArtifactOccupy" | "p2pkhConclusion" | "p2pkhPaymentStatus" | "p2pkhProtocolCommand"
 >;
+
+/** 手续费策略写 RPC 的窄面，仅提供给 chain-fee.policy-writer 装配。 */
+export type ChainFeePolicyCoordinatorControl = Pick<SessionCoordinatorClient, "chainFeePolicyUpdate">;
+
+/** WOC 装配面另含手续费策略写 RPC；普通 P2PKH Coordinator 消费者没有此权限。 */
+export type WocCoordinatorControl = P2pkhCoordinatorControl & ChainFeePolicyCoordinatorControl;
 
 /**
  * 装配层给中心广播服务的私有 Worker 出口。

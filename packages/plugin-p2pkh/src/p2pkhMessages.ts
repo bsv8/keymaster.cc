@@ -4,8 +4,6 @@
 
 /** P2PKH 业务事件类型（messageBus.publish 的 type 字段）。 */
 export const P2PKH_MSG = {
-  /** Local service status changed. */
-  SYNC: "p2pkh.sync",
   /** 资源地址派生完成。 */
   ADDRESS_DERIVED: "p2pkh.address.derived",
   /** rehydrate 失败。 */
@@ -14,14 +12,6 @@ export const P2PKH_MSG = {
   TRANSFER_BROADCAST: "p2pkh.transfer.broadcast",
   /** 全局余额快照发生内容变化。payload 是 GlobalBalanceSnapshot。 */
   BALANCE_CHANGED: "p2pkh.balance.changed",
-  /**
-   * 全局产品设置变更（硬切换 001）。
-   * 设计缘由：跨标签页或非 settings 页面需要知道 bsvNetwork 切换，
-   * 跨 tab 链路交给 messageBus；settings 页同 tab 链路交给
-   * `service.onGlobalSettingsChange` 订阅句柄。
-   * payload: P2pkhGlobalSettings。
-   */
-  SETTINGS_CHANGED: "p2pkh.settings.changed"
 } as const;
 
 export type P2pkhMessageType = (typeof P2PKH_MSG)[keyof typeof P2PKH_MSG];

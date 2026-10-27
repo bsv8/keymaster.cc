@@ -2,6 +2,7 @@ import {
   defineBuiltinWorkerPlugin, STORAGE_FILE_CLIENTS_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY,
   VAULT_WORKER_CRYPTO_CAPABILITY, WOC_CAPABILITY, WOC_WORKER_BROADCAST_CAPABILITY,
   P2PKH_WORKER_TRANSFER_CAPABILITY, P2PKH_WORKER_PROTOCOL_CAPABILITY,
+  requireUnlockedWalletIdentity,
   type BorrowedModuleFileStore, type VaultWalletState, type VaultWorkerCrypto, type WocService,
   type WocWorkerBroadcastService, type P2pkhProviderRegistry, type WorkerTaskRegistrar,
 } from "@keymaster/contracts";
@@ -101,8 +102,9 @@ export function createP2pkhWorkerRuntime(ports: P2pkhWorkerPorts) {
         context.scope.assertActive();
         const service = await transfer.ensure();
         context.scope.assertActive();
+        const identity = Object.freeze({ ...requireUnlockedWalletIdentity(own.walletState.snapshot()) });
         return Object.freeze({
-          getGlobalSettings: () => { context.scope.assertActive(); return structuredClone(service.getGlobalSettings()); },
+          identity,
           async prepareTransfer(input: Parameters<typeof service.prepareTransfer>[0]) { context.scope.assertActive(); const result = await service.prepareTransfer(input); context.scope.assertActive(); return result; },
           async submitTransfer(preview: unknown) { context.scope.assertActive(); const result = await service.submitTransfer(preview as Parameters<typeof service.submitTransfer>[0]); context.scope.assertActive(); return result; },
         });
