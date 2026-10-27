@@ -1,3 +1,4 @@
+import { requireWocNetwork } from "@keymaster/contracts";
 // P2PKH 历史同步：只同步 WoC history 元数据，与 UTXO 完全解耦。
 //
 // 设计缘由（2026-09-20 解耦）：
@@ -57,12 +58,7 @@ export function createP2pkhTransactionSync(deps: P2pkhTransactionSyncDeps) {
       while (true) {
         if (signal.aborted) return { pages, transactions };
         if (deps.isNetworkEnabled && !deps.isNetworkEnabled(network)) return { pages, transactions };
-        const page = await deps.woc.listAddressConfirmedHistory(
-          network,
-          resource.address,
-          { limit: HISTORY_PAGE_LIMIT, ...(cursor === undefined ? {} : { nextPageToken: cursor }) },
-          { priority: "background", signal }
-        );
+        const page = await requireWocNetwork(deps.woc, network).listAddressConfirmedHistory(resource.address, { limit: HISTORY_PAGE_LIMIT, ...(cursor === undefined ? {} : { nextPageToken: cursor }) }, { priority: "background", signal });
         for (const rawItem of page.items) {
           const item = normalizeHistoryItem(rawItem);
           const existing = entries.get(item.txid);

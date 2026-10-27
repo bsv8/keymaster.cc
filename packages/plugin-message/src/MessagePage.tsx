@@ -8,7 +8,7 @@ import { useMessageResources } from "./MessageResourceContext.js";
 //   - 联系人名称回填来自 contacts.service；
 //   - 新增 / 编辑联系人通过 contacts.editor capability 打开，message
 //     页面不复制联系人表单；
-//   - 会话详情主入口是 /message/:publicKeyHex，/messages/:publicKeyHex 仅作兼容别名；
+//   - 会话详情入口是 /message/:publicKeyHex；
 //
 // 硬切换 003：使用 Resource Store 读取消息和联系人数据。
 // 跨标签同步、请求去重、失效批处理由 resource 处理。

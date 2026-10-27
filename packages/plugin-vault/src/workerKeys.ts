@@ -1,10 +1,10 @@
 import { WalletMigrationFence } from "./coordinator.js";
-import { type CoordinatorCryptoOperation, type CoordinatorCryptoResult } from "@keymaster/contracts";
+import { deriveP2pkhAddress, type CoordinatorCryptoOperation, type CoordinatorCryptoResult } from "@keymaster/contracts";
 import type { LifecycleScope } from "webloom-framework";
 import {
   SignatureHistory, HardwareConnectionOwner, WalletPayments, HardwareWalletPayments, createWorkerKeySession,
   createWorkerIdentityProjection, createWorkerActiveKeyCryptoFactory, createHardwareChannelAdapter,
-  bytesToHex, hexToBytes as cryptoHexToBytes, deriveP2pkhAddress,
+  bytesToHex, hexToBytes as cryptoHexToBytes,
 } from "./coordinator.js";
 
 export interface VaultWorkerKeyPorts {

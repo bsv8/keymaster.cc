@@ -1,3 +1,4 @@
+import { requireWocNetwork } from "@keymaster/contracts";
 // Forum 的专用资金来源。
 //
 // Forum 不选币、不拼资金准备交易、不接触私钥：这里把「读专用资金记录 / 判断
@@ -42,7 +43,7 @@ export interface CreateForumFundingSourceDeps {
   funding(): ProtocolFundingService | undefined;
     /** 受保护输出登记；专用 UTXO 必须在这里挡住普通选币。 */
   protectedOutpoints: Pick<ProtectedOutpointRegistry, "register" | "unregister">;
-  woc: Pick<WocService, "getSpentOutput" | "getTransactionObservation"> | undefined;
+  woc: Pick<WocService, "identity" | "getSpentOutput" | "getTransactionObservation"> | undefined;
   repository: {
     readDedicatedFunding(taskId: string): Promise<ForumFundingRecord | undefined>;
     writeDedicatedFunding(taskId: string, record: ForumFundingRecord): Promise<void>;
@@ -77,8 +78,6 @@ export function createForumFundingSource(deps: CreateForumFundingSourceDeps): Fo
     if (funding?.reconcileDedicatedFunding === undefined) return false;
     try {
       const outcome = await funding.reconcileDedicatedFunding({
-        ownerPublicKeyHex: input.ownerPublicKeyHex,
-        network: input.network,
         // 两侧必须用同一个编号，否则 P2PKH 找不到自己那份记录。
         fundingId: record.fundingId ?? FORUM_FUNDING_ID(input.taskId),
         txid: record.txid,
@@ -142,8 +141,6 @@ export function createForumFundingSource(deps: CreateForumFundingSourceDeps): Fo
       if (funding === undefined) return "unknown";
       const record = await deps.repository.readDedicatedFunding(input.taskId);
       return funding.observeDedicatedFunding({
-        ownerPublicKeyHex: input.ownerPublicKeyHex,
-        network: input.network,
         fundingId: record?.fundingId ?? FORUM_FUNDING_ID(input.taskId),
         txid: input.txid,
         vout: input.vout,
@@ -153,7 +150,7 @@ export function createForumFundingSource(deps: CreateForumFundingSourceDeps): Fo
     async isSpent(network, txid, vout): Promise<boolean> {
       if (deps.woc === undefined) return false;
       try {
-        const spent = await deps.woc.getSpentOutput(network, txid, vout);
+        const spent = await requireWocNetwork(deps.woc, network).getSpentOutput(txid, vout);
         return spent !== null;
       } catch {
         // 链数据源不可用时不假定「已花费」：宁可多准备一次也不要双花。
@@ -169,8 +166,6 @@ export function createForumFundingSource(deps: CreateForumFundingSourceDeps): Fo
       // 选币、资金准备交易、找零与保护登记都在 P2PKH 内完成：Forum 不选币、
       // 不拼准备交易，也不接触私钥。
       const prepared = await funding.prepareDedicatedFunding({
-        ownerPublicKeyHex: input.ownerPublicKeyHex,
-        network: input.network,
         // 每个发布任务一笔专用资金，避免两个任务争同一个 UTXO。
         fundingId: FORUM_FUNDING_ID(input.taskId),
         requiredSatoshis: input.requiredSatoshis.toString(),
@@ -206,8 +201,6 @@ export function createForumFundingSource(deps: CreateForumFundingSourceDeps): Fo
       const record = await deps.repository.readDedicatedFunding(input.taskId);
       const fundingId = record?.fundingId ?? FORUM_FUNDING_ID(input.taskId);
       const outcome = await funding.recoverDedicatedFunding({
-        ownerPublicKeyHex,
-        network: input.network,
         fundingId,
         feeRateSatoshisPerKb: input.feeRateSatoshisPerKb,
         reason: "supersededBy" in input.reason

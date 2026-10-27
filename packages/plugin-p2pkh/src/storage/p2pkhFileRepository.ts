@@ -8,7 +8,7 @@
 //     调用方已持有的数据；
 //   - 损坏文件跳过并记录，不影响其它文件。
 
-import type { BorrowedOwnerFileStore } from "@keymaster/contracts";
+import type { BorrowedModuleFileStore } from "@keymaster/contracts";
 import {
   P2PKH_SETTING_FILE_NAME,
   parseP2pkhHistoryFile,
@@ -34,7 +34,7 @@ function assertNetwork(network: P2pkhFileNetwork): P2pkhFileNetwork {
 }
 
 /** Repository 只接收 Host 已绑定网络身份的 `p2pkh/` 文件根。 */
-export function createP2pkhFileRepository(files: BorrowedOwnerFileStore) {
+export function createP2pkhFileRepository(files: BorrowedModuleFileStore) {
   async function readSetting(): Promise<P2pkhResolvedSetting> {
     const object = await files.get(P2PKH_SETTING_FILE_NAME);
     if (!object) return resolveP2pkhSetting();
@@ -135,7 +135,7 @@ export function createP2pkhFileRepository(files: BorrowedOwnerFileStore) {
   }
 
   return {
-    getStore(): BorrowedOwnerFileStore { return files; },
+    getStore(): BorrowedModuleFileStore { return files; },
     readSetting,
     writeSetting,
     readHistory,

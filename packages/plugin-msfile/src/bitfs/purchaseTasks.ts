@@ -1,6 +1,6 @@
 // 文件采购生命周期真值。一个 Owner 的同 Seed 只有一个 active 指针；
 // 多卖家会话只是任务成员，资金回收与内容存在性均不改变该唯一约束。
-import type { BorrowedOwnerFileStore } from "@keymaster/contracts";
+import type { BorrowedModuleFileStore } from "@keymaster/contracts";
 
 export interface BitfsPurchaseTask {
   taskId: string;
@@ -16,7 +16,7 @@ export interface BitfsPurchaseTask {
 interface TaskIndex { version: 1; seedHashHex: string; revision: number; tasks: BitfsPurchaseTask[] }
 const locks = new Map<string, Promise<void>>();
 
-export function createBitfsPurchaseTasks(store: BorrowedOwnerFileStore, owner: string, seed: string) {
+export function createBitfsPurchaseTasks(store: BorrowedModuleFileStore, owner: string, seed: string) {
   if (!/^[0-9a-f]{66}$/.test(owner) || !/^[0-9a-f]{64}$/.test(seed)) throw new Error("采购任务身份无效");
   const path = `purchase-tasks/${seed}.json`;
   const key = `${owner}:${seed}`;

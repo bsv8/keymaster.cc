@@ -10,7 +10,7 @@ import type {
   ProtectedOutpoint,
   P2pkhUtxoSnapshotResult,
 } from "@keymaster/contracts";
-import type { BorrowedOwnerFileStore } from "@keymaster/contracts";
+import type { BorrowedModuleFileStore } from "@keymaster/contracts";
 import type { BitfsSessionJournal } from "./sessionJournal.js";
 import type { BitfsTransactionJournal } from "./broadcast.js";
 
@@ -257,7 +257,7 @@ export async function prepareBitfsPoolRecoveryWithCurrentRevision(
 }
 
 /** 创建使用条件写与 Worker 内串行队列的资金账本。 */
-export function createBitfsFundingLedger(store: BorrowedOwnerFileStore): BitfsFundingLedger {
+export function createBitfsFundingLedger(store: BorrowedModuleFileStore): BitfsFundingLedger {
   if (!store) throw new TypeError("BitFS 资金账本需要文件存储");
   const queuedMutations = new Map<string, Promise<void>>();
   const accountPath = (seedHashHex: string, network: BsvNetwork) => `funding/accounts/${assertNetwork(network)}/${assertHash(seedHashHex)}.json`;
@@ -988,9 +988,7 @@ export async function prepareBitfsFunding(input: {
   let outboxDurable = false;
   try {
     preview = await deps.protocolSpend.presign({
-      ownerPublicKeyHex: owner,
       requestingPluginId: "msfile",
-      network,
       inputs: selectedInputs,
       outputs: [{ value: outputAmountNumber, scriptHex: outputScript, label: "BitFS 开池资金" }],
       feeRateSatoshisPerKb: input.feeRateSatoshisPerKb,
@@ -1088,7 +1086,7 @@ export async function prepareBitfsFunding(input: {
         const plan = account.transactions.find((transaction) => transaction.txid === preview!.txid && transaction.purpose === "opening");
         if (plan && plan.state !== "failed" && plan.state !== "observed") {
           if (preview.submissionId && deps.protocolSpend.releasePreparedSubmission) {
-            await deps.protocolSpend.releasePreparedSubmission({ ownerPublicKeyHex: owner, network, txid: preview.txid, submissionId: preview.submissionId });
+            await deps.protocolSpend.releasePreparedSubmission({ txid: preview.txid, submissionId: preview.submissionId });
           } else {
             await deps.releasePrepared(preview);
           }

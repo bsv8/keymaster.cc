@@ -328,6 +328,20 @@ export function createForumService(deps: ForumServiceDeps): ForumService {
     }
   };
 
+  const selfOutputContext = async () => {
+    const epoch = deps.sessionEpoch(), owner = deps.ownerPublicKeyHex().toLowerCase();
+    if (!epoch || !/^(02|03)[0-9a-f]{64}$/u.test(owner)) throw new ForumIdentityError("Wallet identity unavailable");
+    const crypto = await deps.activeCrypto();
+    assertFresh(epoch, owner);
+    const identity = { ...crypto.getIdentity() };
+    if (identity.publicKeyHex.toLowerCase() !== owner || (identity.bsvNetwork !== "main" && identity.bsvNetwork !== "test")) throw new ForumIdentityError("Wallet crypto identity mismatch");
+    return { network: identity.bsvNetwork, assertActive() {
+      assertFresh(epoch, owner);
+      const current = crypto.getIdentity();
+      if (current.publicKeyHex !== identity.publicKeyHex || current.bsvNetwork !== identity.bsvNetwork) throw new ForumIdentityError("Wallet crypto identity changed");
+    } };
+  };
+
   const signingPort = async (): Promise<{ port: SigningPort; ownerPublicKeyHex: string; epoch: string }> => {
     const epoch = deps.sessionEpoch();
     const ownerPublicKeyHex = deps.ownerPublicKeyHex().toLowerCase();
@@ -344,7 +358,7 @@ export function createForumService(deps: ForumServiceDeps): ForumService {
     return {
       port: {
         signDigest: async (digest) => {
-          const result = await crypto.signDigest({ publicKeyHex: ownerPublicKeyHex, digest: toArrayBuffer(digest), format: "der" });
+          const result = await crypto.signDigest({ digest: toArrayBuffer(digest), format: "der" });
           if (result.format !== "der") throw new ForumIdentityError("业务签名必须是严格 DER");
           return new Uint8Array(result.signature);
         },
@@ -1229,9 +1243,7 @@ async freezeContent(configId, markdown, options): Promise<{ seedHashHex: string;
       //    受控无找零：输入超出固定输出的差额必须精确成为矿工费，且不超过
       //    用户确认的预算。零值输出是固定位置协议输出的一部分（索引费为 0 的 vout 0）。
       const preview = await spend.presign({
-        ownerPublicKeyHex: recheckedTask.ownerPublicKeyHex,
         requestingPluginId: "forum",
-        network: recheckedTask.network,
         // 只花专用资金 UTXO；钱包大额余额差不会直接变成矿工费。
         inputs: [funding.input],
         outputs: outputs.map((output, index) => ({
@@ -1301,25 +1313,38 @@ async freezeContent(configId, markdown, options): Promise<{ seedHashHex: string;
 
     reconcile: (taskId, options) => reconcileTask(taskId, options),
 
-    listSelfOutputs: (input) => requireSelfOutputs().list(input.network, input.txids, input.signal),
+    async listSelfOutputs(input) {
+      if (Object.keys(input).some(key => !["txids", "signal"].includes(key))) throw new ForumIdentityError("Wallet selectors are not accepted");
+      const txids = [...input.txids], signal = input.signal;
+      const context = await selfOutputContext();
+      const result = await requireSelfOutputs().list(context.network, txids, signal);
+      context.assertActive();
+      return result;
+    },
 
-    async protectSelfOutputs(outputs, network) {
-      return requireSelfOutputs().protect(outputs, network);
+    async protectSelfOutputs(outputs, ...args: []) {
+      if (args.length) throw new ForumIdentityError("Wallet selectors are not accepted");
+      const rows = outputs.map(row => ({ ...row })), context = await selfOutputContext();
+      const result = await requireSelfOutputs().protect(rows, context.network);
+      context.assertActive();
+      return result;
     },
 
     async unprotectSelfOutputs(outputs) {
-      requireSelfOutputs().unprotect(outputs);
+      const rows = outputs.map(row => ({ ...row })), context = await selfOutputContext();
+      context.assertActive();
+      requireSelfOutputs().unprotect(rows);
     },
 
     async sweepSelfOutputs(input) {
+      if (Object.keys(input).some(key => !["outpoints", "feeRateSatoshisPerKb", "signal"].includes(key))) throw new ForumIdentityError("Wallet selectors are not accepted");
+      const outpoints = input.outpoints.map(row => ({ ...row })), feeRateSatoshisPerKb = input.feeRateSatoshisPerKb ?? FORUM_FEE_RATE_SATOSHIS_PER_KB, signal = input.signal;
+      const context = await selfOutputContext();
       const sources = (deps.fundingSource ?? fundingSources)?.();
       if (sources === undefined) throw new ForumProtocolError("funding-unavailable", "没有可用的资金来源，无法归集自有输出");
-      return requireSelfOutputs().sweep({
-        network: input.network,
-        outpoints: input.outpoints,
-        feeRateSatoshisPerKb: input.feeRateSatoshisPerKb ?? FORUM_FEE_RATE_SATOSHIS_PER_KB,
-        ...(input.signal === undefined ? {} : { signal: input.signal }),
-      });
+      const result = await requireSelfOutputs().sweep({ network: context.network, outpoints, feeRateSatoshisPerKb, ...(signal === undefined ? {} : { signal }) });
+      context.assertActive();
+      return result;
     },
 
     /**
@@ -1511,8 +1536,6 @@ async freezeContent(configId, markdown, options): Promise<{ seedHashHex: string;
       );
     }
     await release({
-      ownerPublicKeyHex: task.ownerPublicKeyHex,
-      network: task.network,
       txid: task.txid,
       submissionId: task.submissionId,
     });

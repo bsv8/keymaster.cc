@@ -1,14 +1,15 @@
+import { requireWocNetwork } from "@keymaster/contracts";
 // BitFS 交易对 WoC 的 Worker 内部适配。
 // 只把已签名 raw transaction 与 txid 事实投影成 BitfsChainPort。
 
-import type { BsvNetwork, WocServiceHandle } from "@keymaster/contracts";
+import type { BsvNetwork, WocService, WocWorkerBroadcastService, WocWorkerChainPort } from "@keymaster/contracts";
 import type { BitfsChainPort, BitfsBroadcastOutcome, BitfsTransactionJournal } from "./broadcast.js";
 import { BitfsTransactionBroadcaster } from "./broadcast.js";
 import type { BitfsSessionJournal, BitfsSessionRecord } from "./sessionJournal.js";
 import { bitfsTxidHex } from "./txid.js";
 
 /** 创建只能在 Coordinator Worker 内装配的 BitFS 链端口。 */
-export function createBitfsWocChainPort(woc: WocServiceHandle, network: BsvNetwork): BitfsChainPort {
+export function createBitfsWocChainPort(woc: WocService & WocWorkerBroadcastService, network: BsvNetwork): BitfsChainPort {
   return {
     async broadcast(input) {
       const result = await woc.broadcast(network, input.rawTxHex);
@@ -19,7 +20,7 @@ export function createBitfsWocChainPort(woc: WocServiceHandle, network: BsvNetwo
     },
     async lookupTransaction(txid) {
       try {
-        const result = await woc.getTransactionObservation(network, txid);
+        const result = await requireWocNetwork(woc, network).getTransactionObservation(txid);
         if (result.canonicalTxid !== txid) return "unknown";
         if (result.observation === "confirmed") return "confirmed";
         if (result.observation === "unconfirmed") return "mempool";
@@ -109,7 +110,7 @@ export type BitfsPoolSpendChain =
  */
 export async function readBitfsPoolSpendChain(input: {
   /** Worker 内 WoC 句柄。 */
-  woc: WocServiceHandle;
+  woc: WocWorkerChainPort;
   /** 链网络。 */
   network: BsvNetwork;
   /** 资金交易 canonical txid。 */
@@ -126,10 +127,10 @@ export async function readBitfsPoolSpendChain(input: {
   const maxPayments = input.maxPayments ?? 8_194;
   if (!Number.isSafeInteger(maxPayments) || maxPayments < 1 || maxPayments > 100_000) throw new TypeError("BitFS 支付链扫描上限不合法");
   if (input.signal?.aborted) throw new DOMException("BitFS 支付状态查询已取消", "AbortError");
-  let spent: Awaited<ReturnType<WocServiceHandle["getSpentOutput"]>> = null;
+  let spent: Awaited<ReturnType<WocWorkerChainPort["getSpentOutput"]>> = null;
   for (let attempt = 0; ; attempt += 1) {
     try {
-      spent = await input.woc.getSpentOutput(input.network, fundingTxid, 0, { signal: input.signal, priority: "interactive" });
+      spent = await requireWocNetwork(input.woc, input.network).getSpentOutput(fundingTxid, 0, { signal: input.signal, priority: "interactive" });
       break;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -142,7 +143,7 @@ export async function readBitfsPoolSpendChain(input: {
   if (afterTxid !== undefined && txid === afterTxid) return { kind: "unchanged", txid };
   let rawHex: string | undefined;
   try {
-    rawHex = await input.woc.getRawTransaction?.(input.network, txid, { signal: input.signal, priority: "interactive" });
+    rawHex = await requireWocNetwork(input.woc, input.network).getRawTransaction?.(txid, { signal: input.signal, priority: "interactive" });
   } catch (error) {
     if (spent.status === "unconfirmed" && error instanceof Error && /WOC 404/u.test(error.message)) {
       return { kind: "unknown", reason: "spender_raw_unavailable" };

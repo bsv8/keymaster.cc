@@ -27,8 +27,8 @@ export function createMsFileWorkerLifecycle(ports: MsFileWorkerLifecyclePorts) {
   let bridge: (() => WindowP2pExecutorBridge | undefined) | undefined;
   function bindBridge(value: () => WindowP2pExecutorBridge | undefined) { bridge = value; return () => { if (bridge === value) bridge = undefined; }; }
   function executor(...args: Parameters<WindowP2pExecutorBridge["request"]>) { const current = bridge?.(); if (!current) throw new Error("MSFile Worker bridge is unavailable"); return current.request(...args); }
-  let chainAccess: (() => import("@keymaster/contracts").WocServiceHandle | undefined) | undefined;
-  function bindChain(access: () => import("@keymaster/contracts").WocServiceHandle | undefined) { chainAccess = access; return () => { if (chainAccess === access) chainAccess = undefined; }; }
+  let chainAccess: (() => import("@keymaster/contracts").WocWorkerChainPort | undefined) | undefined;
+  function bindChain(access: () => import("@keymaster/contracts").WocWorkerChainPort | undefined) { chainAccess = access; return () => { if (chainAccess === access) chainAccess = undefined; }; }
   let service: MsFileServiceImpl | undefined;
   let stores: MsFileWorkerStores | undefined;
   let starting: Promise<MsFileServiceImpl> | undefined;

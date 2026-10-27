@@ -347,7 +347,6 @@ export function createSatWorkerSpiService(coordinator: SatCoordinatorControl): S
     prepareTopUp: (input) => callSat<SatTopUpPreview>(coordinator, { type: "spi.prepareTopUp", input }, "SPI top-up preview"),
     submitTopUp: (preview) => callSat<SatTopUpResult>(coordinator, { type: "spi.submitTopUp", preview }, "SPI top-up submit"),
     collectNew: (input) => callSat<SatCollectResult>(coordinator, { type: "spi.collectNew", input }, "SPI Collect"),
-    retryCollect: (input) => callSat<SatCollectResult>(coordinator, { type: "spi.retryCollect", input }, "SPI Collect retry"),
-    collect: (input) => callSat<SatCollectResult>(coordinator, { type: "spi.collect", input }, "SPI Collect")
+    retryCollect: (input) => callSat<SatCollectResult>(coordinator, { type: "spi.retryCollect", input }, "SPI Collect retry")
   };
 }

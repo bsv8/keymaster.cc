@@ -1,4 +1,4 @@
-import type { BorrowedOwnerFileStore, VaultWalletState, WocService } from "@keymaster/contracts";
+import type { BorrowedModuleFileStore, VaultWalletState, WocService } from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
 import { createP2pkhTransactionSync } from "./p2pkhTransactionSync.js";
 import { createP2pkhStateRepository, openP2pkhStateRepository } from "./storage/p2pkhStateRepository.js";
@@ -11,7 +11,7 @@ import { createP2pkhStateRepository, openP2pkhStateRepository } from "./storage/
  */
 export function createP2pkhCoordinatorTasks(input: {
   walletState: VaultWalletState;
-  storage: BorrowedOwnerFileStore;
+  storage: BorrowedModuleFileStore;
   woc: WocService;
   isNetworkEnabled?: (network: "main" | "test") => boolean;
   messageBus?: MessageBus;
@@ -19,7 +19,7 @@ export function createP2pkhCoordinatorTasks(input: {
   const getStore = async () => createP2pkhStateRepository(await openP2pkhStateRepository(input.storage));
   const sync = createP2pkhTransactionSync({
     getStore,
-    getResources: async () => (await getStore()).listResourcesByKey().then((resources) => resources.filter((resource) => input.isNetworkEnabled?.(resource.network) ?? true)),
+    getResources: async () => (await getStore()).listAddresses().then((resources) => resources.filter((resource) => input.isNetworkEnabled?.(resource.network) ?? true)),
     woc: input.woc,
     isNetworkEnabled: input.isNetworkEnabled
   });

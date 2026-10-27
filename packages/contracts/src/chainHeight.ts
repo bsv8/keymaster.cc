@@ -37,14 +37,12 @@ export interface ChainHeightSnapshot {
  */
 export interface ChainHeightReader {
   /** 同步读取当前链高度快照；不会触发网络请求。 */
-  get(network?: BsvNetwork): ChainHeightSnapshot;
+  get(): ChainHeightSnapshot;
   /**
    * 订阅链高度变化。
    * 返回的函数就是退订句柄：调用后该 handler 不再收到任何回调。
    */
   subscribe(handler: (snapshot: ChainHeightSnapshot) => void): () => void;
-  /** 退订指定 handler；与 `subscribe` 返回的句柄等价，便于显式退订。 */
-  unsubscribe(handler: (snapshot: ChainHeightSnapshot) => void): void;
   /** 宿主 teardown 时释放底层主题订阅；必须幂等。 */
   dispose?(): void;
 }

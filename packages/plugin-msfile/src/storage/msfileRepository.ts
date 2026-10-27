@@ -12,7 +12,7 @@
 // 段在写回时原样保留。
 
 import type {
-  BorrowedOwnerFileStore,
+  BorrowedModuleFileStore,
   MsFileAppIdentityKey,
   MsFileAppPriceOverride,
   MsFileBitfsBuyerSettings,
@@ -116,8 +116,8 @@ export interface MsFileRepositoryStores {
   network?: "main" | "test";
   /** 当前 active owner；用于生成 App 授权行的稳定身份键。 */
   ownerPublicKeyHex: string;
-  settings: BorrowedOwnerFileStore;
-  appSettings: BorrowedOwnerFileStore;
+  settings: BorrowedModuleFileStore;
+  appSettings: BorrowedModuleFileStore;
 }
 
 interface StoredSettingSnapshot {

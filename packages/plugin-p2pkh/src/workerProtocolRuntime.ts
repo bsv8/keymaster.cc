@@ -1,3 +1,4 @@
+import { requireWocNetwork } from "@keymaster/contracts";
 import type { ActiveKeyCrypto, BorrowedModuleFileStore, CentralBroadcastService, P2pkhUtxoSnapshotResult, ProtectedOutpoint, ProtocolSubmissionObservation, WocService } from "@keymaster/contracts";
 import { createP2pkhProtocolSpendService, type P2pkhProtocolManagerPort } from "./p2pkhProtocolSpend.js";
 import { createProtocolFundingService } from "./p2pkhProtocolFunding.js";
@@ -5,12 +6,14 @@ import { createProtectedOutpointRegistry } from "./registries/protectedOutpointR
 import { createP2pkhFileRepository } from "./storage/p2pkhFileRepository.js";
 import { openP2pkhStateRepository } from "./storage/p2pkhStateRepository.js";
 import { createWorkerProtocolEvidence } from "./workerProtocolEvidence.js";
+import { createWalletProtectedOutpoints } from "./registries/walletProtectedOutpoints.js";
 import type { P2pkhService } from "./p2pkhContracts.js";
 
 export interface WorkerProtocolDependencies {
   requestPayment: import("@keymaster/contracts").VaultService["requestPayment"];
   assertActive(): void;
   owner: string;
+  network: "main" | "test";
   storage: BorrowedModuleFileStore;
   crypto(owner: string): Promise<ActiveKeyCrypto>;
   central: CentralBroadcastService;
@@ -49,6 +52,7 @@ export async function readWorkerProtocolProtection(storage: BorrowedModuleFileSt
 export async function createWorkerProtocolRuntime(deps: WorkerProtocolDependencies) {
   const registry = createProtectedOutpointRegistry();
   const check = (owner = deps.owner) => { deps.assertActive(); if (owner.toLowerCase() !== deps.owner.toLowerCase()) throw new Error("Protocol wallet owner mismatch"); };
+  const protectionView = createWalletProtectedOutpoints(registry, { identity: { publicKeyHex: deps.owner, bsvNetwork: deps.network }, assertActive: () => check() });
   const state = async () => { check(); const store = createWorkerProtocolEvidence(deps.storage); check(); return store; };
   const files = async () => { check(); const store = createP2pkhFileRepository((await openP2pkhStateRepository(deps.storage)).files); check(); return store; };
   const observeProtocolSubmission = async (input: { ownerPublicKeyHex: string; network: "main" | "test"; txid: string; submissionId: string }): Promise<ProtocolSubmissionObservation> => {
@@ -65,10 +69,10 @@ export async function createWorkerProtocolRuntime(deps: WorkerProtocolDependenci
       default: return "unknown";
     }
   };
-  const spend = createP2pkhProtocolSpendService({
-    assertInputsUnspent:async(network,inputs)=>{const query=deps.query();if(!query)throw Error("Protocol input reader unavailable");await Promise.all(inputs.map(async i=>{if(await query.getSpentOutput(network,i.txid,i.vout)!==null)throw Error("Protocol input is already spent");}));check();},
-    previousTransactions: async (network, inputs) => { const q = deps.query(); if (!q?.getRawTransaction) throw new Error("Complete previous transaction reader unavailable"); const raw = await Promise.all(inputs.map(i => q.getRawTransaction!(network, i.txid))); check(); return raw; },
-    vault: { requestPayment: c => { check(); return deps.requestPayment(c); }, status: () => { check(); return "unlocked"; }, createActiveKeyCrypto: async owner => { check(owner); const crypto = await deps.crypto(owner); check(); return crypto; } },
+  const executor = createP2pkhProtocolSpendService({
+    assertInputsUnspent:async(network,inputs)=>{const query=deps.query();if(!query)throw Error("Protocol input reader unavailable");await Promise.all(inputs.map(async i=>{if(await requireWocNetwork(query, network).getSpentOutput(i.txid, i.vout)!==null)throw Error("Protocol input is already spent");}));check();},
+    previousTransactions: async (network, inputs) => { const q = deps.query(); if (!q?.getRawTransaction) throw new Error("Complete previous transaction reader unavailable"); const raw = await Promise.all(inputs.map(i => requireWocNetwork(q, network).getRawTransaction!(i.txid))); check(); return raw; },
+    vault: { requestPayment: c => { check(); return deps.requestPayment(c); }, status: () => { check(); return "unlocked"; }, createActiveKeyCrypto: async () => { check(); const crypto = await deps.crypto(deps.owner); check(); return crypto; } },
     centralBroadcastService: deps.central,
     getUtxoBinding: async ({ ownerPublicKeyHex, network }) => {
       check(ownerPublicKeyHex); const snapshot = await deps.snapshot(network); check();
@@ -86,6 +90,22 @@ export async function createWorkerProtocolRuntime(deps: WorkerProtocolDependenci
     protectedOutpoints: registry,
     protocolManager: deps.protocolManager,
   });
+  const scoped = <T extends object>(input: T) => {
+    check();
+    if ("ownerPublicKeyHex" in input || "network" in input) throw new TypeError("Protocol requests cannot select a wallet");
+    return { ...structuredClone(input), ownerPublicKeyHex: deps.owner, network: deps.network };
+  };
+  const assertPreview = (preview: import("@keymaster/contracts").ProtocolSpendPreview) => {
+    check(preview.ownerPublicKeyHex);
+    if (preview.network !== deps.network) throw new Error("Protocol preview network mismatch");
+  };
+  const spend: import("@keymaster/contracts").ProtocolSpendService = {
+    async prepare(input) { const value = await executor.prepare(scoped(input)); check(); assertPreview(value); return value; },
+    async presign(input) { const value = await executor.presign(scoped(input)); check(); assertPreview(value); return value; },
+    async submit(input) { assertPreview(input); const result = await executor.submit(input); check(); return result; },
+    async releasePrepared(input) { assertPreview(input); await executor.releasePrepared!(input); check(); },
+    async releasePreparedSubmission(input) { await executor.releasePreparedSubmission(scoped(input)); check(); },
+  };
   const planFunding = async (input: { ownerPublicKeyHex: string; network: "main" | "test"; amountSatoshis: number; feeRateSatoshisPerKb: number; outputs?: Array<{ scriptHex: string; value: string }> }) => {
     check(input.ownerPublicKeyHex);
     if (!deps.protocolManager?.selectFundingInputs) throw new Error("Protocol funding requires manager selection");
@@ -94,6 +114,7 @@ export async function createWorkerProtocolRuntime(deps: WorkerProtocolDependenci
     return result;
   };
   const funding = createProtocolFundingService({
+    binding: { identity: { publicKeyHex: deps.owner, bsvNetwork: deps.network }, assertActive: check },
     protocolSpend: () => { check(); return spend; }, protectedOutpoints: registry,
     store: {
       async get(id, owner) { check(owner); return (await files()).readProtocolFunding(id); },
@@ -110,14 +131,15 @@ export async function createWorkerProtocolRuntime(deps: WorkerProtocolDependenci
       check();
       return result;
     },
-    async deriveChangeAddress(owner, network) { check(owner); const crypto = await deps.crypto(owner); try { const result = await crypto.deriveP2pkhAddress({ publicKeyHex: owner, network }); check(); return result.address; } finally { crypto.dispose("protocol-address-derived"); } },
-    async observeChain(network, txid) { const query = deps.query(); if (!query) return "unknown"; const result = await query.getTransactionObservation(network, txid); check(); return result.observation === "confirmed" ? "confirmed" : result.observation === "unconfirmed" ? "mempool" : "unknown"; },
-    async observeOutpoint({ network, txid, vout }) { const query = deps.query(); if (!query) return "unknown"; try { const spent = await query.getSpentOutput(network, txid, vout); check(); return spent === null ? "unspent" : "spent"; } catch { check(); return "unknown"; } },
+    async deriveChangeAddress(owner, network) { check(owner); const crypto = await deps.crypto(owner); try { const result = await crypto.deriveP2pkhAddress(); check(); return result.address; } finally { crypto.dispose("protocol-address-derived"); } },
+    async observeChain(network, txid) { const query = deps.query(); if (!query) return "unknown"; const result = await requireWocNetwork(query, network).getTransactionObservation(txid); check(); return result.observation === "confirmed" ? "confirmed" : result.observation === "unconfirmed" ? "mempool" : "unknown"; },
+    async observeOutpoint({ network, txid, vout }) { const query = deps.query(); if (!query) return "unknown"; try { const spent = await requireWocNetwork(query, network).getSpentOutput(txid, vout); check(); return spent === null ? "unspent" : "spent"; } catch { check(); return "unknown"; } },
     observeSubmission: observeProtocolSubmission,
   });
-  await funding.restoreProtections!({ ownerPublicKeyHex: deps.owner, network: "main" });
+  await funding.restoreProtections!();
   check();
-  return Object.freeze({ spend, funding, planFunding, observer: { observeProtocolSubmission }, protectedOutpoints: registry,
+  return Object.freeze({ identity: Object.freeze({ publicKeyHex: deps.owner, bsvNetwork: deps.network }), spend, executor, funding, planFundingCommand: planFunding,
+    planFunding: (input: import("@keymaster/contracts").ProtocolFundingPlanRequest) => planFunding(scoped(input)), observer: { observeProtocolSubmission: (input: { txid: string; submissionId: string }) => observeProtocolSubmission(scoped(input)) }, protectedOutpoints: registry, protectionView,
     dispose() { for (const id of registry._ids()) registry.unregister(id); },
   });
 }

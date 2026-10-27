@@ -16,21 +16,7 @@ import type { VaultWalletState, NoticeRegistry, NoticeRecord } from "@keymaster/
 import type { WebrtcBlockReason as ContractWebrtcBlockReason } from "@keymaster/contracts";
 import { APP_MESSAGE_PROTOCOL } from "bsv8-channel-protocol/app-message";
 import type { WebrtcHistoryItem, WebrtcHistoryService } from "./webrtcHistoryService.js";
-import {
-  isAcceptableRemoteSession,
-  newAnswerSignal,
-  newEndOfCandidatesSignal,
-  newIceSignal,
-  newOfferSignal,
-  parseSignalValue,
-  tryParseSignal,
-  type WebrtcHangupReason,
-  type WebrtcIceSignal,
-  type WebrtcInviteSignal,
-  type WebrtcAnswerSignal,
-  type WebrtcSignal,
-  type WebrtcEndOfCandidatesSignal
-} from "./webrtcSignal.js";
+import { isAcceptableRemoteSession, newAnswerSignal, newEndOfCandidatesSignal, newIceSignal, newOfferSignal, parseSignal, type WebrtcHangupReason, type WebrtcIceSignal, type WebrtcInviteSignal, type WebrtcAnswerSignal, type WebrtcSignal, type WebrtcEndOfCandidatesSignal } from "./webrtcSignal.js";
 import { newMessageID, newSessionID, parseMessageID, parseSessionID } from "bsv8-channel-protocol";
 import {
   DEFAULT_STUN_SERVERS,
@@ -679,7 +665,7 @@ export function createWebrtcService(input: {
 
   /** 联系人信令走加密 APP 私信；共享的公开 Hash/offer 协议留给 BitFS。 */
   async function publishSignalBody(recipientPublicKeyHex: string, body: WebrtcSignal): Promise<void> {
-    const parsed = parseSignalValue(body);
+    const parsed = parseSignal(body);
     if (!parsed.ok) throw new Error(`invalid_signal_body: ${parsed.reason}`);
     const session = signalSession(recipientPublicKeyHex, body);
     if (!session) throw new Error("webrtc_session_stale");
@@ -1672,12 +1658,13 @@ export function createWebrtcService(input: {
       return;
     }
     if (msg.content.type !== CONTACT_SIGNAL_TYPE) return;
-    const sig = tryParseSignal({
+    const parsed = parseSignal({
       request_message_id: msg.content.request_id,
       session_id: msg.content.session_id,
       signal: msg.content.signal
     });
-    if (!sig) return;
+    if (!parsed.ok) return;
+    const sig = parsed.signal;
     if (sig.signal.type === "offer") {
       if (activeTransfer) return;
       if (isDataChannelOffer(sig.signal.sdp)) {

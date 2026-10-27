@@ -294,23 +294,23 @@ export class VaultServiceCoordinator implements InternalVaultService {
   // 5. Crypto Operations
   // ============================================================
 
-  async createActiveKeyCrypto(publicKeyHex: string): Promise<ActiveKeyCrypto> {
-    return this.createCoordinatorCrypto(publicKeyHex);
+  async createActiveKeyCrypto(...args: []): Promise<ActiveKeyCrypto> {
+    if (args.length) throw new TypeError("Crypto capabilities do not accept wallet selectors");
+    const identity = requireUnlockedWalletIdentity(this.walletSnapshot());
+    return this.createCoordinatorCrypto(identity.publicKeyHex);
   }
 
   async createAppViewSession(input: {
     sessionId: string;
-    publicKeyHex: string;
     password: string;
   }): Promise<ActiveKeyCrypto> {
-    if (this.lifecycleSnapshot.activePublicKeyHex !== input.publicKeyHex) {
-      throw new Error("AppView crypto requires the wallet key");
-    }
+    if ("publicKeyHex" in input || "network" in input || "ownerPublicKeyHex" in input) throw new TypeError("AppView sessions do not accept wallet selectors");
     const issued = this.walletSnapshot();
-    await authenticateAppWallet(this, input.publicKeyHex, input.password, this.walletState);
+    const identity = requireUnlockedWalletIdentity(issued);
+    await authenticateAppWallet(this, identity.publicKeyHex, input.password, this.walletState);
     if (!sameWalletSession(issued, this.walletSnapshot())) throw new Error("AppView wallet session has been revoked");
     this.disposeAppViewSession(input.sessionId, "appView session replaced");
-    const crypto = await this.createCoordinatorCrypto(input.publicKeyHex, input.sessionId);
+    const crypto = await this.createCoordinatorCrypto(identity.publicKeyHex, input.sessionId);
     this.appViewRevocations.set(input.sessionId, () => crypto.dispose?.("appView session disposed"));
     return crypto;
   }
@@ -379,7 +379,7 @@ export class VaultServiceCoordinator implements InternalVaultService {
       getIdentity: () => { guard(); return { ...requireUnlockedWalletIdentity(issuedSession), sessionId }; },
       async signConnectEnvelope(input: Parameters<NonNullable<ActiveKeyCrypto["signConnectEnvelope"]>>[0]) {
         guard();
-        if(input.publicKeyHex!==publicKeyHex)throw new Error("session_key_mismatch");
+        if (Object.keys(input).some(key => !["kind", "envelope", "content", "appSessionId"].includes(key))) throw new TypeError("Crypto requests do not accept wallet selectors or unknown fields");
         const r=await client.crypto!({type:"signConnectEnvelope",kind:input.kind,envelope:new Uint8Array(input.envelope).slice(),...(input.content ? {content:new Uint8Array(input.content).slice()} : {}),appSessionId:input.appSessionId});
         guard();
         if(r.ack.status!=="ok"||r.result?.type!=="signConnectEnvelope")throw new Error(commandResultMessage(r.ack,"Connect signature failed"));
@@ -387,21 +387,26 @@ export class VaultServiceCoordinator implements InternalVaultService {
       },
       async signDigest(input) {
         guard();
-        const r = await client.crypto!({ type: "signDigest", digestHex: bytesToHex(input.digest), format: input.format });
+        if (Object.keys(input).some(key => !["digest", "format"].includes(key))) throw new TypeError("Crypto requests do not accept wallet selectors or unknown fields");
+        const format = input.format, digestHex = bytesToHex(input.digest);
+        if (format !== "der" && format !== "compact") throw new TypeError("Unknown signature format");
+        if (digestHex.length !== 64) throw new TypeError("Digest must be 32 bytes");
+        const r = await client.crypto!({ type: "signDigest", digestHex, format });
         guard();
         if (r.ack.status !== "ok" || !r.result) throw new Error(commandResultMessage(r.ack, "Sign failed"));
         const result = r.result as { signatureHex: string; format: string };
         if (result.format !== "der" && result.format !== "compact") {
           throw new Error(`signDigest: unexpected format "${result.format}" from Coordinator`);
         }
-        if (result.format !== input.format) {
-          throw new Error(`signDigest format mismatch: requested "${input.format}", got "${result.format}"`);
+        if (result.format !== format) {
+          throw new Error(`signDigest format mismatch: requested "${format}", got "${result.format}"`);
         }
         return { publicKeyHex, format: result.format as EcdsaSignatureFormat, signature: hexToArrayBuffer(result.signatureHex) };
       },
-      async deriveP2pkhAddress(input) {
+      async deriveP2pkhAddress(...args: []) {
         guard();
-        const r = await client.crypto!({ type: "deriveP2pkhAddress", network: input.network });
+        if (args.length) throw new TypeError("Crypto requests do not accept wallet selectors");
+        const r = await client.crypto!({ type: "deriveP2pkhAddress", network: requireUnlockedWalletIdentity(issuedSession).bsvNetwork });
         guard();
         if (r.ack.status !== "ok" || !r.result) throw new Error(commandResultMessage(r.ack, "Derive failed"));
         return { publicKeyHex, address: (r.result as { address: string }).address };

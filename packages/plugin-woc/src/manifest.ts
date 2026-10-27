@@ -1,4 +1,4 @@
-import { CHAIN_FEE_READER_CAPABILITY } from "@keymaster/contracts";
+import { CHAIN_FEE_READER_CAPABILITY, bindWalletIdentity } from "@keymaster/contracts";
 import { createChainFeeReader } from "./chainFeeReader.js";
 import { VAULT_WALLET_STATE_CAPABILITY, WOC_WORKER_BROADCAST_CAPABILITY } from "@keymaster/contracts";
 import { WOC_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
@@ -21,11 +21,8 @@ import type {
   I18nPluginResources,
   PluginManifest,
   PluginSetup,
-  Woc1SatOrdinalsService,
-  WocBsv21Service,
   WocConfig,
-  WocService,
-  WocStasService
+  WocService
 } from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
 import {
@@ -33,20 +30,15 @@ import {
   RESOURCE_REGISTRY_CAPABILITY,
   WOC_COORDINATOR_CONTROL_CAPABILITY,
   type P2pkhCoordinatorControl,
-  WOC_1SAT_ORDINALS_CAPABILITY,
-  WOC_BSV21_CAPABILITY,
   WOC_CAPABILITY,
-  WOC_STAS_CAPABILITY,
   CHAIN_HEIGHT_READER_CAPABILITY,
   CHAIN_HEIGHT_RESOURCE_ID,
   capabilityDescriptor,
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
 import { createChainHeightReader } from "./chainHeightReader.js";
-import { createWoc1SatOrdinalsService } from "./woc1SatOrdinalsService.js";
-import { createWocBsv21Service } from "./wocBsv21Service.js";
 import { createWocService } from "./wocService.js";
-import { createWocStasService } from "./wocStasService.js";
+import { createWorkerWocViews } from "./workerWocViews.js";
 
 const wocResources: I18nPluginResources = {
   namespace: "woc",
@@ -111,13 +103,11 @@ const wocPluginDefinition = {
     scopeKind: "owner-session",
     provides: [capabilityDescriptor(CHAIN_FEE_READER_CAPABILITY),
       capabilityDescriptor(WOC_CAPABILITY),
-      capabilityDescriptor(WOC_BSV21_CAPABILITY),
-      capabilityDescriptor(WOC_STAS_CAPABILITY),
-      capabilityDescriptor(WOC_1SAT_ORDINALS_CAPABILITY),
       capabilityDescriptor(WOC_COORDINATOR_CONTROL_CAPABILITY),
       capabilityDescriptor(CHAIN_HEIGHT_READER_CAPABILITY),
     ],
     dependencies: defineRuntimeUnitDependencies([
+      { capability: VAULT_WALLET_STATE_CAPABILITY, reason: "链查询绑定当前钱包权威身份和运行代际" },
       { capability: WOC_COORDINATOR_CLIENT_BINDING_CAPABILITY, sourceRuntime: "window-main", reason: "声明本插件的受限 Coordinator 连接" },
       { capability: PAGE_UI_REGISTRY_CAPABILITY }, { capability: OWNED_RESOURCE_ACCESS_CAPABILITY },
       { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
@@ -128,13 +118,14 @@ const wocPluginDefinition = {
     id: "woc.coordinator-worker",
     runtime: "shared-worker",
     scopeKind: "owner-session",
-    provides: [WOC_CAPABILITY, WOC_WORKER_BROADCAST_CAPABILITY, WOC_BSV21_CAPABILITY, WOC_STAS_CAPABILITY, WOC_1SAT_ORDINALS_CAPABILITY],
+    provides: [WOC_CAPABILITY, WOC_WORKER_BROADCAST_CAPABILITY],
     dependencies: defineRuntimeUnitDependencies([
       { capability: VAULT_WALLET_STATE_CAPABILITY, sourceRuntime: "shared-worker", reason: "链高度任务绑定当前钱包网络身份" },
     ]),
   }],
   i18n: wocResources,
   async setup(ctx) {
+    const wallet = bindWalletIdentity(ctx.capability(VAULT_WALLET_STATE_CAPABILITY).bind(ctx.consumer, ctx.scope), ctx.scope.signal);
     const coordinator = ctx.capability(WOC_COORDINATOR_CLIENT_BINDING_CAPABILITY).bind(ctx.consumer, ctx.scope) as P2pkhCoordinatorControl | undefined;
     if (!coordinator) throw new Error("WOC Coordinator control is unavailable");
     ctx.provide(WOC_COORDINATOR_CONTROL_CAPABILITY, coordinator);
@@ -151,32 +142,22 @@ const wocPluginDefinition = {
         bootstrap.requestsPerSecond = requestsPerSecond;
       }
     }
+    wallet.assertActive();
     const service = createWocService({ messageBus, initialConfig: bootstrap });
     await service.ready();
+    wallet.assertActive();
     // WOC capability 只向页面插件暴露只读方法。完整句柄仍由 Worker
     // 自己保留并用于注册物理广播 Provider，页面即使拿到运行时对象也
     // 不存在 `broadcast` 出口。
-    const { broadcast: _workerBroadcast, ...readOnlyService } = service;
-    void _workerBroadcast;
-    ctx.provide(WOC_CAPABILITY, readOnlyService);
-
-    // BSV-21 / STAS / 1Sat Ordinals 的 WOC capability。
-    // 全部共享同一个 actor（service 内的 createWocService 持有 actor 并
-    // 已 attach 到 messageBus），因此 token / collectible 业务插件继承
-    // 同一套限流 / 优先级 / 429 backoff / 多标签页协调，不复制第二套队列。
-    const bsv21Service = createWocBsv21Service({ messageBus });
-    ctx.provide(WOC_BSV21_CAPABILITY, bsv21Service);
-    const stasService = createWocStasService({ messageBus });
-    ctx.provide(WOC_STAS_CAPABILITY, stasService);
-    const oneSatService = createWoc1SatOrdinalsService({ messageBus });
-    ctx.provide(WOC_1SAT_ORDINALS_CAPABILITY, oneSatService);
+    const views = createWorkerWocViews(service, wallet);
+    ctx.provide(WOC_CAPABILITY, views.query);
 
     // 链高度读取器：把 Coordinator 的 `chain.height` 广播转成页面侧的
     // get / 订阅 / 退订。刷新由后台同步任务按用户设置的间隔驱动，
     // 页面只读内存中的最近一次节点读数。
-    const chainHeightReader = createChainHeightReader({ coordinatorClient: coordinator });
+    const chainHeightReader = createChainHeightReader({ coordinatorClient: coordinator, wallet });
     ctx.provide(CHAIN_HEIGHT_READER_CAPABILITY, chainHeightReader);
-    const chainFeeReader = createChainFeeReader(coordinator);
+    const chainFeeReader = createChainFeeReader(coordinator, wallet);
     ctx.provide(CHAIN_FEE_READER_CAPABILITY, chainFeeReader);
 
     // chain.height：页面用 Resource Store 读链高度；订阅即退订，跨标签
@@ -210,6 +191,7 @@ const wocPluginDefinition = {
     return () => {
       // 硬切换 001：bridge 到 service.dispose()。
       // actor detach + 取消 messageBus handle 都在 dispose 内。
+      views.dispose();
       service.dispose();
       chainHeightReader.dispose?.();
       chainFeeReader.dispose();

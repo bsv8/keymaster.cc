@@ -1,6 +1,6 @@
 // WebRTC 历史 owner/App K-V Repository。
 
-import type { BorrowedKeyValueStore, BorrowedOwnerFileStore } from "@keymaster/contracts";
+import type { BorrowedKeyValueStore, BorrowedModuleFileStore } from "@keymaster/contracts";
 
 const CALL_PARTITION = "calls";
 const TRANSFER_PARTITION = "transfers";
@@ -31,12 +31,12 @@ function blobPath(blobKey: string): string {
   return `attachments/${blobKey}`;
 }
 
-export async function getWebrtcBlob(files: BorrowedOwnerFileStore, blobKey: string): Promise<Blob | null> {
+export async function getWebrtcBlob(files: BorrowedModuleFileStore, blobKey: string): Promise<Blob | null> {
   const value = await files.get(blobPath(blobKey));
   return value ? new Blob([value.bytes.slice().buffer as ArrayBuffer]) : null;
 }
 
-export async function putWebrtcBlob(files: BorrowedOwnerFileStore, blobKey: string, blob: Blob): Promise<void> {
+export async function putWebrtcBlob(files: BorrowedModuleFileStore, blobKey: string, blob: Blob): Promise<void> {
   await files.put(blobPath(blobKey), new Uint8Array(await blob.arrayBuffer()));
 }
 

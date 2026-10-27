@@ -1,14 +1,15 @@
-// packages/plugin-vault/src/p2pkhAddress.ts
-// 本地 P2PKH 地址派生：避免 vault 反向依赖 plugin-p2pkh。
+// Shared pure public-key address algorithm; no wallet authority or private-key input.
+import { ripemd160 } from "@noble/hashes/legacy.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 
-import { ripemd160 } from "@noble/hashes/ripemd160";
-import { sha256 } from "@noble/hashes/sha256";
-
-export function publicKeyHexToP2pkhAddress(
+export function deriveP2pkhAddress(
   publicKeyHex: string,
-  network: "main" | "test" = "main"
+  network: "main" | "test"
 ): string {
-  const pub = hexToBytes(publicKeyHex);
+  if (network !== "main" && network !== "test") throw new TypeError("Address derivation requires an explicit network");
+  const normalized = publicKeyHex.replace(/^0x/i, "").trim().toLowerCase();
+  if (!/^(02|03)[0-9a-f]{64}$/.test(normalized)) throw new Error("Public key must be 33 bytes (compressed hex)");
+  const pub = hexToBytes(normalized);
   if (pub.length !== 33) {
     throw new Error("Public key must be 33 bytes (compressed)");
   }

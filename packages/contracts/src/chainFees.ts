@@ -50,7 +50,7 @@ export function emptyChainFeeSnapshots(): ChainFeeSnapshots {
 }
 /** 纯内存读取；所有网络 I/O 交由中心后台调度。 */
 export interface ChainFeeReader {
-  get(network: BsvNetwork): ChainFeeSnapshot;
+  get(): ChainFeeSnapshot;
   subscribe(listener: () => void): () => void;
   dispose(): void;
 }

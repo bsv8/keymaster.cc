@@ -20,7 +20,6 @@ import type {
   ReadyKeyIdentity
 } from "./p2pkhContracts.js";
 import { assetIdToNetwork, makeResourceId } from "./p2pkhContracts.js";
-import { deriveP2pkhAddress } from "./p2pkhSigner.js";
 import { classifyPaymentScript, p2pkScriptFromPublicKey, publisherMatchesPaymentScript } from "@keymaster/utxo-manager";
 import { type P2pkhStateRepositoryHandle } from "./storage/p2pkhStateRepository.js";
 import {
@@ -187,10 +186,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       const loaded = normalizeLoadedUtxos(await deps.loadSpendableUtxos({ ownerPublicKeyHex: owner.publicKeyHex, resource, purpose: context?.retry ? "retry" : "prepare", signal: context?.signal }));
       const candidates = loaded.utxos;
       if (!deps.utxoManager) throw new Error("Transfer requires the durable UTXO manager");
-      const { address: changeAddress } = await activeCrypto.deriveP2pkhAddress({
-        publicKeyHex: owner.publicKeyHex,
-        network
-      });
+      const { address: changeAddress } = await activeCrypto.deriveP2pkhAddress();
 
       if (payment && !deps.utxoManager) throw new Error("Connect payment requires the durable UTXO manager");
       if (deps.utxoManager) {
@@ -301,7 +297,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
             })
           : undefined;
         const activeCrypto = await resolveActiveKeyCrypto(deps.vault, owner.publicKeyHex);
-        const { address: expectedChangeAddress } = await activeCrypto.deriveP2pkhAddress({ publicKeyHex: owner.publicKeyHex, network });
+        const { address: expectedChangeAddress } = await activeCrypto.deriveP2pkhAddress();
         validateFinalTransferPreview(currentPreview, { candidates, expectedChangeAddress, ...(managerInputs ? { managerInputs } : {}) });
         const frozen = claim(currentPreview);
         if (options?.signal?.aborted) throw new Error("Transfer signing cancelled");
@@ -502,7 +498,7 @@ function validateFinalTransferPreview(
 }
 
 async function resolveActiveKeyCrypto(vault: Pick<VaultService, "status" | "createActiveKeyCrypto">, publicKeyHex: string) {
-  return vault.createActiveKeyCrypto(publicKeyHex);
+  return vault.createActiveKeyCrypto();
 }
 
 /**

@@ -490,12 +490,11 @@ export interface ForumService {
    * 且能被 data/tip 解析器接受。「长度像」「前缀像」都不算。
    */
   listSelfOutputs(input: {
-    network: BsvNetwork;
     txids: readonly string[];
     signal?: AbortSignal;
   }): Promise<readonly ForumSelfOutput[]>;
   /** 登记保护；识别与登记都必须成功，否则普通转账可能把它们花掉。 */
-  protectSelfOutputs(outputs: readonly ForumSelfOutput[], network: BsvNetwork): Promise<number>;
+  protectSelfOutputs(outputs: readonly ForumSelfOutput[]): Promise<number>;
   /** 解除保护。 */
   unprotectSelfOutputs(outputs: readonly ForumSelfOutput[]): Promise<void>;
   /**
@@ -505,7 +504,6 @@ export interface ForumService {
    * 广播结果未知时拒绝当成成功：原交易必须先对账。
    */
   sweepSelfOutputs(input: {
-    network: BsvNetwork;
     /**
      * 只点名坐标，不带金额、脚本或归属。
      *

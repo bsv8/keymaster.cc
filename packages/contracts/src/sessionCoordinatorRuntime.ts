@@ -266,8 +266,7 @@ export type CoordinatorMsFileControlResultFor<C extends CoordinatorMsFileControl
   C extends { type: "settings.get" } ? MsFileSettingsSnapshot :
   C extends { type: "settings.bitfsBuyer.get" } ? MsFileBitfsBuyerSettings :
   C extends { type: "settings.readConcurrency.get" } ? MsFileReadConcurrencySettings :
-  C extends { type: "settings.readConcurrency.update" | "settings.readConcurrency.reset" | "settings.mediaBlockReadConcurrency.update" | "settings.global.update" | "settings.seller.update" | "settings.bitfsBuyer.update" | "supplier.upsert" | "supplier.delete" | "app-policy.update" | "app-policy.clear" | "approval.resolve" } ? null :
-  C extends { type: "settings.mediaBlockReadConcurrency.get" } ? number :
+  C extends { type: "settings.readConcurrency.update" | "settings.readConcurrency.reset" | "settings.global.update" | "settings.seller.update" | "settings.bitfsBuyer.update" | "supplier.upsert" | "supplier.delete" | "app-policy.update" | "app-policy.clear" | "approval.resolve" } ? null :
   C extends { type: "bitfs.demand.publish" | "bitfs.demand.snapshot" | "bitfs.purchase.start" | "bitfs.purchase.cancel" | "bitfs.purchase.reconnect" } ? MsFileBitfsDemandSnapshot :
   C extends { type: "bitfs.arbitration.list" } ? import("./msfile.js").MsFileArbitrationTask[] :
   C extends { type: "bitfs.arbitration.operate" | "bitfs.purchase.reconcile" } ? null :
@@ -299,7 +298,7 @@ export type CoordinatorSatOperationResultFor<O extends CoordinatorSatOperation> 
   O extends { type: "spi.getInformation" } ? SatSpiInformation :
   O extends { type: "spi.prepareTopUp" } ? SatTopUpPreview :
   O extends { type: "spi.submitTopUp" } ? SatTopUpResult :
-  O extends { type: "spi.collectNew" | "spi.retryCollect" | "spi.collect" } ? SatCollectResult :
+  O extends { type: "spi.collectNew" | "spi.retryCollect" } ? SatCollectResult :
   never;
 
 /** 依据 Channel operation discriminant 收窄 operationResult。 */
@@ -317,9 +316,9 @@ export type CoordinatorOwnerStorageResultFor<D extends CoordinatorOwnerStorageDa
   D extends { type: "owner.put" | "platform.put" } ? KeyValueEntryMeta :
   D extends { type: "owner.delete" | "platform.delete" } ? undefined :
   D extends { type: "owner.commit" | "platform.commit" } ? KeyValueCommitResult :
-  D extends { type: "owner.file-list" } ? import("./storage/files.js").OwnerFileListPage :
-  D extends { type: "owner.file-get" } ? import("./storage/files.js").OwnerFileObject | undefined :
-  D extends { type: "owner.file-range" } ? import("./storage/files.js").OwnerFileObject | undefined :
+  D extends { type: "owner.file-list" } ? import("./storage/files.js").ModuleFileListPage :
+  D extends { type: "owner.file-get" } ? import("./storage/files.js").ModuleFileObject | undefined :
+  D extends { type: "owner.file-range" } ? import("./storage/files.js").ModuleFileObject | undefined :
   D extends { type: "owner.file-put" } ? { revision: string; lastModified: string } :
   D extends { type: "owner.file-delete" } ? undefined :
   D extends { type: "owner.file-batch" } ? { paths: string[]; committedAt: string } :
@@ -1177,7 +1176,7 @@ function parseMsFileControl(value: unknown): CoordinatorMsFileControl {
   const type = text(control.type, "MSFile control.type", 96);
   if (type === "settings.get" || type === "settings.readConcurrency.get" || type === "settings.readConcurrency.reset"
     || type === "settings.bitfsBuyer.get"
-    || type === "settings.mediaBlockReadConcurrency.get" || type === "app-authorizations.list" || type === "approvals.pending"
+    || type === "app-authorizations.list" || type === "approvals.pending"
     || type === "bitfs.purchase.tasks.list" || type === "bitfs.funding.pools.list" || type === "bitfs.demands.monitor" || type === "bitfs.arbitration.list") {
     return { type };
   }
@@ -1211,9 +1210,6 @@ function parseMsFileControl(value: unknown): CoordinatorMsFileControl {
   }
   if (type === "settings.seller.update") return { type, input: parseMsFileSellerSettings(control.input) };
   if (type === "settings.bitfsBuyer.update") return { type, input: parseMsFileBitfsBuyerSettings(control.input) };
-  if (type === "settings.mediaBlockReadConcurrency.update") {
-    return { type, mediaBlockReadConcurrency: boundedNumber(control.mediaBlockReadConcurrency, "MSFile control.mediaBlockReadConcurrency", 1, 16) };
-  }
   if (type === "supplier.upsert") {
     return { type, supplier: parseMsFileSupplier(control.supplier), expectedGeneration: nullableBoundedNumber(control.expectedGeneration, "MSFile control.expectedGeneration") };
   }
@@ -1461,7 +1457,7 @@ function parseSatOperation(value: unknown): CoordinatorSatOperation {
     if ((currency === undefined) !== (network === undefined)) throw new TypeError("Coordinator Sat prepareTopUp currency/network must be paired");
     return { type, input: { supplierId: text(input.supplierId, "Sat operation.spi.prepareTopUp.supplierId", 256), amountSatoshis: satBigInt(input.amountSatoshis, "Sat operation.spi.prepareTopUp.amountSatoshis"), ...(currency === undefined ? {} : { currency, network: network! }) } };
   }
-  if (type === "spi.collectNew" || type === "spi.collect") {
+  if (type === "spi.collectNew") {
     const input = expectRecord(operation.input, "Sat operation." + type + ".input");
     return { type, input: { supplierId: text(input.supplierId, "Sat operation." + type + ".supplierId", 256), currency: text(input.currency, "Sat operation." + type + ".currency", 128), network: text(input.network, "Sat operation." + type + ".network", 128), amount: satBigInt(input.amount, "Sat operation." + type + ".amount") } };
   }
@@ -2314,7 +2310,6 @@ function parseMsFileAppAuthorization(value: unknown, field: string): MsFileAppAu
 function parseMsFileControlResult(value: unknown, field: string): CoordinatorMsFileControlResult {
   if (value === undefined || value === null) return value;
   if (typeof value === "string") return enumValue(value, ["unconfigured", "ready", "unavailable"] as const, field);
-  if (typeof value === "number") return boundedNumber(value, field, 1, 16);
   if (Array.isArray(value)) {
     if (value.length === 0 || value.every((item) => record(item) && "approvalId" in item)) {
       return value.map((item, index) => parseMsFilePendingApproval(item, `${field}[${index}]`));
@@ -2958,7 +2953,6 @@ function parseMsFileControlResultFor(control: CoordinatorMsFileControl, value: u
     case "settings.get": return parseMsFileSettingsSnapshot(value, field);
     case "settings.bitfsBuyer.get": return parseMsFileBitfsBuyerSettings(value, field);
     case "settings.readConcurrency.get": return parseMsFileReadConcurrency(value);
-    case "settings.mediaBlockReadConcurrency.get": return boundedNumber(value, field, 1, 16);
     case "bitfs.demand.publish":
     case "bitfs.demand.snapshot":
     case "bitfs.purchase.start":
@@ -3034,7 +3028,6 @@ function parseMsFileControlResultFor(control: CoordinatorMsFileControl, value: u
     }
     case "settings.readConcurrency.update":
     case "settings.readConcurrency.reset":
-    case "settings.mediaBlockReadConcurrency.update":
     case "settings.global.update":
     case "settings.seller.update":
     case "settings.bitfsBuyer.update":
@@ -3250,8 +3243,7 @@ function parseSatOperationResultFor(operation: CoordinatorSatOperation, value: u
     case "spi.prepareTopUp": return parseSatTopUpPreview(value, field);
     case "spi.submitTopUp": return parseSatTopUpResult(value, field);
     case "spi.collectNew":
-    case "spi.retryCollect":
-    case "spi.collect": return parseSatCollectResult(value, field);
+    case "spi.retryCollect": return parseSatCollectResult(value, field);
   }
 }
 

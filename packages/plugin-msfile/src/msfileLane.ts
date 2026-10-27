@@ -149,8 +149,6 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
       const protocolSpend = this.getProtocolSpend();
       if (!protocolSpend?.releasePreparedSubmission) throw new Error("P2PKH prepared-submission release is unavailable");
       await protocolSpend.releasePreparedSubmission({
-        ownerPublicKeyHex: value.ownerPublicKeyHex,
-        network: value.network,
         txid: value.txid,
         submissionId: value.submissionId,
       });

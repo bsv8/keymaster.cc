@@ -2,7 +2,7 @@ export { installInsecureContextCryptoFallback, getEffectiveCryptoCapability } fr
 export { deriveKey, verifyVerifier, encryptVerifier, decryptBytesWithAad, encryptBytesWithAad, bytesToHex, hexToBytes } from "./crypto.js";
 export { encryptBytesWithSaltBoundAad, decryptBytesWithSaltBoundAad } from "./crypto.js";
 export * from "./vaultCoordinator.js";
-export { deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair } from "./sessionCryptoCore.js";
+export { signEcdsaDigest, verifySessionKeyPair } from "./sessionCryptoCore.js";
 export { generatePrivateKeyHex } from "./keyIdentity.js";
 
 export { createWorkerKeySession, signPrivateMessageForFixture } from "./workerKeySession.js";

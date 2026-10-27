@@ -27,15 +27,11 @@ import {
 import {
   parseMessageID,
   parseSessionID,
-  type MessageID,
-  type SessionID
 } from "bsv8-channel-protocol";
 
 export { WEBRTC_SIGNAL_PROTOCOL } from "bsv8-channel-protocol/webrtc-signal";
-export type { ICECandidate, MessageID, SessionID, Signal, WebRTCSignalV1Body };
-
-/** ChannelProtocol WebRTC 协议标识；保留旧常量名仅用于源码兼容，不会写入 body。 */
-export const WEBRTC_SIGNAL_SCHEMA = "bsv8.webrtc.signal.v1" as const;
+export type { MessageID, SessionID } from "bsv8-channel-protocol";
+export type { ICECandidate, Signal, WebRTCSignalV1Body };
 
 /** ChannelProtocol WebRTC body 的最长有效期。实际时间校验由 Coordinator 完成。 */
 export const DEFAULT_SIGNAL_TTL_MS = 2 * 60 * 1000;
@@ -73,18 +69,6 @@ export type WebrtcIceSignal = WebRTCSignalV1Body & { signal: Extract<Signal, { t
 /** end-of-candidates body 的精确类型。 */
 export type WebrtcEndOfCandidatesSignal = WebRTCSignalV1Body & { signal: EndOfCandidatesSignal };
 
-/** 兼容旧调用方的 envelope 类型；新代码不应构造或发送该类型。 */
-export type WebrtcSignalEnvelope = WebrtcSignal;
-
-/** 旧控制类型不再是 WebRTC wire 分支，保留类型别名以便业务 API 编译。 */
-export type WebrtcRejectSignal = never;
-export type WebrtcBusySignal = never;
-export type WebrtcHangupSignal = never;
-export type WebrtcFallbackRequiredSignal = never;
-export type WebrtcTransferInviteSignal = never;
-export type WebrtcTransferAnswerSignal = never;
-export type WebrtcTransferRejectSignal = never;
-
 /** 解析结果；失败时调用方应直接丢弃。 */
 export type ParseSignalResult =
   | { ok: true; signal: WebrtcSignal }
@@ -96,29 +80,14 @@ export function serializeSignal(signal: WebrtcSignal): string {
   return JSON.stringify(signal);
 }
 
-/** 将 JSON 文本交给真实 ChannelProtocol parser。 */
-export function parseSignalBody(body: string): ParseSignalResult {
-  if (typeof body !== "string") return { ok: false, reason: "body_not_string" };
+/** 将 JSON 文本或 Channel content 交给同一真实 ChannelProtocol parser。 */
+export function parseSignal(value: unknown): ParseSignalResult {
   try {
-    return { ok: true, signal: protocolParseBody(body) };
+    const signal = typeof value === "string" ? protocolParseBody(value) : protocolParseBodyValue(value as Parameters<typeof protocolParseBodyValue>[0]);
+    return { ok: true, signal };
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) };
   }
-}
-
-/** 将 Channel content 交给真实 ChannelProtocol parser。 */
-export function parseSignalValue(value: unknown): ParseSignalResult {
-  try {
-    return { ok: true, signal: protocolParseBodyValue(value as Parameters<typeof protocolParseBodyValue>[0]) };
-  } catch (error) {
-    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
-  }
-}
-
-/** 接收旧测试/边界调用的统一解析入口；不再接受旧 Keymaster envelope。 */
-export function tryParseSignal(value: unknown): WebrtcSignal | null {
-  const result = typeof value === "string" ? parseSignalBody(value) : parseSignalValue(value);
-  return result.ok ? result.signal : null;
 }
 
 /** 创建 offer body。 */
@@ -159,34 +128,4 @@ export function isAcceptableRemoteSession(
   return local !== null
     && signal.request_message_id === local.requestMessageId
     && signal.session_id === local.sessionId;
-}
-
-/**
- * 兼容旧 API 名称：现在只校验 request/session，不再按旧 envelope 的 type 判断。
- */
-export function isAcceptableRemoteSessionId(
-  signal: WebrtcSignal,
-  localSessionId: string | null,
-  localRequestMessageId?: string
-): boolean {
-  if (signal.signal.type === "offer") return true;
-  return localSessionId !== null
-    && localRequestMessageId !== undefined
-    && signal.session_id === localSessionId
-    && signal.request_message_id === localRequestMessageId;
-}
-
-/** 时间字段由 ChannelProtocol inbox.open 校验；插件层不维护第二套 envelope。 */
-export function isSignalExpired(_signal: WebrtcSignal, _nowMs: number): boolean {
-  return false;
-}
-
-/** 仅供需要显式标注 branded ID 的调用方使用。 */
-export function asMessageId(value: string): MessageID {
-  return parseMessageID(value);
-}
-
-/** 仅供需要显式标注 branded ID 的调用方使用。 */
-export function asSessionId(value: string): SessionID {
-  return parseSessionID(value);
 }

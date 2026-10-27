@@ -41,8 +41,6 @@ export interface SatP2pkhService {
   };
   /** 创建 owner 绑定的 P2PKH 交易预览。 */
   prepareTransfer(input: {
-    assetId: "bsv" | "bsvtest";
-    ownerPublicKeyHex: string;
     recipientAddress: string;
     amountSatoshis: number;
     feeRateSatoshisPerKb?: number;
@@ -356,8 +354,6 @@ export class SatSpiService implements SatSubscriptionSpiService {
     let p2pkhPreview: unknown;
     try {
       p2pkhPreview = await p2pkh.prepareTransfer({
-        assetId: mapping.assetId,
-        ownerPublicKeyHex: context.ownerPublicKeyHex,
         recipientAddress: account.paymentAddress,
         amountSatoshis: amountNumber,
         feeRateSatoshisPerKb: feeRate
@@ -550,26 +546,6 @@ export class SatSpiService implements SatSubscriptionSpiService {
     };
     await context.stateStore.putCollectResult(pending);
     return this.executeCollect(context, pending);
-  }
-
-  async collect(input: { supplierId: string; currency: string; network: string; amount: bigint }): Promise<SatCollectResult> {
-    // 兼容旧调用方：只有未决内容才进入 retry；已完成内容必须走 collectNew，
-    // 这样同金额的第二次主动回收仍会得到新的 request_id。
-    assertSpiText(input.currency, "currency", 32);
-    assertSpiText(input.network, "network", 32);
-    assertPositiveAmount(input.amount, "amount");
-    const context = await this.context();
-    this.supplier(context.stateStore, input.supplierId);
-    if (input.currency !== "BSV") throw new SatSubscriptionError("unavailable", "SatSubscription 回收目前只支持 BSV SPI 账户");
-    const paymentAddress = await this.deriveCollectAddress(context, input.network, true);
-    const content = { supplierId: input.supplierId, currency: input.currency, network: input.network, amount: input.amount, paymentAddress };
-    const unresolved = context.stateStore.snapshot().collectResults.filter((value) => value.state === "pending" || value.state === "unknown_result");
-    const same = unresolved.find((value) => sameCollectContent(value, content));
-    if (same) return this.retryCollect({ requestIdHex: same.requestIdHex });
-    if (unresolved.some((value) => value.supplierId === input.supplierId && value.currency === input.currency && value.network === input.network)) {
-      throw new SatSubscriptionError("conflict", "An unresolved Collect request has different content");
-    }
-    return this.collectNew(input);
   }
 }
 

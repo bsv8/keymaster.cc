@@ -18,7 +18,7 @@ import {
   type Signer,
   type WireKind,
 } from "go-bitfs";
-import type { MsFileBitfsPurchasePhase, BorrowedOwnerFileStore } from "@keymaster/contracts";
+import type { MsFileBitfsPurchasePhase, BorrowedModuleFileStore } from "@keymaster/contracts";
 import type { BitfsBuyerTask } from "./buyerTask.js";
 import type { BitfsBuyerDownloadPlan } from "./buyerDownloadPlan.js";
 import type { BitfsSessionJournal, BitfsSessionRecord } from "./sessionJournal.js";
@@ -74,7 +74,7 @@ export async function recoverBitfsBuyerContentCommit(input: {
   /** 买卖会话与证据日志。 */
   sessions: BitfsSessionJournal;
   /** 当前 Owner 的 MSFile 根存储。 */
-  contentStore: BorrowedOwnerFileStore;
+  contentStore: BorrowedModuleFileStore;
   /** 需要恢复的买方会话编号。 */
   sessionId: string;
   /** 显式 UTC 毫秒。 */
@@ -171,7 +171,7 @@ export interface BitfsBuyerProtocolDeps {
   /** 当前 Vault 的受限买方签名器。 */
   signer: Signer;
   /** 当前 Owner 的 MSFile 根存储；暂存路径不写入可用文件索引。 */
-  contentStore: BorrowedOwnerFileStore;
+  contentStore: BorrowedModuleFileStore;
   /** 同 Seed 多卖家共用的唯一 Block 归属和逐池付款预算。 */
   downloadPlan: BitfsBuyerDownloadPlan;
   /** 已保存到同 Seed 下载计划的卖家优先策略。 */

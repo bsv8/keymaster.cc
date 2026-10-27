@@ -15,7 +15,7 @@ import type {
   ContactPresence,
   ContactPresenceMap,
   ContactsService,
-  BorrowedOwnerFileStore,
+  BorrowedModuleFileStore,
   VaultWalletState,
   ContactsPresenceChannel,
   JSONValue
@@ -38,7 +38,7 @@ export class ContactsNoActiveKeyError extends Error {
 
 export interface ContactsServiceDeps {
   walletState: VaultWalletState;
-  storage: BorrowedOwnerFileStore;
+  storage: BorrowedModuleFileStore;
   messageBus?: MessageBus;
   /** Coordinator Channel runtime；缺失时联系人 CRUD 仍可用，但不会探测在线状态。 */
   channel?: ContactsPresenceChannel;

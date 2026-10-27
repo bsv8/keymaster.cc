@@ -33,14 +33,13 @@ export function sumOutputs(outputs: Array<{ value: number }>): number {
   return outputs.reduce((sum, output) => sum + output.value, 0);
 }
 
-export function listPath(network: P2pkhNetwork, page = 1, view: P2pkhWalletView = "transactions"): string {
-  const networkPath = network === "main" ? "mainnet" : "testnet";
-  const pathname = `/p2pkh/${networkPath}/${view}`;
+export function listPath(page = 1, view: P2pkhWalletView = "transactions"): string {
+  const pathname = `/p2pkh/${view}`;
   return `${pathname}?${new URLSearchParams({ page: String(page) }).toString()}`;
 }
 
-export function detailPath(txid: string, network: P2pkhNetwork, page: number, source: P2pkhWalletView = "transactions", submissionId?: string): string {
-  const params = new URLSearchParams({ network, page: String(page), source });
+export function detailPath(txid: string, page: number, source: P2pkhWalletView = "transactions", submissionId?: string): string {
+  const params = new URLSearchParams({ page: String(page), source });
   if (source === "local-transactions" && submissionId) params.set("submissionId", submissionId);
   return `/p2pkh/tx/${encodeURIComponent(txid)}?${params.toString()}`;
 }
@@ -48,10 +47,6 @@ export function detailPath(txid: string, network: P2pkhNetwork, page: number, so
 export function readPage(search = window.location.search): number {
   const raw = Number.parseInt(new URLSearchParams(search).get("page") ?? "1", 10);
   return Number.isSafeInteger(raw) && raw > 0 ? raw : 1;
-}
-
-export function readTransactionNetwork(search = window.location.search): P2pkhNetwork {
-  return new URLSearchParams(search).get("network") === "test" ? "test" : "main";
 }
 
 /** The only accepted detail source is the formal local-transactions list. */
@@ -69,8 +64,7 @@ export function readTransactionSubmissionId(search = window.location.search): st
 }
 
 export function transactionSourceListPath(search: string): string {
-  const network = new URLSearchParams(search).get("network") === "test" ? "testnet" : "mainnet";
-  return `/p2pkh/${network}/${parseTransactionSource(search)}`;
+  return `/p2pkh/${parseTransactionSource(search)}`;
 }
 
 export function readTransactionId(pathname = window.location.pathname): string | undefined {

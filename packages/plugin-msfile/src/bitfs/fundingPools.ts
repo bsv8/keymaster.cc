@@ -1,10 +1,10 @@
-import type { BorrowedOwnerFileStore, MsFileBitfsFundingPoolSnapshot } from "@keymaster/contracts";
+import type { BorrowedModuleFileStore, MsFileBitfsFundingPoolSnapshot } from "@keymaster/contracts";
 import type { BitfsFundingLedger } from "./funding.js";
 import { createBitfsSessionJournal } from "./sessionJournal.js";
 import { bitfsSessionNeedsFundingRecovery, listBitfsPaths, readBitfsHiddenHistory } from "./purchaseRetention.js";
 
 /** 独立费用池读模型：枚举任务执行期间已写入的资金账本，不依赖购买历史是否存在。 */
-export async function listBitfsFundingPools(input: { journal: BorrowedOwnerFileStore; ledger: BitfsFundingLedger; owner: string; network: "main" | "test" }): Promise<MsFileBitfsFundingPoolSnapshot[]> {
+export async function listBitfsFundingPools(input: { journal: BorrowedModuleFileStore; ledger: BitfsFundingLedger; owner: string; network: "main" | "test" }): Promise<MsFileBitfsFundingPoolSnapshot[]> {
   const { journal, ledger, owner } = input;
   const result: MsFileBitfsFundingPoolSnapshot[] = [];
   const sessions = createBitfsSessionJournal(journal);

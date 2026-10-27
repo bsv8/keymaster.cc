@@ -73,9 +73,3 @@ export function peekBsv8EnvelopeText(text: string): boolean {
 export function peekBsv8EnvelopeBytes(bytes: Uint8Array): boolean {
   return peekBsv8EnvelopeText(new TextDecoder().decode(bytes));
 }
-
-/**
- * 旧 API 兼容别名：原文件 bytes 嗅探入口名仍叫 `peekBsv8Envelope`。
- * 详见插件 key-import 的 ImportPage / FirstTimeImportWizard 既有调用。
- */
-export const peekBsv8Envelope = peekBsv8EnvelopeBytes;

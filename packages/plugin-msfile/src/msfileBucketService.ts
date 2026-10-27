@@ -2,10 +2,10 @@
 // `msfiles/` 下的 seeds、storage、meta 执行上传、列表、读回校验与删除。
 //
 // 服务不接触 Provider、凭据或浏览器持久化；所有远程 I/O 都由 Worker 侧的
-// OwnerFileStore 完成。MasterSeed 算法全部来自 `masterseed` 官方 SDK。
+// ModuleFileStore 完成。MasterSeed 算法全部来自 `masterseed` 官方 SDK。
 
 import { defineCapability } from "webloom-framework";
-import type { MsFileBitfsTaskSnapshot, MsFileCoordinatorControl, BorrowedOwnerFileStore } from "@keymaster/contracts";
+import type { MsFileBitfsTaskSnapshot, MsFileCoordinatorControl, BorrowedModuleFileStore } from "@keymaster/contracts";
 import {
   MsFileSeedStoreError,
   listMsFileSeeds,
@@ -88,7 +88,7 @@ export function createBrowserMsFileSeedSource(file: File): MsFileSeedSource {
 
 export interface MsFileBucketServiceDeps {
   /** Host 预绑定的 owner 文件根句柄（`<owner>/msfiles/`）。 */
-  store: BorrowedOwnerFileStore;
+  store: BorrowedModuleFileStore;
   /** Coordinator 控制面：块写入绕过页面 storage 数据面的端口并发上限。 */
   coordinator: MsFileCoordinatorControl;
   now?(): number;

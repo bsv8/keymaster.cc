@@ -1,3 +1,4 @@
+import { requireWocNetwork } from "@keymaster/contracts";
 import { defaultChainFeePolicies, parseChainFeePolicy, type ChainFeePolicies } from "@keymaster/contracts";
 import { createCoordinatorWorkerAuthority, type CoordinatorAuthorityRecord } from "../coordinator/workerAuthority.js";
 import { VAULT_WORKER_WALLET_CONTROL_CAPABILITY, type VaultWorkerWalletControl } from "@keymaster/contracts";
@@ -33,7 +34,7 @@ import { createWorkerAutoLock } from "@keymaster/plugin-vault/coordinator";
 import { createWorkerBackgroundRuntime, type TaskRuntime } from "@keymaster/plugin-background/coordinator";
 import { FORUM_WORKER_SERVICE_CAPABILITY, FORUM_WORKER_ATTACHMENT_CAPABILITY } from "@keymaster/contracts";
 
-import { type WocWorkerBroadcastService, type WocServiceHandle } from "@keymaster/contracts";
+import { type WocWorkerBroadcastService, type WocWorkerChainPort } from "@keymaster/contracts";
 
 import { isUnknownChannelPublishFailure } from "@keymaster/plugin-sat-subscription/coordinator";
 
@@ -79,7 +80,8 @@ import {
   COORDINATOR_CRYPTO_RPC_CAPABILITY,
 } from "@keymaster/contracts";
 import { MSFILE_READ_CONCURRENCY_RECOMMENDED, MSFILE_SELLER_SETTINGS_DEFAULT } from "@keymaster/contracts";
-import { bytesToHex, installInsecureContextCryptoFallback, hexToBytes as cryptoHexToBytes, deriveP2pkhAddress } from "@keymaster/plugin-vault/coordinator";
+import { deriveP2pkhAddress } from "@keymaster/contracts";
+import { bytesToHex, installInsecureContextCryptoFallback, hexToBytes as cryptoHexToBytes } from "@keymaster/plugin-vault/coordinator";
 // 不能通过 runtime barrel 导入：它 re-export React hooks，Vite 会把
 // React Refresh 注入 SharedWorker，后者没有 window。
 import { WebLoomError, definePlugin, startSharedWorkerApp, type HandlerCallContext, type PeerController } from "webloom-framework";
@@ -241,7 +243,7 @@ const { makeCoordinatorAuthorityInstanceId, coordinatorUpgradeError, readCoordin
 
 let keyDeletionTail: Promise<void> = Promise.resolve();
 
-let p2pkhWocService: ReturnType<typeof createWocService> | undefined;
+let p2pkhWocService: (WocWorkerChainPort & Pick<ReturnType<typeof createWocService>, "ready" | "dispose">) | undefined;
 
 /**
  * Worker 内唯一链高度读数（2026-09-26）。
@@ -796,7 +798,7 @@ const windowP2pWorkerRuntime = createWindowP2pWorkerRuntime({
 });
 
 /* ---------- MSFile runtime state（施工单 KMMF-005/006） ---------- */
-let msfileWorkerChainAccess: (() => WocServiceHandle | undefined) | undefined;
+let msfileWorkerChainAccess: (() => WocWorkerChainPort | undefined) | undefined;
 let testMsfileRuntimeOverride: MsFileServiceImpl | undefined;
 type MsFileRuntimeStores = import("@keymaster/plugin-msfile/worker").MsFileWorkerStores;
 const msfileWorkerRequests = createMsFileWorkerRequests({
@@ -1981,7 +1983,11 @@ const backgroundWorkerRuntime = createWorkerBackgroundRuntime({
   blockedReason: coordinatorTaskBlockedReason,
   isAvailabilityBlocked: isRuntimeAvailabilityBlockedReason,
   publish: event => { publishTopicEvent("background.snapshot", event); },
-  queueSnapshot: () => (testDomainUnitReadiness ? p2pkhWocService : p2pkhWorkerRuntime.query())?.getQueueSnapshot(),
+  queueSnapshot: () => {
+    const query = testDomainUnitReadiness ? p2pkhWocService : p2pkhWorkerRuntime.query();
+    if (!query) return undefined;
+    try { return query.getQueueSnapshot(); } catch { return undefined; }
+  },
   activate: taskId => {
     const unit = getCoordinatorWorkerUnitForTask(taskId);
     if (!unit) return undefined;
@@ -2094,7 +2100,7 @@ const p2pkhWorkerRuntime = createP2pkhWorkerRuntime({
     settings: () => ({ ...coordinatorMeta.p2pkhSettings, feeRateSatoshisPerKb: wocWorkerRuntime.fees.snapshot()[coordinatorMeta.p2pkhSettings.bsvNetwork].effectiveSatoshisPerKb }),
     walletState: () => testDomainUnitReadiness ? createWorkerWalletState() : p2pkhWorkerRuntime.binding()!.walletState,
     storage: () => testDomainUnitReadiness ? createWorkerModuleFileStore("p2pkh", "") : p2pkhWorkerRuntime.binding()!.storage,
-    crypto: (owner) => testDomainUnitReadiness ? vaultWorkerKeys.createWorkerActiveKeyCrypto(owner) : p2pkhWorkerRuntime.binding()!.crypto.createActiveKeyCrypto(owner),
+    crypto: (owner) => testDomainUnitReadiness ? vaultWorkerKeys.createWorkerActiveKeyCrypto(owner) : p2pkhWorkerRuntime.binding()!.crypto.createActiveKeyCrypto(),
     vaultStatus: () => coordinatorState.vaultStatus === "fatal" ? "locked" : coordinatorState.vaultStatus,
     snapshot: async (input, refresh) => {
       const request = { ...input, expectedSessionEpoch: coordinatorState.sessionEpoch, clientId: "sat-subscription", requestId: generateRequestId() };
@@ -2125,15 +2131,16 @@ const ensureSatP2pkhService = workerTransferRuntime.ensure;
  */
 function createP2pkhSnapshotWocSource(woc: WocService): WocService {
   return {
-    getAddressUnspentAll: (network: "main" | "test", address: string, options?: import("@keymaster/contracts").WocRequestOptions) =>
+    identity: woc.identity,
+    getAddressUnspentAll: (address: string, options?: import("@keymaster/contracts").WocRequestOptions) =>
       testP2pkhUnspentAllProvider
-        ? testP2pkhUnspentAllProvider(network, address)
-        : woc.getAddressUnspentAll(network, address, options),
-    getTransactionObservation: (network: "main" | "test", txid: string, options?: import("@keymaster/contracts").WocRequestOptions) => woc.getTransactionObservation(network, txid, options),
+        ? testP2pkhUnspentAllProvider(woc.identity.bsvNetwork, address)
+        : woc.getAddressUnspentAll(address, options),
+    getTransactionObservation: (txid: string, options?: import("@keymaster/contracts").WocRequestOptions) => woc.getTransactionObservation(txid, options),
     // 测试夹具替换 `unspent/all` 时，spent 查询也必须留在本地：否则提交前的
     // “输入是否已被花费”会打到真实 WoC，组件链夹具就无法离线运行。
-    getSpentOutput: async (network: "main" | "test", txid: string, vout: number, options?: import("@keymaster/contracts").WocRequestOptions) =>
-      testP2pkhUnspentAllProvider ? null : woc.getSpentOutput(network, txid, vout, options),
+    getSpentOutput: async (txid: string, vout: number, options?: import("@keymaster/contracts").WocRequestOptions) =>
+      testP2pkhUnspentAllProvider ? null : woc.getSpentOutput(txid, vout, options),
   } as unknown as WocService;
 }
 
@@ -3882,7 +3889,7 @@ export interface CoordinatorTestingPorts {
   msfileWorkerProjection: ReturnType<typeof createMsFileWorkerProjection>;
   msfileWorkerRequests: ReturnType<typeof createMsFileWorkerRequests>;
   onWocQueueChanged: typeof onWocQueueChanged;
-  p2pkhWocService: ReturnType<typeof createWocService> | undefined;
+  p2pkhWocService: (WocWorkerChainPort & Pick<ReturnType<typeof createWocService>, "ready" | "dispose">) | undefined;
   p2pkhWorkerRuntime: ReturnType<typeof createP2pkhWorkerRuntime>;
   persistCoordinatorSettings: typeof persistCoordinatorSettings;
   processRequest: typeof processRequest;

@@ -1,11 +1,19 @@
-import type { ProtocolSpendInput, ProtocolSpendPrepareInput, ProtocolSpendPreview, ProtocolSpendResult, ProtocolSpendService } from "./protocolSpend.js";
+import type { ProtocolFundingPlanRequest, ProtocolSpendInput, ProtocolSpendPrepareInput, ProtocolSpendPreview, ProtocolSpendResult, ProtocolSpendService } from "./protocolSpend.js";
+
+/** Authority evidence added by wallet assembly, never a business selector. */
+export type ProtocolSpendExecutionInput = ProtocolSpendPrepareInput & { ownerPublicKeyHex: string; network: "main" | "test" };
+export interface P2pkhProtocolExecutor extends Omit<ProtocolSpendService, "prepare" | "presign" | "releasePreparedSubmission"> {
+  prepare(input: ProtocolSpendExecutionInput): Promise<ProtocolSpendPreview>;
+  presign(input: ProtocolSpendExecutionInput): Promise<ProtocolSpendPreview>;
+  releasePreparedSubmission(input: Parameters<NonNullable<ProtocolSpendService["releasePreparedSubmission"]>>[0] & { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<void>;
+}
 
 /** Internal wallet Window -> Worker DTO, NOT a Connect method or manager API. */
 export type P2pkhProtocolCommand =
-  | { type: "prepare" | "presign"; input: ProtocolSpendPrepareInput }
+  | { type: "prepare" | "presign"; input: ProtocolSpendExecutionInput }
   | { type: "submit" | "release"; input: ProtocolSpendPreview }
-  | { type: "release-submission"; input: Parameters<NonNullable<ProtocolSpendService["releasePreparedSubmission"]>>[0] }
-  | { type: "funding-plan"; input: { ownerPublicKeyHex: string; network: "main" | "test"; amountSatoshis: number; feeRateSatoshisPerKb: number } };
+  | { type: "release-submission"; input: Parameters<P2pkhProtocolExecutor["releasePreparedSubmission"]>[0] }
+  | { type: "funding-plan"; input: ProtocolFundingPlanRequest & { ownerPublicKeyHex: string; network: "main" | "test" } };
 export type P2pkhProtocolCommandResult =
   | { type: "prepare" | "presign"; value: ProtocolSpendPreview }
   | { type: "submit"; value: ProtocolSpendResult }
@@ -80,7 +88,7 @@ export function parseP2pkhProtocolCommand(value: unknown): P2pkhProtocolCommand 
     case "prepare": case "presign": prepare(row.input); break;
     case "submit": case "release": preview(row.input); break;
     case "release-submission": { const body = scope(row.input); text(body.submissionId); if (hex(body.txid).length !== 64) throw new TypeError("Invalid protocol release txid"); break; }
-    case "funding-plan": { const body = scope(row.input); number(body.amountSatoshis, true); number(body.feeRateSatoshisPerKb, true); break; }
+    case "funding-plan": { const body = scope(row.input); number(body.amountSatoshis, true); number(body.feeRateSatoshisPerKb, true); if (body.outputs !== undefined) list(body.outputs, item => { const output = record(item); hex(output.scriptHex, true); if (!/^(0|[1-9][0-9]*)$/.test(text(output.value))) throw new TypeError("Invalid funding output amount"); }); break; }
     default: throw new TypeError("Unsupported protocol RPC command");
   }
   return structuredClone(row) as P2pkhProtocolCommand;

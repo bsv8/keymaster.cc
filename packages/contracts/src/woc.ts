@@ -183,7 +183,7 @@ export interface WocBroadcastResult {
  * 是强保证；不可用时降级为单 tab 限流（snapshot.coordinated=false 提示）。
  */
 /** WOC 只读服务；插件可见能力不包含广播出口。 */
-export interface WocService {
+export interface WocQueryTransport {
   getConfig(): WocConfig;
   updateConfig(input: Partial<WocConfig>): WocConfig;
   onConfigChange(handler: (config: WocConfig) => void): () => void;
@@ -272,10 +272,10 @@ export interface WocService {
   ): Promise<WocSpentOutput | null>;
 
   /** One batch, at most20. Unknown/null/empty error is not an unspent proof. */
-  getSpentOutputs?(network: BsvNetwork, outpoints: WocOutpoint[], options?: WocRequestOptions): Promise<WocSpentResult[]>;
+  getSpentOutputs(network: BsvNetwork, outpoints: WocOutpoint[], options?: WocRequestOptions): Promise<WocSpentResult[]>;
 
   /** Confirmed raw transaction bytes for provider adapters. */
-  getRawTransaction?(
+  getRawTransaction(
     network: BsvNetwork,
     txid: string,
     options?: WocRequestOptions
@@ -294,7 +294,23 @@ export interface WocWorkerBroadcastService {
 }
 
 /** createWocService 返回的完整内部句柄；仅 Worker/装配层使用扩展方法。 */
-export type WocServiceHandle = WocService & WocWorkerBroadcastService;
+export type WocServiceHandle = WocQueryTransport & WocWorkerBroadcastService;
+
+type WocControlMethod = "getConfig" | "updateConfig" | "onConfigChange" | "getQueueSnapshot" | "onQueueChange";
+type BoundWocQuery<T> = T extends (network: BsvNetwork, ...args: infer A) => infer R ? (...args: A) => R : T;
+/** Business queries bind the sole wallet; network remains only in transport/evidence. */
+export type WocService = {
+  readonly identity: Readonly<import("./networkIdentity.js").NetworkIdentity>;
+} & { [K in keyof WocQueryTransport]: K extends WocControlMethod ? WocQueryTransport[K] : BoundWocQuery<WocQueryTransport[K]> };
+
+/** Validate original record/task evidence without letting it select the query network. */
+export function requireWocNetwork<T extends { readonly identity: Readonly<import("./networkIdentity.js").NetworkIdentity> }>(service: T, network: BsvNetwork): T {
+  if (!service.identity || service.identity.bsvNetwork !== network) throw new Error("WOC task network differs from its bound wallet");
+  return service;
+}
+
+/** Worker-only composition of bound queries and verified broadcast evidence. */
+export type WocWorkerChainPort = WocService & WocWorkerBroadcastService;
 
 /** WOC capability key。 */
 export const WOC_CAPABILITY = defineCapability<WocService>({

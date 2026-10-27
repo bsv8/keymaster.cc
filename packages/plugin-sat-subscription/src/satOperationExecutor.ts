@@ -41,7 +41,6 @@ export async function executeSatOperation(operation: CoordinatorSatOperation, ru
     case "spi.submitTopUp": value = await runtime.spi.submitTopUp(operation.preview); break;
     case "spi.collectNew": value = await runtime.spi.collectNew(operation.input); break;
     case "spi.retryCollect": value = await runtime.spi.retryCollect(operation.input); break;
-    case "spi.collect": value = await runtime.spi.collect(operation.input); break;
   }
   return value;
 }

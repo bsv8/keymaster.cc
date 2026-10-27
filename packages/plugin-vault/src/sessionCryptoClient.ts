@@ -1,3 +1,4 @@
+import { deriveP2pkhAddress } from "@keymaster/contracts";
 // Session Crypto capability client。
 //
 // 主页面使用 Coordinator RPC；appView 使用当前 Session Window 的专用 Worker。
@@ -14,12 +15,7 @@ import type {
   SessionEpoch
 } from "@keymaster/contracts";
 import { ActiveKeySessionRevokedError } from "@keymaster/contracts";
-import {
-  deriveP2pkhAddress,
-  hexToBytes,
-  signEcdsaDigest,
-  verifySessionKeyPair
-} from "./sessionCryptoCore.js";
+import { hexToBytes, signEcdsaDigest, verifySessionKeyPair } from "./sessionCryptoCore.js";
 import type {
   SessionCryptoBootstrapInput,
   SessionCryptoResponseMessage

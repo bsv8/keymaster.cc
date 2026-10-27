@@ -4,7 +4,7 @@ import { QRCodeSVG } from "qrcode.react";
 import { Check, Copy, UserRound } from "lucide-react";
 import { Button, Modal } from "@keymaster/ui";
 import { usePluginI18n, useResourceView } from "@keymaster/runtime";
-import { formatShortPublicKey } from "@keymaster/contracts";
+import { formatShortPublicKey, type NetworkIdentity, type VaultLifecycleSnapshot } from "@keymaster/contracts";
 import { useP2pkhResources } from "./P2pkhResourceContext.js";
 function p2pkhAddress(publicKeyHex: string | undefined, network: "mainnet" | "testnet"): string | null {
   if (!publicKeyHex) return null;
@@ -43,14 +43,15 @@ function CopyButton({ value }: { value: string }) {
   );
 }
 
-function MyInfoModal({ open, onClose, publicKeyHex, hasP2pkh }: { open: boolean; onClose: () => void; publicKeyHex?: string; hasP2pkh: boolean }) {
+function MyInfoModal({ open, onClose, identity }: { open: boolean; onClose: () => void; identity?: NetworkIdentity }) {
   const { t } = usePluginI18n();
-  const network = useResourceView<"main" | "test">(useP2pkhResources(), "p2pkh.identity-testnet", []).data ?? "main";
-  const address = useMemo(() => p2pkhAddress(publicKeyHex, network === "test" ? "testnet" : "mainnet"), [publicKeyHex, network]);
+  const publicKeyHex = identity?.publicKeyHex;
+  const network = identity?.bsvNetwork;
+  const address = useMemo(() => network ? p2pkhAddress(publicKeyHex, network === "test" ? "testnet" : "mainnet") : null, [publicKeyHex, network]);
 
   return (
     <Modal open={open} onClose={onClose} title={t("p2pkh.identity.info.title", { defaultValue: "我的信息" })} closeButtonLabel={t("p2pkh.identity.info.close", { defaultValue: "关闭我的信息" })} data-testid="home-my-info-modal">
-      {!publicKeyHex ? (
+      {!publicKeyHex || !network ? (
         <p className="home-actions__hint">{t("p2pkh.identity.info.noKey", { defaultValue: "请选择一个可用的密钥后再查看信息。" })}</p>
       ) : (
         <div className="home-actions__identity">
@@ -78,8 +79,9 @@ function IdentityRow({ label, value, shortValue }: { label: string; value: strin
 export function IdentityHomeButton() {
  const { t } = usePluginI18n();
  const [open, setOpen] = useState(false);
- const publicKeyHex = useResourceView<{ activePublicKeyHex?: string }>(useP2pkhResources(), "p2pkh.identity-key", []).data?.activePublicKeyHex;
+ const state = useResourceView<VaultLifecycleSnapshot>(useP2pkhResources(), "p2pkh.identity-key", []).data;
+ const identity = state?.status === "unlocked" && state.activeKeyIdentity?.publicKeyHex === state.activePublicKeyHex ? state.activeKeyIdentity : undefined;
  return <section className="home-actions"><div className="home-actions__grid">
  <button type="button" className="home-actions__shortcut" onClick={() => setOpen(true)} data-testid="home-my-info-button"><span className="home-actions__icon home-actions__icon--info"><UserRound size={28} /></span><span>{t("p2pkh.identity.action.myInfo")}</span></button>
- </div><MyInfoModal open={open} onClose={() => setOpen(false)} publicKeyHex={publicKeyHex} hasP2pkh /></section>;
+ </div><MyInfoModal open={open} onClose={() => setOpen(false)} identity={identity} /></section>;
 }

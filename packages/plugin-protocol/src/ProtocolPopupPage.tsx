@@ -135,27 +135,19 @@ export function ProtocolPopupPage() {
    *
    * 旧实现把监听放在 `LockScreenPage` 子组件里；解锁后切到主 popup 时
    * `LockScreenPage` 卸载 → 监听消失 → 主页面状态下重新锁定时
-   * `setVaultLockState(true)` 不会再被调用 → `confirming -> waiting_unlock_manual`
+   * `syncWalletState()` 不会再被调用 → `confirming -> waiting_unlock_manual`
    * 的硬收口不会发生，也不会切回全页面锁屏。
    *
    * 现在监听挂在 `ProtocolPopupPage`，跨越 locked / unlocked 视图切换仍生效。
    * LockScreenPage 里旧的 `useEffect(() => vault.onStatusChange(...))` 已
    * 删除（避免重复监听）。
    *
-   * 施工单 2026-06-30 003 硬切换 4.5：传入的 `locked` 仅表达 vault 当前
-   * 状态；`setVaultLockState` 内部用 `computeLockState()` 同时参考
-   * `bootstrap_runtime` 是否已注册——appView bootstrap 完成后即便 vault
-   * 被 relock，Session Window 仍维持 unlocked，不被错误送回全屏锁屏。
+   * 这里只通知状态已提交；service 从当前 Vault 与有效 runtime 派生状态，
+   * 不接收页面自行计算的锁屏值。
    */
   useEffect(() => {
-    if (vaultStatus === "unlocked") {
-        (service as unknown as { setVaultLockState?: (locked: boolean) => void }).setVaultLockState?.(false);
-        if (!service.connectAuthSnapshot()) {
-          void service.resumeAfterUnlock?.();
-        }
-    } else if (vaultStatus === "locked") {
-        (service as unknown as { setVaultLockState?: (locked: boolean) => void }).setVaultLockState?.(true);
-    }
+    if (vaultStatus === "unlocked" || vaultStatus === "locked") service.syncWalletState();
+    if (vaultStatus === "unlocked" && !service.connectAuthSnapshot()) void service.resumeAfterUnlock?.();
   }, [service, vaultStatus]);
 
   // 倒计时：每秒触发一次 re-render，让确认卡内的"剩余秒数"自然滚动。
@@ -478,7 +470,7 @@ function LockScreenPage({
   const [busy, setBusy] = useState(false);
 
   // 关键：vault.onStatusChange 监听统一挂在父组件 `ProtocolPopupPage`，
-  // 这里**不**再重复挂监听——否则会双调用 setVaultLockState / resumeAfterUnlock，
+  // 这里**不**再重复挂监听——否则会双调用 syncWalletState / resumeAfterUnlock，
   // 旧实现下还会导致主页面状态下 relock 监听丢失。
 
   async function submit(e: React.FormEvent) {

@@ -4,7 +4,7 @@
 //   - 文件缺失或损坏 = 全部默认,不阻塞插件启动;
 //   - 保存 = 整文件替换;写盘成功后才提交内存并通知订阅者。
 
-import type { BorrowedOwnerFileStore } from "@keymaster/contracts";
+import type { BorrowedModuleFileStore } from "@keymaster/contracts";
 import {
   DEFAULT_STUN_SERVERS,
   coerceWebrtcConfig,
@@ -19,7 +19,7 @@ import {
 } from "./p2pSettingFileFormats.js";
 
 /** Repository 只接收 Host 已绑定的 `p2p/` owner 文件根。 */
-export function createP2pSettingFileRepository(files: BorrowedOwnerFileStore) {
+export function createP2pSettingFileRepository(files: BorrowedModuleFileStore) {
   async function readConfig(): Promise<WebrtcConfig> {
     const object = await files.get(P2P_SETTING_FILE_NAME);
     if (!object) return { stunServers: [...DEFAULT_STUN_SERVERS] };
@@ -44,7 +44,7 @@ export type P2pSettingFileRepositoryHandle = ReturnType<typeof createP2pSettingF
  *   - `save` 串行写文件,写盘成功后才提交内存并通知订阅者；
  *   - 写失败抛错时内存态仍保留**上次成功**的真值,避免脏读。
  */
-export function createFileWebrtcConfigStore(files: BorrowedOwnerFileStore): WebrtcConfigStore {
+export function createFileWebrtcConfigStore(files: BorrowedModuleFileStore): WebrtcConfigStore {
   const repository = createP2pSettingFileRepository(files);
   let current: WebrtcConfig = { stunServers: [...DEFAULT_STUN_SERVERS] };
   const subscribers = new Set<(c: WebrtcConfig) => void>();

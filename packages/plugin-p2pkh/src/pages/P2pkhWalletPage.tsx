@@ -49,7 +49,7 @@ const EMPTY_WALLET_SNAPSHOT: WalletSnapshot = {
 
 const EMPTY_BALANCE_SNAPSHOT = emptyGlobalBalanceSnapshot();
 
-export function P2pkhWalletPage(props: { view?: P2pkhWalletView; network?: P2pkhNetwork } = {}) {
+export function P2pkhWalletPage(props: { view?: P2pkhWalletView } = {}) {
   const { t } = usePluginI18n();
   // owner 作用域 capability 会在锁定时撤销；路由组件在锁定瞬间仍可能完成
   // 一次渲染，必须按"暂不可用"降级而不是抛错。
@@ -70,12 +70,10 @@ export function P2pkhWalletPage(props: { view?: P2pkhWalletView; network?: P2pkh
 
 function P2pkhWalletPageInner({
   view = "transactions",
-  network = "main",
   service,
   coordinator
 }: {
   view?: P2pkhWalletView;
-  network?: P2pkhNetwork;
   service: P2pkhService;
   coordinator: P2pkhCoordinatorControl;
 }) {
@@ -113,13 +111,7 @@ function P2pkhWalletPageInner({
   const [localCursors, setLocalCursors] = useState<Record<string, string | undefined>>(wallet.localCursors);
   const [loadingMore, setLoadingMore] = useState<"history" | "locals" | null>(null);
 
-  const settings = useOptionalResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
-    resources,
-    "p2pkh.settings",
-    [],
-    (snapshot) => snapshot.data ?? { bsvNetwork: "main" },
-    { bsvNetwork: "main" }
-  );
+  const network = service.getGlobalSettings().bsvNetwork;
 
   useEffect(() => {
     setLoadedHistory(wallet.history);
@@ -131,18 +123,16 @@ function P2pkhWalletPageInner({
   const setCurrentPage = (next: number) => {
     if (next < 1) return;
     setPage(next);
-    router.push(listPath(network, next, view));
+    router.push(listPath(next, view));
   };
-  const networkEnabled = network === settings.bsvNetwork;
   // 钱包余额唯一读取来源是全局广播；页面不再维护第二份余额状态。
-  const resourceBalance = networkEnabled && balanceSnapshot.bsvNetwork === network ? balanceSnapshot.balance : undefined;
+  const resourceBalance = balanceSnapshot.bsvNetwork === network ? balanceSnapshot.balance : undefined;
   const balance = resourceBalance;
   const balanceKnown = Boolean(balance && balance.available === true);
   const sync = wallet.sync.find((row) => row.resourceId === `p2pkh:${network}`);
-  const selectedResources = useMemo(() => networkEnabled ? wallet.resources.filter((resource) => resource.network === network) : [], [wallet.resources, network, networkEnabled]);
+  const selectedResources = useMemo(() => wallet.resources.filter((resource) => resource.network === network), [wallet.resources, network]);
 
   const txRows = useMemo<P2pkhTransactionListRow[]>(() => {
-    if (!networkEnabled) return [];
     return loadedHistory
       .filter((row) => row.network === network)
       .map((row) => ({
@@ -158,11 +148,11 @@ function P2pkhWalletPageInner({
         const rightHeight = typeof right.height === "number" ? right.height : -1;
         return rightHeight - leftHeight || right.txid.localeCompare(left.txid);
       });
-  }, [loadedHistory, network, networkEnabled]);
+  }, [loadedHistory, network]);
 
   const visibleTxRows = useMemo(() => txRows.slice((page - 1) * TRANSACTION_PAGE_SIZE, page * TRANSACTION_PAGE_SIZE), [txRows, page]);
   const localTxRows = useMemo<P2pkhTransactionListRow[]>(() => loadedLocals
-    .filter((row) => networkEnabled && row.network === network && row.chainResolution !== "chain-confirmed")
+    .filter((row) => row.network === network && row.chainResolution !== "chain-confirmed")
     .map((row) => {
       const parsed = parseStoredTransaction(row.rawTxHex, row.txid);
       return {
@@ -176,7 +166,7 @@ function P2pkhWalletPageInner({
         local: row
       };
     })
-    .sort((left, right) => Date.parse(right.time) - Date.parse(left.time) || right.id.localeCompare(left.id)), [loadedLocals, network, networkEnabled]);
+    .sort((left, right) => Date.parse(right.time) - Date.parse(left.time) || right.id.localeCompare(left.id)), [loadedLocals, network]);
   const visibleLocalTxRows = useMemo(() => localTxRows.slice((page - 1) * TRANSACTION_PAGE_SIZE, page * TRANSACTION_PAGE_SIZE), [localTxRows, page]);
 
   async function refreshUtxos() {
@@ -185,7 +175,7 @@ function P2pkhWalletPageInner({
     try {
       // service 与页面均绑定身份网络；钱包页将当前
       // 路由网络明确传下去，否则 testnet 页的按钮只会刷新另一张快照。
-      await service.refreshUtxos?.({ ownerPublicKeyHex: selectedResources[0]?.publicKeyHex, resourceId: `p2pkh:${network}` });
+      await service.refreshUtxos();
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -197,10 +187,9 @@ function P2pkhWalletPageInner({
     if (loadingMore) return false;
     setLoadingMore("history");
     try {
-      if (!service.listHistoryPage) throw new Error(t("p2pkh.action.loadMoreUnsupported", { defaultValue: "本地分页不可用。" }));
       const pages = await Promise.all(selectedResources.map(async (resource) => {
         if (!historyCursors[resource.resourceId]) return [resource.resourceId, { items: [] as P2pkhHistoryRecord[], nextCursor: undefined }] as const;
-        return [resource.resourceId, await service.listHistoryPage!({ resourceId: resource.resourceId, cursor: historyCursors[resource.resourceId], limit: 200 })] as const;
+        return [resource.resourceId, await service.listHistory({ cursor: historyCursors[resource.resourceId], limit: 200 })] as const;
       }));
       const additions = pages.flatMap(([, result]) => result.items);
       setLoadedHistory((current) => [...new Map([...current, ...additions].map((row) => [row.id, row])).values()]);
@@ -218,10 +207,9 @@ function P2pkhWalletPageInner({
     if (loadingMore) return false;
     setLoadingMore("locals");
     try {
-      if (!service.listLocalTransactionsPage) throw new Error(t("p2pkh.action.loadMoreUnsupported", { defaultValue: "本地分页不可用。" }));
       const pages = await Promise.all(selectedResources.map(async (resource) => {
         if (!localCursors[resource.resourceId]) return [resource.resourceId, { items: [] as P2pkhLocalTransaction[], nextCursor: undefined }] as const;
-        return [resource.resourceId, await service.listLocalTransactionsPage!({ resourceId: resource.resourceId, cursor: localCursors[resource.resourceId], limit: 200 })] as const;
+        return [resource.resourceId, await service.listLocalTransactions({ cursor: localCursors[resource.resourceId], limit: 200 })] as const;
       }));
       const additions = pages.flatMap(([, result]) => result.items);
       setLoadedLocals((current) => [...new Map([...current, ...additions].map((row) => [row.id, row])).values()]);
@@ -242,7 +230,7 @@ function P2pkhWalletPageInner({
     { key: "height", header: t("p2pkh.col.height", { defaultValue: "区块高度" }), render: (row) => row.height },
     { key: "state", header: t("p2pkh.col.status", { defaultValue: "状态" }), render: (row) => t(`p2pkh.state.${row.state}`, { defaultValue: row.state }) },
     { key: "time", header: t("p2pkh.col.syncedAt", { defaultValue: "最近观察" }), render: (row) => row.time },
-    { key: "action", header: "", render: (row) => <Button variant="ghost" onClick={() => router.push(detailPath(row.txid, network, page, view))}>{t("p2pkh.action.details", { defaultValue: "Details" })}</Button> }
+    { key: "action", header: "", render: (row) => <Button variant="ghost" onClick={() => router.push(detailPath(row.txid, page, view))}>{t("p2pkh.action.details", { defaultValue: "Details" })}</Button> }
   ];
   const localTxColumns: DataTableColumn<P2pkhTransactionListRow>[] = [
     { key: "txid", header: t("p2pkh.col.txid", { defaultValue: "txid" }), render: (row) => <code>{row.txid}</code> },
@@ -250,7 +238,7 @@ function P2pkhWalletPageInner({
     { key: "localState", header: t("p2pkh.txDetail.state", { defaultValue: "Local state" }), render: (row) => t(`p2pkh.state.${row.local?.localState ?? row.state}`, { defaultValue: row.local?.localState ?? row.state }) },
     { key: "chainResolution", header: t("p2pkh.txDetail.chainResolution", { defaultValue: "Chain resolution" }), render: (row) => t(`p2pkh.resolution.${row.local?.chainResolution ?? "unresolved"}`, { defaultValue: row.local?.chainResolution ?? "unresolved" }) },
     { key: "time", header: t("p2pkh.col.syncedAt", { defaultValue: "最近观察" }), render: (row) => row.time },
-    { key: "action", header: "", render: (row) => <Button variant="ghost" onClick={() => router.push(detailPath(row.txid, network, page, "local-transactions", row.local?.id))}>{t("p2pkh.action.details", { defaultValue: "Details" })}</Button> }
+    { key: "action", header: "", render: (row) => <Button variant="ghost" onClick={() => router.push(detailPath(row.txid, page, "local-transactions", row.local?.id))}>{t("p2pkh.action.details", { defaultValue: "Details" })}</Button> }
   ];
   const networkTitle = network === "main" ? t("p2pkh.wallet.mainnet", { defaultValue: "Mainnet" }) : t("p2pkh.wallet.testnet", { defaultValue: "Testnet" });
   const viewTitle = view === "transactions"
@@ -264,17 +252,17 @@ function P2pkhWalletPageInner({
       <PageHeader
         title={`${viewTitle} · ${networkTitle}`}
         description={viewDescription}
-        actions={<span>{settings.bsvNetwork === "test" ? "Testnet" : "Mainnet"}</span>}
+        actions={<span>{network === "test" ? "Testnet" : "Mainnet"}</span>}
       />
       {wallet.error ? <EmptyState title={t("p2pkh.wallet.loadFailed", { defaultValue: "Wallet data unavailable" })} description={wallet.error} /> : null}
-      {networkEnabled ? <section className="p2pkh-wallet__balances" aria-label={t("p2pkh.wallet.balances", { defaultValue: "BSV balances" })}>
+      <section className="p2pkh-wallet__balances" aria-label={t("p2pkh.wallet.balances", { defaultValue: "BSV balances" })}>
         <article>
           <h2>{networkTitle}</h2>
           <strong>{balanceKnown ? formatSatsWithPrice(balance!.total, price, { locale, network }) : t("p2pkh.balance.unknown", { defaultValue: "未知（尚未取得 UTXO 快照）" })}</strong>
           <BalanceBreakdown breakdown={balanceKnown ? balance?.breakdown : undefined} />
           <Button variant="ghost" disabled={refreshing || selectedResources.length === 0} onClick={() => void refreshUtxos()}>{refreshing ? t("p2pkh.action.inProgress", { defaultValue: "处理中…" }) : t("p2pkh.action.refreshUtxos", { defaultValue: "刷新 UTXO" })}</Button>
         </article>
-      </section> : <EmptyState title={t("p2pkh.wallet.networkDisabled", { defaultValue: "Network identity mismatch" })} description={t("p2pkh.wallet.networkDisabledDescription", { defaultValue: "This route belongs to a different network from the wallet identity." })} />}
+      </section>
       <section className="p2pkh-wallet__sync" aria-label={t("p2pkh.wallet.syncStatus", { defaultValue: "Confirmed synchronization status" })}>
         <p>{t("p2pkh.wallet.lastCompleteSync", { defaultValue: "Last complete sync: {{time}}", time: wallet.lastSyncedAt ?? sync?.lastSuccessAt ?? "—" })}</p>
         <p>{t("p2pkh.wallet.taskStatus", { defaultValue: "Task status: {{status}}", status: t(`p2pkh.syncStatus.${wallet.syncStatus}`, { defaultValue: wallet.syncStatus }) })}</p>
@@ -282,7 +270,7 @@ function P2pkhWalletPageInner({
         {(wallet.syncError ?? sync?.lastError) ? <p role="alert">{t("p2pkh.wallet.syncError", { defaultValue: "Sync error: {{error}}", error: wallet.syncError ?? sync?.lastError })}</p> : null}
         {actionError ? <p role="alert">{actionError}</p> : null}
       </section>
-      {view === "local-transactions" && networkEnabled && typeof coordinator.p2pkhConclusion === "function" && coordinator.getActivePublicKeyHex() && <P2pkhConclusionPanel coordinator={coordinator} owner={coordinator.getActivePublicKeyHex()!} network={network} />}
+      {view === "local-transactions" && typeof coordinator.p2pkhConclusion === "function" && coordinator.getActivePublicKeyHex() && <P2pkhConclusionPanel coordinator={coordinator} owner={coordinator.getActivePublicKeyHex()!} network={network} />}
       {view === "transactions" ? <>
         <DataTable columns={txColumns} rows={visibleTxRows} rowKey={(row) => row.id} />
         <div className="p2pkh-wallet__pagination" aria-label={t("p2pkh.wallet.pagination", { defaultValue: "Transaction pages" })}>

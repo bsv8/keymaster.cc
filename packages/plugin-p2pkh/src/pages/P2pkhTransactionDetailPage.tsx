@@ -5,7 +5,7 @@ import { useOptionalPluginCapability } from "webloom-framework/react";
 import { router, usePluginI18n, useOptionalResourceSelector } from "@keymaster/runtime";
 import type { P2pkhGlobalSettings, P2pkhHistoryRecord, P2pkhLocalTransaction, P2pkhService, P2pkhTransactionDetail } from "../p2pkhContracts.js";
 import { P2PKH_CAPABILITY } from "../p2pkhContracts.js";
-import { formatLocalTime, listPath, readPage, readTransactionId, readTransactionNetwork, readTransactionSource, readTransactionSubmissionId } from "./p2pkhTransactionView.js";
+import { formatLocalTime, listPath, readPage, readTransactionId, readTransactionSource, readTransactionSubmissionId } from "./p2pkhTransactionView.js";
 import { type WalletSnapshot } from "./P2pkhWalletPage.js";
 
 function emptyWallet(): WalletSnapshot {
@@ -47,19 +47,12 @@ export function P2pkhTransactionDetailPage() {
 function P2pkhTransactionDetailPageInner({ service }: { service: P2pkhService }) {
   const resources = useP2pkhResources();
   const { t } = usePluginI18n();
-  const network = readTransactionNetwork();
+  const network = service.getGlobalSettings().bsvNetwork;
   const page = readPage();
   const source = readTransactionSource();
   const txid = readTransactionId();
   const submissionId = readTransactionSubmissionId();
   const routeResourceId = `p2pkh:${network}`;
-  const settings = useOptionalResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
-    resources,
-    "p2pkh.settings",
-    [],
-    (snapshot) => snapshot.data ?? { bsvNetwork: "main" },
-    { bsvNetwork: "main" }
-  );
   const wallet = useOptionalResourceSelector<WalletSnapshot, WalletSnapshot & { error?: string; loaded: boolean }>(
     resources,
     "p2pkh.wallet",
@@ -75,7 +68,6 @@ function P2pkhTransactionDetailPageInner({ service }: { service: P2pkhService })
       : { ...emptyWallet(), error: snapshot.error?.message, loaded: false },
     { ...emptyWallet(), loaded: false }
   );
-  const networkEnabled = network === settings.bsvNetwork;
   const snapshotHistory = useMemo(() => source === "transactions" && txid ? wallet.history.find((row) => row.network === network && row.txid.toLowerCase() === txid.toLowerCase()) : undefined, [wallet.history, network, txid, source]);
   const snapshotLocal = useMemo(() => {
     if (source !== "local-transactions" || !txid) return undefined;
@@ -95,7 +87,7 @@ function P2pkhTransactionDetailPageInner({ service }: { service: P2pkhService })
     let cancelled = false;
     setHistoryRecord(undefined);
     setLocalRecord(undefined);
-    if (!txid || !networkEnabled) return;
+    if (!txid) return;
     if (snapshotHistory || snapshotLocal) {
       setHistoryRecord(snapshotHistory);
       setLocalRecord(snapshotLocal);
@@ -104,12 +96,11 @@ function P2pkhTransactionDetailPageInner({ service }: { service: P2pkhService })
     const readRecord = async () => {
       try {
         if (source === "transactions" && service.listHistory) {
-          const rows = await service.listHistory({ resourceId: routeResourceId });
-          if (!cancelled) setHistoryRecord(rows.find((row) => row.txid.toLowerCase() === txid.toLowerCase()));
+          const page = await service.listHistory({ txid, limit: 1 });
+          if (!cancelled) setHistoryRecord(page.items[0]);
         } else if (source === "local-transactions" && service.listLocalTransactions) {
-          const rows = await service.listLocalTransactions({ resourceId: routeResourceId, includeResolvedLocalTransactions: true });
-          const matches = rows.filter((row) => row.txid.toLowerCase() === txid.toLowerCase());
-          if (!cancelled) setLocalRecord(submissionId ? matches.find((row) => row.id === submissionId) : matches.sort((left, right) => left.id.localeCompare(right.id))[0]);
+          const page = await service.listLocalTransactions({ txid, submissionId, includeResolved: true, limit: 1 });
+          if (!cancelled) setLocalRecord(page.items[0]);
         }
       } catch {
         // 深读失败保持“不可用”展示；不回退到演示数据。
@@ -117,7 +108,7 @@ function P2pkhTransactionDetailPageInner({ service }: { service: P2pkhService })
     };
     void readRecord();
     return () => { cancelled = true; };
-  }, [service, networkEnabled, txid, routeResourceId, submissionId, source, snapshotHistory, snapshotLocal]);
+  }, [service, txid, routeResourceId, submissionId, source, snapshotHistory, snapshotLocal]);
 
   const record = source === "transactions" ? (historyRecord ?? snapshotHistory) : undefined;
   const local = source === "local-transactions" ? (localRecord ?? snapshotLocal) : undefined;
@@ -127,22 +118,21 @@ function P2pkhTransactionDetailPageInner({ service }: { service: P2pkhService })
     let cancelled = false;
     setDetail(undefined);
     setDetailError(undefined);
-    if (!txid || !networkEnabled || (!record && !local) || !service.getTransactionDetail) return;
+    if (!txid || (!record && !local) || !service.getTransactionDetail) return;
     setLoading(true);
-    void service.getTransactionDetail({ resourceId: routeResourceId, network, txid })
+    void service.getTransactionDetail({ txid })
       .then((result) => { if (!cancelled) setDetail(result); })
       .catch((error) => { if (!cancelled) setDetailError(error instanceof Error ? error.message : String(error)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [service, networkEnabled, txid, routeResourceId, record, local]);
+  }, [service, txid, routeResourceId, record, local]);
 
   const outputTotal = detail ? detail.outputs.reduce((sum, output) => sum + output.value, 0) : undefined;
   const timestamp = record ? formatLocalTime(record.firstSeenAt) : formatLocalTime(local?.updatedAt);
-  const back = () => router.push(listPath(network, page, source));
+  const back = () => router.push(listPath(page, source));
 
-  if (!txid || !networkEnabled || (!record && !local)) {
-    const disabled = !networkEnabled;
-    return <div className="p2pkh-tx-detail"><PageHeader title={t("p2pkh.txDetail.title", { defaultValue: "Transaction details" })} actions={<Button variant="ghost" onClick={back}>{t("p2pkh.action.backToTransactions", { defaultValue: "Back to transactions" })}</Button>} /><EmptyState title={disabled ? t("p2pkh.wallet.networkDisabled", { defaultValue: "Network identity mismatch" }) : t("p2pkh.txDetail.unavailable", { defaultValue: "本地没有这笔交易" })} description={disabled ? t("p2pkh.wallet.networkDisabledDescription", { defaultValue: "This route belongs to a different network from the wallet identity." }) : wallet.error ?? t("p2pkh.txDetail.unavailableDescription", { defaultValue: "此页面只展示本钱包已知的历史记录。" })} /></div>;
+  if (!txid || (!record && !local)) {
+    return <div className="p2pkh-tx-detail"><PageHeader title={t("p2pkh.txDetail.title", { defaultValue: "Transaction details" })} actions={<Button variant="ghost" onClick={back}>{t("p2pkh.action.backToTransactions", { defaultValue: "Back to transactions" })}</Button>} /><EmptyState title={t("p2pkh.txDetail.unavailable", { defaultValue: "本地没有这笔交易" })} description={wallet.error ?? t("p2pkh.txDetail.unavailableDescription", { defaultValue: "此页面只展示本钱包已知的历史记录。" })} /></div>;
   }
 
   return <div className="p2pkh-tx-detail">

@@ -3,7 +3,7 @@
 // 该存储必须绑定独立 `bitfs-journal` purpose。协议字节逐文件原样保存，不放入
 // MSFile 内容、设置或 App 用量文件；发送方只能发送 `prepareOutbound` 返回的副本。
 
-import type { BorrowedOwnerFileStore } from "@keymaster/contracts";
+import type { BorrowedModuleFileStore } from "@keymaster/contracts";
 import { parse, type Artifact, type WireKind } from "go-bitfs";
 
 const RECORD_FORMAT = "keymaster.bitfs-journal";
@@ -41,7 +41,7 @@ export interface BitfsJournal {
   getRecord(idHex: string): Promise<BitfsJournalRecord | undefined>;
 }
 
-export function createBitfsJournal(store: BorrowedOwnerFileStore): BitfsJournal {
+export function createBitfsJournal(store: BorrowedModuleFileStore): BitfsJournal {
   const recordPath = (id: string) => `records/${assertId(id)}.json`;
   const checkpointPath = (id: string) => `checkpoints/${assertId(id)}.bin`;
   const outboxPath = (id: string) => `outbox/${assertId(id)}.cbor`;

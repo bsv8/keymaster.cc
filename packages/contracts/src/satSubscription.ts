@@ -329,8 +329,6 @@ export interface SatSubscriptionSpiService {
   collectNew(input: { supplierId: string; currency: string; network: string; amount: bigint }): Promise<SatCollectResult>;
   /** 只重发持久化的完全相同 Collect Wire，不重新检查当前余额。 */
   retryCollect(input: { requestIdHex: string; requestWire?: Uint8Array }): Promise<SatCollectResult>;
-  /** 旧调用方兼容入口：未决结果走 retry，其它调用走 collectNew。 */
-  collect(input: { supplierId: string; currency: string; network: string; amount: bigint }): Promise<SatCollectResult>;
 }
 
 /** 设置/诊断页使用的供应商运行摘要。 */
@@ -375,8 +373,7 @@ export type CoordinatorSatOperation =
   | { type: "spi.prepareTopUp"; input: Parameters<SatSubscriptionSpiService["prepareTopUp"]>[0] }
   | { type: "spi.submitTopUp"; preview: SatTopUpPreview }
   | { type: "spi.collectNew"; input: Parameters<SatSubscriptionSpiService["collectNew"]>[0] }
-  | { type: "spi.retryCollect"; input: Parameters<SatSubscriptionSpiService["retryCollect"]>[0] }
-  | { type: "spi.collect"; input: Parameters<SatSubscriptionSpiService["collect"]>[0] };
+  | { type: "spi.retryCollect"; input: Parameters<SatSubscriptionSpiService["retryCollect"]>[0] };
 
 /** Coordinator 推送给各页面的 Sat 事件。`noop` 只用于 baseline。 */
 export type CoordinatorSatEvent =

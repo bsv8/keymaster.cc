@@ -5,11 +5,11 @@ import type {
   BsvNetwork,
   ProtocolSpendInput,
   ProtocolSpendOutput,
-  ProtocolSpendPrepareInput,
+  ProtocolSpendExecutionInput,
   ProtocolSpendPreview,
   ProtocolSpendResult,
-  ProtocolSpendService,
-  ProtectedOutpointRegistry,
+  P2pkhProtocolExecutor,
+  ProtectedOutpointStore,
   CentralBroadcastService,
   P2pkhUtxoBinding,
   VaultService
@@ -105,7 +105,7 @@ export interface P2pkhProtocolSpendDeps {
   getKeyForOwner: (ownerPublicKeyHex: string) => Promise<{ publicKeyHex: string }>;
   claimStore: P2pkhProtocolSpendClaimStore;
   submissionStore?: P2pkhProtocolSpendSubmissionStore;
-  protectedOutpoints?: ProtectedOutpointRegistry;
+  protectedOutpoints?: ProtectedOutpointStore;
   /** UTXO manager: durable pre-sign intent and exact-byte responsibility. */
   protocolManager?: P2pkhProtocolManagerPort;
 }
@@ -239,8 +239,8 @@ function normalizeMinerFeeBudget(value: number): number {
 }
 
 function assertUnprotectedInputs(
-  registry: ProtectedOutpointRegistry | undefined,
-  input: ProtocolSpendPrepareInput
+  registry: ProtectedOutpointStore | undefined,
+  input: ProtocolSpendExecutionInput
 ): void {
   if (!registry) return;
   for (const utxo of input.inputs) {
@@ -288,7 +288,7 @@ function buildProtocolSubmissionRecord(input: {
   };
 }
 
-export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): ProtocolSpendService {
+export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P2pkhProtocolExecutor {
   const submissionTails = new Map<string, Promise<void>>();
   async function serializeSubmissionOperation<T>(submissionId: string, operation: () => Promise<T>): Promise<T> {
     const previous = submissionTails.get(submissionId) ?? Promise.resolve();
@@ -304,7 +304,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
     }
   }
 
-  const tickets=new Map<string,{preview:ProtocolSpendPreview;input:ProtocolSpendPrepareInput;expires:number}>();
+  const tickets=new Map<string,{preview:ProtocolSpendPreview;input:ProtocolSpendExecutionInput;expires:number}>();
   /**
    * Freeze the manager intent before the signer runs. Without a manager port
    * the protocol service keeps its historic behaviour; hosts that wire the
@@ -315,7 +315,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
     if (!deps.protocolManager) throw new Error("Protocol signing requires the durable UTXO manager");
     return deps.protocolManager.beginProtocolIntent(intent);
   };
-  const build=async(input:ProtocolSpendPrepareInput,sign:boolean):Promise<ProtocolSpendPreview>=>{
+  const build=async(input:ProtocolSpendExecutionInput,sign:boolean):Promise<ProtocolSpendPreview>=>{
       if (!deps.protocolManager) throw new Error("Protocol spend requires the durable UTXO manager");
       let protectedClaimIds: string[] = [];
       let inputClaimIds: string[] = [];

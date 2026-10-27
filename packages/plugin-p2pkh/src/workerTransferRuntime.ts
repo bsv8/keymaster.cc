@@ -1,10 +1,12 @@
+import { deriveP2pkhAddress } from "@keymaster/contracts";
+import { requireWocNetwork } from "@keymaster/contracts";
 import type { ActiveKeyCrypto, AssetDataChangedEvent, BorrowedModuleFileStore, CoordinatorValueResult, VaultWalletState, P2pkhBroadcastSubmission, P2pkhUtxoSnapshotResult, VaultStatus, CentralBroadcastService, WocService } from "@keymaster/contracts";
 import { createMessageBus } from "webloom-framework";
 import { createCentralBroadcastService } from "./centralBroadcastService.js";
 import { createP2pkhService } from "./p2pkhService.js";
 import { createWorkerProtocolRuntime, readWorkerProtocolProtection } from "./workerProtocolRuntime.js";
 import type { P2pkhProtocolManagerPort } from "./p2pkhProtocolSpend.js";
-import { publicKeyHexToP2pkhAddress } from "./p2pkhSigner.js";
+
 import { p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
 import { createP2pkhUtxoManager, type P2pkhUtxoManager } from "./p2pkhUtxoManager.js";
 import type { P2pkhService } from "./p2pkhContracts.js";
@@ -62,7 +64,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     if (!manager) throw new Error("P2PKH UTXO manager is not ready");
     const session = deps.session();
     if (!session.unlocked || session.owner?.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase()) throw new Error("Protocol manager owner mismatch");
-    const address = publicKeyHexToP2pkhAddress(request.ownerPublicKeyHex, request.network);
+    const address = deriveP2pkhAddress(request.ownerPublicKeyHex, request.network);
     const resource = { resourceId: `p2pkh:${request.network}`, network: request.network, address };
     const snapshot = await deps.snapshot({ ownerPublicKeyHex: request.ownerPublicKeyHex, network: request.network }, refresh);
     if (manager !== utxoManager) throw new Error("Protocol manager instance revoked");
@@ -109,7 +111,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     async completeProtocolIntent(request) {
       const manager = utxoManager;
       if (!manager) throw new Error("P2PKH UTXO manager is not ready");
-      const address = publicKeyHexToP2pkhAddress(request.ownerPublicKeyHex, request.network);
+      const address = deriveP2pkhAddress(request.ownerPublicKeyHex, request.network);
       const result = await manager.completeProtocolIntent({
         ...request,
         resource: { resourceId: `p2pkh:${request.network}`, network: request.network, address },
@@ -162,6 +164,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
         p2pkhArtifactOccupy: async () => { throw new Error("P2PKH artifact occupation is worker-internal"); },
       };
       const centralService = createCentralBroadcastService({
+        binding: { identity: { publicKeyHex: owner, bsvNetwork: deps.settings().bsvNetwork }, assertActive: assertFresh },
         coordinator: { p2pkhBroadcast: broadcast },
       });
       utxoManager = createP2pkhUtxoManager({
@@ -199,7 +202,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
           async observe(network, txid) {
             const woc = deps.query?.();
             if (!woc?.getRawTransaction) return null;
-            const raw = await woc.getRawTransaction(network, txid);
+            const raw = await requireWocNetwork(woc, network).getRawTransaction(txid);
             return raw.replace(/^0x/i, "").toLowerCase();
           },
         },
@@ -268,7 +271,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
         assertRecoveryFresh();
       }
       const { service } = createP2pkhService({
-        vault: { status: deps.vaultStatus, createActiveKeyCrypto: deps.crypto, requestPayment: deps.requestPayment },
+        vault: { status: deps.vaultStatus, createActiveKeyCrypto: async () => { assertFresh(); const crypto = await deps.crypto(owner); assertFresh(); return crypto; }, requestPayment: deps.requestPayment },
         utxoManager,
         woc: deps.query?.(),
         effectiveFeeRate: () => deps.settings().feeRateSatoshisPerKb ?? 100,
@@ -308,9 +311,10 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     if (protocol) return protocol;
     if (protocolStarting) return protocolStarting;
     const owner = currentOwner!; const epoch = currentEpoch!; const token = generation;
-    const assertActive = () => { deps.assertActive(); const now = deps.session(); if (generation !== token || !now.unlocked || now.owner !== owner || now.epoch !== epoch) throw new Error("Protocol wallet instance revoked"); };
+    const network = deps.settings().bsvNetwork;
+    const assertActive = () => { deps.assertActive(); const now = deps.session(); if (generation !== token || !now.unlocked || now.owner !== owner || now.epoch !== epoch || deps.settings().bsvNetwork !== network) throw new Error("Protocol wallet instance revoked"); };
     const run = createWorkerProtocolRuntime({
-      requestPayment: deps.requestPayment, assertActive, owner, storage: deps.storage(), crypto: deps.crypto,
+      requestPayment: deps.requestPayment, assertActive, owner, network, storage: deps.storage(), crypto: deps.crypto,
       central: central!, transfer, query: () => deps.query?.(), snapshot: async network => { const result = await deps.snapshot({ ownerPublicKeyHex: owner, network }, false); assertActive(); return result.status === "ok" ? result.value : { available: false, state: "unavailable", items: [] }; },
       protocolManager: protocolManagerPort,
     });
@@ -384,7 +388,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     await ensure();
     const session = deps.session();
     if (!session.unlocked || session.owner?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) throw new Error("Business receipt owner mismatch");
-    const resource = { resourceId: `p2pkh:${input.network}`, network: input.network, address: publicKeyHexToP2pkhAddress(input.ownerPublicKeyHex, input.network) };
+    const resource = { resourceId: `p2pkh:${input.network}`, network: input.network, address: deriveP2pkhAddress(input.ownerPublicKeyHex, input.network) };
     await utxoManager!.observeAcceptedExact({ ...input, resource });
     deps.fundsChanged(input);
   }

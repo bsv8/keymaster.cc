@@ -5,7 +5,7 @@
 // 失效事件。
 //
 // 明确不做的事：
-//   - 不返回 OwnerFileStore、私有路径或供应商私钥；
+//   - 不返回 ModuleFileStore、私有路径或供应商私钥；
 //   - 不让调用方凭 metadata 或任务成功标志绕过内容验证；
 //   - 不在远程渠道缺失时伪造「已获取」。
 //
@@ -24,7 +24,7 @@ import type {
   MsFileVerifiedContent,
 } from "@keymaster/contracts";
 import { MSFILE_MAX_CONTENT_BYTES, isValidMsFileContentSeedHash } from "@keymaster/contracts";
-import type { BorrowedOwnerFileStore } from "@keymaster/contracts";
+import type { BorrowedModuleFileStore } from "@keymaster/contracts";
 
 import { readMsFileSeed, storeMsFileSeed, type MsFileSeedSource } from "./storage/msfileSeedStore.js";
 
@@ -65,7 +65,7 @@ export interface MsFileSellerPublicationEvidence {
 }
 
 export interface MsFileContentServiceDeps {
-  store: BorrowedOwnerFileStore;
+  store: BorrowedModuleFileStore;
   /** 已有 MSFile 服务，用于复用全局价格与并发策略的当前快照。 */
   service?: Pick<MsFileService, "getBitfsBuyerSettings" | "getSettingsSnapshot">;
   /**

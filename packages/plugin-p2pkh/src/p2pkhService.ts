@@ -1,11 +1,12 @@
-import { sameWalletSession } from "@keymaster/contracts";
-import { sameNetworkIdentity, requireUnlockedWalletIdentity } from "@keymaster/contracts";
+import { requireWocNetwork } from "@keymaster/contracts";
+import { sameWalletSession, assertP2pkhTransferRequestFields } from "@keymaster/contracts";
+import { sameNetworkIdentity, requireUnlockedWalletIdentity, bindWalletIdentity } from "@keymaster/contracts";
 // packages/plugin-p2pkh/src/p2pkhService.ts
 // P2PKH 服务实现（2026-09-20 UTXO / 历史解耦后）。
 //
 // 关键设计：
-//   - 默认方法只读当前 active key namespace；跨 owner 读路径走
-//     `ensureRepositoryForOwner(publicKeyHex)`。
+//   - 业务实例绑定权威钱包身份与代际；查询不接受 owner/network 选择。
+//     异步结果交付前校验绑定，失效实例不重新绑定其他钱包。
 //   - 钱包余额与 UTXO 集合唯一来源 = Coordinator Worker manager 投影；
 //     service 通过 `coordinator.p2pkhUtxosGet / p2pkhUtxosRefresh` 读取，
 //     本地不再保存或派生任何 UTXO。
@@ -21,7 +22,7 @@ import type {
   CoordinatorBootstrapSnapshot,
   GlobalBalanceSnapshot,
   VaultWalletState,
-  BorrowedOwnerFileStore,
+  BorrowedModuleFileStore,
   VaultService,
   WocService,
   P2pkhCoordinatorControl,
@@ -41,7 +42,7 @@ import type {
   P2pkhSyncStatus,
   P2pkhTransactionDetail,
   P2pkhUtxo,
-  P2pkhUtxoFilter,
+  P2pkhAvailableUtxos,
   P2pkhTransferPreview,
   P2pkhTransferResult,
 } from "./p2pkhContracts.js";
@@ -56,10 +57,25 @@ import { createP2pkhStateRepository, disposeP2pkhStateRepository, openP2pkhState
 import { createP2pkhTransferService } from "./p2pkhTransferService.js";
 
 import { P2PKH_MSG } from "./p2pkhMessages.js";
+import { p2pkhAddressCodec } from "./p2pkhAddressCodec.js";
 import { canonicalizeP2pkhUtxos } from "./p2pkhCanonical.js";
 import { parseP2pkhTransaction, p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
 
 export const P2PKH_TASK_TRANSACTIONS_SYNC = "p2pkh.transactions-sync";
+
+function validateReadQuery(query: unknown, local: boolean): void {
+  if (query === undefined) return;
+  if (!query || typeof query !== "object" || Array.isArray(query)) throw new TypeError("P2PKH query must be an object");
+  const fields = new Set(["txid", "cursor", "limit", ...(local ? ["submissionId", "includeResolved"] : [])]);
+  for (const [key, value] of Object.entries(query)) {
+    if (!fields.has(key)) throw new TypeError(`Unsupported P2PKH query field: ${key}`);
+    if (value === undefined) continue;
+    if (key === "limit" && (!Number.isSafeInteger(value) || Number(value) < 1 || Number(value) > 1000)) throw new TypeError("P2PKH page limit must be 1–1000");
+    if (key === "txid" && (typeof value !== "string" || !/^[0-9a-f]{64}$/iu.test(value))) throw new TypeError("P2PKH query txid is invalid");
+    if ((key === "cursor" || key === "submissionId") && (typeof value !== "string" || !value)) throw new TypeError(`P2PKH query ${key} is invalid`);
+    if (key === "includeResolved" && typeof value !== "boolean") throw new TypeError("P2PKH includeResolved must be boolean");
+  }
+}
 
 /** 未知余额的占位明细；这些 0 不能直接渲染为真实余额。 */
 const EMPTY_BALANCE_BREAKDOWN: P2pkhBalanceBreakdown = {
@@ -164,7 +180,7 @@ export interface P2pkhServiceDeps {
   signal?: AbortSignal;
   walletState: VaultWalletState;
   /** Host 已按 manifest 声明绑定的当前 owner K-V 句柄。 */
-  storage: BorrowedOwnerFileStore;
+  storage: BorrowedModuleFileStore;
   /** Worker-created durable UTXO Manager; absent only for Window read-only test fixtures. */
   utxoManager?: import("./p2pkhUtxoManager.js").P2pkhUtxoManager;
   /** Window production transfers are executed by the Worker-owned manager/signer path. */
@@ -197,15 +213,19 @@ function protectionGate(deps: P2pkhServiceDeps): () => Promise<void> {
 
 export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhService; balance: BalanceBroadcaster } {
   if (!deps.storage) throw new Error("P2PKH central storage binding is required");
+  const walletBinding = bindWalletIdentity(deps.walletState, deps.signal);
+  const walletIdentity = walletBinding.identity;
   let disposed = false;
   const isCurrentInstance = () => !disposed && !deps.signal?.aborted;
+  function assertWalletSession(): void {
+    if (!isCurrentInstance()) throw new Error("P2PKH wallet session is no longer active");
+    walletBinding.assertActive();
+  }
   function publish<T>(type: string, payload: T): void {
     if (isCurrentInstance()) { const identity=deps.walletState.snapshot().activeKeyIdentity; deps.messageBus.publish(type, identity && payload && typeof payload === "object" ? {...payload,networkIdentity:{bsvNetwork:identity.bsvNetwork,publicKeyHex:identity.publicKeyHex}} : payload); }
   }
-  let activeIdentity: ReadyKeyIdentity | undefined;
-  let cachedSettings: P2pkhGlobalSettings = {
-    bsvNetwork: deps.walletState.snapshot().activeKeyIdentity?.bsvNetwork ?? "main"
-  };
+  let activeIdentity: ReadyKeyIdentity | undefined = requireReadyKey(walletIdentity);
+  let cachedSettings: P2pkhGlobalSettings = { bsvNetwork: walletIdentity.bsvNetwork };
   const settingsListeners = new Set<(s: P2pkhGlobalSettings) => void>();
   let balanceSnapshot = emptyGlobalBalanceSnapshot();
   const balanceListeners = new Set<(snapshot: GlobalBalanceSnapshot) => void>();
@@ -218,7 +238,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
       // 读取方可能在 walletState/session 事件落地前先拿到资源重载；不允许
       // 把上一个 owner 的快照短暂暴露给新 owner。
       const active = deps.walletState.snapshot().activePublicKeyHex?.trim().toLowerCase() ?? "";
-      if (deps.vault.status() !== "unlocked" || !active || balanceSnapshot.publicKeyHex !== active) {
+      if (!isCurrentInstance() || !walletBinding.isActive() || deps.vault.status() !== "unlocked" || !active || balanceSnapshot.publicKeyHex !== active) {
         return emptyGlobalBalanceSnapshot();
       }
       return cloneGlobalBalanceSnapshot(balanceSnapshot);
@@ -272,18 +292,20 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
   /** 详情页懒加载缓存：只存解析结果，不落盘；上限 32 条。 */
   const transactionDetailCache = new Map<string, P2pkhTransactionDetail>();
 
-  async function loadTransactionDetail(input: { resourceId: string; network: "main" | "test"; txid: string }): Promise<P2pkhTransactionDetail | undefined> {
+  async function loadTransactionDetail(input: { txid: string }): Promise<P2pkhTransactionDetail | undefined> {
+    assertWalletSession();
     const txid = input.txid.trim().toLowerCase();
     if (!/^[0-9a-f]{64}$/u.test(txid)) throw new Error("P2PKH transaction detail requires a valid txid");
-    const cacheKey = `${input.resourceId}:${txid}`;
+    const cacheKey = txid;
     const cached = transactionDetailCache.get(cacheKey);
     if (cached) return cached;
     if (!deps.woc?.getRawTransaction) throw new Error("WoC raw transaction capability is unavailable");
-    const rawTxHex = (await deps.woc.getRawTransaction(input.network, txid, { priority: "background" })).replace(/^0x/i, "").toLowerCase();
+    const rawTxHex = (await requireWocNetwork(deps.woc, walletIdentity.bsvNetwork).getRawTransaction(txid, { priority: "background" })).replace(/^0x/i, "").toLowerCase();
+    assertWalletSession();
     const parsed = parseP2pkhTransaction(rawTxHex, txid);
     const detail: P2pkhTransactionDetail = {
       txid: parsed.canonicalTxid,
-      network: input.network,
+      network: walletIdentity.bsvNetwork,
       inputs: parsed.inputs.map((row) => ({ txid: row.prevTxid, vout: row.prevVout, outpointKey: row.outpointKey })),
       outputs: parsed.outputs,
       sizeBytes: rawTxHex.length / 2,
@@ -328,25 +350,22 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
     return canonicalizeP2pkhUtxos(candidates);
   }
 
-  /** 聚合读路径：按 filter 解析 owner/network，再从快照取可花费集合。 */
-  async function collectUtxos(filter: P2pkhUtxoFilter | undefined): Promise<P2pkhUtxo[]> {
-    const ownerHex = filter?.ownerPublicKeyHex ?? getVaultLifecycleSnapshot().activePublicKeyHex;
-    if (!ownerHex) return [];
-    const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : filter?.resourceId ? (/^p2pkh:test$/.test(filter.resourceId) ? "test" : "main") : undefined;
-    const networks = network ? [network] : (getCurrentSettings().bsvNetwork === "test" ? ["test"] as const : ["main"] as const);
-    const rows: P2pkhUtxo[] = [];
-    for (const current of networks) {
-      const snapshot = await requireUtxoSnapshot({ ownerPublicKeyHex: ownerHex, network: current }, "get");
-      const resource = await (await ensureRepositoryForOwner(ownerHex)).getResource(makeResourceId(current));
-      if (!resource) continue;
-      const utxos = snapshot.items
-        .filter((item) => !item.isSpentInMempoolTx)
-        .map((item) => snapshotItemToUtxo({ item, resource }));
-      rows.push(...utxos);
-    }
-    const settings = getCurrentSettings();
-    const visible = rows.filter((u) => u.network === settings.bsvNetwork);
-    return canonicalizeP2pkhUtxos(filterUtxos(visible, filter));
+  /** 同一身份、同一 manager 投影；读取和刷新共享 DTO 与映射规则。 */
+  async function readAvailableUtxos(mode: "get" | "refresh"): Promise<P2pkhAvailableUtxos> {
+    assertWalletSession();
+    const snapshot = await requireUtxoSnapshot({ ownerPublicKeyHex: walletIdentity.publicKeyHex, network: walletIdentity.bsvNetwork }, mode);
+    assertWalletSession();
+    const available = snapshot.available && snapshot.state === "fresh";
+    const resource: P2pkhKeyResource = {
+      resourceId: makeResourceId(walletIdentity.bsvNetwork), publicKeyHex: walletIdentity.publicKeyHex,
+      address: p2pkhAddressCodec.deriveAddress(walletIdentity.publicKeyHex, walletIdentity.bsvNetwork),
+      network: walletIdentity.bsvNetwork, label: walletIdentity.label, createdAt: walletIdentity.createdAt, generation: 0,
+    };
+    return {
+      available, state: available ? "fresh" : "unavailable", seq: snapshot.seq, syncedAt: snapshot.syncedAt,
+      utxos: available ? canonicalizeP2pkhUtxos(snapshot.items.filter(item => !item.isSpentInMempoolTx)
+        .map(item => snapshotItemToUtxo({ item, resource }))) : [],
+    };
   }
 
   // 中文：每次 submit 都有独立取消信号；切 owner、锁仓或销毁 service
@@ -363,14 +382,14 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
       const fetched = new Map<string, Promise<string>>();
       return Promise.all(inputs.map(input => {
         let raw = fetched.get(input.txid);
-        if (!raw) { raw = deps.woc!.getRawTransaction!(network, input.txid); fetched.set(input.txid, raw); }
+        if (!raw) { raw = requireWocNetwork(deps.woc!, network).getRawTransaction(input.txid); fetched.set(input.txid, raw); }
         return raw;
       }));
     },
     async assertInputsUnspent(network, inputs) {
       if (!deps.woc?.getSpentOutput) throw new Error("Spent-output evidence is unavailable");
       await Promise.all(inputs.map(async ({ txid, vout }) => {
-        if (await deps.woc!.getSpentOutput!(network, txid, vout) !== null) throw new Error(`P2PKH input is already spent: ${txid}:${vout}`);
+        if (await requireWocNetwork(deps.woc!, network).getSpentOutput(txid, vout) !== null) throw new Error(`P2PKH input is already spent: ${txid}:${vout}`);
       }));
     },
     vault: deps.vault,
@@ -448,8 +467,10 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
   }
 
   function getCurrentSettings(): P2pkhGlobalSettings {
-    const bsvNetwork = deps.walletState.snapshot().activeKeyIdentity?.bsvNetwork ?? cachedSettings.bsvNetwork;
-    const fee = deps.chainFees?.get(bsvNetwork);
+    assertWalletSession();
+    const bsvNetwork = walletIdentity.bsvNetwork;
+    const fee = deps.chainFees?.get();
+    if (fee && fee.network !== bsvNetwork) throw new Error("P2PKH chain fee identity mismatch");
     return { bsvNetwork, feeRateSatoshisPerKb: fee?.effectiveSatoshisPerKb ?? deps.effectiveFeeRate?.(bsvNetwork) ?? cachedSettings.feeRateSatoshisPerKb ?? 100, ...(fee ? { feePolicy: fee.policy } : {}) };
   }
 
@@ -462,16 +483,18 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
     if (!state.activePublicKeyHex) {
       throw new Error("Active key is required");
     }
-    if (!activeIdentity || activeIdentity.publicKeyHex !== state.activePublicKeyHex) {
+    if (!activeIdentity || activeIdentity.publicKeyHex !== state.activePublicKeyHex.toLowerCase()) {
       throw new Error("Active key is not ready");
     }
     return activeIdentity;
   }
 
   async function ensureRepositoryForOwner(publicKeyHex: string): Promise<P2pkhStateRepositoryHandle> {
-    const active = deps.walletState.snapshot().activePublicKeyHex?.toLowerCase();
+    assertWalletSession();
+    const active = walletIdentity.publicKeyHex.toLowerCase();
     if (active !== publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
     const bundle: P2pkhStateRepositoryBundle = await openP2pkhStateRepository(deps.storage);
+    assertWalletSession();
     return createP2pkhStateRepository(bundle);
   }
 
@@ -504,6 +527,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
    */
   async function refreshBalanceSnapshotImpl(): Promise<void> {
     if (!isCurrentInstance()) return;
+    if (!walletBinding.isActive()) { clearBalanceSnapshot(); return; }
     const session = deps.walletState.snapshot();
     const generation = ++balanceRefreshGeneration;
     const active = getVaultLifecycleSnapshot().activePublicKeyHex?.trim().toLowerCase() ?? "";
@@ -557,6 +581,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
   }
 
   async function rebindActiveKey() {
+    assertWalletSession();
     const state = getVaultLifecycleSnapshot();
     if (!state.activePublicKeyHex) {
       activeIdentity = undefined;
@@ -617,19 +642,19 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
     }
   });
 
-  async function getOrCreateAddress(network: "main" | "test"): Promise<P2pkhKeyResource | null> {
+  async function getOrCreateAddress(): Promise<P2pkhKeyResource> {
+    assertWalletSession();
+    const network = walletIdentity.bsvNetwork;
     const stateRepository = await ensureRepository();
     const resourceId = makeResourceId(network);
     const existing = await stateRepository.getResource(resourceId);
+    assertWalletSession();
     if (existing) {
+      if (existing.publicKeyHex !== walletIdentity.publicKeyHex || existing.network !== network) throw new Error("P2PKH stored resource identity mismatch");
       return existing;
     }
     const key = requireActiveKeyIdentity();
-    const crypto = await resolveActiveKeyCrypto(deps.vault, key.publicKeyHex);
-    const { address } = await crypto.deriveP2pkhAddress({
-      publicKeyHex: key.publicKeyHex,
-      network
-    });
+    const address = p2pkhAddressCodec.deriveAddress(key.publicKeyHex, network);
     const resource: P2pkhKeyResource = {
       resourceId,
       publicKeyHex: key.publicKeyHex,
@@ -684,10 +709,9 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
     const state = getVaultLifecycleSnapshot();
     if (!state.activePublicKeyHex) return;
     if (!activeIdentity) return;
-    const bsvNetwork = getCurrentSettings().bsvNetwork;
     let rehydrateError: unknown;
     try {
-      await getOrCreateAddress(bsvNetwork);
+      await getOrCreateAddress();
     } catch (err) {
       rehydrateError = err;
     }
@@ -700,9 +724,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
     }
     // 冷启动余额可见性：地址资源就绪后主动刷新一次内存 UTXO 快照。
     // 失败只保留“未知/不可用”，不写 0；成功由 Worker 发布 data-changed。
-    for (const network of bsvNetwork === "test" ? ["test"] as const : ["main"] as const) {
-      void deps.coordinator?.p2pkhUtxosRefresh({ ownerPublicKeyHex: state.activePublicKeyHex, network }).catch(() => undefined);
-    }
+    void readAvailableUtxos("refresh").catch(() => undefined);
     void refreshBalanceSnapshot();
   }
 
@@ -763,129 +785,74 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
       return () => dataChangedListeners.delete(handler);
     },
 
-    async listResources(assetId) {
-      const stateRepository = await ensureRepository();
-      const all = await stateRepository.listAddresses();
-      const settings = getCurrentSettings();
-      const filtered = all.filter((r) => r.network === settings.bsvNetwork);
-      if (!assetId) return filtered;
-      const network = assetIdToNetwork(assetId);
-      if (network !== settings.bsvNetwork) return [];
-      return filtered.filter((r) => r.network === network);
-    },
-
     async getPaymentStatus(input) {
-      const epoch = deps.walletState.snapshot().sessionEpoch;
-      const assertFresh = () => {
-        const now = deps.walletState.snapshot();
-        if (!isCurrentInstance() || now.status !== "unlocked" || now.sessionEpoch !== epoch || now.activePublicKeyHex?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase() || getCurrentSettings().bsvNetwork !== input.network) throw new Error("Payment status identity revoked");
-      };
-      assertFresh();
+      assertWalletSession();
+      if (Object.keys(input).some(key => key !== "paymentId")) throw new TypeError("Payment status accepts only paymentId");
+      if (typeof input.paymentId !== "string" || !input.paymentId) throw new TypeError("Payment status requires paymentId");
+      const boundInput = { paymentId: input.paymentId, ownerPublicKeyHex: walletIdentity.publicKeyHex, network: walletIdentity.bsvNetwork };
       if (deps.utxoManager) {
-        const result = await deps.utxoManager.paymentStatus(input); assertFresh(); return result;
+        const result = await deps.utxoManager.paymentStatus(boundInput); assertWalletSession(); return result;
       }
       if (!deps.coordinator?.p2pkhPaymentStatus) throw new Error("Payment manager status RPC unavailable");
-      const result = await deps.coordinator.p2pkhPaymentStatus(input); assertFresh();
+      const result = await deps.coordinator.p2pkhPaymentStatus(boundInput); assertWalletSession();
       if (result.status !== "ok") throw new Error("message" in result ? result.message : `Payment manager status: ${result.status}`);
       return result.value;
     },
-    async getRawTransaction(network, txid) {
+    async getRawTransaction(txid) {
+      assertWalletSession();
+      if (!/^[0-9a-f]{64}$/iu.test(txid)) throw new TypeError("Transaction ID is invalid");
       if (!deps.woc?.getRawTransaction) throw new Error("Previous transaction evidence is unavailable");
-      return deps.woc.getRawTransaction(network,txid);
+      const raw = await requireWocNetwork(deps.woc, walletIdentity.bsvNetwork).getRawTransaction(txid);
+      assertWalletSession();
+      return raw;
     },
-    async listUtxos(filter) {
-      return collectUtxos(filter);
+    getAvailableUtxos: () => readAvailableUtxos("get"),
+    refreshUtxos: () => readAvailableUtxos("refresh"),
+    async listHistory(query) {
+      validateReadQuery(query, false);
+      const filter = { ...query };
+      const repository = await ensureRepository();
+      const page = await repository.listHistoryPage({ ...filter, resourceId: makeResourceId(walletIdentity.bsvNetwork), network: walletIdentity.bsvNetwork });
+      assertWalletSession();
+      return page;
     },
-
-    async listUtxosRaw(filter) {
-      return collectUtxos(filter);
+    async listLocalTransactions(query) {
+      validateReadQuery(query, true);
+      const filter = { ...query };
+      const repository = await ensureRepository();
+      const page = await repository.listLocalTransactionsPage({ ...filter, resourceId: makeResourceId(walletIdentity.bsvNetwork) });
+      assertWalletSession();
+      return page;
     },
-
-    async getUtxosStatus(filter) {
-      const ownerHex = filter?.ownerPublicKeyHex ?? getVaultLifecycleSnapshot().activePublicKeyHex;
-      if (!ownerHex) return { available: false, state: "unavailable", utxos: [] };
-      const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : filter?.resourceId ? (/^p2pkh:test$/.test(filter.resourceId) ? "test" : "main") : "main";
-      const snapshot = await requireUtxoSnapshot({ ownerPublicKeyHex: ownerHex, network }, "get");
-      const resource = await (await ensureRepositoryForOwner(ownerHex)).getResource(makeResourceId(network));
-      if (!resource) return { available: snapshot.available, state: snapshot.state, seq: snapshot.seq, syncedAt: snapshot.syncedAt, utxos: [] };
-      const utxos = await listSpendableUtxosFromSnapshot({ resource, snapshot, ownerPublicKeyHex: ownerHex });
-      return { available: snapshot.available, state: snapshot.state, seq: snapshot.seq, syncedAt: snapshot.syncedAt, utxos: filterUtxos(utxos, filter) };
+    async prepareTransfer(input) {
+      assertWalletSession();
+      assertP2pkhTransferRequestFields(input);
+      const request = { ...input, feeRateSatoshisPerKb: input.feeRateSatoshisPerKb ?? resolveP2pkhFeeRateSatoshisPerKb(getCurrentSettings()) };
+      const preparedInput = { ...request, ownerPublicKeyHex: walletIdentity.publicKeyHex, assetId: walletIdentity.bsvNetwork === "test" ? "bsvtest" as const : "bsv" as const };
+      let result: P2pkhTransferPreview;
+      if (deps.workerTransfer) {
+        const worker = await deps.workerTransfer.getService();
+        assertWalletSession();
+        result = await worker.prepareTransfer(request) as P2pkhTransferPreview;
+      } else result = await transfer.prepare(preparedInput);
+      assertWalletSession();
+      return result;
     },
-
-    async refreshUtxos(filter) {
-      const ownerHex = filter?.ownerPublicKeyHex ?? getVaultLifecycleSnapshot().activePublicKeyHex;
-      if (!ownerHex) throw new Error("Active key is required");
-      const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : filter?.resourceId ? (/^p2pkh:test$/.test(filter.resourceId) ? "test" : "main") : "main";
-      const snapshot = await requireUtxoSnapshot({ ownerPublicKeyHex: ownerHex, network }, "refresh");
-      return { available: snapshot.available, state: snapshot.state, seq: snapshot.seq, syncedAt: snapshot.syncedAt };
-    },
-
-    isAssetEnabled(assetId) {
-      if (assetId === "bsv") return getCurrentSettings().bsvNetwork === "main";
-      if (assetId === "bsvtest") return getCurrentSettings().bsvNetwork === "test";
-      return false;
-    },
-
-    async listHistory(filter) {
-      const ownerHex = filter?.ownerPublicKeyHex;
-      const stateRepository = ownerHex ? await ensureRepositoryForOwner(ownerHex) : await ensureRepository();
-      const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : filter?.resourceId ? (/^p2pkh:test$/.test(filter.resourceId) ? "test" : "main") : undefined;
-      const rows = await stateRepository.listHistory({ network, resourceId: filter?.resourceId, limit: filter?.limit });
-      return rows.filter((row) => row.network === getCurrentSettings().bsvNetwork);
-    },
-    async listHistoryPage(filter) {
-      const ownerHex = filter?.ownerPublicKeyHex;
-      const stateRepository = ownerHex ? await ensureRepositoryForOwner(ownerHex) : await ensureRepository();
-      const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : filter?.resourceId ? (/^p2pkh:test$/.test(filter.resourceId) ? "test" : "main") : undefined;
-      const page = await stateRepository.listHistoryPage({ network, resourceId: filter?.resourceId, cursor: filter?.cursor, limit: filter?.limit });
-      return { items: page.items.filter((row) => row.network === getCurrentSettings().bsvNetwork), ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
-    },
-    async listLocalTransactions(filter) {
-      const ownerHex = filter?.ownerPublicKeyHex;
-      const stateRepository = ownerHex ? await ensureRepositoryForOwner(ownerHex) : await ensureRepository();
-      const rows = await stateRepository.listLocalTransactions(filter?.resourceId, filter?.limit);
-      const visible = filter?.includeResolvedLocalTransactions ? rows : rows.filter((row) => row.chainResolution !== "chain-confirmed");
-      return visible.filter((row) => row.network === getCurrentSettings().bsvNetwork && (!filter?.assetId || row.network === assetIdToNetwork(filter.assetId)));
-    },
-    async listLocalTransactionsPage(filter) {
-      const ownerHex = filter?.ownerPublicKeyHex;
-      const stateRepository = ownerHex ? await ensureRepositoryForOwner(ownerHex) : await ensureRepository();
-      const page = await stateRepository.listLocalTransactionsPage({ resourceId: filter?.resourceId, cursor: filter?.cursor, limit: filter?.limit });
-      const visible = filter?.includeResolvedLocalTransactions ? page.items : page.items.filter((row) => row.chainResolution !== "chain-confirmed");
-      const items = visible.filter((row) => row.network === getCurrentSettings().bsvNetwork);
-      const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : undefined;
-      return { items: network ? items.filter((row) => row.network === network) : items, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
-    },
-    prepareTransfer: (input) => {
-      if (!input.ownerPublicKeyHex) {
-        return Promise.reject(
-          new Error("P2PKH prepareTransfer requires ownerPublicKeyHex")
-        );
+    async submitTransfer(preview) {
+      assertWalletSession();
+      if (preview.ownerPublicKeyHex !== walletIdentity.publicKeyHex || preview.network !== walletIdentity.bsvNetwork
+        || assetIdToNetwork(preview.assetId) !== walletIdentity.bsvNetwork) throw new Error("Transfer preview wallet identity mismatch");
+      if (deps.workerTransfer) {
+        const worker = await deps.workerTransfer.getService(); assertWalletSession();
+        const result = await worker.submitTransfer(preview); assertWalletSession(); return result;
       }
-      const settings = getCurrentSettings();
-      if (assetIdToNetwork(input.assetId) !== settings.bsvNetwork) {
-        return Promise.reject(new Error("Testnet is not enabled in P2PKH settings"));
-      }
-      const preparedInput = { ...input, feeRateSatoshisPerKb: input.feeRateSatoshisPerKb ?? resolveP2pkhFeeRateSatoshisPerKb(settings) };
-      if (deps.workerTransfer) return deps.workerTransfer.getService().then((worker) => worker.prepareTransfer(preparedInput) as Promise<P2pkhTransferPreview>);
-      return transfer.prepare(preparedInput);
-    },
-    submitTransfer: (preview) => {
-      if (!preview.ownerPublicKeyHex) {
-        return Promise.reject(
-          new Error("P2PKH submitTransfer requires ownerPublicKeyHex")
-        );
-      }
-      const settings = getCurrentSettings();
-      if (assetIdToNetwork(preview.assetId) !== settings.bsvNetwork) {
-        return Promise.reject(new Error("Testnet is not enabled in P2PKH settings"));
-      }
-      if (deps.workerTransfer) return deps.workerTransfer.getService().then((worker) => worker.submitTransfer(preview) as Promise<P2pkhTransferResult>);
       const controller = new AbortController();
       transferRetryControllers.add(controller);
-      return transfer.submit(preview, { signal: controller.signal }).finally(() => {
-        transferRetryControllers.delete(controller);
-      });
+      try {
+        const result = await transfer.submit(preview, { signal: controller.signal });
+        assertWalletSession();
+        return result;
+      } finally { transferRetryControllers.delete(controller); }
     },
 
     /**
@@ -894,25 +861,15 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
      * 中文说明：Window 不直接持有 Worker 的能力，只能经受限 Coordinator 请求
      * Worker 让 UTXO Manager 占住这件 artifact 的钱包输入。
      */
-    occupyDeliveredArtifact: (input: {
-      ownerPublicKeyHex: string;
-      network: "main" | "test";
-      artifactId: string;
-      unsignedTxHex: string;
-      signedTxHex: string;
-      inputs: Array<{ txid: string; vout: number; value: string; scriptHex: string }>;
-      outputs: Array<{ scriptHex: string; value: string }>;
-      businessAmountSatoshis: string;
-      feeRateSatoshisPerKb: string;
-      feeCapSats: string;
-      protocolKind: "refund" | "close" | "fund" | "state";
-    }) => {
+    async occupyDeliveredArtifact(input) {
+      assertWalletSession();
+      if ("ownerPublicKeyHex" in input || "network" in input) throw new TypeError("Artifact request cannot select a wallet");
       const occupy = deps.coordinator?.p2pkhArtifactOccupy;
-      if (!occupy) return Promise.reject(new Error("P2PKH artifact occupation is unavailable"));
-      return occupy(input).then((result) => {
-        if (result.status !== "ok") throw new Error(`P2PKH artifact occupation failed: ${result.status}`);
-        return result.value;
-      });
+      if (!occupy) throw new Error("P2PKH artifact occupation is unavailable");
+      const result = await occupy({ ...input, ownerPublicKeyHex: walletIdentity.publicKeyHex, network: walletIdentity.bsvNetwork });
+      assertWalletSession();
+      if (result.status !== "ok") throw new Error(`P2PKH artifact occupation failed: ${result.status}`);
+      return result.value;
     },
 
     /**
@@ -936,27 +893,21 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
       return () => settingsListeners.delete(handler);
     },
     async applyGlobalSettings(settings) {
-      const prev = cachedSettings;
+      assertWalletSession();
+      if (Object.keys(settings).some(key => key !== "feePolicy")) throw new TypeError("P2PKH settings only accept feePolicy");
+      const update = structuredClone(settings);
       if (deps.coordinator?.p2pkhSettingsUpdate) {
         const result = await deps.coordinator.p2pkhSettingsUpdate({
-          bsvNetwork: settings.bsvNetwork,
-          ...(settings.feePolicy === undefined ? {} : { feePolicy: settings.feePolicy })
+          bsvNetwork: walletIdentity.bsvNetwork,
+          ...(update.feePolicy === undefined ? {} : { feePolicy: update.feePolicy })
         });
         if (result.status !== "accepted" && result.status !== "ok") {
           const detail = "message" in result && typeof result.message === "string" ? result.message : "";
           throw new Error(`保存手续费率失败（${result.status}）${detail ? `：${detail}` : ""}`);
         }
       }
-      setCachedSettingsAndEmit(settings);
-      if (prev.bsvNetwork !== settings.bsvNetwork) {
-        try {
-          await rehydrateResources();
-        } catch (err) {
-          publish(P2PKH_MSG.REHYDRATE_ERROR, {
-            error: err instanceof Error ? err.message : String(err)
-          });
-        }
-      }
+      assertWalletSession();
+      setCachedSettingsAndEmit({ ...cachedSettings, ...update, bsvNetwork: walletIdentity.bsvNetwork });
     },
 
     async onKeyImported() {
@@ -1024,26 +975,4 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
     }
   };
   return { service, balance: balanceBroadcaster };
-}
-
-async function resolveActiveKeyCrypto(vault: Pick<VaultService, "status" | "createActiveKeyCrypto">, publicKeyHex: string) {
-  return vault.createActiveKeyCrypto(publicKeyHex);
-}
-
-function filterUtxos<T extends { network: "main" | "test"; publicKeyHex: string; resourceId: string }>(
-  rows: T[],
-  filter: P2pkhUtxoFilter | undefined
-): T[] {
-  if (!filter) return rows;
-  return rows.filter((r) => {
-    if (filter.assetId) {
-      const net = assetIdToNetwork(filter.assetId);
-      if (r.network !== net) return false;
-    }
-    if (filter.ownerPublicKeyHex && r.publicKeyHex !== filter.ownerPublicKeyHex) {
-      return false;
-    }
-    if (filter.resourceId && r.resourceId !== filter.resourceId) return false;
-    return true;
-  });
 }

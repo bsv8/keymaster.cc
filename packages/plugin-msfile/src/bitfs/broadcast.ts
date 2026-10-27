@@ -6,7 +6,7 @@
 //   - 重试只重放已持久化的 exact bytes，保证幂等；
 //   - 本模块不持有私钥、不解析池业务状态、不决定业务是否完成。
 
-import type { BorrowedOwnerFileStore } from "@keymaster/contracts";
+import type { BorrowedModuleFileStore } from "@keymaster/contracts";
 import { isDefinitelyNotDispatchedBroadcastError } from "@keymaster/contracts";
 import { bitfsTxidHex } from "./txid.js";
 
@@ -64,7 +64,7 @@ export interface BitfsTransactionJournal {
   listTransactions(): Promise<BitfsTransactionRecord[]>;
 }
 
-export function createBitfsTransactionJournal(store: BorrowedOwnerFileStore): BitfsTransactionJournal {
+export function createBitfsTransactionJournal(store: BorrowedModuleFileStore): BitfsTransactionJournal {
   const rawPath = (txid: string) => `transactions/${assertId(txid)}.bin`;
   const recordPath = (txid: string) => `transactions/${assertId(txid)}.json`;
   const readRecord = async (txid: string): Promise<BitfsTransactionRecord | undefined> => {

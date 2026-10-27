@@ -1,9 +1,10 @@
+import { deriveP2pkhAddress } from "@keymaster/contracts";
 import type { CoordinatorCryptoOperation, CoordinatorCryptoResult, EcdsaSignatureFormat } from "@keymaster/contracts";
 import { parsePrivateKey, parsePublicKey, publicKeyFromPrivate, inboxChannel, parseMessageID } from "bsv8-channel-protocol";
 import { sign as signPublic } from "bsv8-channel-protocol/public-message";
 import { sign as signHash } from "bsv8-channel-protocol/hash-request";
 import { signPrivateMessage, sealSigned, open, privateMessageMaxLifetimeMs, type UnsignedPrivateMessage, type SignedPrivateMessage } from "bsv8-channel-protocol/inbox";
-import { bytesToHex, hexToBytes, signEcdsaDigest, deriveP2pkhAddress, verifySessionKeyPair } from "./sessionCryptoCore.js";
+import { bytesToHex, hexToBytes, signEcdsaDigest, verifySessionKeyPair } from "./sessionCryptoCore.js";
 
 export interface WorkerKeyIdentity { unlocked: boolean; publicKeyHex?: string; sessionEpoch: string }
 export interface PrivateMessageSigningInput {

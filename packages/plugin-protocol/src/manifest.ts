@@ -1,5 +1,4 @@
 import { createPublicProtocolService } from "./publicProtocolService.js";
-import { CONNECT_V1_SCOPE_ENABLED } from "./protocolValidation.js";
 import { APP_STORAGE_CLIENTS_CAPABILITY } from "@keymaster/contracts";
 import { STORAGE_KV_CLIENTS_CAPABILITY } from "@keymaster/contracts";
 import { PROTOCOL_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
@@ -192,8 +191,6 @@ const protocolResources: I18nPluginResources = {
       "protocol.feed.counterparty": "Counterparty public key",
       "protocol.feed.failureReason": "Local reason",
       "protocol.feed.autoApproved": "Auto-approved",
-      "protocol.originSettings.feePoolDefaultFundSatoshis.label":
-        "Fee-pool default initial fund (satoshis). 0 = unconfigured.",
       /* ============== 施工单 001：钱包入口 + identity / cipher auto-approve ============== */
       "protocol.topbar.wallet": "Open wallet",
       "protocol.originSettings.identityAutoApprove.label": "Always allow identity.get",
@@ -379,8 +376,6 @@ const protocolResources: I18nPluginResources = {
       "protocol.feed.counterparty": "对端公钥",
       "protocol.feed.failureReason": "本地原因",
       "protocol.feed.autoApproved": "已自动通过",
-      "protocol.originSettings.feePoolDefaultFundSatoshis.label":
-        "费用池缺省初始金额（satoshis）。0 = 未配置。",
       /* ============== 施工单 001：钱包入口 + identity / cipher auto-approve ============== */
       "protocol.topbar.wallet": "进入钱包",
       "protocol.originSettings.identityAutoApprove.label": "始终同意 账户信息获取",
@@ -588,7 +583,6 @@ const protocolPluginDefinition = {
             return undefined;
           }
         },
-        connectV1Scope: CONNECT_V1_SCOPE_ENABLED,
         // 施工单 2026-06-29 001：从 URL `?boot=appView` 解析当前模式。
         // 仅在 popup 挂载时解析一次；session 启动后不再变动。
         bootMode: typeof window !== "undefined" ? parseBootMode(window.location.search) : "connect",

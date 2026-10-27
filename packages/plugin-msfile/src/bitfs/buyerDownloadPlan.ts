@@ -1,6 +1,6 @@
 // BitFS 同 Seed 下载计划：跨卖家共用唯一 Block 归属与每池付款预算。
 
-import type { BorrowedOwnerFileStore } from "@keymaster/contracts";
+import type { BorrowedModuleFileStore } from "@keymaster/contracts";
 
 const FORMAT = "keymaster.bitfs-buyer-download-plan";
 const VERSION = 2;
@@ -150,7 +150,7 @@ export function createBitfsBuyerDownloadPlan(input: {
   /** 文件采购任务编号；新任务独立保存计划，旧资金恢复不触碰新计划。 */
   taskId?: string;
   /** 买方 BitFS journal 专用文件存储。 */
-  store: BorrowedOwnerFileStore;
+  store: BorrowedModuleFileStore;
 }): BitfsBuyerDownloadPlan {
   const owner = assertKey(input.ownerPublicKeyHex);
   const seed = assertHash(input.seedHashHex);

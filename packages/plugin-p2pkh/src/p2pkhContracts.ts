@@ -12,7 +12,7 @@
 //     唯一 owner 真值，UTXO / history 过滤同 owner 时直接匹配 hex。
 
 import { defineCapability } from "webloom-framework";
-import type { BsvNetwork, KeyIdentity, P2pkhConnectPaymentFacts, P2pkhConnectPaymentPreview, P2pkhUtxoBinding, CentralBroadcastFailureReason } from "@keymaster/contracts";
+import type { BsvNetwork, KeyIdentity, P2pkhConnectPaymentFacts, P2pkhConnectPaymentPreview, P2pkhUtxoBinding } from "@keymaster/contracts";
 
 // 余额广播契约属于全局 contracts；这里重导出旧路径，兼容插件内部和外部现有 import。
 export type { P2pkhBalance, P2pkhBalanceBreakdown } from "@keymaster/contracts";
@@ -163,43 +163,30 @@ export interface P2pkhUtxo {
   syncedAt: string;
 }
 
-/**
- * UTXO 过滤条件（硬切换 002 收尾）。
- *
- * `ownerPublicKeyHex` 是 session / caller 视角的 owner 真值；plugin
- * 不再依赖 vault 内部 surrogate id 维度。
- *
- * 调用方语义：
- *   - 传 `ownerPublicKeyHex`：结果严格按该 owner 的 namespace K-V 过滤。
- *     跨 owner 调用（protocol feepool 等）**必须**传，不传就拿不到对
- *     的 value。底层硬门禁要求 `active === ownerPublicKeyHex`，由
- *     protocol 层 `assertSessionOwnerIsActive` 显式保证。
- *   - 不传：仅作 UI 本地读路径兜底，service 实现可回落到当前 active
- *     key namespace（老 widget / overview 仍可工作）；这**不**作
- *     为对外契约，跨 owner 调用禁止依赖此兜底。
- */
-export interface P2pkhUtxoFilter {
-  assetId?: P2pkhAssetId;
-  /**
-   * owner public key hex。跨 owner 调用必填；不传时仅作 UI 本地读
-   * 路径兜底，行为**不**作为对外契约。
-   */
-  ownerPublicKeyHex?: string;
-  resourceId?: string;
-  /** Optional bounded page size for wallet/history projections. */
-  limit?: number;
-  /** Local audit read opt-in; UI history defaults to unresolved rows only. */
-  includeResolvedLocalTransactions?: boolean;
+/** 当前绑定钱包的 manager 可用投影；available=false 不等于零 UTXO。 */
+export interface P2pkhAvailableUtxos {
+  available: boolean;
+  state: "fresh" | "unavailable";
+  seq?: number;
+  syncedAt?: string;
+  utxos: P2pkhUtxo[];
 }
 
-/** Opaque cursor page used by the wallet's facts and coins views. */
+/** 查询始终绑定当前钱包，调用方只指定业务筛选与有界分页。 */
+export interface P2pkhHistoryQuery {
+  txid?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface P2pkhLocalTransactionQuery extends P2pkhHistoryQuery {
+  submissionId?: string;
+  includeResolved?: boolean;
+}
+
 export interface P2pkhPage<T> {
   items: T[];
   nextCursor?: string;
-}
-
-export interface P2pkhPageFilter extends P2pkhUtxoFilter {
-  cursor?: string;
 }
 
 /**
@@ -299,6 +286,9 @@ export interface P2pkhTransferInput {
   payment?: P2pkhConnectPaymentFacts;
 }
 
+/** 业务请求；钱包身份由服务实例自动绑定，调用者不能选择。 */
+export type P2pkhTransferRequest = import("@keymaster/contracts").P2pkhTransferRequest;
+
 /**
  * 转移预览结果（硬切换 002 收尾）。
  *
@@ -353,7 +343,8 @@ export interface P2pkhTransferResult {
   /** 已尝试次数（含第一次）。 */
   attempts: number;
   /** 自动重试的终止原因。 */
-  reason?: CentralBroadcastFailureReason;
+  /** 终止诊断，不作为释放输入或重签的凭据。 */
+  reason?: string;
 }
 
 /**
@@ -373,9 +364,9 @@ export interface P2pkhTransactionDetail {
 /** P2PKH 服务契约：plugin-p2pkh 内部使用，对应 capability "p2pkh.service"。 */
 export interface P2pkhService {
   /** 完整前序证据的链上读接口；缺失时费用池不能退回盲签摘要。 */
-  getRawTransaction?(network: "main" | "test", txid: string): Promise<string>;
+  getRawTransaction(txid: string): Promise<string>;
   /** Pure local manager lookup; must never initiate signing/broadcast/chain polling. */
-  getPaymentStatus?(input: import("@keymaster/contracts").P2pkhPaymentLookupInput): Promise<import("@keymaster/contracts").P2pkhPaymentLookupResult>;
+  getPaymentStatus(input: Pick<import("@keymaster/contracts").P2pkhPaymentLookupInput, "paymentId">): Promise<import("@keymaster/contracts").P2pkhPaymentLookupResult>;
   syncStatus(): P2pkhSyncStatus;
   onSyncStatusChange(handler: (status: P2pkhSyncStatus) => void): () => void;
 
@@ -386,15 +377,7 @@ export interface P2pkhService {
    */
   onDataChanged(handler: () => void): () => void;
 
-  /**
-   * 读取当前全局产品设置。始终返回最新同步值：
-   * - 进程内缓存由 `applyGlobalSettings` 维护；
-   * - 跨标签页变更通过 storage 事件被 service 接收并刷新缓存。
-   * 设计缘由：所有 read 路径（listResources / listUtxos / listHistory /
-   * transfer 等）
-   * 在做 testnet 过滤时都必须拿到与上一次写一致的 `bsvNetwork`，
-   * 否则会出现"切换设置后同一次渲染仍按旧值过滤"的不一致。
-   */
+  /** 当前绑定身份的网络及有效手续费策略；身份失效即拒绝读取。 */
   getGlobalSettings(): P2pkhGlobalSettings;
   /**
    * 订阅全局设置变更。包括：
@@ -403,44 +386,26 @@ export interface P2pkhService {
    * 返回取消订阅句柄。
    */
   onGlobalSettingsChange(handler: (settings: P2pkhGlobalSettings) => void): () => void;
-  /**
-   * 应用新的全局设置：写 Coordinator 平台 K-V、更新进程内缓存、通知订阅者、
-   * 并在 bsvNetwork 由 false → true 时立即补齐 testnet 资源。
-   * 设计缘由：硬切换 001 要求"再次开启 testnet 时立即把 testnet
-   * 纳入运行范围"，但 storage 事件不会在本标签页触发，必须由写入
-   * 路径主动通知 service。
-   */
-  applyGlobalSettings(settings: P2pkhGlobalSettings): Promise<void>;
+  /** 更新手续费策略并通知订阅者；不能通过设置选择钱包网络。 */
+  applyGlobalSettings(settings: Pick<P2pkhGlobalSettings, "feePolicy">): Promise<void>;
 
-  listResources(assetId?: P2pkhAssetId): Promise<P2pkhKeyResource[]>;
-  listUtxos(filter?: P2pkhUtxoFilter): Promise<P2pkhUtxo[]>;
-  /**
-   * 施工单 2026-09-18 001：资产是否已在设置里开启。
-   * `bsv` 恒为 true；`bsvtest` 取决于 bsvNetwork 开关。
-   */
-  isAssetEnabled(assetId: P2pkhAssetId): boolean;
-  /** 与 listUtxos 相同的兼容读口；普通 P2PKH 不使用 protected outpoint 过滤。 */
-  listUtxosRaw?(filter?: P2pkhUtxoFilter): Promise<P2pkhUtxo[]>;
-  /**
-   * UTXO 快照状态读口：`available=false` 表示尚未取得可信快照（余额未知）。
-   * 返回的 utxos 已排除 `isSpentInMempoolTx=true` 的输出。
-   */
-  getUtxosStatus?(filter?: P2pkhUtxoFilter): Promise<{ available: boolean; state: "fresh" | "consumed" | "unavailable"; seq?: number; syncedAt?: string; utxos: P2pkhUtxo[] }>;  /** 主动刷新 Coordinator Worker 内存中的 UTXO 快照；失败时保留旧快照。 */
-  refreshUtxos?(filter?: P2pkhUtxoFilter): Promise<{ available: boolean; state: "fresh" | "consumed" | "unavailable"; seq?: number; syncedAt?: string }>;
-  /** 链上历史（只有 txid/height/fee 元数据，不做任何派生）。 */
-  listHistory?(filter?: P2pkhUtxoFilter): Promise<P2pkhHistoryRecord[]>;
-  listHistoryPage?(filter?: P2pkhPageFilter): Promise<P2pkhPage<P2pkhHistoryRecord>>;
-  listLocalTransactions?(filter?: P2pkhUtxoFilter): Promise<P2pkhLocalTransaction[]>;
-  listLocalTransactionsPage?(filter?: P2pkhPageFilter): Promise<P2pkhPage<P2pkhLocalTransaction>>;
+  /** 同步观察的本地只读投影；不刷新链、不占用或释放输入。 */
+  getAvailableUtxos(): Promise<P2pkhAvailableUtxos>;
+  /** 主动刷新链上观察，经 manager 返回可用投影。 */
+  refreshUtxos(): Promise<P2pkhAvailableUtxos>;
+  /** 当前钱包链上历史，先筛选再分页。 */
+  listHistory(query?: P2pkhHistoryQuery): Promise<P2pkhPage<P2pkhHistoryRecord>>;
+  /** 当前钱包本地提交，默认仅未链上收敛记录；先筛选再分页。 */
+  listLocalTransactions(query?: P2pkhLocalTransactionQuery): Promise<P2pkhPage<P2pkhLocalTransaction>>;
   /**
    * 详情页懒加载：按 txid 从 WoC 取 raw transaction 并临时解析。
    *
    * 解析结果只用于展示，不写任何派生状态、不进入选币或余额。
    */
-  getTransactionDetail?(input: { resourceId: string; network: BsvNetwork; txid: string }): Promise<P2pkhTransactionDetail | undefined>;
+  getTransactionDetail(input: { txid: string }): Promise<P2pkhTransactionDetail | undefined>;
 
   /** 转移：prepare / preview。 */
-  prepareTransfer(input: P2pkhTransferInput): Promise<P2pkhTransferPreview>;
+  prepareTransfer(input: P2pkhTransferRequest): Promise<P2pkhTransferPreview>;
   /** 转移：广播 preview 中已经生成好的最终交易。 */
   submitTransfer(preview: P2pkhTransferPreview): Promise<P2pkhTransferResult>;
   /**
@@ -454,40 +419,17 @@ export interface P2pkhService {
    * 外露 artifact 的占用：Connect/费用池交付已签名 artifact 之前，先让
    * UTXO Manager 占住它的钱包输入（跨 Runtime 路径，经受限 Coordinator）。
    */
-  occupyDeliveredArtifact?(input: {
-    ownerPublicKeyHex: string;
-    network: "main" | "test";
-    artifactId: string;
-    unsignedTxHex: string;
-    signedTxHex: string;
-    inputs: Array<{ txid: string; vout: number; value: string; scriptHex: string }>;
-    outputs: Array<{ scriptHex: string; value: string }>;
-    businessAmountSatoshis: string;
-    feeRateSatoshisPerKb: string;
-    feeCapSats: string;
-    protocolKind: "refund" | "close" | "fund" | "state";
-  }): Promise<{ allocationId: string; txid: string }>;
-  /** Explicitly revoke an initial submission only when no provider attempt exists. */
-  abortUnattemptedLocalSubmission?(input: { ownerPublicKeyHex: string; submissionId: string; reason?: string }): Promise<void>;
+  occupyDeliveredArtifact?(input: import("@keymaster/contracts").P2pkhArtifactRequest): Promise<import("@keymaster/contracts").P2pkhArtifactOccupyResult>;
 
-  /**
-   * 通知 P2PKH 新 key 已就绪（按 publicKeyHex 触发 rehydrate / background sync）。
-   */
-  onKeyImported(publicKeyHex: string): Promise<void>;
-  /**
-   * 通知 P2PKH 对应 publicKeyHex 的 key 已删除。service 应清理该 hex 的
-   * 派生 cache / 取消 background 任务；但不要触碰 namespace K-V——该工作
-   * 已经由 walletState.deleteKey 在前面完成。
-   */
-  onKeyRemoved(publicKeyHex: string): Promise<void>;
+  /** 当前绑定钱包的资料已就绪，补齐派生资源。 */
+  onKeyImported(): Promise<void>;
+  /** 清理当前实例的派生缓存与后台引用；不删除持久资金责任。 */
+  onKeyRemoved(): Promise<void>;
   /** Vault 锁定时调用：取消当前所有 P2PKH 后台运行。 */
   onVaultLocked(): void;
   /** Vault 解锁时调用：重新绑定当前 key 并补齐资源。 */
   onVaultUnlocked(): Promise<void>;
-  /**
-   * 关键修复：plugin 启动时调用，遍历 Vault 现有 key，补齐缺失的
-   * main/test P2PKH 资源。Vault 仍处于 locked 时静默返回。
-   */
+  /** 补齐当前身份的地址资源并刷新投影；失效实例不能重新绑定新身份。 */
   rehydrate(): Promise<void>;
   /** 硬切换 001：宿主 teardown 时调用。幂等。 */
   dispose?(): void;

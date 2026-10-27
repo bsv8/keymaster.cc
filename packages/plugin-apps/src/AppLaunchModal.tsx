@@ -22,7 +22,7 @@ export interface AppLaunchModalProps {
   busy?: boolean;
   error?: string | null;
   onClose(): void;
-  onConfirm(input: { publicKeyHex: string; password: string }): Promise<void>;
+  onConfirm(input: { password: string }): Promise<void>;
 }
 
 export function AppLaunchModal({
@@ -76,7 +76,7 @@ export function AppLaunchModal({
 
   async function submit() {
     if (!currentKey || (!hardware && !password) || !entry || !boundSession.current || !sameWalletSession(boundSession.current, walletState.snapshot())) return;
-    await onConfirm({ publicKeyHex: currentKey.publicKeyHex, password: hardware ? "" : password });
+    await onConfirm({ password: hardware ? "" : password });
   }
 
   return (

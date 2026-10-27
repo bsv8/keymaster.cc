@@ -25,7 +25,7 @@ export function P2pkhBalanceWidget() {
     store, "p2pkh.balance", [], state => state.data ?? EMPTY,
   );
   const { balance, bsvNetwork: network } = snapshot;
-  const known = Boolean(snapshot.publicKeyHex) && balance.available === true;
+  const known = Boolean(snapshot.publicKeyHex && network) && balance.available === true;
   const stale = status === "failed" || status === "rate-limited";
   const statusText = readiness === "ready" ? status : t(
     readiness === "initializing" ? "p2pkh.balanceWidget.status.initializing" : "p2pkh.balanceWidget.status.noActiveKey",
@@ -35,7 +35,7 @@ export function P2pkhBalanceWidget() {
     <div className={`home-widget home-widget--p2pkh-balance ${stale ? "is-stale" : ""}`}>
       <header className="home-widget__head"><h3>{t("p2pkh.balanceWidget.title", { defaultValue: "P2PKH 余额" })}</h3></header>
       <section className="home-widget__row"><div>
-        <p className="home-widget__label">{t(network === "main" ? "p2pkh.balanceWidget.bsvMain" : "p2pkh.balanceWidget.bsvTest", { defaultValue: network === "main" ? "BSV (main)" : "BSV Testnet (test)" })}</p>
+        <p className="home-widget__label">{network ? t(network === "main" ? "p2pkh.balanceWidget.bsvMain" : "p2pkh.balanceWidget.bsvTest", { defaultValue: network === "main" ? "BSV (main)" : "BSV Testnet (test)" }) : "BSV"}</p>
         <p className="home-widget__amount">{known ? formatSatsWithPrice(balance.total, price, { locale, network }) : "—"}</p>
         {known && balance.breakdown ? <dl className="home-widget__breakdown">
           <dt>{t("p2pkh.balance.confirmed", { defaultValue: "已确认（可花费）" })}</dt><dd>{formatSats(balance.breakdown.confirmed)}</dd>

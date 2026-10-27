@@ -23,12 +23,6 @@ import { EmptyState, PageHeader, TextInput } from "@keymaster/ui";
 
 const COMPRESSED_PUBLIC_KEY = /^(02|03)[0-9a-f]{64}$/u;
 
-/** P2PKH 设置资源的最小页面投影。字段含义：是否把 testnet 纳入转账范围。 */
-interface TransferNetworkSettings {
-  /** 是否启用 testnet；关闭时页面只允许主网。 */
-  bsvNetwork?: "main" | "test";
-}
-
 interface RecipientCandidate {
   /** 输入形态：公钥或地址。 */
   kind: "public-key" | "address";
@@ -193,12 +187,7 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
     [],
     (snapshot) => snapshot.data ?? { status: "booting", sessionEpoch: "boot", runGeneration: "boot", vaultLifecycleRevision: 0 }
   );
-  const bsvNetwork = useResourceViewSelector<TransferNetworkSettings, "main" | "test">(
-    reader,
-    "p2pkh.settings",
-    [],
-    (snapshot) => snapshot.data?.bsvNetwork ?? "main"
-  );
+  const bsvNetwork = activeState.activeKeyIdentity?.bsvNetwork;
   const contacts = useResourceViewSelector<Contact[], Contact[]>(
     reader,
     "p2pkh.transfer-contacts",
@@ -208,6 +197,7 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
   const locationSearch = location.path.split("?", 2)[1]?.split("#", 1)[0] ?? "";
   const urlParams = useMemo(() => new URLSearchParams(locationSearch), [locationSearch]);
   const urlRecipient = useMemo<UrlRecipientState>(() => {
+    if (!bsvNetwork) return { kind: "none" };
     const rawPublicKey = urlParams.get("recipientPublicKeyHex");
     const rawAddress = urlParams.get("recipientAddress");
     if (rawPublicKey === null && rawAddress === null) return { kind: "none" };
@@ -279,6 +269,7 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
   }, [locationSearch, urlRecipient.kind, urlRecipient.network]);
 
   const manualResolution = useMemo<ManualResolution>(() => {
+    if (!bsvNetwork) return { searching: false };
     const value = manualInput.trim();
     if (!value) return { searching: false };
     const publicKeyHex = normalizePublicKey(value);
@@ -300,6 +291,7 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
   }, [codec, contacts, bsvNetwork, manualInput]);
 
   const urlCandidate = useMemo<RecipientCandidate | undefined>(() => {
+    if (!bsvNetwork) return undefined;
     if (urlRecipient.kind === "public-key" && urlRecipient.publicKeyHex) {
       return makePublicCandidate(urlRecipient.publicKeyHex, bsvNetwork, contacts, codec);
     }
@@ -349,7 +341,7 @@ export function P2pkhTransferPage({ location }: { location: import("@keymaster/c
       : t("p2pkh.transferPage.page.recipient.mainnet", { defaultValue: "主网" });
   }
 
-  if (!activeState.activePublicKeyHex) {
+  if (activeState.status !== "unlocked" || !activeState.activePublicKeyHex || !bsvNetwork) {
     return (
       <div className="transfer-page">
         <PageHeader title={t("p2pkh.transferPage.route.title", { defaultValue: "转账" })} />

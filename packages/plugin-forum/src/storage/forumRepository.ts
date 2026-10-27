@@ -22,7 +22,7 @@ import type {
   ForumPublishTask,
   ForumRootVerification,
 } from "@keymaster/contracts";
-import type { BorrowedOwnerFileStore, StorageObjectRevision } from "@keymaster/contracts";
+import type { BorrowedModuleFileStore, StorageObjectRevision } from "@keymaster/contracts";
 import { FORUM_MARKDOWN_PARSER_VERSION } from "@keymaster/contracts";
 
 export const FORUM_RECORD_FORMAT = "keymaster.forum";
@@ -199,7 +199,7 @@ export interface ForumNodeViewProjection {
 }
 
 /** 仓储只接收 Host 已绑定的 owner 文件句柄，物理路径由绑定决定。 */
-export function createForumRepository(files: BorrowedOwnerFileStore, now: () => number = Date.now): ForumRepository {
+export function createForumRepository(files: BorrowedModuleFileStore, now: () => number = Date.now): ForumRepository {
   const decodeJson = <T>(bytes: Uint8Array, path: string, kind: string): T | undefined => {
     if (bytes.byteLength > FORUM_RECORD_MAX_BYTES) throw new ForumRecordError("record-too-large", `${path} 超过记录大小上限`);
     let parsed: unknown;

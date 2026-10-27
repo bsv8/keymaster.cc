@@ -16,7 +16,7 @@ import { Button, TextInput } from "@keymaster/ui";
 import { useOptionalPluginCapability } from "webloom-framework/react";
 import { usePluginI18n, usePluginLocale, useOptionalResourceSelector } from "@keymaster/runtime";
 import { emptyGlobalBalanceSnapshot, type GlobalBalanceSnapshot, type KeyIdentity } from "@keymaster/contracts";
-import type { P2pkhAssetId, P2pkhGlobalSettings, P2pkhKeyResource, P2pkhService, P2pkhTransferPreview, P2pkhTransferResult } from "../p2pkhContracts.js";
+import type { P2pkhGlobalSettings, P2pkhKeyResource, P2pkhService, P2pkhTransferPreview, P2pkhTransferResult } from "../p2pkhContracts.js";
 import { P2PKH_CAPABILITY, resolveP2pkhFeeRateSatoshisPerKb } from "../p2pkhContracts.js";
 
 interface FormState {
@@ -69,7 +69,6 @@ function P2pkhTransferWidgetInner({
   const activeIdentity = context.identity;
   const resource = context.resource;
   const network = activeIdentity?.bsvNetwork;
-  const assetId: P2pkhAssetId = network === "test" ? "bsvtest" : "bsv";
   const globalSettings = useOptionalResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
     reader,
     "p2pkh.settings",
@@ -147,12 +146,10 @@ function P2pkhTransferWidgetInner({
       return null;
     }
     return {
-      assetId,
       recipientAddress: form.recipient,
       amountSatoshis: sendAll ? 0 : amount,
       sendAll,
-      feeRateSatoshisPerKb: feeRate,
-      ownerPublicKeyHex: activeIdentity?.publicKeyHex ?? ""
+      feeRateSatoshisPerKb: feeRate
     };
   }
 

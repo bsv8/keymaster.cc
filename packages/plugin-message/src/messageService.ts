@@ -8,7 +8,7 @@ import { sameWalletSession } from "@keymaster/contracts";
 // 这里不查询远端历史、不查询在线状态，也不暴露 Supplier、SSP 或私钥字段。
 
 import type {
-  BorrowedOwnerFileStore,
+  BorrowedModuleFileStore,
   ChannelPrivateMessageEvent,
   ChannelRuntime,
   JSONValue,
@@ -71,7 +71,7 @@ export interface MessageServiceDeps {
   channel: ChannelRuntime;
   walletState: VaultWalletState;
   /** 绑定到 `<owner>/messages/` 的只读/追加文件句柄。 */
-  files: BorrowedOwnerFileStore;
+  files: BorrowedModuleFileStore;
   /** Optional observer for storage failures in background receive handling. */
   onStorageError?(error: unknown): void;
 }

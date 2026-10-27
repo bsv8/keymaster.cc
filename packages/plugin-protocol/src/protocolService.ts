@@ -140,6 +140,7 @@ import {
   type ProtocolFeePoolRecord,
   type ProtocolLockSummary,
   type ProtocolMethod,
+  type ProtocolOriginSettings,
   type ProtocolOriginSettingsRecord,
   type ProtocolPopupLockState,
   type ProtocolReadyMessage,
@@ -181,7 +182,7 @@ import { cborDecode, cborEncode, type CborValue } from "./protocolCbor.js";
 import { buildClaimProjectionFromParams, resolveBuiltinClaim, resolveClaims } from "./protocolClaims.js";
 import { consumeLauncherBootstrap, encodeOrigin, parseBootstrapToken } from "./sessionWindowBootstrap.js";
 import { buildAppBootstrapPayload } from "./sessionWindowBootstrap.js";
-import { installLauncherBootstrapRegistry } from "@keymaster/contracts";
+import { installLauncherBootstrapRegistry, bindWalletIdentity } from "@keymaster/contracts";
 import type { FeepoolPendingOpsMap } from "./feepoolOperations.js";
 import {
   calcTxidFromRawTxHex,
@@ -278,10 +279,10 @@ function normalizeOriginSettings(
   origin: string
 ): ProtocolOriginSettingsRecord {
   return {
+    ...rec,
     origin,
     identityAutoApproveEnabled: rec?.identityAutoApproveEnabled ?? false,
     cipherAutoApproveEnabled: rec?.cipherAutoApproveEnabled ?? false,
-    feePoolDefaultFundSatoshis: rec?.feePoolDefaultFundSatoshis ?? 0,
     confirmTimeoutSeconds:
       rec?.confirmTimeoutSeconds && rec.confirmTimeoutSeconds > 0
         ? rec.confirmTimeoutSeconds
@@ -358,13 +359,6 @@ export interface ProtocolServiceDeps {
    * 不再次解析——避免 URL 被中途篡改。
    */
   bootMode?: "connect" | "appView";
-  /**
-   * Connect v1 production scope: reject new fee-pool signing requests and
-   * feepool.connect channel creation before any record or funds side effect.
-   * Tests that exercise historical fee-pool internals leave this off
-   * explicitly; the production manifest turns it on.
-   */
-  connectV1Scope?: boolean;
 }
 
 /**
@@ -1071,7 +1065,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.phase = "waiting";
     // 同时推 session 快照 + feed 快照：feed 订阅者拿到空 feed；
     // session 订阅者拿到 phase="waiting" + lockState 不变（vault 状态
-    // 与 popup 生命周期解耦，由 setVaultLockState 单独管理）。
+    // 与 popup 生命周期解耦，由 syncWalletState 单独管理）。
     this.currentAppViewContext = null;
     this.currentAppClientSource = null;
     // 施工单 2026-06-30 003：endSession 同样要把 child `ready` 等待态
@@ -1173,14 +1167,14 @@ export class ProtocolServiceImpl implements ProtocolService {
   /**
    * 读 origin 配置。K-V 不可用或该 origin 尚未配置时返回 null。
    */
-  async getOriginSettings(origin: string): Promise<ProtocolOriginSettingsRecord | null> {
+  async getOriginSettings(origin: string): Promise<ProtocolOriginSettings | null> {
     if (!this.deps.storageRepository) return null;
     try {
       const raw = await this.deps.storageRepository.getOrigin(origin);
       if (raw) {
         const normalized = normalizeOriginSettings(raw, origin);
         this.originCache.set(origin, normalized);
-        return normalized;
+        return { origin: normalized.origin, identityAutoApproveEnabled: normalized.identityAutoApproveEnabled, cipherAutoApproveEnabled: normalized.cipherAutoApproveEnabled, confirmTimeoutSeconds: normalized.confirmTimeoutSeconds, updatedAt: normalized.updatedAt };
       }
       return null;
     } catch {
@@ -1191,11 +1185,14 @@ export class ProtocolServiceImpl implements ProtocolService {
   /**
    * 写 origin 配置。K-V 不可用时 throw。写入时同步刷内存 cache。
    */
-  async setOriginSettings(record: ProtocolOriginSettingsRecord): Promise<void> {
+  async setOriginSettings(record: ProtocolOriginSettings): Promise<void> {
+    const allowed = new Set(["origin", "identityAutoApproveEnabled", "cipherAutoApproveEnabled", "confirmTimeoutSeconds", "updatedAt"]);
+    if (Object.keys(record).some(key => !allowed.has(key))) throw new TypeError("Unknown origin setting");
     if (!this.deps.storageRepository) {
       throw new Error("Protocol storage K-V is not available");
     }
-    const next = normalizeOriginSettings(record, record.origin);
+    const stored = await this.deps.storageRepository.getOrigin(record.origin);
+    const next = normalizeOriginSettings({ ...stored, ...record }, record.origin);
     next.updatedAt = Date.now();
     await this.deps.storageRepository.putOrigin(next);
     this.originCache.set(record.origin, next);
@@ -1462,19 +1459,6 @@ export class ProtocolServiceImpl implements ProtocolService {
    */
   connectAuthSnapshot(): ProtocolConnectAuthSnapshot | null {
     return this.resolveConnectAuthSnapshot();
-  }
-
-  /**
-   * 暴露底层 vault service 引用，供 popup 顶层监听 vault.onStatusChange。
-   *
-   * 设计缘由：vault 状态变化（unlock / relock）需要在 `ProtocolPopupPage`
-   * 顶层监听（跨 locked / unlocked 视图切换仍生效），不能放在
-   * `LockScreenPage` 子组件里——否则解锁切到主页面后 relock 监听会丢。
-   * 这里暴露一个 getter，让 popup 用 useCapability("vault.service") 之外的
-   * 通道拿到 vault 引用，避免 popup 同时挂两个 vault capability 实例。
-   */
-  getVaultService(): VaultService {
-    return this.deps.vault;
   }
 
   /**
@@ -2006,7 +1990,6 @@ export class ProtocolServiceImpl implements ProtocolService {
       !input.appId ||
       !input.appOrigin ||
       !input.appUrl ||
-      !input.publicKeyHex ||
       typeof input.password !== "string" ||
       (!input.password && this.deps.walletState.snapshot().activeKeyIdentity?.backend !== "hardware")
     ) {
@@ -2016,6 +1999,12 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (this.deps.vault.status() !== "unlocked") {
       throw new LaunchAppViewError("vault_locked", "launchAppView: vault not unlocked");
     }
+    if ("publicKeyHex" in input || "ownerPublicKeyHex" in input || "network" in input) throw new TypeError("App launches do not accept wallet selectors");
+    // Capture the sole authority before any asynchronous work. Never rebind an old launch.
+    let wallet: ReturnType<typeof bindWalletIdentity>;
+    try { wallet = bindWalletIdentity(this.deps.walletState); }
+    catch { throw new LaunchAppViewError("no_active_key", "launchAppView: wallet identity unavailable"); }
+    const key = wallet.identity;
     // 3) 校验 app 配置合法：appOrigin 是合法 origin，且 new URL(appUrl).origin === appOrigin。
     let parsedAppUrl: URL;
     try {
@@ -2033,9 +2022,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       );
     }
     const catalog = this.resolveAppCatalog(input.appOrigin, input.appIdentity, input.appId);
-    // storage/catalog 门禁必须在 window.open 前完成。private-key 只需先确认
-    // caller 已提供非空公钥；实际 walletState ready 查询放到预开 popup 后，
-    // 以保留浏览器 user-activation，失败会在 finally 关闭空白窗口。
+    // Catalog/storage/identity checks are synchronous and precede the gesture popup.
     this.assertAppRequirements(catalog.proof, true);
     if (typeof window === "undefined") {
       throw new LaunchAppViewError(
@@ -2072,14 +2059,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     let sessionWindowNavigated = false;
     let stagedAppViewSessionId: string | undefined;
     try {
-    // 5) 校验目标 key ready。
-    const key = this.requireCurrentOwnerKey(input.publicKeyHex);
-    if (!key) {
-      throw new LaunchAppViewError(
-        "no_active_key",
-        "launchAppView: selected key not found"
-      );
-    }
+    wallet.assertActive();
     // 6) 解析 claims 快照（与 connect.login 同语义）。
     const resolvedClaims = resolveClaims(input.claims ?? [], (name) =>
       resolveBuiltinClaim(name, { activeKeyLabel: key.label })
@@ -2092,6 +2072,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     //    在每次执行时按当前窗口状态决定。
     const now = Date.now();
     const sessionId = await this.connectBindingKey(key, input.appOrigin);
+    wallet.assertActive();
     const sessionRecord: ConnectSessionRecord = {
       sessionId,
       origin: input.appOrigin,
@@ -2109,11 +2090,12 @@ export class ProtocolServiceImpl implements ProtocolService {
     try {
       const crypto = await this.deps.vault.createAppViewSession({
         sessionId,
-        publicKeyHex: input.publicKeyHex,
         password: input.password
       });
       stagedAppViewSessionId = sessionId;
+      try { wallet.assertActive(); } catch (error) { crypto.dispose("launch-authority-revoked"); throw error; }
       const identity = crypto.getIdentity();
+      if (!sameNetworkIdentity(identity, key)) { crypto.dispose("launch-identity-mismatch"); throw new Error("AppView crypto identity mismatch"); }
       sessionRuntimeBootstrap = {
         networkIdentity: validateNetworkIdentity(identity),
         ownerPublicKeyHex: identity.publicKeyHex,
@@ -2135,6 +2117,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     // 存储等待期间断线/锁定，旧 capability 也不能用来导航或建立可执行会话。
     sessionRuntimeBootstrap.crypto.getIdentity();
+    wallet.assertActive();
     // 9) 生成新 launchToken。
     const launchToken = this.deps.generateId
       ? `launch-${this.deps.generateId()}`
@@ -2299,12 +2282,12 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 施工单 2026-06-30 003 硬切换 4.5：appView bootstrap 成功并建立
     // 可执行 owner runtime 后，Session Window 应视为 unlocked。即使
     // 本地 vault 仍是 locked，bootstrap_runtime 来源已足够跑业务方法。
-    // 这里走 `setVaultLockState(vault.status() === "unlocked")` 让
+    // 这里同步已提交的权威执行状态，让
     // `computeLockState()` 重新计算；如果之前因 vault locked 已经有
     // `waiting_unlock_*` record，这里会顺便批量推进到 confirming /
-    // queued。如果 lockState 已是 unlocked，setVaultLockState 内部
+    // queued。如果 lockState 已是 unlocked，syncWalletState 内部
     // 早返回，不重复触发收口。
-    this.setVaultLockState(this.deps.vault.status() === "unlocked");
+    this.syncWalletState();
     this.emit();
     // 注：**不**向 launcher 发 ack。用户已确认"session window 不需要
     // 和 launcher 做任何沟通"；launcher 自己决定何时关窗（信任开窗即
@@ -2814,24 +2797,16 @@ export class ProtocolServiceImpl implements ProtocolService {
         await this.scheduleFailFastRequest(recordId, sessionFail.code, sessionFail.reason);
         return;
       }
-      // preCheck 已通过：session 真值有效 / K-V 异常按降级放行（手动
-      // confirm 继续走）。把 sessionId 落到 record 必填字段；
-      // ownerPublicKeyHex 由 fetchSessionForBinding 二次校验后回填。
+      // Re-read after precheck to detect revocation/storage failure at this boundary.
+      // Preserve the bound owner only after the authority read succeeds.
       let session: ConnectSessionRecord | null = null;
-      let dbError = false;
       try {
         session = await this.fetchSessionForBinding({ ...rec.networkIdentity, publicKeyHex: sessionId }, rec.origin);
       } catch (err) {
-        // K-V 异常：accept 阶段无法读到 session 真值；走 manual
-        // confirm 路径，execute 阶段 `requireConnectSession` 再校验。
-        // ownerPublicKeyHex 留空——execute 阶段校验失败会写入
-        // 本地 failureReason；caller 收到 user_rejected。
-        dbError = true;
+        await this.scheduleFailFastRequest(recordId, "internal_error", "storage_error");
+        return;
       }
-      if (dbError) {
-        rec.walletPublicKeyHex = sessionId;
-        // 不 return；让 request 继续走 manual confirm / execute 路径。
-      } else if (session === null) {
+      if (session === null) {
         // 极端竞态：preCheck 通过 → session 突然被外部 logout / 删除。
         // 走 fail-fast（与 K-V 异常区分）。
         await this.scheduleFailFastRequest(recordId, "user_rejected", "internal_error");
@@ -2845,16 +2820,6 @@ export class ProtocolServiceImpl implements ProtocolService {
           const identityCode: ProtocolErrorCode =
             method.startsWith("msfile.") ? "msfile_identity_required" : "storage_identity_required";
           await this.scheduleFailFastRequest(recordId, identityCode, "storage_error");
-          return;
-        }
-      }
-      if (method === "p2pkh.transfer" || method.startsWith("feepool.")) {
-        // 施工单 2026-09-18 001：testnet 未开启时 accept 阶段 fail-fast，
-        // 不进确认 / 解锁队列。
-        const assetId = (parsed.params as { assetId?: P2pkhTransferAssetId }).assetId;
-        const assetFail = this.preCheckP2pkhAsset(assetId);
-        if (assetFail !== null) {
-          await this.scheduleFailFastRequest(recordId, assetFail.code, assetFail.reason);
           return;
         }
       }
@@ -2930,35 +2895,29 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 对齐：session 真值存在 + 未 revoke + origin 匹配 + owner key ready。
    *
    * 返回 `null` 表示校验通过；返回 `{code, reason}` 表示校验失败：
-   *   - `code` 是对外 result.error.code（user_rejected 或 invalid_origin）；
+   *   - `code` 是对外 result.error.code（user_rejected / invalid_origin / internal_error）；
    *   - `reason` 是本地 ProtocolFailureReason（写进 record.failureReason）。
    *
    * 跨 origin 区分：accept 阶段读出 session 后立即做 origin 比对，
    * origin 不匹配 → `invalid_origin`（与 identity.get 同语义，
    * 让 caller 知道自己"用的 sessionId 不是该 origin 的"）。
    *
-   * K-V 异常 / K-V 不可用处理（关键边界）：
-   *   - fetchSessionForBinding 抛错时**不**走 fail-fast 路径，**返回
-   *     null** 让 caller 走 manual confirm / execute 阶段再校验。
-   *     这与旧"K-V unavailable 降级"边界一致：p2pkh / cipher / 业务
-   *     方法仍可继续走人工确认，execute 阶段 `requireConnectSession`
-   *     会再做一次校验。
+   * K-V 不可用或读取失败时，直接 internal_error / storage_error，
+   * 不进入确认、签名或执行队列，不把未知授权状态伪装为用户拒绝。
    */
   private async preCheckConnectSession(
     identity: NetworkIdentity,
     origin: string
   ): Promise<{ code: ProtocolErrorCode; reason: ProtocolFailureReason } | null> {
-    if (!identity.publicKeyHex) {
-      return { code: "user_rejected", reason: "internal_error" };
-    }
+    if (!this.deps.storageRepository) return { code: "internal_error", reason: "storage_error" };
+    if (!identity.publicKeyHex) return { code: "internal_error", reason: "internal_error" };
     let session: ConnectSessionRecord | null = null;
     try {
       session = await this.fetchSessionForBinding(identity, origin);
     } catch (err) {
-      // 关键（施工单 2026-06-28 002 收口）：K-V 异常**不**触发 fail-fast。
-      // 与"K-V unavailable 降级"边界一致：允许 manual confirm 继续走
-      // manual confirm 路径，execute 阶段再校验 session 真值。
-      return null;
+      // An unavailable authority is not a missing/revoked grant or user rejection.
+      // Stop before confirmation/execution; never degrade a failed read into consent.
+      return { code: "internal_error", reason: "storage_error" };
     }
     if (session === null) {
       // 校验失败：不存在 / 已 revoke —— 不能直接告诉 caller 哪一种，
@@ -2981,25 +2940,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!this.requireCurrentOwnerKey(session.ownerPublicKeyHex)) {
       // 没有可用 Key（锁定/未初始化）：session 仍然存在，但当前无法执行。
       return { code: "user_rejected", reason: "internal_error" };
-    }
-    return null;
-  }
-
-  /**
-   * accept 阶段解析并检查本次请求的资产（施工单 2026-09-18 001）。
-   *
-   * 设计缘由：付款资产必须属于当前完整身份的网络；
-   * 未开启时 fail-fast `asset_not_enabled`，而不是等 prepare 抛错后被
-   * 统一折叠成 user_rejected（caller 无法区分"用户拒绝"与"资产未开启"）。
-   */
-  private preCheckP2pkhAsset(
-    assetId: P2pkhTransferAssetId | undefined
-  ): { code: ProtocolErrorCode; reason: ProtocolFailureReason } | null {
-    if (this.lockStateValue === "locked") return null;
-    const publicAssetId = assetId ?? (this.deps.walletState.snapshot().activeKeyIdentity?.bsvNetwork === "test" ? "bsv-testnet" : "bsv-mainnet");
-    const p2pkhService = this.currentP2pkhService();
-    if (!p2pkhService || !p2pkhService.isAssetEnabled(toInternalP2pkhAssetId(publicAssetId))) {
-      return { code: "asset_not_enabled", reason: "asset_not_enabled" };
     }
     return null;
   }
@@ -3073,7 +3013,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - fail-fast 的 record 不进 executionQueue / 不 drainExecutionQueue；
    *     executionQueue 的 drain 检查 `lockStateValue === "unlocked"`，
    *     走队列意味着 locked 时会被挂起，违反"直接失败"。
-   *   - 不动 setVaultLockState / autoExecuteAfterUnlock——fail-fast record
+   *   - 不动 syncWalletState / autoExecuteAfterUnlock——fail-fast record
    *     已经没有"unlock 后怎么办"的概念。
    */
   private async scheduleFailFastRequest(
@@ -3314,18 +3254,8 @@ export class ProtocolServiceImpl implements ProtocolService {
    * vault 状态变化时由外部（popup 或 vault）调用：service 同步 lockState
    * 并执行 relock / unlock 收口。
    *
-   * 设计缘由（施工单 2026-06-30 003 硬切换 4.5）：
-   *   - `lockStateValue` 真值 = "当前 Session Window 是否拥有可执行
-   *     owner runtime"。`setVaultLockState(locked)` 传的 `locked` 只是
-   *     当前 vault 的状态；最终 `lockStateValue` 由 `computeLockState()`
-   *     同时参考 vault 状态 + `ownerRuntimesBySessionId` 是否非空决定。
-   *   - 因此即便 vault 被 relock，只要 `ownerRuntimesBySessionId` 里还
-   *     有 bootstrap_runtime runtime，`lockStateValue` 仍保持 unlocked——
-   *     不再为了保留"本地 vault locked"细节把 UI / accept 阶段重新推
-   *     进解锁流。
-   *   - 同样被 `applyLauncherBootstrap` 在注册完 owner runtime 后调用
-   *     一次，让 vault locked + bootstrap_runtime 已就绪 的组合也能立刻
-   *     把已存在的 `waiting_unlock_*` 记录推进到 confirming / queued。
+   * 状态仅从当前 Vault 与仍有效的授权 runtime 派生，不接受外部锁屏布尔值。
+   * 没有状态变化时不重复撤销 Channel 会话；runtime 就绪后使用同一入口推进等待请求。
    *
    * 收口语义：
    *   - 状态从 unlocked → locked：所有 `confirming` → `waiting_unlock_manual`
@@ -3333,8 +3263,11 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - 状态从 locked → unlocked：批量推进 `waiting_unlock_*`。
    *     `authUnlockInProgress` 期间跳过批量推进（auth 页自己处理）。
    */
-  setVaultLockState(_vaultLocked: boolean): void {
-    if (_vaultLocked) {
+  syncWalletState(...args: []): void {
+    if (args.length) throw new TypeError("Wallet state notifications do not accept state arguments");
+    const next = this.computeLockState();
+    if (this.lockStateValue === next) return;
+    if (next === "locked") {
       // Vault 锁定会立即撤销所有 Session Window Channel caller；后续 App
       // 必须重新建立 session/订阅，不能复用锁前的授权上下文。
       this.releaseAllChannelSessions();
@@ -3343,9 +3276,6 @@ export class ProtocolServiceImpl implements ProtocolService {
       this.channelQuotaBySessionId.clear();
       this.channelSessionEpoch++;
     }
-    // 参数 `_vaultLocked` 仅保留兼容入口；最终态由 computeLockState 统一决定。
-    const next = this.computeLockState();
-    if (this.lockStateValue === next) return;
     this.lockStateValue = next;
     if (next === "locked") {
       // relock 硬收口：所有 confirming → waiting_unlock_manual，清 timeout。
@@ -3635,7 +3565,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       // 按当前 record 自己判定能否执行——不再用全局 lockState 卡。
         const decision = await this.probeExecutionCondition(rec);
         if (decision.kind === "block_unlock") {
-        // 等 vault 解锁；保持队首，等待 `setVaultLockState(false)` 后
+        // 等 vault 解锁；保持队首，等待 `syncWalletState()` 后
         // 由它触发的 drainExecutionQueue 再走一遍。
           this.setRecordPhase(rec.recordId, decision.targetPhase);
           rec.enteredPhaseAt = Date.now();
@@ -3650,9 +3580,9 @@ export class ProtocolServiceImpl implements ProtocolService {
         // `user_rejected`。
           this.executionQueue.shift();
           rec.phase = "failed";
-          rec.errorCode = "user_rejected";
-          rec.errorMessage = "User rejected";
-          rec.failureReason = "runtime_missing";
+          rec.errorCode = decision.storageError ? "internal_error" : "user_rejected";
+          rec.errorMessage = decision.storageError ? "Connect session storage unavailable" : "User rejected";
+          rec.failureReason = decision.storageError ? "storage_error" : "runtime_missing";
           rec.finishedAt = Date.now();
           rec.updatedAt = rec.finishedAt;
           try {
@@ -3666,7 +3596,7 @@ export class ProtocolServiceImpl implements ProtocolService {
             this.emit();
             continue;
           }
-          await this.replyErrorToRec(rec, "user_rejected", "User rejected");
+          await this.replyErrorToRec(rec, decision.storageError ? "internal_error" : "user_rejected", rec.errorMessage);
           this.emitFeed();
           this.emit();
           continue;
@@ -3709,7 +3639,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   ): Promise<
     | { kind: "execute" }
     | { kind: "block_unlock"; targetPhase: "waiting_unlock_manual" | "waiting_unlock_auto" }
-    | { kind: "fail" }
+    | { kind: "fail"; storageError?: true }
   > {
     // connect.* 自有登录 UI / 流程，由 service 走专门的 connect auth
     // 路径；不依赖 owner runtime resolver。直接 execute。
@@ -3746,7 +3676,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     try {
       session = await this.fetchSessionForBinding({ ...rec.networkIdentity, publicKeyHex: sessionId }, rec.origin);
     } catch {
-      session = null;
+      return { kind: "fail", storageError: true };
     }
     if (!session || session.revokedAt !== null) {
       return { kind: "fail" };
@@ -3774,7 +3704,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     //       - session 绑定的 owner 公钥不是当前唯一 Key（钱包已重置并
     //         重新初始化为另一把 Key）→ 解锁了也拿不到 → 直接 fail-fast，
     //         让用户明确知道 "session 绑定的 Key 已不是本钱包的 Key"。
-    //       - owner 公钥与当前唯一 Key 一致 → 等解锁；解锁后由 setVaultLockState
+    //       - owner 公钥与当前唯一 Key 一致 → 等解锁；解锁后由 syncWalletState
     //         重新触发 drainExecutionQueue → 走第 2 步拿到 execute。
     //   - 这把 "locked + 等下去也无解" 的请求挡在 unlocked 流程之前；
     //     避免无谓解锁。
@@ -4193,9 +4123,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     try {
       session = await this.fetchSessionForBinding({ ...rec.networkIdentity, publicKeyHex: sessionId }, rec.origin);
     } catch (err) {
-      // K-V 异常：与"K-V unavailable 降级"边界一致——execute 阶段
-      // 也走"未查到 session"路径，统一 user_rejected。
-      throw localFailure("internal_error", "connect session storage unavailable");
+      throw protocolError("internal_error", "connect session storage unavailable");
     }
     if (!session) {
       // 重新做一次更精确的区分：可能是被删 / 被 revoke / 跨 origin。
@@ -4347,7 +4275,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 2) vault_runtime 来源：仅 connect mode 下才允许本窗口 vault 解锁后从本地 vault 重建。
     let crypto;
     try {
-      crypto = await this.deps.vault.createActiveKeyCrypto(session.ownerPublicKeyHex);
+      crypto = await this.deps.vault.createActiveKeyCrypto();
     } catch {
       throw localFailure(
         "runtime_missing",
@@ -4414,17 +4342,13 @@ export class ProtocolServiceImpl implements ProtocolService {
       resolution.crypto.getIdentity();
       // cborg can return Node Buffer in the native host; Buffer.slice() aliases a larger slab.
       // Construct an ordinary Uint8Array so only the exact envelope enters the capability.
-      const result=await resolution.crypto.signConnectEnvelope({publicKeyHex:resolution.ownerPublicKeyHex,kind,envelope:new Uint8Array(bytes).buffer as ArrayBuffer,...(content ? {content:new Uint8Array(content).buffer as ArrayBuffer} : {}),appSessionId:session.sessionId});
+      const result=await resolution.crypto.signConnectEnvelope({ kind, envelope:new Uint8Array(bytes).buffer as ArrayBuffer, ...(content ? {content:new Uint8Array(content).buffer as ArrayBuffer} : {}), appSessionId:session.sessionId });
       resolution.crypto.getIdentity();
       if(result.format!=="compact"||result.signature.byteLength!==64||result.publicKeyHex!==resolution.ownerPublicKeyHex)throw new Error("Invalid Connect signature result");
       return new Uint8Array(result.signature);
     }
     return signCompactSecp256k1(async (digest) => {
-      const result = await resolution.crypto.signDigest({
-        publicKeyHex: resolution.ownerPublicKeyHex,
-        digest: digest.buffer.slice(digest.byteOffset, digest.byteOffset + digest.byteLength) as ArrayBuffer,
-        format: "compact"
-      });
+      const result = await resolution.crypto.signDigest({ digest: digest.buffer.slice(digest.byteOffset, digest.byteOffset + digest.byteLength) as ArrayBuffer, format: "compact" });
       // P0: 校验回包 format 为 compact
       if (result.format !== "compact") {
         throw new Error(
@@ -4583,7 +4507,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - **执行成功后**清掉 popup 当前 unlock runtime：调 `vault.lock()`。
    *     这是施工单 4.4 + 5.1.3 明确要求的"清掉 popup unlock runtime"。
    *     `vault.locked` 事件触发 popup 顶层 `vault.onStatusChange` 监听，
-   *     调用 `setVaultLockState(true)`：
+   *     调用 `syncWalletState()`：
    *       - 当前 executing 的 logout request 走完，结果照常发；
    *       - 其它 confirming / queued request 进入 waiting_unlock_manual
    *         （与现有 relock 行为一致）；
@@ -5078,6 +5002,11 @@ export class ProtocolServiceImpl implements ProtocolService {
       appId: session.appIdentity.appId,
       publisherPublicKeyHex: session.appIdentity.publisherPublicKeyHex.toLowerCase(),
     };
+    const assertBoundPayment = () => {
+      this.assertWalletGeneration(rec);
+      this.receiver.assertCurrent(rec.protocol);
+      this.assertSessionOwnerIsActive(session);
+    };
     const requestDigest = paymentRequestDigest(identity, normalized);
     const key = paymentRequestKey(identity, params.clientRequestId);
     const now = Date.now();
@@ -5112,14 +5041,17 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     let current = claimed.record;
     try {
+      assertBoundPayment();
       const channelId = await publisherPaymentChannelId(session.appIdentity.publisherPublicKeyHex, params.paymentType, session.networkIdentity.bsvNetwork);
+      assertBoundPayment();
       if (params.channelId !== channelId) throw protocolError("invalid_request", "Register a publisher single-payment channel before creating a new payment");
       const paymentSessionId = await publisherPaymentSessionId(session.sessionId);
-      await this.deps.vault.requestPayment({ action: "session-open", id: paymentSessionId, owner: await this.paymentOwner(session) });
+      const owner = await this.paymentOwner(session);
+      assertBoundPayment();
+      await this.deps.vault.requestPayment({ action: "session-open", id: paymentSessionId, owner });
+      assertBoundPayment();
       const preview = await p2pkhService.prepareTransfer({
         paymentContext: { channelId: params.channelId, sessionId: paymentSessionId },
-        assetId: internalAssetId,
-        ownerPublicKeyHex: identity.ownerPublicKeyHex,
         amountSatoshis: params.amountSatoshis,
         feeRateSatoshisPerKb: params.feeRateSatoshisPerKb ?? DEFAULT_P2PKH_FEE_RATE_SAT_PER_KB,
         payment: {
@@ -5134,6 +5066,7 @@ export class ProtocolServiceImpl implements ProtocolService {
           publisherPublicKeyHex: identity.publisherPublicKeyHex,
         },
       });
+      assertBoundPayment();
       const payment = (preview as { payment?: import("@keymaster/contracts").P2pkhConnectPaymentPreview }).payment;
       if (!payment) throw new Error("Connect payment preview is missing its frozen plan");
       current = {
@@ -5146,6 +5079,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         updatedAt: Date.now(),
       };
       current = await storeConnectPaymentRecord(repo, current);
+      assertBoundPayment();
       const submitted = await p2pkhService.submitTransfer({ ...preview, ownerPublicKeyHex: identity.ownerPublicKeyHex } as never);
       const reason = submitted.error ?? submitted.reason ?? "";
       const status: import("@keymaster/contracts").ConnectPaymentStatus =
@@ -5187,7 +5121,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (["accepted", "already_known", "not_signed", "failed"].includes(record.status)) return record;
     const service = this.currentP2pkhService();
     if (!service?.getPaymentStatus) return record;
-    const value = await service.getPaymentStatus({ ownerPublicKeyHex: record.ownerPublicKeyHex, network: record.networkIdentity.bsvNetwork, paymentId: record.paymentId });
+    const value = await service.getPaymentStatus({ paymentId: record.paymentId });
     await assertAuthorized();
     const manager = parseP2pkhPaymentLookupResult(value);
     if (manager.status === "not_found") return record;
@@ -5268,7 +5202,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     if ((record.status === "pending" || record.status === "unknown" || record.status === "signed_not_dispatched")
       && record.txid && this.currentP2pkhService()?.getRawTransaction) {
       try {
-        const raw = await this.currentP2pkhService()!.getRawTransaction!(identity.network, record.txid);
+        const raw = await this.currentP2pkhService()!.getRawTransaction!(record.txid);
         if (calcTxidFromRawTxHex(raw).toLowerCase() === record.txid.toLowerCase()) {
           record = await storeConnectPaymentRecord(repo, { ...record, status: "accepted" as const, updatedAt: Date.now() });
         }
@@ -5353,17 +5287,13 @@ export class ProtocolServiceImpl implements ProtocolService {
       }
       const preview = await p2pkhService.prepareTransfer({
         paymentContext: {channelId: paymentChannelId, sessionId: paymentSessionId},
-        assetId: internalAssetId,
-        ownerPublicKeyHex,
         recipientAddress: params.recipientAddress,
         amountSatoshis: params.amountSatoshis,
         feeRateSatoshisPerKb: params.feeRateSatoshisPerKb ?? DEFAULT_P2PKH_FEE_RATE_SAT_PER_KB
       });
-      // preview 透传 ownerPublicKeyHex；submit 阶段 plugin-p2pkh
-      // 会校验 resource / 签名 key 与 owner 一致，跨 owner 复用
-      // preview 直接拒绝。
-      const previewWithOwner = { ...preview, ownerPublicKeyHex };
-      const submitted = await p2pkhService.submitTransfer(previewWithOwner);
+      this.assertSessionOwnerIsActive(session);
+      if (preview.ownerPublicKeyHex !== ownerPublicKeyHex) throw localFailure("session_owner_mismatch", "Transfer preview identity mismatch");
+      const submitted = await p2pkhService.submitTransfer(preview);
       const txid = submitted.txid ?? preview.txid;
       const result: P2pkhTransferResult = {
         assetId: publicAssetId,
@@ -5461,7 +5391,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         const cached=sourceCache.get(txid);if(cached)return cached;
         const adapter=this.currentP2pkhService();
         if(!adapter?.getRawTransaction)throw new Error('Fee pool previous transaction evidence unavailable');
-        const raw=await adapter.getRawTransaction(network,txid);sourceCache.set(txid,raw);return raw;
+        const raw=await adapter.getRawTransaction(txid);sourceCache.set(txid,raw);return raw;
       };
       const paymentOwner=await this.legacyPaymentOwner(session);
       const channelId=params.channelId;
@@ -5750,7 +5680,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       const network = record.assetId === "bsv-testnet" ? "test" : "main";
       let observed: string | null = null;
       try {
-        observed = await p2pkhService.getRawTransaction(network, txid);
+        observed = await p2pkhService.getRawTransaction(txid);
       } catch {
         continue;
       }
@@ -5892,14 +5822,16 @@ export class ProtocolServiceImpl implements ProtocolService {
       const fee = record.totalInSatoshis - totalOut;
       if (fee < 0) throw new Error(`Fee pool delivery ${record.id} spends more than its inputs`);
 
+      const wallet = bindWalletIdentity(this.deps.walletState);
+      if (wallet.identity.publicKeyHex !== record.ownerPublicKeyHex || wallet.identity.bsvNetwork !== (record.assetId === "bsv-testnet" ? "test" : "main")) throw new Error("Artifact responsibility belongs to another wallet");
+      const verifiedInputs = await artifactInputs(record.rawTxHex);
+      wallet.assertActive();
       const occupied = await occupy({
-        ownerPublicKeyHex: record.ownerPublicKeyHex,
-        network: record.assetId === "bsv-testnet" ? "test" : "main",
         artifactId: record.id,
         // 形状以已签字节为准：manager 冻结的是交易骨架（不含 scriptSig）。
         unsignedTxHex: record.rawTxHex,
         signedTxHex: record.rawTxHex,
-        inputs: (await artifactInputs(record.rawTxHex)).map((row) => ({ txid: row.txid, vout: row.vout, value: String(row.value), scriptHex: row.scriptHex })),
+        inputs: verifiedInputs.map((row) => ({ txid: row.txid, vout: row.vout, value: String(row.value), scriptHex: row.scriptHex })),
         outputs: outputs.map((output) => ({ scriptHex: output.scriptHex, value: String(output.value) })),
         businessAmountSatoshis: String(record.totalInSatoshis),
         // 不再按实际消耗反推费率（Q05：3 sats / 192 bytes 曾被反推成
@@ -5910,6 +5842,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         feeCapSats: String(fee),
         protocolKind: record.action === "close_and_recreate" ? "close" : "state",
       });
+      wallet.assertActive();
       record.managerAllocationId = occupied.allocationId;
     }
     for (const record of records) {
@@ -5963,10 +5896,19 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 关键（002 硬切换）：UTXO 选币按 owner 走，**不**读全局 active key。
     // plugin-p2pkh 内部 `listUtxos` filter 已支持 `ownerPublicKeyHex`。
     // 施工单 2026-09-18 001：assetId 由调用方按公开资产映射后传入。
-    const utxos = await p2pkhService.listUtxos({
-      assetId,
-      ownerPublicKeyHex
-    });
+    const captured = this.deps.walletState.snapshot();
+    const assertIdentity = () => {
+      const now = this.deps.walletState.snapshot();
+      if (now.sessionEpoch !== captured.sessionEpoch || !this.requireCurrentOwnerKey(ownerPublicKeyHex)
+        || now.activeKeyIdentity?.bsvNetwork !== (assetId === "bsvtest" ? "test" : "main")) {
+        throw localFailure("session_owner_mismatch", "Wallet identity revoked during UTXO lookup");
+      }
+    };
+    assertIdentity();
+    const projection = await p2pkhService.getAvailableUtxos();
+    assertIdentity();
+    if (!projection.available) throw localFailure("internal_error", "Wallet UTXO projection is unavailable");
+    const utxos = projection.utxos;
     if (utxos.length === 0) {
       throw localFailure(
         "internal_error",
@@ -6524,10 +6466,9 @@ export class ProtocolServiceImpl implements ProtocolService {
     const token = ++this.historyLoadToken;
     const task = (async () => {
       try {
-        const [list, originRec, pools] = await Promise.all([
+        const [list, originRec] = await Promise.all([
           storageRepository.listCommandsByOrigin(origin),
-          storageRepository.getOrigin(origin),
-          storageRepository.listFeePoolsByOrigin(origin)
+          storageRepository.getOrigin(origin)
         ]);
         // 批次隔离：旧 token 晚到 → 丢弃结果。
         if (token !== this.historyLoadToken) {
@@ -6562,7 +6503,6 @@ export class ProtocolServiceImpl implements ProtocolService {
             Array.from(mergedById.values())
           );
           this.historyAvailableFlag = true;
-          void pools;
           this.emitFeed();
         }
       } catch (err) {
@@ -6928,7 +6868,9 @@ function paymentResultFromRecord(record: ProtocolConnectPaymentRecord): PaymentP
     ...(record.feeSatoshis === undefined ? {} : { feeSatoshis: record.feeSatoshis }),
     ...(record.changeSatoshis === undefined ? {} : { changeSatoshis: record.changeSatoshis }),
     ...(record.approval === undefined ? {} : { approval: record.approval }),
-    ...(record.reason === undefined ? {} : { reason: record.reason }),
+    // Keep detailed failures in the local responsibility ledger, never disclose
+    // wallet balances, input values or private backend diagnostics to an App.
+    ...(record.reason === undefined ? {} : { reason: record.reason === "cancelled" || record.reason === "input-conflict" ? record.reason : "payment-unresolved" }),
     ...(record.release ? { release: { ...record.release } } : {}),
   };
 }

@@ -13,7 +13,6 @@
 
 import { ripemd160 } from "@noble/hashes/ripemd160";
 import { sha256 } from "@noble/hashes/sha256";
-import { getPublicKey } from "@noble/secp256k1";
 import type { P2pkhUtxo, UtxoAllocation } from "./p2pkhContracts.js";
 
 export interface TxInput {
@@ -36,47 +35,6 @@ export interface UnsignedTx {
 }
 
 const SIGHASH_ALL_FORKID = 0x41;
-
-/**
- * 从公钥 hex 派生 P2PKH 压缩公钥与地址。
- *
- * 设计缘由：生产路径只应传入 publicKeyHex；这里兼容 32 字节输入仅用于
- * 现有测试与少量旧调用的平滑过渡。
- */
-export function deriveP2pkhAddress(keyHex: string, network: "main" | "test" = "main"): {
-  publicKeyHex: string;
-  address: string;
-} {
-  const key = hexToBytes(keyHex);
-  const pub = key.length === 32 ? getPublicKey(key, true) : key;
-  if (pub.length !== 33) throw new Error("Public key must be 33 bytes (compressed)");
-  const sha = sha256(pub);
-  const ripe = ripemd160(sha);
-  const versionByte = network === "main" ? 0x00 : 0x6f;
-  const payload = concatBytes(new Uint8Array([versionByte]), ripe);
-  const checksum = sha256(sha256(payload)).slice(0, 4);
-  return {
-    publicKeyHex: bytesToHex(pub),
-    address: base58Encode(concatBytes(payload, checksum))
-  };
-}
-
-/**
- * 从压缩公钥 hex 派生 P2PKH 地址。
- *
- * 设计缘由：联系人与消息侧只提供 publicKeyHex，P2PKH 自己负责把身份
- * 投影成链上地址，不把地址派生逻辑塞回 contacts。
- */
-export function publicKeyHexToP2pkhAddress(publicKeyHex: string, network: "main" | "test" = "main"): string {
-  const pub = hexToBytes(publicKeyHex);
-  if (pub.length !== 33) throw new Error("Public key must be 33 bytes (compressed)");
-  const sha = sha256(pub);
-  const ripe = ripemd160(sha);
-  const versionByte = network === "main" ? 0x00 : 0x6f;
-  const payload = concatBytes(new Uint8Array([versionByte]), ripe);
-  const checksum = sha256(sha256(payload)).slice(0, 4);
-  return base58Encode(concatBytes(payload, checksum));
-}
 
 /**
  * 计算链上 P2PKH 锁脚本所需的 HASH160(compressed public key),即

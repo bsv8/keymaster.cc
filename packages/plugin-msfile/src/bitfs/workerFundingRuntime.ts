@@ -1,3 +1,4 @@
+import { requireWocNetwork } from "@keymaster/contracts";
 import type { BorrowedModuleFileStore, ProtocolSpendService, ProtocolSpendInput, WocService } from "@keymaster/contracts";
 import { createBitfsFundingLedger, recoverBitfsFundingSplits, type BitfsFundingLedger, type BitfsFundingTransactionView } from "./funding.js";
 import { createBitfsTransactionJournal, type BitfsTransactionJournal, type BitfsChainPort } from "./broadcast.js";
@@ -9,7 +10,7 @@ export interface WorkerFundingDependencies {
   session(): { vaultStatus: string; activePublicKeyHex?: string; sessionEpoch: string };
   journalStore(): BorrowedModuleFileStore;
   walletView(input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<import("@keymaster/contracts").P2pkhUtxoSnapshotResult>;
-  protocol(): Promise<{ spend: ProtocolSpendService; planFunding(input: FundingPlan): Promise<{ selected: ProtocolSpendInput[]; totalInputSatoshis: number }> }>;
+  protocol(): Promise<{ readonly identity: Readonly<import("@keymaster/contracts").NetworkIdentity>; spend: ProtocolSpendService; planFunding(input: import("@keymaster/contracts").ProtocolFundingPlanRequest): Promise<{ selected: ProtocolSpendInput[]; totalInputSatoshis: number }> }>;
   submitWalletExact(input: { ownerPublicKeyHex: string; network: "main" | "test"; txid: string; rawTxHex: string }): Promise<{ outcome: "accepted" | "already-known" }>;
   ownsWalletExact(input: { ownerPublicKeyHex: string; network: "main" | "test"; txid: string; rawTxHex: string }): Promise<boolean>;
   previousTransaction(input: { ownerPublicKeyHex: string; network: "main" | "test"; txid: string }): Promise<string | null>;
@@ -52,9 +53,18 @@ export function createWorkerFundingRuntime(deps: WorkerFundingDependencies) {
     };
   }
   async function releasePreparedSubmission(input: { ownerPublicKeyHex: string; network: "main" | "test"; txid: string; submissionId: string }) {
-    await (await deps.protocol()).spend.releasePreparedSubmission!(input);
+    const service = await deps.protocol();
+    const currentSession = deps.session();
+    if (currentSession.vaultStatus !== "unlocked" || currentSession.activePublicKeyHex?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()
+      || service.identity.publicKeyHex.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase() || service.identity.bsvNetwork !== input.network) throw new Error("BitFS submission ownership changed");
+    await service.spend.releasePreparedSubmission!({ txid: input.txid, submissionId: input.submissionId });
   }
-  async function planFunding(input: FundingPlan) { return (await deps.protocol()).planFunding(input); }
+  async function planFunding(input: FundingPlan) {
+    const service = await deps.protocol();
+    if (service.identity.publicKeyHex.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase() || service.identity.bsvNetwork !== input.network) throw new Error("BitFS funding ownership changed");
+    const { ownerPublicKeyHex: _owner, network: _network, ...plan } = input;
+    return service.planFunding(plan);
+  }
 
   /** Wallet-input transactions dispatch only through the manager. Pool-only
    * transactions stay in BitFS and do not incur another wallet approval. */
@@ -78,7 +88,7 @@ export function createWorkerFundingRuntime(deps: WorkerFundingDependencies) {
           check();
           const retained = managerParent ? undefined : await transactions.getTransaction(txid!);
           if (!managerParent && !retained && !woc.getRawTransaction) throw new Error("BitFS previous transaction reader unavailable");
-          const raw = managerParent ?? (retained ? hex(retained) : await woc.getRawTransaction!(network, txid!));
+          const raw = managerParent ?? (retained ? hex(retained) : await requireWocNetwork(woc, network).getRawTransaction!(txid!));
           check();
           const previous = deps.parseTransaction(raw, txid);
           const output = previous.outputs.find(item => item.vout === Number(vout));

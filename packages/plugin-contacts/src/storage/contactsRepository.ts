@@ -6,7 +6,7 @@
 //   - 更新/删除：只动当前这一个文件；
 //   - 损坏文件跳过并提示，不影响其它联系人；没有索引、没有跨文件事务。
 
-import type { BorrowedOwnerFileStore, Contact, ContactInput } from "@keymaster/contracts";
+import type { BorrowedModuleFileStore, Contact, ContactInput } from "@keymaster/contracts";
 import { CONTACT_FILE_FORMAT, CONTACT_FILE_LIMITS, CONTACT_FILE_VERSION } from "@keymaster/contracts";
 
 const PUBLIC_KEY_PATTERN = /^(02|03)[0-9a-f]{64}$/u;
@@ -89,7 +89,7 @@ export function serializeContactFile(contact: Contact): Uint8Array {
 }
 
 /** Repository 只接收 Host 已绑定的 Contacts owner 文件句柄。 */
-export function createContactsRepository(files: BorrowedOwnerFileStore) {
+export function createContactsRepository(files: BorrowedModuleFileStore) {
   async function getContact(publicKeyHex: string): Promise<Contact | undefined> {
     const normalized = publicKeyHex.toLowerCase();
     if (!PUBLIC_KEY_PATTERN.test(normalized)) return undefined;
@@ -121,7 +121,7 @@ export function createContactsRepository(files: BorrowedOwnerFileStore) {
   }
 
   return {
-    getStore(): BorrowedOwnerFileStore { return files; },
+    getStore(): BorrowedModuleFileStore { return files; },
     close(): void { /* Host owns the borrowed file handle. */ },
     async list(): Promise<ContactsListResult> { return listAll(); },
     async get(publicKeyHex: string): Promise<Contact | undefined> { return getContact(publicKeyHex); },

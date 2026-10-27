@@ -5,7 +5,7 @@
 //   - 不管理通话状态机；
 //   - 不持久化临时协商态，只记录终态。
 
-import type { BorrowedKeyValueStore, BorrowedOwnerFileStore, VaultWalletState } from "@keymaster/contracts";
+import type { BorrowedKeyValueStore, BorrowedModuleFileStore, VaultWalletState } from "@keymaster/contracts";
 import {
   CALL_PARTITION,
   TRANSFER_PARTITION,
@@ -33,7 +33,7 @@ export function createWebrtcHistoryService(input: {
   walletState: VaultWalletState;
   ownerPublicKeyHex: () => string | null;
   storage: BorrowedKeyValueStore;
-  files: BorrowedOwnerFileStore;
+  files: BorrowedModuleFileStore;
 }): WebrtcHistoryService {
   if (!input.storage) throw new Error("WebRTC history central storage binding is required");
   const repository = createWebrtcHistoryRepository(input.storage);

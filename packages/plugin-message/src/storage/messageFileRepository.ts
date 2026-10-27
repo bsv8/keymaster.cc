@@ -7,7 +7,7 @@
 // 文件名是内容身份；raw 允许重复写入（同名即同内容），时间索引只追加。
 // 仓库不做删除、不做索引重建。
 
-import type { BorrowedOwnerFileStore } from "@keymaster/contracts";
+import type { BorrowedModuleFileStore } from "@keymaster/contracts";
 import { masterSeedHashHex } from "./masterSeed.js";
 
 const INDEX_FORMAT = "keymaster.message-index";
@@ -88,7 +88,7 @@ function parseIndexName(fileName: string): MessageIndexName | undefined {
 }
 
 async function listAll(
-  files: BorrowedOwnerFileStore,
+  files: BorrowedModuleFileStore,
   prefix: string,
 ): Promise<Array<{ path: string; lastModified?: string }>> {
   const result: Array<{ path: string; lastModified?: string }> = [];
@@ -103,7 +103,7 @@ async function listAll(
 }
 
 /** 用只读文件句柄构造消息仓库。 */
-export function createMessageFileRepository(files: BorrowedOwnerFileStore): MessageFileRepository {
+export function createMessageFileRepository(files: BorrowedModuleFileStore): MessageFileRepository {
   return {
     async putSentRaw(peerPublicKeyHex, bytes) {
       const peer = assertPeer(peerPublicKeyHex);

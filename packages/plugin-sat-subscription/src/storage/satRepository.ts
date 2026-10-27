@@ -5,7 +5,7 @@
 // setting.json。旧的 `.keymaster` K-V snapshot 不再读取、迁移或删除。
 
 import type {
-  BorrowedOwnerFileStore,
+  BorrowedModuleFileStore,
   SatOwnerSupplierSettingsV1,
   SatSupplierConfigV1,
 } from "@keymaster/contracts";
@@ -203,7 +203,7 @@ function serializeSetting(value: SatSubscriptionSettingFileV1): Uint8Array {
 
 /** 创建绑定当前 owner 文件根的 SatSubscription 设置仓储。 */
 export function createSatSubscriptionRepository(
-  files: BorrowedOwnerFileStore,
+  files: BorrowedModuleFileStore,
   ownerPublicKeyHex: string,
 ): SatSubscriptionRepository {
   return new SatSubscriptionRepository(files, ownerPublicKeyHex);
@@ -213,7 +213,7 @@ export class SatSubscriptionRepository {
   private lastSerializedSetting: string | null | undefined;
 
   constructor(
-    readonly files: BorrowedOwnerFileStore,
+    readonly files: BorrowedModuleFileStore,
     readonly ownerPublicKeyHex: string,
   ) {}
 

@@ -20,7 +20,6 @@ import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 //   - 页面路由固定归本插件：
 //       * `/messages`                —— 会话列表
 //       * `/message/:publicKeyHex`    —— 会话详情（主承载路由）
-//       * `/messages/:publicKeyHex`   —— 会话详情别名，兼容旧口头路径
 //     **不**注册传输系统管理页或远端消息管理页。
 
 import type {
@@ -482,8 +481,6 @@ const messagePlatformPluginDefinition = {
     pages.view.register({ kind: "page", id: "message.page", path: "/messages",
       label: { key: "message.page.title", fallback: "Messages" }, render: () => createElement(List) });
     pages.view.register({ kind: "page", id: "message.detail", path: "/message/:publicKeyHex",
-      label: { key: "message.page.detail.title", fallback: "Conversation" }, render: location => createElement(Detail, { location }) });
-    pages.view.register({ kind: "page", id: "message.detail.alias", path: "/messages/:publicKeyHex",
       label: { key: "message.page.detail.title", fallback: "Conversation" }, render: location => createElement(Detail, { location }) });
     const breadcrumbs = ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY);
     const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);

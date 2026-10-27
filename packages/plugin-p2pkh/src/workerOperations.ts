@@ -1,3 +1,4 @@
+import { requireWocNetwork } from "@keymaster/contracts";
 import { defineWorkerRequestRoute, parseP2pkhProtocolCommand } from "@keymaster/contracts";
 import type { P2pkhProtocolCommandResult } from "@keymaster/contracts";
 import type {
@@ -214,7 +215,7 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
             if (!query) throw new Error("P2PKH spent-output reader is unavailable");
             await Promise.all(outpointKeys.map(async (key: string) => {
               const [txid, voutText] = key.split(":");
-              if (await query.getSpentOutput(network, txid!, Number(voutText)) !== null) throw new Error(`P2PKH input is already spent: ${key}`);
+              if (await requireWocNetwork(query, network).getSpentOutput(txid!, Number(voutText)) !== null) throw new Error(`P2PKH input is already spent: ${key}`);
             }));
             captured.assertFresh();
           },
@@ -287,11 +288,11 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
       captured.assertFresh();
       let result: P2pkhProtocolCommandResult;
       switch (command.type) {
-        case "prepare": case "presign": result = { type: command.type, value: await service.spend[command.type](command.input) }; break;
-        case "submit": result = { type: "submit", value: await service.spend.submit(command.input) }; break;
-        case "release": await service.spend.releasePrepared!(command.input); result = { type: "release", value: { released: true } }; break;
-        case "release-submission": await service.spend.releasePreparedSubmission!(command.input); result = { type: "release-submission", value: { released: true } }; break;
-        case "funding-plan": result = { type: "funding-plan", value: await service.planFunding(command.input) }; break;
+        case "prepare": case "presign": result = { type: command.type, value: await service.executor[command.type](command.input) }; break;
+        case "submit": result = { type: "submit", value: await service.executor.submit(command.input) }; break;
+        case "release": await service.executor.releasePrepared!(command.input); result = { type: "release", value: { released: true } }; break;
+        case "release-submission": await service.executor.releasePreparedSubmission(command.input); result = { type: "release-submission", value: { released: true } }; break;
+        case "funding-plan": result = { type: "funding-plan", value: await service.planFundingCommand(command.input) }; break;
       }
       captured.assertFresh();
       if (input.network !== ports.network()) throw new Error("Protocol RPC network changed");
@@ -308,7 +309,10 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
       captured.assertFresh();
       const service = await ports.domain.transfer.ensure();
       captured.assertFresh();
-      const preview = await service.prepareTransfer(request.input as Parameters<typeof service.prepareTransfer>[0]);
+      if (request.input.network !== ports.network()) throw new Error("Transfer RPC network does not match the wallet");
+      const { ownerPublicKeyHex: _owner, network: _network, assetId: _asset, ...transferRequest } = request.input;
+      if (_asset !== (ports.network() === "test" ? "bsvtest" : "bsv")) throw new Error("Transfer RPC identity mismatch");
+      const preview = await service.prepareTransfer(transferRequest);
       captured.assertFresh();
       ports.changed({ type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.input.ownerPublicKeyHex, kinds: ["utxo", "balance"] });
       return { requestId, sessionEpoch: epoch(), ack: { status: "ok" }, operationResult: preview };

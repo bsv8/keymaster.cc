@@ -107,18 +107,3 @@ export interface ModuleFileStore {
 
 /** 插件/Host 借用的文件句柄；生命周期由 Host 拥有。 */
 export type BorrowedModuleFileStore = Omit<ModuleFileStore, "close">;
-
-/** @deprecated 使用 {@link ModuleFileStore}。 */
-export type OwnerFileStore = ModuleFileStore;
-/** @deprecated 使用 {@link BorrowedModuleFileStore}。 */
-export type BorrowedOwnerFileStore = BorrowedModuleFileStore;
-/** @deprecated 使用 {@link ModuleFileListEntry}。 */
-export type OwnerFileListEntry = ModuleFileListEntry;
-/** @deprecated 使用 {@link ModuleFileListPage}。 */
-export type OwnerFileListPage = ModuleFileListPage;
-/** @deprecated 使用 {@link ModuleFileObject}。 */
-export type OwnerFileObject = ModuleFileObject;
-/** @deprecated 使用 {@link MODULE_FILE_LIST_DEFAULT_LIMIT}。 */
-export const OWNER_FILE_LIST_DEFAULT_LIMIT = MODULE_FILE_LIST_DEFAULT_LIMIT;
-/** @deprecated 使用 {@link MODULE_FILE_LIST_MAX_LIMIT}。 */
-export const OWNER_FILE_LIST_MAX_LIMIT = MODULE_FILE_LIST_MAX_LIMIT;

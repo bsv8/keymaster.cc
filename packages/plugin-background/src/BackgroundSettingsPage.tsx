@@ -1,4 +1,4 @@
-import { emptyChainFeeSnapshots, type ChainFeeSnapshots } from "@keymaster/contracts";
+import type { ChainFeeSnapshot } from "@keymaster/contracts";
 import { useBackgroundResources } from "./BackgroundResourceContext.js";
 // packages/plugin-background/src/BackgroundSettingsPage.tsx
 // 智能调度设置页：余额快照的智能刷新说明 + 各后台任务的同步管理。
@@ -452,20 +452,15 @@ function CustomIntervalEditor({
  * `chain.height` 主题；本页通过 Resource Store 订阅，等价于 ChainHeightReader
  * 的订阅/退订，因此后台同步任务每成功一次，本区块就自动重渲染一次。
  */
-const EMPTY_CHAIN_FEES = emptyChainFeeSnapshots();
 function ChainFeeReadout() {
   const { t } = usePluginI18n();
   const reader = useBackgroundResources();
-  const empty = EMPTY_CHAIN_FEES;
-  const fees = useOptionalResourceSelector<ChainFeeSnapshots, ChainFeeSnapshots>(reader, "background.chain-fees", [], value => value.data ?? empty, empty);
+  const fee = useOptionalResourceSelector<ChainFeeSnapshot | null, ChainFeeSnapshot | null>(reader, "background.chain-fees", [], value => value.data ?? null, null);
   return <section className="background-settings__section"><h4>{t("background.settings.feeReadout")}</h4>
-    {(["main", "test"] as const).map(network => {
-      const fee = fees[network];
-      return <div key={network}><p>{network === "main" ? "Mainnet" : "Testnet"}: {fee.effectiveSatoshisPerKb} · {t(`background.settings.feeSource.${fee.source}`)}</p>
-        <p>WoC: {fee.recommendation?.fee ?? "—"}{fee.updatedAtMs === undefined ? "" : ` · ${new Date(fee.updatedAtMs).toLocaleString()}`}</p>
-        {fee.error ? <p role="status">{t("background.settings.feeRefreshFailed")}</p> : null}
-      </div>;
-    })}
+    {fee ? <div><p>{fee.network === "main" ? "Mainnet" : "Testnet"}: {fee.effectiveSatoshisPerKb} · {t(`background.settings.feeSource.${fee.source}`)}</p>
+      <p>WoC: {fee.recommendation?.fee ?? "—"}{fee.updatedAtMs === undefined ? "" : ` · ${new Date(fee.updatedAtMs).toLocaleString()}`}</p>
+      {fee.error ? <p role="status">{t("background.settings.feeRefreshFailed")}</p> : null}
+    </div> : <p>—</p>}
   </section>;
 }
 
@@ -473,12 +468,12 @@ function ChainHeightReadout() {
   const { t } = usePluginI18n();
   const resources = useBackgroundResources();
   // 资源未注册时（例如 WOC 单元尚未装配）回落为空快照，不抛错。
-  const chainHeight = useOptionalResourceSelector<ChainHeightSnapshot, ChainHeightSnapshot>(
+  const chainHeight = useOptionalResourceSelector<ChainHeightSnapshot | null, ChainHeightSnapshot | null>(
     resources,
     "background.chain-height",
     [],
-    (snapshot) => snapshot.data ?? emptyChainHeightSnapshot(),
-    emptyChainHeightSnapshot()
+    (snapshot) => snapshot.data ?? null,
+    null
   );
   return (
     <section className="background-settings__section">
@@ -486,9 +481,9 @@ function ChainHeightReadout() {
         {t("background.settings.chainHeightTitle", { defaultValue: "当前区块链高度" })}
       </h4>
       <p className="background-settings__hint">
-        {chainHeight.available
+        {chainHeight?.available
           ? t("background.settings.chainHeightValue", {
-              defaultValue: "主网高度 {{height}}",
+              defaultValue: "区块高度 {{height}}", network: chainHeight.network,
               height: chainHeight.height.toLocaleString()
             })
           : t("background.settings.chainHeightPending", { defaultValue: "尚未取得节点高度：等待后台同步任务完成第一次读取。" })}

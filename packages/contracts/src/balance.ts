@@ -7,7 +7,8 @@ import type { P2pkhBalance } from "./balanceTypes.js";
 export interface GlobalBalanceSnapshot {
   /** 小写压缩公钥；空串表示没有可用的解锁身份。 */
   publicKeyHex: string;
-  bsvNetwork: BsvNetwork;
+  /** 身份不可用时缺省，绝不以 main 冒充已初始化网络。 */
+  bsvNetwork?: BsvNetwork;
   /** 当前身份的 manager 可用投影，available=false 表示未知而非零。 */
   balance: P2pkhBalance;
   /** 本实例内容修订号，不是资金锁或链上版本。 */
@@ -22,7 +23,7 @@ export interface BalanceBroadcaster {
 }
 
 export function emptyGlobalBalanceSnapshot(): GlobalBalanceSnapshot {
-  return { publicKeyHex: "", bsvNetwork: "main", balance: { total: 0, available: false }, revision: 0 };
+  return { publicKeyHex: "", balance: { total: 0, available: false }, revision: 0 };
 }
 
 export const BALANCE_BROADCAST_CAPABILITY = defineCapability<BalanceBroadcaster>({

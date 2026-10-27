@@ -1,6 +1,6 @@
 // 内核快照 + 命令 outbox 的原子持久化；沿用 bitfs-journal 的条件写（CAS）约定。
 
-import type { BorrowedOwnerFileStore } from "@keymaster/contracts";
+import type { BorrowedModuleFileStore } from "@keymaster/contracts";
 import type { Command, State } from "keymaster.cc-download-scheduler";
 
 const FORMAT = "keymaster.scheduler-host";
@@ -75,7 +75,7 @@ function validate(raw: unknown, owner: string, network: string, taskId: string):
 }
 
 export function createSchedulerSnapshotStore(input: {
-  store: BorrowedOwnerFileStore;
+  store: BorrowedModuleFileStore;
   ownerPublicKeyHex: string;
   network: string;
   taskId: string;

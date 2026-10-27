@@ -171,6 +171,9 @@ export interface P2pkhArtifactOccupyInput {
   readonly protocolKind: "refund" | "close" | "fund" | "state";
 }
 
+/** 当前钱包的业务请求；身份仅在受信边界自动补入持久意图。 */
+export type P2pkhArtifactRequest = Omit<P2pkhArtifactOccupyInput, "ownerPublicKeyHex" | "network">;
+
 /** 外露 artifact 的占用结果：manager 的 allocation 与交易身份。 */
 export interface P2pkhArtifactOccupyResult {
   readonly allocationId: string;

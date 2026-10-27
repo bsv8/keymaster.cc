@@ -44,8 +44,8 @@ export interface ProtectedOutpointProvider {
   dispose?(): void;
 }
 
-/** 受保护 outpoint registry。 */
-export interface ProtectedOutpointRegistry {
+/** Wallet-owned protection store; explicit coordinates are responsibility evidence. */
+export interface ProtectedOutpointStore {
   register(provider: ProtectedOutpointProvider): void;
   unregister(id: string): void;
   list(filter?: { publicKeyHex?: string; network?: BsvNetwork }): ProtectedOutpoint[];
@@ -59,6 +59,13 @@ export interface ProtectedOutpointRegistry {
   }): Promise<{ claimIds: string[] }>;
   releaseClaims(claimIds: string[]): Promise<void>;
   _ids(): string[];
+}
+
+/** Business view bound to the sole wallet; callers cannot select another wallet. */
+export interface ProtectedOutpointRegistry extends Omit<ProtectedOutpointStore, "list" | "isProtected" | "claimProtectedInputs" | "_ids"> {
+  list(): ProtectedOutpoint[];
+  isProtected(input: { txid: string; vout: number }): boolean;
+  claimProtectedInputs(input: { ownerPluginId: string; inputs: Array<{ txid: string; vout: number }> }): Promise<{ claimIds: string[] }>;
 }
 
 /** capability key。 */

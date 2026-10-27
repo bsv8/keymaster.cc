@@ -6,7 +6,6 @@
 //   - 消息历史只存本地 key-scoped K-V，不拉取远端历史；
 //   - owner、签名、加密、供应商选择和物理订阅全部由 Coordinator 持有；
 //   - 页面 = `/messages`（会话列表）与 `/message/:publicKeyHex`（会话详情主路由）；
-//   - 同时兼容 `/messages/:publicKeyHex` 作为会话详情别名；
 //   - **不**展示传输连接态、在线查询或远端全库统计。
 //
 // 样式入口：本插件自带 `src/styles.css`；装配层在

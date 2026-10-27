@@ -4,8 +4,7 @@ import { defineCapability } from "webloom-framework";
 // 设计缘由：
 //   - 协议插件需要的是“受控签名 + 广播 + txid 归一化”，不是 P2PKH
 //     固化表单。
-//   - 这里把输入/输出计划抽成最小公共协议，供 BSV-21 / 1Sat Ordinals
-//     等插件复用。
+//   - 输入/输出计划由协议插件提交，钱包归属和网络由权威身份绑定。
 
 import type { BsvNetwork } from "./vault.js";
 import type { P2pkhUtxoBinding } from "./bsvP2pkhProviders.js";
@@ -104,10 +103,6 @@ export interface ProtocolSpendService {
   releasePrepared?(preview: ProtocolSpendPreview): Promise<void>;
   /** 按持久化提交编号释放已明确未派发的预签名；用于跨进程恢复。 */
   releasePreparedSubmission?(input: {
-    /** 提交所属的当前 Key。 */
-    ownerPublicKeyHex: string;
-    /** 交易所属网络。 */
-    network: BsvNetwork;
     /** 必须与持久化预签名记录一致的 canonical txid。 */
     txid: string;
     /** P2PKH 持久化的 protocol submission ID。 */
@@ -116,9 +111,7 @@ export interface ProtocolSpendService {
 }
 
 export interface ProtocolSpendPrepareInput {
-  ownerPublicKeyHex: string;
   requestingPluginId?: string;
-  network: BsvNetwork;
   inputs: ProtocolSpendInput[];
   outputs: ProtocolSpendOutput[];
   feeRateSatoshisPerKb: number;
@@ -173,13 +166,11 @@ export interface ProtocolSpendNoChangeRule {
  * 回**同一个**提交而不是重建，所以观测入口单独发布成一个窄能力。
  *
  * 状态取值与 `P2pkhProtocolSpendSubmissionStatus` 对齐。调用方必须按
- * `(ownerPublicKeyHex, network, txid, submissionId)` 四元组查询：只按 txid 查会让
+ * `(txid, submissionId)` 查询并校验记录的原始钱包归属：只按 txid 查会让
  * 同一笔交易的不同提交互相覆盖。
  */
 export interface ProtocolSubmissionObserver {
   observeProtocolSubmission(input: {
-    ownerPublicKeyHex: string;
-    network: BsvNetwork;
     txid: string;
     submissionId: string;
   }): Promise<ProtocolSubmissionObservation>;
@@ -220,10 +211,7 @@ export interface ProtocolFundingService {
    * 返回恢复条数与不可读记录数：存在不可读记录时调用方应当拒绝准备新资金，
    * 因为那笔资金的 UTXO 可能已经在链上。
    */
-  restoreProtections?(input: {
-    ownerPublicKeyHex: string;
-    network: BsvNetwork;
-  }): Promise<{ restored: number; readonly unreadable: readonly string[] }>;
+  restoreProtections?(): Promise<{ restored: number; readonly unreadable: readonly string[] }>;
   /**
    * 按 outpoint 核对一笔已存在的专用资金，并在复用前恢复它的保护登记。
    *
@@ -231,8 +219,6 @@ export interface ProtocolFundingService {
    * 链上状态（已花费的资金不能被复用）并重申保护。
    */
   reconcileDedicatedFunding?(input: {
-    ownerPublicKeyHex: string;
-    network: BsvNetwork;
     fundingId: string;
     txid: string;
     vout: number;
@@ -257,16 +243,12 @@ export interface ProtocolFundingService {
   estimateFundingMinerFee?(input: { requiredSatoshis: string; feeRateSatoshisPerKb: number }): string;
   /** 按 outpoint 查这笔专用资金的链上状态。 */
   observeDedicatedFunding(input: {
-    ownerPublicKeyHex: string;
-    network: BsvNetwork;
     fundingId: string;
     txid: string;
     vout: number;
   }): Promise<ProtocolDedicatedFundingState>;
   /** 明确未派发时才可释放该 UTXO 的占用。 */
   releaseDedicatedFunding?(input: {
-    ownerPublicKeyHex: string;
-    network: BsvNetwork;
     fundingId: string;
     submissionId: string;
   }): Promise<void>;
@@ -280,8 +262,6 @@ export interface ProtocolFundingService {
    * 因此实现要求调用方先确认记录确实不再被引用。
    */
   recoverDedicatedFunding?(input: {
-    ownerPublicKeyHex: string;
-    network: BsvNetwork;
     fundingId: string;
     feeRateSatoshisPerKb: number;
     /**
@@ -303,9 +283,13 @@ export interface ProtocolFundingService {
   }>;
 }
 
+export interface ProtocolFundingPlanRequest {
+  amountSatoshis: number;
+  feeRateSatoshisPerKb: number;
+  outputs?: Array<{ scriptHex: string; value: string }>;
+}
+
 export interface ProtocolFundingRequest {
-  readonly ownerPublicKeyHex: string;
-  readonly network: BsvNetwork;
   /** 调用方侧的稳定编号；同一个编号只允许有一笔专用资金。 */
   readonly fundingId: string;
   /** 专用 UTXO 至少要有这么多聪，够覆盖协议的固定输出与矿工费预算。 */

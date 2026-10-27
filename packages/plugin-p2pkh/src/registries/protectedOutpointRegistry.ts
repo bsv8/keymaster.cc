@@ -5,7 +5,7 @@
 //   - plain funding 选币前查询此 registry，排除 token / ordinal / 其它协议资产；
 //   - registry 只负责聚合和查询，不解释协议细节。
 
-import type { BsvNetwork, ProtectedOutpoint, ProtectedOutpointProvider, ProtectedOutpointRegistry as IProtectedOutpointRegistry } from "@keymaster/contracts";
+import type { BsvNetwork, ProtectedOutpoint, ProtectedOutpointProvider, ProtectedOutpointStore as IProtectedOutpointRegistry } from "@keymaster/contracts";
 
 function sameOutpoint(a: ProtectedOutpoint, b: { txid: string; vout: number; network: BsvNetwork; publicKeyHex?: string }): boolean {
   return a.txid === b.txid && a.vout === b.vout && a.network === b.network && (a.publicKeyHex === undefined || b.publicKeyHex === undefined || a.publicKeyHex === b.publicKeyHex);

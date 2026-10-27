@@ -1,5 +1,5 @@
 // packages/plugin-protocol/src/OriginSettingsTray.tsx
-// popup 顶栏配置面板：identity/cipher 授权、费用池初始大小和确认超时。
+// popup 顶栏配置面板：identity/cipher 授权和确认超时。
 // 付款额度只在钱包核心渠道设置，不能再叠加一套 origin 支付授权。
 //
 // 设计缘由（施工单 002 硬切换：即时生效 + 样式补全；施工单 003：confirmTimeoutSeconds；
@@ -32,7 +32,7 @@ import { usePluginCapability } from "webloom-framework/react";
 import { usePluginI18n } from "@keymaster/runtime";
 import {
   PROTOCOL_SERVICE_CAPABILITY,
-  type ProtocolOriginSettingsRecord,
+  type ProtocolOriginSettings,
   type ProtocolService
 } from "@keymaster/contracts";
 
@@ -41,39 +41,20 @@ interface OriginSettingsTrayInlineProps {
   onClose: () => void;
 }
 
-function defaultOriginSettings(origin: string): ProtocolOriginSettingsRecord {
+function defaultOriginSettings(origin: string): ProtocolOriginSettings {
   return {
     origin,
     identityAutoApproveEnabled: false,
     cipherAutoApproveEnabled: false,
-    feePoolDefaultFundSatoshis: 0,
     confirmTimeoutSeconds: 30,
     updatedAt: Date.now()
   };
 }
 
 /** 数字字段名集合。每个字段单独维护一个本地字符串编辑态。 */
-type NumberFieldKey =
-  | "feePoolDefaultFundSatoshis"
-  | "confirmTimeoutSeconds";
+type NumberFieldKey = "confirmTimeoutSeconds";
 
 type NumberEdits = Partial<Record<NumberFieldKey, string>>;
-
-/**
- * 数字输入规范化（施工单 002 硬切换）：
- *   - 空串 / 非整数 / 负数 → 0；
- *   - 合法非负整数 → 该整数。
- * 返回 `{ display, value }`：display 是回填 input 的字符串，value 是落库数字。
- */
-function normalizeNumber(raw: string): { display: string; value: number } {
-  const trimmed = raw.trim();
-  if (trimmed === "") return { display: "0", value: 0 };
-  const n = Number(trimmed);
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
-    return { display: "0", value: 0 };
-  }
-  return { display: String(n), value: n };
-}
 
 /**
  * `confirmTimeoutSeconds` 规范化（施工单 003 硬切换）：
@@ -99,7 +80,7 @@ export function OriginSettingsTrayInline({ origin, onClose }: OriginSettingsTray
    * `record` 是当前已持久化真值。所有"显示真值"与"失败回滚目标"都走它。
    * `null` 表示初始 getOriginSettings 还没回来。
    */
-  const [record, setRecord] = useState<ProtocolOriginSettingsRecord | null>(null);
+  const [record, setRecord] = useState<ProtocolOriginSettings | null>(null);
   /**
    * 数字字段的本地字符串编辑态。提交成功且与真值相等时清掉；保留不清理也
    * 无副作用（input 显示 `edits[key] ?? String(record[key])`）。
@@ -164,7 +145,7 @@ export function OriginSettingsTrayInline({ origin, onClose }: OriginSettingsTray
    *     切走，本 commit 的所有 post-await setState 全部跳过。
    */
   async function commit(
-    next: ProtocolOriginSettingsRecord,
+    next: ProtocolOriginSettings,
     editedKeys?: NumberFieldKey[]
   ): Promise<void> {
     if (!record) return;
@@ -212,12 +193,12 @@ export function OriginSettingsTrayInline({ origin, onClose }: OriginSettingsTray
   }
 
   /** 复选框 onChange：构造 next + 立即提交。无中间态。 */
-  function toggleBoolean<K extends keyof ProtocolOriginSettingsRecord>(
+  function toggleBoolean<K extends keyof ProtocolOriginSettings>(
     key: K,
     value: boolean
   ): void {
     if (!record) return;
-    const next: ProtocolOriginSettingsRecord = { ...record, [key]: value };
+    const next: ProtocolOriginSettings = { ...record, [key]: value };
     void commit(next);
   }
 
@@ -226,20 +207,16 @@ export function OriginSettingsTrayInline({ origin, onClose }: OriginSettingsTray
    * 幂等：规范化值等于当前 record 真值时不写库（覆盖 blur 与 Enter 连续
    * 触发的边缘情况）。
    *
-   * `confirmTimeoutSeconds` 走单独的 `normalizeConfirmTimeoutSeconds`：
-   * 非法 → 30，**不**走"非法 → 0"的常规路径。
+   * `confirmTimeoutSeconds` 非法输入统一规范化为 30。
    */
   function submitNumber(key: NumberFieldKey, display: string): void {
     if (!record) return;
-    const normalized =
-      key === "confirmTimeoutSeconds"
-        ? normalizeConfirmTimeoutSeconds(display)
-        : normalizeNumber(display);
+    const normalized = normalizeConfirmTimeoutSeconds(display);
     const { display: normDisplay, value } = normalized;
-    // 把规范化后的字符串回写到 edits，让 input 显示 "0"/"30" 而不是空串 / NaN。
+    // 把规范化后的字符串回写到 edits，非法输入显示默认 30。
     setEdits((cur) => ({ ...cur, [key]: normDisplay }));
     if (value === record[key]) return;
-    const next: ProtocolOriginSettingsRecord = { ...record, [key]: value };
+    const next: ProtocolOriginSettings = { ...record, [key]: value };
     void commit(next, [key]);
   }
 
@@ -348,12 +325,6 @@ export function OriginSettingsTrayInline({ origin, onClose }: OriginSettingsTray
             })}
           </span>
         </label>
-        {renderNumberField(
-          "feePoolDefaultFundSatoshis",
-          t("protocol.originSettings.feePoolDefaultFundSatoshis.label", {
-            defaultValue: "Fee-pool default initial fund (satoshis). 0 = unconfigured."
-          })
-        )}
         {/* ============== 施工单 003：per-origin 确认超时 ============== */}
         {renderNumberField(
           "confirmTimeoutSeconds",

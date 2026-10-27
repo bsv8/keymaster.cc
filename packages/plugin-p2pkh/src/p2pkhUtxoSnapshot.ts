@@ -1,3 +1,4 @@
+import { requireWocNetwork } from "@keymaster/contracts";
 // Compatibility DTO adapter: chain observations go straight into the manager.
 // No external UTXO cache, consumed state, whole-snapshot lock or timeout release.
 import type { WocService, WocUtxoResponse, P2pkhUtxoSnapshotItem, P2pkhUtxoSnapshotResult } from "@keymaster/contracts";
@@ -82,7 +83,7 @@ export function createP2pkhUtxoSnapshotStore(deps: {
       const captured = epoch;
       check(captured);
       const task = (async () => {
-        const rows = validateP2pkhUnspentAll(await deps.woc.getAddressUnspentAll(resource.network, resource.address, { priority: "background", ...(options?.signal ? { signal: options.signal } : {}) }));
+        const rows = validateP2pkhUnspentAll(await requireWocNetwork(deps.woc, resource.network).getAddressUnspentAll(resource.address, { priority: "background", ...(options?.signal ? { signal: options.signal } : {}) }));
         check(captured);
         if (options?.signal?.aborted) throw new Error("Manager observation cancelled");
         await deps.manager.observe({ ownerPublicKeyHex: resource.publicKeyHex, resource, utxos: rows.map(row => ({ ...row, id: `${row.txid}:${row.vout}`, resourceId: resource.resourceId, publicKeyHex: resource.publicKeyHex, network: resource.network, address: resource.address, syncedAt: deps.now?.() ?? new Date().toISOString() })) });

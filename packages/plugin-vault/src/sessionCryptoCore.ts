@@ -7,7 +7,7 @@
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { signAsync } from "@noble/secp256k1";
 import type { EcdsaSignatureFormat } from "@keymaster/contracts";
-import { publicKeyHexToP2pkhAddress } from "./p2pkhAddress.js";
+
 
 export interface SessionCryptoInit {
   /** 期望的压缩公钥 hex。 */
@@ -59,10 +59,6 @@ export async function signEcdsaDigest(input: {
   const der = encodeDERSignature(signature.r, signature.s);
   assertStrictDer(der);
   return der;
-}
-
-export function deriveP2pkhAddress(publicKeyHex: string, network: "main" | "test"): string {
-  return publicKeyHexToP2pkhAddress(publicKeyHex, network);
 }
 
 export function hexToBytes(hex: string): Uint8Array {

@@ -41,11 +41,7 @@ export function createVaultRoundtripSigner(crypto: ActiveKeyCrypto, identity: { 
     },
     async signRoundtrip(unsigned, signal): Promise<Uint8Array> {
       if (signal?.aborted === true) throw signal.reason as Error;
-      const result = await crypto.signDigest({
-        publicKeyHex,
-        digest: toArrayBuffer(digestOf(unsigned)),
-        format: SIGNATURE_FORMAT,
-      });
+      const result = await crypto.signDigest({ digest: toArrayBuffer(digestOf(unsigned)), format: SIGNATURE_FORMAT });
       if (result.publicKeyHex.toLowerCase() !== publicKeyHex) {
         throw new ForumIdentityError("签名结果的身份与请求身份不一致");
       }

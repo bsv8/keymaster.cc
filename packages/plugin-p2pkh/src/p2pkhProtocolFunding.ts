@@ -74,6 +74,7 @@ export interface ProtocolFundingStore {
 export type ProtocolFundingProtectedOutpoints = Pick<ProtectedOutpointRegistry, "register" | "unregister">;
 
 export interface CreateProtocolFundingServiceDeps {
+  binding: { readonly identity: { publicKeyHex: string; bsvNetwork: "main" | "test" }; assertActive(): void };
   /** 受控协议 spend：构造并签名资金准备交易。 */
   protocolSpend(): ProtocolSpendService | undefined;
   protectedOutpoints: ProtocolFundingProtectedOutpoints;
@@ -126,6 +127,31 @@ export class ProtocolFundingError extends Error {
 }
 
 export function createProtocolFundingService(deps: CreateProtocolFundingServiceDeps): ProtocolFundingService {
+  const binding = deps.binding;
+  binding.assertActive();
+  const identity = { ownerPublicKeyHex: binding.identity.publicKeyHex.toLowerCase(), network: binding.identity.bsvNetwork };
+  const scoped = <T extends object>(request: T) => {
+    binding.assertActive();
+    if ("ownerPublicKeyHex" in request || "network" in request) throw new TypeError("Funding requests cannot select a wallet");
+    return { ...structuredClone(request), ...identity };
+  };
+  const run = async <T>(operation: () => Promise<T>): Promise<T> => {
+    binding.assertActive(); const value = await operation(); binding.assertActive(); return value;
+  };
+  const original = deps;
+  deps = { ...deps,
+    store: {
+      get: (...args) => run(() => original.store.get(...args)),
+      put: (...args) => run(() => original.store.put(...args)),
+      delete: (...args) => run(() => original.store.delete(...args)),
+      list: (...args) => run(() => original.store.list(...args)),
+    },
+    allocate: input => run(() => original.allocate(input)),
+    deriveChangeAddress: (...args) => run(() => original.deriveChangeAddress(...args)),
+    observeChain: (...args) => run(() => original.observeChain(...args)),
+    ...(original.observeOutpoint ? { observeOutpoint: input => run(() => original.observeOutpoint!(input)) } : {}),
+    ...(original.observeSubmission ? { observeSubmission: input => run(() => original.observeSubmission!(input)) } : {}),
+  };
   const now = deps.now ?? Date.now;
   const protectionId = (fundingId: string): string => `protocol-funding:${fundingId}`;
 
@@ -150,7 +176,7 @@ export function createProtocolFundingService(deps: CreateProtocolFundingServiceD
     listeners: Set<() => void>;
   }>();
   const ensureProtection = (record: ProtocolFundingStoredRecord, input: { ownerPublicKeyHex: string; network: "main" | "test"; ownerPluginId?: string; protectionReason?: string }): void => {
-    // 兼容已有 Forum 资金记录；新记录显式持久化插件归属。
+    binding.assertActive();
     const ownerPluginId = record.ownerPluginId ?? input.ownerPluginId ?? (record.fundingId.startsWith("forum:") ? "forum" : "protocol");
     const id = protectionId(record.fundingId);
     const outpoint = {
@@ -166,6 +192,7 @@ export function createProtocolFundingService(deps: CreateProtocolFundingServiceD
       return;
     }
     const entry = { outpoint, listeners: new Set<() => void>() };
+    binding.assertActive();
     deps.protectedOutpoints.register({
       id, ownerPluginId,
       listProtectedOutpoints: () => [entry.outpoint],
@@ -177,6 +204,7 @@ export function createProtocolFundingService(deps: CreateProtocolFundingServiceD
     protections.set(id, entry);
   };
   const removeProtection = (fundingId: string): void => {
+    binding.assertActive();
     deps.protectedOutpoints.unregister(protectionId(fundingId));
     protections.delete(protectionId(fundingId));
   };
@@ -192,6 +220,7 @@ export function createProtocolFundingService(deps: CreateProtocolFundingServiceD
 
   return {
     estimateFundingMinerFee(input) {
+      binding.assertActive();
       return estimateProtocolFundingMinerFee(
         parseAmount(input.requiredSatoshis, "requiredSatoshis"),
         input.feeRateSatoshisPerKb,
@@ -207,7 +236,9 @@ export function createProtocolFundingService(deps: CreateProtocolFundingServiceD
      * 判据只有一条：**能否证明它已被花费**。链上状态未知时必须继续保护——「查不到」
      * 不是「不存在」，按不存在处理会让一次网络抖动变成用户的静默资金损失。
      */
-    async restoreProtections(input) {
+    async restoreProtections(...args: []) {
+      if (args.length) throw new TypeError("Protection restore does not accept wallet selectors");
+      const input = scoped({});
       const known = await deps.store.list(input.ownerPublicKeyHex);
       let restored = 0;
       for (const record of known.records) {
@@ -236,13 +267,14 @@ export function createProtocolFundingService(deps: CreateProtocolFundingServiceD
      * 直接返回调用方记录会绕过两件事：链上状态核对（已花费的 UTXO 不能复用）与
      * 保护登记恢复（重启后保护是空的）。因此复用必须经过这里。
      */
-    async reconcileDedicatedFunding(input) {
+    async reconcileDedicatedFunding(request) {
+      const input = scoped(request);
       const known = await deps.store.list(input.ownerPublicKeyHex);
       const record = ownedRecord(known.records.find((candidate) => candidate.fundingId === input.fundingId), input.ownerPublicKeyHex);
       if (record === undefined) {
         return { state: "unknown", usable: false, reason: known.unreadable.includes(input.fundingId) ? "记录无法读取" : "记录不存在" };
       }
-      if (record.txid !== input.txid || record.vout !== input.vout) {
+      if (record.network !== input.network || record.txid !== input.txid || record.vout !== input.vout) {
         return { state: "unknown", usable: false, reason: "记录与请求的 outpoint 不一致" };
       }
       // 被替代但未回收的记录不可复用：它的 UTXO 归新的那笔，本笔只作恢复与回收用。
@@ -260,7 +292,8 @@ export function createProtocolFundingService(deps: CreateProtocolFundingServiceD
       return { state, usable: true };
     },
 
-    async prepareDedicatedFunding(input) {
+    async prepareDedicatedFunding(request) {
+      const input = scoped(request);
       const required = parseAmount(input.requiredSatoshis, "requiredSatoshis");
       let currentId = input.fundingId;
       const visited = new Set<string>();
@@ -296,10 +329,11 @@ export function createProtocolFundingService(deps: CreateProtocolFundingServiceD
       throw new ProtocolFundingError("funding-state-unknown", "专用资金后继记录超出恢复上限");
     },
 
-    async observeDedicatedFunding(input) {
+    async observeDedicatedFunding(request) {
+      const input = scoped(request);
       const record = ownedRecord(await deps.store.get(input.fundingId, input.ownerPublicKeyHex), input.ownerPublicKeyHex);
       // 记录必须对上 outpoint，否则不返回猜测状态。
-      if (record === undefined || record.txid !== input.txid || record.vout !== input.vout) return "unknown";
+      if (record === undefined || record.network !== input.network || record.txid !== input.txid || record.vout !== input.vout) return "unknown";
       return deps.observeChain(input.network, record.txid);
     },
 
@@ -317,13 +351,15 @@ export function createProtocolFundingService(deps: CreateProtocolFundingServiceD
      * 记录与保护；`not-broadcast` 明确失败但钱还在，记录必须留着；`uncertain` 更要
      * 留着——它是唯一的对账依据。
      */
-    async recoverDedicatedFunding(input) {
+    async recoverDedicatedFunding(request) {
+      const input = scoped(request);
       const spend = deps.protocolSpend();
       if (spend === undefined) throw new ProtocolFundingError("funding-state-unknown", "P2PKH 协议资金能力不可用，无法回收专用资金");
       const record = ownedRecord(await deps.store.get(input.fundingId, input.ownerPublicKeyHex), input.ownerPublicKeyHex);
       if (record === undefined) {
         throw new ProtocolFundingError("funding-state-unknown", `专用资金 ${input.fundingId} 没有可回收的记录`);
       }
+      if (record.network !== input.network) throw new ProtocolFundingError("funding-state-unknown", "专用资金网络不匹配");
       // 依据必须与记录相符：说「被 X 替代」却与记录里的 supersededBy 不同，
       // 说明调用方看到的不是这笔记录。
       if ("supersededBy" in input.reason) {
@@ -403,9 +439,7 @@ export function createProtocolFundingService(deps: CreateProtocolFundingServiceD
         throw new ProtocolFundingError("funding-state-unknown", "专用资金不足以覆盖回收交易的矿工费");
       }
       const preview = await spend.presign({
-        ownerPublicKeyHex: input.ownerPublicKeyHex,
         requestingPluginId: record.ownerPluginId ?? "protocol",
-        network: record.network,
         inputs: [{ txid: record.txid, vout: record.vout, value: toSafeNumber(total), address: record.address }],
         outputs: [{
           value: toSafeNumber(total - BigInt(feeCap)),
@@ -442,19 +476,16 @@ export function createProtocolFundingService(deps: CreateProtocolFundingServiceD
       };
     },
 
-    async releaseDedicatedFunding(input) {
+    async releaseDedicatedFunding(request) {
+      const input = scoped(request);
       const spend = deps.protocolSpend();
       const record = ownedRecord(await deps.store.get(input.fundingId, input.ownerPublicKeyHex), input.ownerPublicKeyHex);
       if (record === undefined) return;
-      // 只在明确未派发时释放：已广播或未知的输入不得提前放开。
-      if (spend?.releasePreparedSubmission !== undefined && record.submissionId !== undefined) {
-        await spend.releasePreparedSubmission({
-          ownerPublicKeyHex: input.ownerPublicKeyHex,
-          network: input.network,
-          txid: record.txid,
-          submissionId: record.submissionId,
-        });
-      }
+      if (record.network !== input.network || !record.submissionId || record.submissionId !== input.submissionId
+        || !spend?.releasePreparedSubmission) throw new ProtocolFundingError("funding-state-unknown", "缺少同一提交的受控释放依据");
+      // The manager must prove this exact submission is not dispatched before deletion.
+      await spend.releasePreparedSubmission({ txid: record.txid, submissionId: record.submissionId });
+      binding.assertActive();
       await deps.store.delete(input.fundingId);
       removeProtection(input.fundingId);
     },
@@ -487,9 +518,7 @@ export function createProtocolFundingService(deps: CreateProtocolFundingServiceD
     const dedicatedAddress = changeAddress;
     const dedicatedScriptHex = p2pkhAddressToScriptHex(dedicatedAddress, input.network);
     const preview = await spend.presign({
-      ownerPublicKeyHex: input.ownerPublicKeyHex,
       requestingPluginId: input.ownerPluginId ?? "protocol",
-      network: input.network,
       inputs: allocation.selected.map((utxo) => ({
         txid: utxo.txid,
         vout: utxo.vout,

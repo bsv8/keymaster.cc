@@ -1,3 +1,4 @@
+import { requireWocNetwork } from "@keymaster/contracts";
 import { bitfsPoolSettlementFee } from "./poolBudget.js";
 import { deleteBitfsPurchaseData } from "./purchaseCleanup.js";
 import { listBitfsFundingPools } from "./fundingPools.js";
@@ -19,7 +20,7 @@ import type {
 import { prepareBitfsPoolRecoveryWithCurrentRevision } from "./funding.js";
 import { BitfsArbitrationWorkflow } from "./arbitrationWorkflow.js";
 import {createBitfsBuyerPaymentSigner,createBitfsPaymentSigner} from '@keymaster/vaultlink-integration';
-import type { CoordinatorClientRequest, CoordinatorMsFileControl, CoordinatorResponse, MsFileErrorCode, ActiveKeyCrypto, BorrowedModuleFileStore, MsFileSellerSettings, SessionEpoch, ProtocolSpendService, P2pkhUtxoSnapshotResult, WocServiceHandle } from "@keymaster/contracts";
+import type { CoordinatorClientRequest, CoordinatorMsFileControl, CoordinatorResponse, MsFileErrorCode, ActiveKeyCrypto, BorrowedModuleFileStore, MsFileSellerSettings, SessionEpoch, ProtocolSpendService, P2pkhUtxoSnapshotResult, WocWorkerChainPort } from "@keymaster/contracts";
 import { normalizeMsFileSatoshiAmount, isValidMsFileHashHex, MSFILE_BITFS_BUYER_SETTINGS_DEFAULT } from "@keymaster/contracts";
 import type { WindowP2pExecutorOperation } from "@keymaster/contracts/window-p2p";
 import { BitfsSeedIndex, BitfsSellerRuntime, BitfsSellerSessionManager, createBitfsBuyerTask, createBitfsBuyerDownloadPlan, BitfsBuyerProtocol, createBitfsLocalSellerContentResolver, BitfsTransactionBroadcaster, createBitfsJournal, createBitfsSessionJournal, createBitfsTransactionJournal, createBitfsVaultSigner, createBitfsWocChainPort, createMsFileLocalContentSource, recoverBitfsBuyerContentCommit, readBitfsBuyerLocalPaymentState, assertBitfsBuyerCloseBinding, parseBitfsBuyerCloseBinding, createUnavailableBitfsSellerContentResolver, reconcileBitfsTransactions, reconcileBitfsSessionTransactions, readBitfsPoolSpendChain, prepareBitfsFunding, recoverBitfsFundingSplits, BitfsSellerProtocol, type BitfsSellerMatch, type BitfsBuyerQuoteView, type BitfsBuyerTask, type BitfsSellerProtocolPort, type BitfsSellerStreamTransport, type BitfsFundingPrepareDeps, type BitfsTransactionJournal, type BitfsFundingLedger, type MsFileServiceImpl } from "../coordinator.js";
@@ -38,7 +39,7 @@ export interface BitfsWorkerDependencies {
   service(): MsFileServiceImpl | undefined;
   ensureService(): Promise<MsFileServiceImpl>;
   files(purpose: string): BorrowedModuleFileStore;
-  woc(): WocServiceHandle | undefined;
+  woc(): WocWorkerChainPort | undefined;
   p2pkhSettings(): ReturnType<WorkerFundingDependencies["readP2pkhSettings"]>;
   crypto(owner: string): Promise<ActiveKeyCrypto>;
   requestPayment(command: import("@keymaster/contracts").CoordinatorWalletPaymentCommand): Promise<unknown>;
@@ -155,7 +156,7 @@ async function arbitrationWorkflow(service?: MsFileServiceImpl): Promise<BitfsAr
         }
         const currentWoc = requireWoc();
         if (!currentWoc.getRawTransaction) throw new Error("缺少费用池资金交易证据");
-        const raw = deps.hexToBytes(await currentWoc.getRawTransaction(network, txid)); assertActive(); return raw;
+        const raw = deps.hexToBytes(await requireWocNetwork(currentWoc, network).getRawTransaction(txid)); assertActive(); return raw;
       },
     });
     const flow = new BitfsArbitrationWorkflow({
@@ -1321,7 +1322,7 @@ async function ensureMsfileBitfsBuyerProtocol(
       const saved=await createBitfsTransactionJournal(journalStore).getTransaction(txid);
       if(saved)return saved;
       if(!woc.getRawTransaction)throw new Error('BitFS previous transaction evidence unavailable');
-      return deps.hexToBytes(await woc.getRawTransaction(paymentNetwork,txid));
+      return deps.hexToBytes(await requireWocNetwork(woc, paymentNetwork).getRawTransaction(txid));
     },
   });
   const signer = {
@@ -2535,7 +2536,7 @@ async function createMsfileBitfsBuyerTask(input: {
     async previousTransaction(txid){
       const saved=await transactions.getTransaction(txid);if(saved)return saved;
       if(!woc?.getRawTransaction)throw new Error('BitFS previous transaction evidence unavailable');
-      return deps.hexToBytes(await woc.getRawTransaction(input.network,txid));
+      return deps.hexToBytes(await requireWocNetwork(woc, input.network).getRawTransaction(txid));
     },
   });
 
@@ -2793,7 +2794,7 @@ async function configureMsfileSellerRuntime(
           if(raw&&deps.bytesToHex(new Uint8Array(transactionID(raw)).reverse())===txid)return raw;
         }
         if(!woc?.getRawTransaction)throw new Error("BitFS seller funding evidence unavailable");
-        const raw=deps.hexToBytes(await woc.getRawTransaction(sellerNetwork,txid));assertSellerContext();return raw;
+        const raw=deps.hexToBytes(await requireWocNetwork(woc, sellerNetwork).getRawTransaction(txid));assertSellerContext();return raw;
       },
     });
     // WoC 未装配时仍允许派生索引和 fail-closed 协议端口启动；
@@ -3548,7 +3549,6 @@ const MSFILE_MUTATION_CONTROLS = new Set<CoordinatorMsFileControl["type"]>([
   "settings.bitfsBuyer.update",
   "settings.readConcurrency.update",
   "settings.readConcurrency.reset",
-  "settings.mediaBlockReadConcurrency.update",
   "bitfs.demand.publish",
   "bitfs.demand.cancel",
   "bitfs.purchase.start",
@@ -3587,7 +3587,7 @@ async function executeMsfileControl(
  *
  * 页面 storage 数据面每个端口只允许 3 个并发请求；批量上传如果逐块走
  * 那条通道，远端一次 PUT 的延迟就是瓶颈。桶块由 Coordinator 直接写
- * OwnerFileStore，这里给出一个有界并发，既提高吞吐又不放大内存。
+ * ModuleFileStore，这里给出一个有界并发，既提高吞吐又不放大内存。
  */
 const MSFILE_BUCKET_BLOCK_WRITE_MAX_CONCURRENCY = 16;
 let msfileBucketBlockWritesActive = 0;
@@ -3632,8 +3632,6 @@ async function executeMsfileControlNow(
     case "settings.readConcurrency.get": value = await service.getReadConcurrencySettings(); break;
     case "settings.readConcurrency.update": await service.updateReadConcurrencySettings(control.input); value = null; break;
     case "settings.readConcurrency.reset": await service.resetReadConcurrencySettings(); value = null; break;
-    case "settings.mediaBlockReadConcurrency.get": value = await service.getMediaBlockReadConcurrency(); break;
-    case "settings.mediaBlockReadConcurrency.update": await service.updateMediaBlockReadConcurrency(control.mediaBlockReadConcurrency); value = null; break;
     case "settings.global.update": await service.updateGlobalPriceSettings(control.input); value = null; break;
     case "settings.seller.update": await service.updateSellerSettings(control.input); value = null; break;
     case "settings.bitfsBuyer.get": {

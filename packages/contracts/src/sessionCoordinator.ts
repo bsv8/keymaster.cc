@@ -259,9 +259,6 @@ export type CoordinatorMsFileControl =
   | { type: "settings.readConcurrency.get" }
   | { type: "settings.readConcurrency.update"; input: MsFileReadConcurrencySettings }
   | { type: "settings.readConcurrency.reset" }
-  /** 旧页面兼容入口；新页面使用 settings.readConcurrency.*。 */
-  | { type: "settings.mediaBlockReadConcurrency.get" }
-  | { type: "settings.mediaBlockReadConcurrency.update"; mediaBlockReadConcurrency: number }
   | { type: "settings.global.update"; input: MsFileGlobalPriceSettings }
   /** 保存当前 Key 的 BitFS 卖方设置。 */
   | { type: "settings.seller.update"; input: MsFileSellerSettings }
@@ -1006,11 +1003,6 @@ export type ContactsCoordinatorControl = Pick<SessionCoordinatorClient,
 // 6. Capability Keys
 // ============================================================
 
-/**
- * @deprecated 仅保留给旧测试夹具；生产 Host 不再注入全局 Coordinator client。
- * 业务插件必须使用按 manifest 身份绑定的窄 capability。
- */
-export const SESSION_COORDINATOR_CLIENT_CAPABILITY = defineCapability<SessionCoordinatorClient>({ kind: "local", id: "session-coordinator.client", version: "1" });
 /** Shell 只读活动心跳面；不包含任何业务或存储控制 RPC。 */
 export const COORDINATOR_ACTIVITY_CAPABILITY = defineCapability<Pick<SessionCoordinatorClient, "getIsConnected" | "sendActivity">>({ kind: "local", id: "session-coordinator.activity", version: "1" });
 export const SESSION_COORDINATOR_SNAPSHOT_CAPABILITY = defineCapability<{ snapshot(): CoordinatorBootstrapSnapshot }>({ kind: "local", id: "session-coordinator.snapshot", version: "1" });

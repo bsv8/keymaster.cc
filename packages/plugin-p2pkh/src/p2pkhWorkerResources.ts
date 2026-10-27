@@ -1,16 +1,17 @@
+import { deriveP2pkhAddress } from "@keymaster/contracts";
 import type { BorrowedModuleFileStore, P2pkhUtxoSnapshotResult } from "@keymaster/contracts";
-import { publicKeyHexToP2pkhAddress } from "./p2pkhSigner.js";
+
 import { createP2pkhStateRepository, openP2pkhStateRepository } from "./storage/p2pkhStateRepository.js";
 import type { P2pkhUtxoSnapshotStore, P2pkhUtxoSnapshotResource } from "./p2pkhUtxoSnapshot.js";
 export async function ensureWorkerP2pkhResources(storage: BorrowedModuleFileStore, ownerPublicKeyHex: string, bsvNetwork: "main" | "test"): Promise<P2pkhUtxoSnapshotResource[]> {
   const repository = createP2pkhStateRepository(await openP2pkhStateRepository(storage));
-  const existing = await repository.listResourcesByKey();
+  const existing = await repository.listAddresses();
   const networks: Array<"main" | "test"> = bsvNetwork === "test" ? ["test"] : ["main"];
   const createdAt = new Date().toISOString();
   for (const network of networks) {
     const resourceId = `p2pkh:${network}`;
     if (existing.some((resource) => resource.resourceId === resourceId)) continue;
-    const address = publicKeyHexToP2pkhAddress(ownerPublicKeyHex, network);
+    const address = deriveP2pkhAddress(ownerPublicKeyHex, network);
     const resource = {
       resourceId,
       publicKeyHex: ownerPublicKeyHex,

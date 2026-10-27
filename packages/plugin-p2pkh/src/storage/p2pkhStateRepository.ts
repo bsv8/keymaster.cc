@@ -6,7 +6,7 @@
 //   - 资源表、本地提交、协议提交、历史/协议兼容 claim、同步状态 = 仅内存；
 //   - 不再有 raw tx 文件、高度文件、owned outpoint 投影或交易 DAG。
 
-import type { BorrowedOwnerFileStore, BsvNetwork } from "@keymaster/contracts";
+import type { BorrowedModuleFileStore, BsvNetwork } from "@keymaster/contracts";
 import type {
   P2pkhHistoryRecord,
   P2pkhKeyResource,
@@ -38,7 +38,7 @@ export interface P2pkhStateMemory {
 
 export interface P2pkhStateRepositoryBundle {
   close(): void;
-  readonly files: BorrowedOwnerFileStore;
+  readonly files: BorrowedModuleFileStore;
   /** 共享内存本地态 + 历史缓存。 */
   readonly memory: P2pkhStateMemory;
 }
@@ -60,8 +60,9 @@ export interface CursorPage<T> { items: T[]; nextCursor?: string; }
 /** 内存游标分页：cursor 是不透明 last-key；列表顺序稳定时可用。 */
 function pageRows<T>(rows: readonly T[], keyOf: (row: T) => string, cursor: string | undefined, limit: number): CursorPage<T> {
   const sorted = [...rows].sort((left, right) => keyOf(left).localeCompare(keyOf(right)));
-  const start = cursor === undefined ? 0 : sorted.findIndex((row) => keyOf(row) === cursor) + 1;
-  const from = start < 0 ? sorted.length : start;
+  const index = cursor === undefined ? -1 : sorted.findIndex((row) => keyOf(row) === cursor);
+  if (cursor !== undefined && index < 0) throw new Error("P2PKH query cursor is no longer valid");
+  const from = index + 1;
   const items = sorted.slice(from, from + limit);
   const last = items[items.length - 1];
   const hasMore = last !== undefined && from + items.length < sorted.length;
@@ -70,7 +71,7 @@ function pageRows<T>(rows: readonly T[], keyOf: (row: T) => string, cursor: stri
 
 function claimId(resourceId: string, txid: string, vout: number): string { return `${resourceId}:${txid}:${vout}`; }
 
-export async function openP2pkhStateRepository(files: BorrowedOwnerFileStore): Promise<P2pkhStateRepositoryBundle> {
+export async function openP2pkhStateRepository(files: BorrowedModuleFileStore): Promise<P2pkhStateRepositoryBundle> {
   const cached = bundlesByFiles.get(files);
   if (cached) return cached;
   const bundle: P2pkhStateRepositoryBundle = {
@@ -180,7 +181,6 @@ export function createP2pkhStateRepository(handle: P2pkhStateRepositoryBundle) {
       for (const [key, row] of [...localClaims]) if (row.resourceId === id) localClaims.delete(key);
     },
     listAddresses: async () => [...resources.values()].map((row) => structuredClone(row)),
-    listResourcesByKey: async () => [...resources.values()].map((row) => structuredClone(row)),
     getResource: async (id: string) => {
       const row = resourceOf(id);
       return row ? structuredClone(row) : undefined;
@@ -201,22 +201,11 @@ export function createP2pkhStateRepository(handle: P2pkhStateRepositoryBundle) {
       reconcileHistoryConfirmed(resourceId, new Set([...confirmedTxids].map((txid) => txid.toLowerCase())));
     },
 
-    async listHistory(filter?: { resourceId?: string; network?: BsvNetwork; limit?: number }): Promise<P2pkhHistoryRecord[]> {
-      const rows: P2pkhHistoryRecord[] = [];
-      for (const resource of resources.values()) {
-        if (filter?.resourceId && resource.resourceId !== filter.resourceId) continue;
-        if (filter?.network && resource.network !== filter.network) continue;
-        rows.push(...await ensureHistory(resource));
-      }
-      const limit = boundedLimit(filter?.limit);
-      return limit ? rows.slice(0, limit) : rows;
-    },
-
-    async listHistoryPage(filter?: { resourceId?: string; network?: BsvNetwork; cursor?: string; limit?: number }): Promise<CursorPage<P2pkhHistoryRecord>> {
+    async listHistoryPage(filter?: { resourceId?: string; network?: BsvNetwork; txid?: string; cursor?: string; limit?: number }): Promise<CursorPage<P2pkhHistoryRecord>> {
       if (!filter?.resourceId) return { items: [], nextCursor: undefined };
       const resource = resourceOf(filter.resourceId);
       if (!resource || (filter.network && resource.network !== filter.network)) return { items: [], nextCursor: undefined };
-      const rows = await ensureHistory(resource);
+      const rows = (await ensureHistory(resource)).filter(row => !filter.txid || row.txid === filter.txid.toLowerCase());
       return pageRows(rows, (row) => row.txid, filter.cursor, boundedLimit(filter.limit) ?? 200);
     },
 
@@ -232,9 +221,13 @@ export function createP2pkhStateRepository(handle: P2pkhStateRepositoryBundle) {
       const size = boundedLimit(limit);
       return size ? rows.slice(0, size) : rows;
     },
-    listLocalTransactionsPage: async (filter?: { resourceId?: string; cursor?: string; limit?: number }) => {
+    listLocalTransactionsPage: async (filter?: { resourceId?: string; cursor?: string; limit?: number; txid?: string; submissionId?: string; includeResolved?: boolean }) => {
       if (!filter?.resourceId) return { items: [], nextCursor: undefined };
-      return pageRows(localRowsOfResource(filter.resourceId), (row) => row.id, filter.cursor, boundedLimit(filter.limit) ?? 500);
+      const rows = localRowsOfResource(filter.resourceId).filter(row =>
+        (filter.includeResolved || row.chainResolution !== "chain-confirmed")
+        && (!filter.txid || row.txid === filter.txid.toLowerCase())
+        && (!filter.submissionId || row.id === filter.submissionId));
+      return pageRows(rows, (row) => row.id, filter.cursor, boundedLimit(filter.limit) ?? 500);
     },
     listLocalInputClaimsPage: async (filter?: { resourceId?: string; cursor?: string; limit?: number }) => {
       if (!filter?.resourceId) return { items: [], nextCursor: undefined };

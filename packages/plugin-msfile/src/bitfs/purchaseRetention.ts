@@ -1,4 +1,4 @@
-import type { BorrowedOwnerFileStore } from "@keymaster/contracts";
+import type { BorrowedModuleFileStore } from "@keymaster/contracts";
 import type { BitfsSessionRecord } from "./sessionJournal.js";
 import type { BitfsFundingAccount } from "./funding.js";
 
@@ -13,10 +13,10 @@ export async function withBitfsContentLock<T>(key: string, run: () => Promise<T>
   await prior;
   try { return await run(); } finally { release(); if (queues.get(key) === gate) queues.delete(key); }
 }
-export function bitfsContentLockKey(store: BorrowedOwnerFileStore, owner: string, seed: string): string {
+export function bitfsContentLockKey(store: BorrowedModuleFileStore, owner: string, seed: string): string {
   return `${store.walletGeneration}:${store.sessionEpoch}:${store.runGeneration}:${owner}:${seed}`;
 }
-export async function readBitfsDeletedHistory(store: BorrowedOwnerFileStore, seed: string): Promise<Set<string>> {
+export async function readBitfsDeletedHistory(store: BorrowedModuleFileStore, seed: string): Promise<Set<string>> {
   if (!/^[0-9a-f]{64}$/.test(seed)) throw new Error("删除记录 Seed Hash 无效");
   const file = await store.get(`deleted-history/${seed}.json`);
   if (!file) return new Set();
@@ -26,7 +26,7 @@ export async function readBitfsDeletedHistory(store: BorrowedOwnerFileStore, see
   return new Set(value.sessionIds);
 }
 /** 只有清理成功才从普通历史隐藏，失败仍可看到原记录并重试。 */
-export async function readBitfsHiddenHistory(store: BorrowedOwnerFileStore, seed: string): Promise<Set<string>> {
+export async function readBitfsHiddenHistory(store: BorrowedModuleFileStore, seed: string): Promise<Set<string>> {
   const file = await store.get(`deleted-history/${seed}.json`);
   if (!file) return new Set();
   await readBitfsDeletedHistory(store, seed);
@@ -34,7 +34,7 @@ export async function readBitfsHiddenHistory(store: BorrowedOwnerFileStore, seed
   if (value.hiddenSessionIds !== undefined && (!Array.isArray(value.hiddenSessionIds) || value.hiddenSessionIds.some(id => !value.sessionIds.includes(id)))) throw new Error("采购隐藏记录损坏");
   return new Set(value.hiddenSessionIds ?? []);
 }
-export async function readBitfsErasableHistory(store: BorrowedOwnerFileStore, seed: string): Promise<Set<string>> {
+export async function readBitfsErasableHistory(store: BorrowedModuleFileStore, seed: string): Promise<Set<string>> {
   const deleted = await readBitfsDeletedHistory(store, seed);
   const file = await store.get(`deleted-history/${seed}.json`);
   if (!file) return new Set();
@@ -42,12 +42,12 @@ export async function readBitfsErasableHistory(store: BorrowedOwnerFileStore, se
   if (value.erasableSessionIds !== undefined && (!Array.isArray(value.erasableSessionIds) || value.erasableSessionIds.some(id => !deleted.has(id)))) throw new Error("采购清理提交记录损坏");
   return new Set(value.erasableSessionIds ?? []);
 }
-export async function completeBitfsHistoryDeletion(store: BorrowedOwnerFileStore, seed: string, ids: readonly string[]): Promise<void> {
+export async function completeBitfsHistoryDeletion(store: BorrowedModuleFileStore, seed: string, ids: readonly string[]): Promise<void> {
   const deleted = await readBitfsDeletedHistory(store, seed), hidden = await readBitfsHiddenHistory(store, seed), erasable = await readBitfsErasableHistory(store, seed);
   for (const id of ids) hidden.add(id);
   await store.put(`deleted-history/${seed}.json`, new TextEncoder().encode(JSON.stringify({ version: 1, seedHashHex: seed, sessionIds: [...deleted], hiddenSessionIds: [...hidden], erasableSessionIds: [...erasable] })));
 }
-export async function markBitfsDeletedHistory(store: BorrowedOwnerFileStore, seed: string, ids: readonly string[], safeIds: readonly string[] = []): Promise<void> {
+export async function markBitfsDeletedHistory(store: BorrowedModuleFileStore, seed: string, ids: readonly string[], safeIds: readonly string[] = []): Promise<void> {
   const existing = await readBitfsDeletedHistory(store, seed);
   const hidden = await readBitfsHiddenHistory(store, seed);
   const erasable = await readBitfsErasableHistory(store, seed);
@@ -67,7 +67,7 @@ export function bitfsSessionNeedsFundingRecovery(session: BitfsSessionRecord, ac
   return session.evidence.some(name => ["kind2-opening-request", "kind3-opening-response", "funding-transaction", "opening-configuration"].includes(name)
     || name.startsWith("kind7-"));
 }
-export async function listBitfsPaths(store: BorrowedOwnerFileStore, prefix: string): Promise<string[]> {
+export async function listBitfsPaths(store: BorrowedModuleFileStore, prefix: string): Promise<string[]> {
   const result: string[] = []; let cursor: string | undefined;
   do {
     const page = await store.list({ prefix, limit: 1000, ...(cursor ? { cursor } : {}) });
@@ -75,13 +75,13 @@ export async function listBitfsPaths(store: BorrowedOwnerFileStore, prefix: stri
   } while (cursor !== undefined);
   return result;
 }
-export async function deleteBitfsPrefix(store: BorrowedOwnerFileStore, prefix: string): Promise<void> {
+export async function deleteBitfsPrefix(store: BorrowedModuleFileStore, prefix: string): Promise<void> {
   // 先收集路径再删，避免基于 offset 的分页因删除而跳项。
   for (const path of await listBitfsPaths(store, prefix)) await store.delete(path);
 }
 /** 已删采购保留的内容仅供原资金恢复使用，不可再进入普通文件库。
  * 每个操作与删除串行，阻止迟到写入跨越删除边界。 */
-export function createBitfsRetainedContentStore(input: { store: BorrowedOwnerFileStore; journal: BorrowedOwnerFileStore; owner: string; seed: string; sessionId: string }): BorrowedOwnerFileStore {
+export function createBitfsRetainedContentStore(input: { store: BorrowedModuleFileStore; journal: BorrowedModuleFileStore; owner: string; seed: string; sessionId: string }): BorrowedModuleFileStore {
   const { store, journal, owner, seed, sessionId } = input;
   const key = bitfsContentLockKey(store, owner, seed);
   const base = `bitfs-recovery-content/${sessionId}/`;

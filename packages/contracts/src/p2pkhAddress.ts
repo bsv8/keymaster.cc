@@ -1,5 +1,6 @@
 import { defineCapability } from "webloom-framework";
 import type { BsvNetwork } from "./vault.js";
+export { deriveP2pkhAddress } from "./p2pkhPublicKeyAddress.js";
 
 /**
  * /transfer 页面当前使用的收款方状态。
@@ -28,8 +29,8 @@ export interface TransferRecipient {
 /**
  * P2PKH 地址编解码能力。
  *
- * 平台页面只通过 capability 消费该能力；具体的 HASH160、Base58Check 与
- * 网络 version 处理由 plugin-p2pkh 提供，避免平台重复实现地址算法。
+ * 平台页面通过 capability 消费该能力。公钥派生复用共享纯算法；
+ * plugin-p2pkh 提供编解码门面，平台不复制 HASH160/Base58Check 实现。
  */
 export interface P2pkhAddressCodec {
   /** 由压缩公钥与网络派生 P2PKH 地址。 */

@@ -1,5 +1,5 @@
 import {
-  defineBuiltinWorkerPlugin, VAULT_WALLET_STATE_CAPABILITY, VAULT_WORKER_CRYPTO_CAPABILITY,
+  bindWalletIdentity, defineBuiltinWorkerPlugin, VAULT_WALLET_STATE_CAPABILITY, VAULT_WORKER_CRYPTO_CAPABILITY,
   COORDINATOR_CRYPTO_RPC_CAPABILITY, VAULT_WORKER_WALLET_CONTROL_CAPABILITY, type VaultWorkerWalletControl, type ActiveKeyCrypto, type VaultWalletState,
 } from "@keymaster/contracts";
 import type { LifecycleScope, PluginConsumer } from "webloom-framework";
@@ -37,10 +37,12 @@ export function createVaultWorkerRuntime(ports: {
     context.handle(COORDINATOR_CRYPTO_RPC_CAPABILITY, createWorkerCryptoRpc(ports.cryptoRpc));
     context.provide(VAULT_WALLET_STATE_CAPABILITY, createWalletStateAccess(ports.walletState, context.scope, ports.isIssued));
     context.provide(VAULT_WORKER_CRYPTO_CAPABILITY, Object.freeze({
-      async createActiveKeyCrypto(owner: string) {
+      async createActiveKeyCrypto(...args: []) {
         context.scope.assertActive();
-        const crypto = await ports.activeCrypto(owner, context.scope);
-        try { context.scope.assertActive(); } catch (error) { crypto.dispose("vault-provider-revoked"); throw error; }
+        if (args.length) throw new TypeError("Worker crypto cannot select a wallet");
+        const wallet = bindWalletIdentity(ports.walletState, context.scope.signal);
+        const crypto = await ports.activeCrypto(wallet.identity.publicKeyHex, context.scope);
+        try { context.scope.assertActive(); wallet.assertActive(); } catch (error) { crypto.dispose("vault-provider-revoked"); throw error; }
         return crypto;
       },
     }));

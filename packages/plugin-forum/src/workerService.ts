@@ -1,3 +1,4 @@
+import { requireWocNetwork } from "@keymaster/contracts";
 import type { ActiveKeyCrypto, BorrowedModuleFileStore, ForumService, ForumWorkerNetwork, MsFileContentService, P2pkhWorkerProtocolBinding, VaultWorkerCrypto, WocService } from "@keymaster/contracts";
 import { createForumService } from "./domain/forumService.js";
 import { createForumFundingSource } from "./domain/forumFundingSource.js";
@@ -32,12 +33,12 @@ export async function createForumWorkerService(deps: ForumWorkerServiceDependenc
     assertActive();
     if (crypto) return crypto;
     creatingCrypto ??= (async () => {
-      const candidate = await deps.crypto.createActiveKeyCrypto(deps.owner);
+      const candidate = await deps.crypto.createActiveKeyCrypto();
       try { assertActive(); } catch (error) { candidate.dispose("forum-revoked"); throw error; }
       const scoped: ActiveKeyCrypto = Object.freeze<ActiveKeyCrypto>({
         getIdentity: () => { assertActive(); return candidate.getIdentity(); },
         async signDigest(input) { assertActive(); const result = await candidate.signDigest(input); assertActive(); return result; },
-        async deriveP2pkhAddress(input) { assertActive(); const result = await candidate.deriveP2pkhAddress(input); assertActive(); return result; },
+        async deriveP2pkhAddress() { assertActive(); const result = await candidate.deriveP2pkhAddress(); assertActive(); return result; },
         dispose: reason => candidate.dispose(reason),
       });
       crypto = scoped; return scoped;
@@ -48,14 +49,14 @@ export async function createForumWorkerService(deps: ForumWorkerServiceDependenc
   const raw = async (network: "main" | "test", txid: string, signal?: AbortSignal) => {
     assertActive();
     if (!deps.query.getRawTransaction) throw new Error("Chain raw source unavailable");
-    const value = await deps.query.getRawTransaction(network, txid, signal ? { signal } : {});
+    const value = await requireWocNetwork(deps.query, network).getRawTransaction(txid, signal ? { signal } : {});
     assertActive();
     if (!/^(?:[a-fA-F0-9]{2})+$/u.test(value) || value.length > 2 * 1024 * 1024) throw new Error("Forum chain raw is invalid or oversized");
     return hexToBytes(value);
   };
   const selfOutputs = createForumSelfOutputService({ ownerPublicKeyHex: () => { assertActive(); return deps.owner; },
     getRawTransaction: raw, protocolSpend: () => wallet.spend, protectedOutpoints: wallet.protectedOutpoints,
-    deriveOwnerAddress: async (owner, network) => { assertActive(); const key = await deps.crypto.createActiveKeyCrypto(owner); try { const result = await key.deriveP2pkhAddress({ publicKeyHex: owner, network }); assertActive(); return result.address; } finally { key.dispose("forum-address-derived"); } },
+    deriveOwnerAddress: async (owner, network) => { assertActive(); const key = await deps.crypto.createActiveKeyCrypto(); try { const result = await key.deriveP2pkhAddress(); assertActive(); return result.address; } finally { key.dispose("forum-address-derived"); } },
   });
   const service = createForumService({ repository, ...(deps.signal ? { signal: deps.signal } : {}), content: deps.content, fundingSource: () => funding,
     ownerPublicKeyHex: () => { assertActive(); return deps.owner; },
@@ -65,7 +66,7 @@ export async function createForumWorkerService(deps: ForumWorkerServiceDependenc
     dispatchP2p: (operation, signal) => deps.network.roundtrip(operation as Parameters<ForumWorkerNetwork["roundtrip"]>[0], signal),
     fetchRootRaw: (input, options) => raw(input.network, input.txid, options?.signal),
     selfOutputs: () => { assertActive(); return selfOutputs; },
-    async observeChain(network, txid, signal) { const result = await deps.query.getTransactionObservation(network, txid, signal ? { signal } : {}); assertActive(); return result.observation === "confirmed" ? "confirmed" : result.observation === "unconfirmed" ? "mempool" : "unknown"; },
+    async observeChain(network, txid, signal) { const result = await requireWocNetwork(deps.query, network).getTransactionObservation(txid, signal ? { signal } : {}); assertActive(); return result.observation === "confirmed" ? "confirmed" : result.observation === "unconfirmed" ? "mempool" : "unknown"; },
     async observeBroadcast(input) { const result = await wallet.observer.observeProtocolSubmission(input); assertActive(); return result === "not-dispatched" ? "definitely-not-dispatched" : result === "rejected" || result === "dropped" ? "unknown" : result; },
   });
   return { service, dispose() { disposed = true; crypto?.dispose("forum-worker-revoked"); crypto = undefined; selfOutputs.dispose("forum-worker-revoked"); } };

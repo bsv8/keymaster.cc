@@ -143,10 +143,10 @@ function createDeferredOwnerFileStore(
   pluginId: string,
   declaration: PluginStorageDeclaration,
   scope: import("webloom-framework").LifecycleScope,
-): import("@keymaster/contracts").OwnerFileStore {
+): import("@keymaster/contracts").ModuleFileStore {
   let closed = false;
-  let current: import("@keymaster/contracts").OwnerFileStore | undefined;
-  let opening: Promise<import("@keymaster/contracts").OwnerFileStore> | undefined;
+  let current: import("@keymaster/contracts").ModuleFileStore | undefined;
+  let opening: Promise<import("@keymaster/contracts").ModuleFileStore> | undefined;
 
   const invalidateCurrent = (): void => {
     current?.close();
@@ -164,14 +164,14 @@ function createDeferredOwnerFileStore(
     invalidateCurrent();
   }, "owner-file-storage");
 
-  async function resolve(): Promise<import("@keymaster/contracts").OwnerFileStore> {
+  async function resolve(): Promise<import("@keymaster/contracts").ModuleFileStore> {
     scope.assertActive();
     if (closed) throw new Error("Owner file storage handle is closed");
     const liveWalletGeneration = authority.getWalletGeneration?.();
     if (current && liveWalletGeneration !== undefined && current.walletGeneration !== liveWalletGeneration) invalidateCurrent();
     if (!current) {
       if (!opening) {
-        const pending: Promise<import("@keymaster/contracts").OwnerFileStore> = authority.openOwnerFileStore({ pluginId, declaration }).then(opened => {
+        const pending: Promise<import("@keymaster/contracts").ModuleFileStore> = authority.openOwnerFileStore({ pluginId, declaration }).then(opened => {
           try {
             scope.assertActive();
             if (closed || opening !== pending) throw new Error("Owner file storage binding superseded while opening");
@@ -193,7 +193,7 @@ function createDeferredOwnerFileStore(
     return current;
   }
 
-  const run = async <T>(operation: (store: import("@keymaster/contracts").OwnerFileStore) => Promise<T>): Promise<T> => {
+  const run = async <T>(operation: (store: import("@keymaster/contracts").ModuleFileStore) => Promise<T>): Promise<T> => {
     const store = await resolve();
     const boundEpoch = store.sessionEpoch;
     const boundRun = store.runGeneration;
@@ -261,7 +261,7 @@ export function createScopedStorageClients(
   manifest: (pluginId: string) => { units?: readonly { id: string; storage?: PluginStorageDeclaration; storages?: readonly PluginStorageDeclaration[] }[] } | undefined,
   authentic: (consumer: PluginConsumer, scope: LifecycleScope) => boolean = isIssuedKeymasterConsumer,
 ) {
-  const files = new WeakMap<PluginConsumer, Map<string, import("@keymaster/contracts").BorrowedOwnerFileStore>>();
+  const files = new WeakMap<PluginConsumer, Map<string, import("@keymaster/contracts").BorrowedModuleFileStore>>();
   const kv = new WeakMap<PluginConsumer, Map<string, import("@keymaster/contracts").BorrowedKeyValueStore>>();
   const declarationFor = (consumer: PluginConsumer, scope: LifecycleScope, purposeId: string, model: "files" | "kv") => {
     if (!authentic(consumer, scope) || consumer.status !== "active") throw new Error("Client binding requires its live issued consumer and Scope");

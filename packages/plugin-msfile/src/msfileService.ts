@@ -398,10 +398,6 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     await this.updateReadConcurrencySettings({ ...MSFILE_READ_CONCURRENCY_RECOMMENDED });
   }
 
-  async getMediaBlockReadConcurrency(): Promise<number> {
-    return (await this.getReadConcurrencySettings()).mediaBlockReadConcurrency;
-  }
-
   async updateGlobalPriceSettings(input: MsFileGlobalPriceSettings): Promise<void> {
     await this.ensureReady();
     assertAmount(input?.seedMaxPriceSatoshis, "seedMaxPriceSatoshis");
@@ -461,11 +457,6 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
   setSellerRuntimeStatus(status: import("@keymaster/contracts").MsFileSellerRuntimeStatus): void {
     this.sellerStatus = status;
     this.emit();
-  }
-
-  async updateMediaBlockReadConcurrency(value: number): Promise<void> {
-    const current = await this.getReadConcurrencySettings();
-    await this.updateReadConcurrencySettings({ ...current, mediaBlockReadConcurrency: value });
   }
 
   async upsertSupplier(input: unknown): Promise<void> {

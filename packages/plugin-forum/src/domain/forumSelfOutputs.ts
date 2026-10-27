@@ -391,9 +391,7 @@ export function createForumSelfOutputService(deps: ForumSelfOutputDeps & {
         lockingScriptHex: output.lockingScriptHex,
       }));
       const preview = await spend.prepare({
-        ownerPublicKeyHex: owner,
         requestingPluginId: "forum",
-        network: input.network,
         inputs,
         outputs: [{
           value: total - feeCap,

@@ -2,30 +2,32 @@ import { useEffect, useState } from "react";
 import { Button, TextInput } from "@keymaster/ui";
 import { useOptionalPluginCapability } from "webloom-framework/react";
 import { AppLink, usePluginI18n, useOptionalResourceSelector } from "@keymaster/runtime";
-import { emptyChainFeeSnapshots, type ChainFeePolicy, type ChainFeeSnapshots } from "@keymaster/contracts";
-import { P2PKH_CAPABILITY, type P2pkhGlobalSettings } from "../p2pkhContracts.js";
+import type { ChainFeePolicy, ChainFeeSnapshot } from "@keymaster/contracts";
+import { P2PKH_CAPABILITY, type P2pkhGlobalSettings, type P2pkhService } from "../p2pkhContracts.js";
 import { useP2pkhResources } from "../P2pkhResourceContext.js";
 
-const EMPTY = emptyChainFeeSnapshots();
-const DEFAULT_SETTINGS: P2pkhGlobalSettings = { bsvNetwork: "main" };
-/** 全局按网络设置费率；手动输入只有明确保存后才覆盖自动模式。 */
+/** 当前钱包的费率设置；只保存策略，不选择网络。 */
 export function P2pkhSettingsPage() {
-  const reader = useP2pkhResources();
   const service = useOptionalPluginCapability(P2PKH_CAPABILITY);
   const { t } = usePluginI18n();
-  const settings = useOptionalResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(reader, "p2pkh.settings", [], snapshot => snapshot.data ?? DEFAULT_SETTINGS, DEFAULT_SETTINGS);
-  const fees = useOptionalResourceSelector<ChainFeeSnapshots, ChainFeeSnapshots>(reader, "p2pkh.chain-fees", [], snapshot => snapshot.data ?? EMPTY, EMPTY);
-  const fee = fees[settings.bsvNetwork];
-  const [draft, setDraft] = useState(String(fee.effectiveSatoshisPerKb));
+  return service ? <P2pkhSettingsEditor service={service} /> : <p>{t("p2pkh.settings.unavailable")}</p>;
+}
+function P2pkhSettingsEditor({ service }: { service: P2pkhService }) {
+  const reader = useP2pkhResources();
+  const { t } = usePluginI18n();
+  const [initialSettings] = useState(() => service.getGlobalSettings());
+  const settings = useOptionalResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(reader, "p2pkh.settings", [], snapshot => snapshot.data ?? initialSettings, initialSettings);
+  const fee = useOptionalResourceSelector<ChainFeeSnapshot, ChainFeeSnapshot | undefined>(reader, "p2pkh.chain-fee", [], snapshot => snapshot.data, undefined);
+  const [draft, setDraft] = useState(() => fee ? String(fee.effectiveSatoshisPerKb) : "");
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
-  useEffect(() => { setDirty(false); setDraft(String(fee.effectiveSatoshisPerKb)); setError(undefined); }, [settings.bsvNetwork]);
-  useEffect(() => { if (!dirty) setDraft(String(fee.effectiveSatoshisPerKb)); }, [fee.effectiveSatoshisPerKb, dirty]);
+  useEffect(() => { setDirty(false); setError(undefined); }, [settings.bsvNetwork]);
+  useEffect(() => { if (fee && !dirty) setDraft(String(fee.effectiveSatoshisPerKb)); }, [fee?.effectiveSatoshisPerKb, dirty]);
   async function save(policy: ChainFeePolicy) {
     if (!service || busy) return;
     setBusy(true); setError(undefined);
-    try { await service.applyGlobalSettings({ bsvNetwork: settings.bsvNetwork, feePolicy: policy }); setDirty(false); }
+    try { await service.applyGlobalSettings({ feePolicy: policy }); setDirty(false); }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setBusy(false); }
   }
@@ -36,7 +38,7 @@ export function P2pkhSettingsPage() {
     }
     void save({ mode: "manual", satoshisPerKb: value });
   }
-  if (!service) return <p>{t("p2pkh.settings.unavailable")}</p>;
+  if (!fee) return <p>{t("p2pkh.settings.feePending")}</p>;
   return <div className="p2pkh-settings">
     <p>{settings.bsvNetwork === "test" ? "Testnet" : "Mainnet"}</p>
     <section className="p2pkh-settings__fee-rates" aria-labelledby="p2pkh-fee-rates-title">

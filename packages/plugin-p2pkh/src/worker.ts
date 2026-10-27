@@ -109,7 +109,14 @@ export function createP2pkhWorkerRuntime(ports: P2pkhWorkerPorts) {
       },
     }));
     context.provide(P2PKH_WORKER_PROTOCOL_CAPABILITY, Object.freeze({
-      async getService() { context.scope.assertActive(); const service = await transfer.ensureProtocol(); context.scope.assertActive(); return service; },
+      async getService() {
+        context.scope.assertActive();
+        const service = await transfer.ensureProtocol();
+        context.scope.assertActive();
+        // Executor/RPC evidence ports stay private to wallet assembly.
+        return Object.freeze({ identity: service.identity, spend: service.spend, funding: service.funding,
+          planFunding: service.planFunding, observer: service.observer, protectedOutpoints: service.protectionView });
+      },
     }));
     const network = () => {
       const identity = own.walletState.snapshot().activeKeyIdentity;

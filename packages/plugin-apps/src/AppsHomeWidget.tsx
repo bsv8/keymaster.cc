@@ -112,7 +112,7 @@ function AppsHomeWidgetContent({ protocol }: { protocol: ProtocolService }) {
     });
   };
 
-  const handleConfirmLaunch = async (input: { publicKeyHex: string; password: string }) => {
+  const handleConfirmLaunch = async (input: { password: string }) => {
     if (!launchEntry) return;
     setLaunchingId(launchEntry.id);
     setLaunchError(null);
@@ -123,7 +123,6 @@ function AppsHomeWidgetContent({ protocol }: { protocol: ProtocolService }) {
         appUrl: launchEntry.appUrl,
         claims: launchEntry.claims,
         appIdentity: launchEntry.appIdentity,
-        publicKeyHex: input.publicKeyHex,
         password: input.password
       });
       setLaunchEntry(null);

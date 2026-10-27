@@ -1,12 +1,9 @@
+import { deriveP2pkhAddress } from "@keymaster/contracts";
 // appView Session Window 的专用密码学 Worker。
 // 私钥只存在 worker 状态中；Channel 消息格式由 Coordinator 使用 ChannelProtocol
 // 处理，本 Worker 不实现消息信封。
 
-import {
-  deriveP2pkhAddress,
-  signEcdsaDigest,
-  verifySessionKeyPair
-} from "./sessionCryptoCore.js";
+import { signEcdsaDigest, verifySessionKeyPair } from "./sessionCryptoCore.js";
 import type {
   SessionCryptoRequestMessage,
   SessionCryptoResponseMessage

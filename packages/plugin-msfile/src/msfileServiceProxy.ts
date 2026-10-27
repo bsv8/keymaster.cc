@@ -247,10 +247,6 @@ export class MsFileServiceProxy implements MsFileService {
     return this.#control({ type: "settings.readConcurrency.reset" }).then(() => undefined);
   }
 
-  getMediaBlockReadConcurrency(): Promise<number> {
-    return this.getReadConcurrencySettings().then((settings) => settings.mediaBlockReadConcurrency);
-  }
-
   updateGlobalPriceSettings(input: MsFileGlobalPriceSettings): Promise<void> {
     return this.#control({ type: "settings.global.update", input }).then(() => undefined);
   }
@@ -267,11 +263,6 @@ export class MsFileServiceProxy implements MsFileService {
   /** 保存 Worker 持久化的 BitFS 自动购买策略。 */
   updateBitfsBuyerSettings(input: MsFileBitfsBuyerSettings): Promise<void> {
     return this.#control({ type: "settings.bitfsBuyer.update", input }).then(() => undefined);
-  }
-
-  updateMediaBlockReadConcurrency(value: number): Promise<void> {
-    return this.getReadConcurrencySettings()
-      .then((settings) => this.updateReadConcurrencySettings({ ...settings, mediaBlockReadConcurrency: value }));
   }
 
   upsertSupplier(input: unknown): Promise<void> {

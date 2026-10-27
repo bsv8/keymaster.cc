@@ -18,6 +18,7 @@ export async function authenticateAppWallet(
       || current.status !== issued.status || current.activePublicKeyHex !== issued.activePublicKeyHex
       || current.sessionEpoch !== issued.sessionEpoch || current.runGeneration !== issued.runGeneration
       || current.walletGeneration !== issued.walletGeneration
+      || current.activeKeyIdentity?.bsvNetwork !== issued.activeKeyIdentity?.bsvNetwork
       || (current.activeKeyIdentity?.backend ?? "software") !== backend) {
       throw new Error("Active wallet key session has been revoked");
     }
@@ -32,10 +33,10 @@ export async function authenticateAppWallet(
   const key = await vault.getCurrentKey();
   assertLive();
   if (key?.format !== "keymaster.hardware-key" || key.publicKeyHex !== publicKeyHex) throw new Error("Hardware wallet identity mismatch");
-  const crypto = await vault.createActiveKeyCrypto(publicKeyHex);
+  const crypto = await vault.createActiveKeyCrypto();
   try {
     assertLive();
-    const derived = await crypto.deriveP2pkhAddress({publicKeyHex, network: "main"});
+    const derived = await crypto.deriveP2pkhAddress();
     assertLive();
     if (derived.publicKeyHex !== publicKeyHex || !derived.address) throw new Error("Hardware wallet identity mismatch");
   } finally { crypto.dispose?.("App wallet authentication completed"); }

@@ -163,14 +163,13 @@ export interface VaultService {
   /**
    * 返回受控 active key capability。调用方不能拿到 raw private key。
    */
-  createActiveKeyCrypto(publicKeyHex: string): Promise<ActiveKeyCrypto>;
+  createActiveKeyCrypto(): Promise<ActiveKeyCrypto>;
   /**
    * 为独立 appView session 创建专属 worker capability。
    * appView 不能复用 Keymaster 当前 session capability。
    */
   createAppViewSession(input: {
     sessionId: string;
-    publicKeyHex: string;
     password: string;
   }): Promise<ActiveKeyCrypto>;
   /** 销毁单个 appView session。 */
@@ -196,8 +195,34 @@ export function requireUnlockedWalletIdentity(snapshot: Readonly<VaultLifecycleS
   if (snapshot.status !== "unlocked" || !snapshot.activePublicKeyHex) throw new Error("Active key is unavailable");
   const identity = snapshot.activeKeyIdentity;
   if (!identity || (identity.bsvNetwork !== "main" && identity.bsvNetwork !== "test") || identity.publicKeyHex !== snapshot.activePublicKeyHex) throw new Error("Network identity is unavailable");
-  return { ...identity, capabilities: [...identity.capabilities] };
+  return { ...identity, publicKeyHex: identity.publicKeyHex.toLowerCase(), capabilities: [...identity.capabilities] };
 }
+/**
+ * 从权威 wallet-state 为当前业务实例捕获身份；这不是新的身份权威或授权。
+ * 业务 API 不接收 owner/network 选择参数，异步操作前后调用 assertActive。
+ */
+export function bindWalletIdentity(state: VaultWalletState, signal?: AbortSignal) {
+  const initial = state.snapshot();
+  const issued = { ...initial, activeKeyIdentity: initial.activeKeyIdentity ? { ...initial.activeKeyIdentity } : undefined };
+  const identity = requireUnlockedWalletIdentity(issued);
+  if ([issued.sessionEpoch, issued.runGeneration, issued.walletGeneration].some(value => typeof value !== "string" || !value)) throw new Error("Wallet identity generation is unavailable");
+  Object.freeze(identity.capabilities);
+  Object.freeze(identity);
+  function isActive(): boolean {
+    try {
+      if (signal?.aborted) return false;
+      const current = state.snapshot();
+      const active = requireUnlockedWalletIdentity(current);
+      return sameWalletSession(issued, current) && active.publicKeyHex === identity.publicKeyHex && active.bsvNetwork === identity.bsvNetwork;
+    } catch { return false; }
+  }
+  function assertActive(): void {
+    if (!isActive()) throw new Error("Wallet identity session is no longer active");
+  }
+  assertActive();
+  return Object.freeze({ identity, isActive, assertActive });
+}
+
 /** 同一公钥再次解锁、Worker 重启、钱包重置都属于不同会话。 */
 export function sameWalletSession(a: Readonly<VaultLifecycleSnapshot>, b: Readonly<VaultLifecycleSnapshot>): boolean {
   return a.status === b.status && a.activeKeyIdentity?.bsvNetwork === b.activeKeyIdentity?.bsvNetwork && a.activePublicKeyHex === b.activePublicKeyHex

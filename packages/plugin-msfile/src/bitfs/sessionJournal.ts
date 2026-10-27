@@ -3,7 +3,7 @@
 // 与 go-bitfs 的边界：SDK 只返回普通 evidence 和 exact bytes；本文件
 // 记录应用进度、恢复 fence 和证据引用，不序列化 SDK 实例。
 
-import type { BorrowedOwnerFileStore } from "@keymaster/contracts";
+import type { BorrowedModuleFileStore } from "@keymaster/contracts";
 
 const SESSION_FORMAT = "keymaster.bitfs-session";
 const SESSION_VERSION = 1;
@@ -180,7 +180,7 @@ export interface BitfsSessionJournal {
   list(): Promise<BitfsSessionRecord[]>;
 }
 
-export function createBitfsSessionJournal(store: BorrowedOwnerFileStore): BitfsSessionJournal {
+export function createBitfsSessionJournal(store: BorrowedModuleFileStore): BitfsSessionJournal {
   const recordPath = (id: string) => `sessions/${assertSessionId(id)}.json`;
   const evidencePath = (id: string, name: BitfsEvidenceName) => `evidence/${assertSessionId(id)}/${name}.bin`;
   const read = async (id: string): Promise<{ record: BitfsSessionRecord; revision?: string } | undefined> => {

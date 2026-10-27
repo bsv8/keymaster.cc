@@ -23,7 +23,7 @@ import type {
   WocHistoryPage,
   WocQueueSnapshot,
   WocRequestOptions,
-  WocService,
+  WocQueryTransport,
   WocWorkerBroadcastService,
   WocTransactionObservation,
   WocSpentOutput,
@@ -48,7 +48,7 @@ import {
   type WocUtxosPayload
 } from "./wocMessages.js";
 
-export interface WocServiceHandle extends WocService, WocWorkerBroadcastService {
+export interface WocServiceHandle extends WocQueryTransport, WocWorkerBroadcastService {
   /** 保留兼容的异步就绪钩子；配置已由 Coordinator bootstrap 提供。 */
   ready(): Promise<void>;
   /** 停止调度器(用于测试)。 */

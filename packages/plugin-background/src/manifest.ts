@@ -1,4 +1,4 @@
-import { CHAIN_FEE_READER_CAPABILITY, emptyChainFeeSnapshots } from "@keymaster/contracts";
+import { CHAIN_FEE_READER_CAPABILITY } from "@keymaster/contracts";
 import { BACKGROUND_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
 import { createElement } from "react";
 import { bindBackgroundUi } from "./BackgroundResourceContext.js";
@@ -78,7 +78,7 @@ const backgroundResources: I18nPluginResources = {
       "background.settings.feeRefreshFailed": "Refresh failed; retaining the previous recommendation if available.",
       "background.settings.feeReadout": "Network fee rates (sat/KB)",
       "background.settings.chainHeightTitle": "Current blockchain height",
-      "background.settings.chainHeightValue": "Mainnet height {{height}}",
+      "background.settings.chainHeightValue": "Block height {{height}}",
       "background.settings.chainHeightPending": "No height from the node yet: waiting for the background sync task to complete its first read.",
       "background.settings.option.30s": "30 seconds",
       "background.settings.option.1min": "1 minute",
@@ -145,7 +145,7 @@ const backgroundResources: I18nPluginResources = {
       "background.settings.feeRefreshFailed": "刷新失败；已有建议值保留并标记为过期。",
       "background.settings.feeReadout": "网络手续费率（sat/KB）",
       "background.settings.chainHeightTitle": "当前区块链高度",
-      "background.settings.chainHeightValue": "主网高度 {{height}}",
+      "background.settings.chainHeightValue": "区块高度 {{height}}",
       "background.settings.chainHeightPending": "尚未取得节点高度：等待后台同步任务完成第一次读取。",
       "background.settings.option.30s": "30 秒",
       "background.settings.option.1min": "1 分钟",
@@ -264,7 +264,7 @@ const backgroundPluginDefinition = {
     });
 
     resources.register({ id: "background.chain-fees", scope: "global", key: () => ["background.chain-fees"],
-      load: async () => { const fees = ctx.optionalCapability(CHAIN_FEE_READER_CAPABILITY); return fees ? { main: fees.get("main"), test: fees.get("test") } : emptyChainFeeSnapshots(); },
+      load: async () => ctx.optionalCapability(CHAIN_FEE_READER_CAPABILITY)?.get() ?? null,
       subscribe: (_args, _context, invalidate) => {
         let current = ctx.optionalCapability(CHAIN_FEE_READER_CAPABILITY);
         let off = current?.subscribe(invalidate);
@@ -277,7 +277,7 @@ const backgroundPluginDefinition = {
         return () => { off?.(); scopeOff(); };
       }, invalidation: "immediate" });
     resources.register({ id: "background.chain-height", scope: "global", key: () => ["background.chain-height"],
-      load: async () => ctx.optionalCapability(CHAIN_HEIGHT_READER_CAPABILITY)?.get() ?? emptyChainHeightSnapshot(),
+      load: async () => ctx.optionalCapability(CHAIN_HEIGHT_READER_CAPABILITY)?.get() ?? null,
       subscribe: (_args, _context, invalidate) => {
         let current = ctx.optionalCapability(CHAIN_HEIGHT_READER_CAPABILITY);
         let off = current?.subscribe(invalidate) ?? (() => {});

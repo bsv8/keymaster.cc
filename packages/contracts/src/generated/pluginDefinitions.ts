@@ -1976,21 +1976,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           },
           {
             "kind": "local",
-            "id": "woc.bsv21.service",
-            "version": "1"
-          },
-          {
-            "kind": "local",
-            "id": "woc.stas.service",
-            "version": "1"
-          },
-          {
-            "kind": "local",
-            "id": "woc.1satordinals.service",
-            "version": "1"
-          },
-          {
-            "kind": "local",
             "id": "woc.coordinator-control",
             "version": "1"
           },
@@ -2002,6 +1987,15 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
         ],
         "privateProvides": [],
         "dependencies": [
+          {
+            "capability": {
+              "kind": "local",
+              "id": "vault.wallet-state",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "链查询绑定当前钱包权威身份和运行代际"
+          },
           {
             "capability": {
               "kind": "local",
@@ -2071,21 +2065,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "kind": "local",
             "id": "woc.worker-broadcast",
-            "version": "1"
-          },
-          {
-            "kind": "local",
-            "id": "woc.bsv21.service",
-            "version": "1"
-          },
-          {
-            "kind": "local",
-            "id": "woc.stas.service",
-            "version": "1"
-          },
-          {
-            "kind": "local",
-            "id": "woc.1satordinals.service",
             "version": "1"
           }
         ],

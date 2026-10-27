@@ -65,12 +65,12 @@ export function createBitfsVaultSigner(cryptoPort: ActiveKeyCrypto): Signer {
            if(!request.documentCBOR)throw new WireError("invalid_evidence",request.wireKind,"document_cbor","硬件签名需要完整认证文档");
            const document=new Uint8Array(request.documentCBOR),digest=wireSignatureDigest(request.wireKind as import("go-bitfs").WireKind,document);
            if(!digest.every((byte,index)=>byte===request.digest[index]))throw new WireError("invalid_evidence",request.wireKind,"digest","BitFS 文档与摘要不一致");
-           const result=await cryptoPort.signBitfsWire({publicKeyHex:identity.publicKeyHex,kind:request.wireKind,document:document.buffer},signal);
+           const result=await cryptoPort.signBitfsWire({ kind:request.wireKind, document:document.buffer },signal);
            if(signal?.aborted)throw new DOMException("BitFS 签名已取消","AbortError");
            if(result.format!=="der"||result.publicKeyHex!==identity.publicKeyHex||cryptoPort.getIdentity().publicKeyHex!==identity.publicKeyHex)throw new WireError("unauthorized",request.wireKind,"signer","签名期间 active Key 已变化");
            return new Uint8Array(result.signature);
          }
-         const result = await cryptoPort.signDigest({ publicKeyHex: identity.publicKeyHex, digest: new Uint8Array(request.digest).buffer, format: "der" });
+         const result = await cryptoPort.signDigest({ digest: new Uint8Array(request.digest).buffer, format: "der" });
          if (result.format !== "der") throw new TypeError("Vault 返回了错误的签名格式");
          return new Uint8Array(result.signature).slice();
        } catch (error) {

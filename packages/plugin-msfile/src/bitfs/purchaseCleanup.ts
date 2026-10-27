@@ -1,4 +1,4 @@
-import type { BorrowedOwnerFileStore } from "@keymaster/contracts";
+import type { BorrowedModuleFileStore } from "@keymaster/contracts";
 import { createBitfsSessionJournal } from "./sessionJournal.js";
 import { createBitfsPurchaseTasks } from "./purchaseTasks.js";
 import type { BitfsFundingAccount, BitfsFundingLedger } from "./funding.js";
@@ -6,7 +6,7 @@ import { bitfsSessionNeedsFundingRecovery, bitfsContentLockKey, withBitfsContent
 
 /** 清理用户明确选定的文件/采购历史。未结池仍是执行时原有账本记录，绝不在此创建池。 */
 export async function deleteBitfsPurchaseData(input: {
-  journal: BorrowedOwnerFileStore; content: BorrowedOwnerFileStore; ledger: BitfsFundingLedger;
+  journal: BorrowedModuleFileStore; content: BorrowedModuleFileStore; ledger: BitfsFundingLedger;
   owner: string; seed: string; sessionId?: string; deleteContent: boolean; assertActive(): void;
 }) {
   const { journal, content, ledger, owner, seed } = input;

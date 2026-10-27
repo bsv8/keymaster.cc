@@ -910,23 +910,10 @@ export interface FeepoolCommitResult {
   closeDraftTxid?: string;
 }
 
-/* ============== 站点配置与费用池状态（施工单 002 硬切换） ============== */
+/* ============== 站点配置 ============== */
 
-/**
- * 站点级配置。
- *
- * 字段固定；默认值在 service 层给出：
- *   - feePoolDefaultFundSatoshis 默认 0（首次配置必须由用户填）。
- *   - 付款授权不属于 origin 设置，统一由钱包核心的渠道/会话额度处理。
- *
- * 设计缘由（施工单 002 收尾反馈）：
- *   - 关键：**fee pool 缺省 fund 是 per-origin 设置**，不是系统级设置；
- *     同一站点不同 origin 之间彼此独立。
- *   - 首次 `feepool.prepare` 命中 create action 且该 origin 没配置时，
- *     popup 必须要求用户先填 `feePoolDefaultFundSatoshis`（走 settings modal
- *     或站点配置入口；详见协议文档）。
- */
-export interface ProtocolOriginSettingsRecord {
+/** exact origin 的身份/密码学自动确认及人工确认超时。付款由钱包核心授权。 */
+export interface ProtocolOriginSettings {
   /** exact event.origin（不做 host 归一化）。 */
   origin: string;
   /**
@@ -946,17 +933,12 @@ export interface ProtocolOriginSettingsRecord {
    * 同一字段同时控制 encrypt 与 decrypt，语义对称。
    *
    * 设计缘由（施工单 001）：
-   *   - **不**扩展到 `intent.sign` / `p2pkh.transfer` / `feepool.*`；
+   *   - 不扩展到签名或转账；
    *     付款的渠道/会话额度只由钱包核心处理。
    *   - aud / origin 校验仍由对应 execute 方法内部 throw，自动批准
    *     路径不绕过校验。
    */
   cipherAutoApproveEnabled: boolean;
-  /**
-   * 该 origin 首次 `feepool.prepare` 命中 create 时使用的池大小。
-   * 默认 0；0 = "未配置"，首次会要求用户在 popup 内补。
-   */
-  feePoolDefaultFundSatoshis: number;
   /**
    * 确认超时秒数（施工单 003 硬切换：per-origin 确认超时）。
    *
@@ -974,6 +956,11 @@ export interface ProtocolOriginSettingsRecord {
    */
   confirmTimeoutSeconds: number;
   updatedAt: number;
+}
+
+/** 钱包私有的持久化站点记录。 */
+export interface ProtocolOriginSettingsRecord extends ProtocolOriginSettings {
+  feePoolDefaultFundSatoshis?: number;
 }
 
 /**
@@ -1439,8 +1426,6 @@ export interface LaunchAppViewInput {
   appOrigin: string;
   /** client app 真正打开的 URL（appView bootstrap 后会带上 `?launchToken=`）。 */
   appUrl: string;
-  /** launcher 这次启动要绑定的 owner 公钥。 */
-  publicKeyHex: string;
   /** 解锁 appView 专属 session 所需的 Vault 密码。 */
   password: string;
   /**
@@ -2336,14 +2321,6 @@ export interface LaunchTokenRecord {
   expiresAt: number;
 }
 
-/**
- * （施工单 002 收尾反馈：已废弃并删除）
- *
- * 原本想用 system-level bridge 暴露 `feePoolDefaultFundSatoshis`，
- * 实际收口为 per-origin 字段 `ProtocolOriginSettingsRecord.feePoolDefaultFundSatoshis`。
- * 本接口不再导出；service / manifest / settings 页一并删除。
- */
-
 /* ============== popup 会话状态 ============== */
 
 /**
@@ -2430,53 +2407,23 @@ export const PROTOCOL_SERVICE_CAPABILITY = defineCapability<ProtocolService>({
  *     互相 import）。这里在 contracts 层定义一个最小子集；plugin-p2pkh
  *     的现有 `P2pkhService` 已经覆盖该子集，manifest setup 时做一次
  *     适配即可。
- *   - 所有 p2pkh 业务能力（listUtxos / prepareTransfer / submitTransfer）
- *     **必须**接受 `ownerPublicKeyHex` 维度。owner 是 connect session 绑定
- *     的 owner；plugin-protocol 永远**不**传当前钱包 active key 给 p2pkh
- *     适配层——只有 session 绑定的 owner 才是真值。`ownerPublicKeyHex`
- *     缺省视作旧路径的"取 active key"语义（**仅**为旧测试 / 兜底保留）；
- *     002 之后所有业务方法都强制传 owner。
+ *   - 业务请求不选择 owner/network；P2PKH 实例自动绑定权威钱包身份。
+ *     Protocol 在调用前后核对 Connect session、来源、App 与钱包代际；
+ *     预览和持久记录中的身份是责任证据，不是调用者自报的授权。
  */
 export interface P2pkhProtocolAdapter {
   /** 完整前序证据的链上读接口；缺失时费用池不能退回盲签摘要。 */
-  getRawTransaction?(network: "main" | "test", txid: string): Promise<string>;
+  getRawTransaction?(txid: string): Promise<string>;
   /** Local manager lookup only; never implicitly starts conclusion queries. */
-  getPaymentStatus?(input: import("./p2pkhConclusion.js").P2pkhPaymentLookupInput): Promise<import("./p2pkhConclusion.js").P2pkhPaymentLookupResult>;
-  /**
-   * 列指定 owner 在指定 assetId 下的 UTXO。
-   *
-   * `ownerPublicKeyHex` 必填；缺省 = "取 active key namespace"是
-   * 兜底路径，**只**为兼容旧调用。002 之后所有调用方都应传 owner。
-   * `assetId` 使用 p2pkh 内部命名（`bsv` / `bsvtest`）。
-   */
-  listUtxos(filter?: {
-    assetId?: string;
-    ownerPublicKeyHex?: string;
-  }): Promise<Array<{ txid: string; vout: number; value: number }>>;
-  /**
-   * 当前钱包设置是否已开启指定资产（施工单 2026-09-18 001）。
-   *
-   * plugin-protocol 在 accept 阶段用它把"未开启 testnet"fail-fast 成
-   * `asset_not_enabled`，而不是等 prepare 抛错后统一折叠成 user_rejected。
-   * `assetId` 使用 p2pkh 内部命名（`bsv` / `bsvtest`）。
-   */
-  isAssetEnabled(assetId: string): boolean;
-  /**
-   * 准备 p2pkh 转账预览。
-   *
-   * `ownerPublicKeyHex` 必填；plugin-protocol 永远传 session 绑定 owner。
-   * UTXO 选币 + 签名都按该 owner 走，**不**读全局 active key。
-   */
-  prepareTransfer(input: {
-    paymentContext?: { channelId: string; sessionId: string | null };
-    assetId: string;
+  getPaymentStatus?(input: Pick<import("./p2pkhConclusion.js").P2pkhPaymentLookupInput, "paymentId">): Promise<import("./p2pkhConclusion.js").P2pkhPaymentLookupResult>;
+  /** 当前绑定钱包的可用投影；未知与零 UTXO 显式区分。 */
+  getAvailableUtxos(): Promise<{
+    available: boolean;
+    utxos: Array<{ txid: string; vout: number; value: number }>;
+  }>;
+  /** 当前钱包的业务转账预览；原样保留返回身份供提交时核对。 */
+  prepareTransfer(input: import("./workerTransfer.js").P2pkhTransferRequest): Promise<{
     ownerPublicKeyHex: string;
-    recipientAddress?: string;
-    amountSatoshis: number;
-    feeRateSatoshisPerKb: number;
-    /** Connect v1 payment facts; when present the service uses the strict role plan. */
-    payment?: import("./p2pkhConnectPayment.js").P2pkhConnectPaymentFacts;
-  }): Promise<{
     assetId: string;
     network: "main" | "test";
     recipientAddress?: string;
@@ -2499,19 +2446,7 @@ export interface P2pkhProtocolAdapter {
    * 余额——同一枚输入可能被再花一次。返回的 allocation id 是稳定身份：
    * ledger 与 manager 两侧指向同一笔占用。
    */
-  occupyDeliveredArtifact?(input: {
-    ownerPublicKeyHex: string;
-    network: "main" | "test";
-    artifactId: string;
-    unsignedTxHex: string;
-    signedTxHex: string;
-    inputs: Array<{ txid: string; vout: number; value: string; scriptHex: string }>;
-    outputs: Array<{ scriptHex: string; value: string }>;
-    businessAmountSatoshis: string;
-    feeRateSatoshisPerKb: string;
-    feeCapSats: string;
-    protocolKind: "refund" | "close" | "fund" | "state";
-  }): Promise<{ allocationId: string; txid: string }>;
+  occupyDeliveredArtifact?(input: import("./bsvP2pkhProviders.js").P2pkhArtifactRequest): Promise<import("./bsvP2pkhProviders.js").P2pkhArtifactOccupyResult>;
   /**
    * 广播已签名 transfer preview。
    *
@@ -2659,11 +2594,11 @@ export interface ProtocolService {
    * 读 origin 配置；K-V 不可用或该 origin 尚未配置时返回 null。
    * UI 用此填默认 + 弹 modal 编辑当前 origin。
    */
-  getOriginSettings(origin: string): Promise<ProtocolOriginSettingsRecord | null>;
+  getOriginSettings(origin: string): Promise<ProtocolOriginSettings | null>;
   /**
    * 写 origin 配置；K-V 不可用时 throw（由调用方决定怎么降级）。
    */
-  setOriginSettings(record: ProtocolOriginSettingsRecord): Promise<void>;
+  setOriginSettings(record: ProtocolOriginSettings): Promise<void>;
   /**
    * 当前确认超时截止时间（epoch ms）。
    *
@@ -2703,33 +2638,8 @@ export interface ProtocolService {
    * `feedSnapshot().lockSummary`，两者行为一致。
    */
   lockSummarySnapshot(): ProtocolLockSummary | null;
-  /**
-   * 暴露底层 vault service 引用（施工单 2026-06-27 001 反馈修复）。
-   *
-   * 设计缘由：vault 状态变化（unlock / relock）需要在 popup 顶层监听，
-   * 跨 locked / unlocked 视图切换仍生效。UI 不应再 useCapability 拿
-   * 一个独立的 vault 实例——会双订阅。
-   */
-  getVaultService(): VaultService;
-  /**
-   * 由 popup 顶层 vault.onStatusChange 调用的切换入口。
-   *
-   * 设计缘由（施工单 2026-06-30 003 硬切换 4.5）：
-   *   - 传入的 `locked` 仅表达当前 vault 状态；最终 `lockStateValue`
-   *     由 service 内部用 `computeLockState()` 同时参考 vault 状态 +
-   *     `ownerRuntimesBySessionId` 是否非空统一决定。
-   *   - 因此：
-   *       * vault unlock 后 → 至少有一路 owner runtime 可用 → unlocked；
-   *         已存在的 `waiting_unlock_*` 记录批量推进到
-   *         `confirming` / `queued`。
-   *       * vault lock 后 → 如果 `ownerRuntimesBySessionId` 里还保留
- *         bootstrap_runtime，仍维持 unlocked；否则推回 locked
-   *         并触发 `confirming` → `waiting_unlock_manual` 的硬收口。
-   *   - 同方法也被 `applyLauncherBootstrap` 在注册完 owner runtime 后
-   *     调用一次，使 appView bootstrap 完成即可立刻把当前 Session Window
-   *     视为 unlocked。
-   */
-  setVaultLockState(locked: boolean): void;
+  /** 从当前 Vault 与有效授权 runtime 同步执行状态；页面不传锁屏值。状态变化时撤销 Channel 会话或推进等待请求。 */
+  syncWalletState(): void;
 
   /* ============== Session Window（施工单 2026-06-29 001 硬切换） ============== */
 
@@ -2878,7 +2788,7 @@ export interface ProtocolService {
    *       3. 解析 claims 快照（按 input.claims 走 builtin claim 解析）；
    *       4. 创建新 `walletPublicKeyHex` 并落 K-V，写 session 真值三元组
    *          （sessionId + origin + ownerPublicKeyHex）；
-   *       5. 调 `vault.createAppViewSession({ sessionId, publicKeyHex, password })`
+   *       5. 调 `vault.createAppViewSession({ sessionId, password })`
    *          取受控 capability，组装 `SessionRuntimeBootstrap`；
    *       6. 生成 `launchToken`；
  *       7. 组装 `AppBootstrapPayload`（含 `sessionRuntimeBootstrap`，

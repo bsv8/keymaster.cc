@@ -875,8 +875,6 @@ export interface MsFileService {
   updateReadConcurrencySettings(input: MsFileReadConcurrencySettings): Promise<void>;
   /** 一键恢复施工单定义的建议值。 */
   resetReadConcurrencySettings(): Promise<void>;
-  /** 兼容旧调用方的单字段读取入口。 */
-  getMediaBlockReadConcurrency(): Promise<number>;
   updateGlobalPriceSettings(input: MsFileGlobalPriceSettings): Promise<void>;
   /** 原子保存当前 Key 的 BitFS 卖方设置。 */
   updateSellerSettings(input: MsFileSellerSettings): Promise<void>;
@@ -884,8 +882,6 @@ export interface MsFileService {
   getBitfsBuyerSettings?(): Promise<MsFileBitfsBuyerSettings>;
   /** 保存当前 Key 的 BitFS 自动购买策略；不改变已开始的购买任务。 */
   updateBitfsBuyerSettings?(input: MsFileBitfsBuyerSettings): Promise<void>;
-  /** 兼容旧调用方的单字段保存入口；只影响之后新建的媒体 Session。 */
-  updateMediaBlockReadConcurrency(value: number): Promise<void>;
   upsertSupplier(input: MsFileSupplierConfig): Promise<void>;
   deleteSupplier(supplierPublicKeyHex: string): Promise<void>;
   probeSupplier(supplierPublicKeyHex: string, signal?: AbortSignal): Promise<MsFileSupplierProbeResult>;
