@@ -1601,10 +1601,8 @@ async function msfileBitfsKernelRefreshQuote(runtime: MsfileBitfsKernelRuntime, 
 /** 普通钱包快照 → 内核 wallet；已准备开池（Kind 2 已落盘）的命令视为占用已反映。 */
 async function msfileBitfsKernelWallet(runtime: MsfileBitfsKernelRuntime): Promise<{ revision: number; available: string; reflectedCommands: string[] }> {
   const snapshot = await deps.funding.walletView({ ownerPublicKeyHex: runtime.ownerPublicKeyHex, network: deps.network() });
-  if (!snapshot.available) throw new Error("Manager wallet balance is unavailable");
-  const available = snapshot.available && snapshot.state === "fresh"
-    ? snapshot.items.filter((item) => !item.isSpentInMempoolTx).reduce((sum, item) => sum + BigInt(item.value), 0n)
-    : 0n;
+  if (!snapshot.hasResult) throw new Error("Manager wallet result has not been obtained");
+  const available = snapshot.items.filter((item) => !item.isSpentInMempoolTx).reduce((sum, item) => sum + BigInt(item.value), 0n);
   const sessions = createBitfsSessionJournal(deps.files("bitfs-journal"));
   const prepared = new Set<string>();
   for (const record of await sessions.list()) {

@@ -127,7 +127,7 @@ function sameGlobalSettings(left: P2pkhGlobalSettings, right: P2pkhGlobalSetting
 
 /** UTXO 快照项 → service 内部 UTXO 视图（script 由地址确定性生成）。 */
 function snapshotItemToUtxo(input: {
-  item: P2pkhUtxoSnapshotResult["items"][number];
+  item: NonNullable<P2pkhUtxoSnapshotResult["items"]>[number];
   resource: P2pkhKeyResource;
 }): P2pkhUtxo {
   const { item, resource } = input;
@@ -157,7 +157,7 @@ function snapshotItemToUtxo(input: {
 export function calculateP2pkhBalanceBreakdown(input: {
   snapshot: P2pkhUtxoSnapshotResult;
 }): P2pkhBalanceBreakdown {
-  if (!input.snapshot.available) {
+  if (!input.snapshot.hasResult) {
     return { confirmed: 0, unconfirmed: 0, spendable: 0 };
   }
   const spendableItems = input.snapshot.items.filter((item) => !item.isSpentInMempoolTx);
@@ -331,10 +331,10 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
     return result.value;
   }
 
-  /** 返回组合交易需要的资源 + 快照序号绑定；consumed/unavailable 不可组合。 */
+  /** 返回原资源和内容编号；未取得结果时没有绑定，不授予资金权限。 */
   async function getUtxoBinding(input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<P2pkhUtxoBinding | undefined> {
     const snapshot = await requireUtxoSnapshot(input, "get");
-    if (!snapshot.available || snapshot.state !== "fresh" || snapshot.seq === undefined) return undefined;
+    if (!snapshot.hasResult) return undefined;
     return { resourceId: makeResourceId(input.network), seq: snapshot.seq };
   }
 
@@ -344,6 +344,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
     snapshot: P2pkhUtxoSnapshotResult;
     ownerPublicKeyHex: string;
   }): Promise<P2pkhUtxo[]> {
+    if (!input.snapshot.hasResult) return [];
     const candidates = input.snapshot.items
       .filter((item) => !item.isSpentInMempoolTx)
       .map((item) => snapshotItemToUtxo({ item, resource: input.resource }));
@@ -355,16 +356,16 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
     assertWalletSession();
     const snapshot = await requireUtxoSnapshot({ ownerPublicKeyHex: walletIdentity.publicKeyHex, network: walletIdentity.bsvNetwork }, mode);
     assertWalletSession();
-    const available = snapshot.available && snapshot.state === "fresh";
+    if (!snapshot.hasResult) return { hasResult: false, utxos: null, seq: null, syncedAt: null };
     const resource: P2pkhKeyResource = {
       resourceId: makeResourceId(walletIdentity.bsvNetwork), publicKeyHex: walletIdentity.publicKeyHex,
       address: p2pkhAddressCodec.deriveAddress(walletIdentity.publicKeyHex, walletIdentity.bsvNetwork),
       network: walletIdentity.bsvNetwork, label: walletIdentity.label, createdAt: walletIdentity.createdAt, generation: 0,
     };
     return {
-      available, state: available ? "fresh" : "unavailable", seq: snapshot.seq, syncedAt: snapshot.syncedAt,
-      utxos: available ? canonicalizeP2pkhUtxos(snapshot.items.filter(item => !item.isSpentInMempoolTx)
-        .map(item => snapshotItemToUtxo({ item, resource }))) : [],
+      hasResult: true, seq: snapshot.seq, syncedAt: snapshot.syncedAt,
+      utxos: canonicalizeP2pkhUtxos(snapshot.items.filter(item => !item.isSpentInMempoolTx)
+        .map(item => snapshotItemToUtxo({ item, resource }))),
     };
   }
 
@@ -514,9 +515,9 @@ export function createP2pkhService(deps: P2pkhServiceDeps): { service: IP2pkhSer
       snapshot = await requireUtxoSnapshot({ ownerPublicKeyHex: active, network }, "get");
     } catch {
       // 快照不可用（冷启动/刷新失败）：余额未知，绝不当 0。
-      snapshot = { available: false, state: "unavailable", items: [] };
+      snapshot = { hasResult: false, items: null, seq: null, syncedAt: null };
     }
-    return { breakdown: calculateP2pkhBalanceBreakdown({ snapshot }), available: snapshot.available };
+    return { breakdown: calculateP2pkhBalanceBreakdown({ snapshot }), available: snapshot.hasResult };
   }
 
   /**

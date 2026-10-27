@@ -69,7 +69,7 @@ import {
   BSV_PRICE_READER_CAPABILITY,
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
-import type { P2pkhGlobalSettings, P2pkhSyncStatus, P2pkhKeyResource, P2pkhHistoryRecord, P2pkhLocalTransaction, P2pkhTransactionSyncState, P2pkhUtxo } from "./p2pkhContracts.js";
+import type { P2pkhGlobalSettings, P2pkhSyncStatus, P2pkhKeyResource, P2pkhHistoryRecord, P2pkhLocalTransaction, P2pkhTransactionSyncState, P2pkhAvailableUtxos } from "./p2pkhContracts.js";
 
 type ReadinessState = "initializing" | "no-active-key" | "ready";
 import { createP2pkhService } from "./p2pkhService.js";
@@ -199,7 +199,7 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.wallet.balances": "BSV balances",
       "p2pkh.wallet.syncStatus": "Confirmed synchronization status",
       "p2pkh.wallet.lastCompleteSync": "Last complete sync: {{time}}",
-      "p2pkh.wallet.utxoSnapshot": "UTXO snapshot: {{time}} ({{count}} outputs)",
+      "p2pkh.wallet.utxoSnapshot": "UTXO result: {{time}} ({{count}} outputs)",
       "p2pkh.wallet.testSync": "test {{time}}",
       "p2pkh.wallet.taskStatus": "Task status: {{status}}",
       "p2pkh.wallet.syncError": "Sync error: {{error}}",
@@ -219,7 +219,7 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.balance.localSpendable": "Local spendable",
       "p2pkh.balance.confirmed": "Confirmed (spendable)",
       "p2pkh.balance.unconfirmed": "Unconfirmed (spendable)",
-      "p2pkh.balance.unknown": "Unknown (UTXO snapshot not available yet)",
+      "p2pkh.balance.unknown": "Unknown (no UTXO result yet)",
       "p2pkh.source.confirmed": "Confirmed",
       "p2pkh.source.local-confirmed": "Local confirmed",
       "p2pkh.direction.received": "Received",
@@ -467,7 +467,7 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.wallet.syncStatus": "确认交易同步状态",
       "p2pkh.wallet.balances": "BSV 余额",
       "p2pkh.wallet.lastCompleteSync": "最近完整同步：{{time}}",
-      "p2pkh.wallet.utxoSnapshot": "UTXO 快照：{{time}}（{{count}} 个输出）",
+      "p2pkh.wallet.utxoSnapshot": "UTXO 结果：{{time}}（{{count}} 个输出）",
       "p2pkh.wallet.testSync": "test {{time}}",
       "p2pkh.wallet.taskStatus": "任务状态：{{status}}",
       "p2pkh.wallet.syncError": "同步错误：{{error}}",
@@ -487,7 +487,7 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.balance.localSpendable": "本地可花",
       "p2pkh.balance.confirmed": "已确认（可花费）",
       "p2pkh.balance.unconfirmed": "未确认（可花费）",
-      "p2pkh.balance.unknown": "未知（尚未取得 UTXO 快照）",
+      "p2pkh.balance.unknown": "未知（尚未取得 UTXO 结果）",
       "p2pkh.source.confirmed": "已确认",
       "p2pkh.source.local-confirmed": "本地确认",
       "p2pkh.direction.received": "收款",
@@ -1010,9 +1010,7 @@ const p2pkhPluginDefinition = {
       resources: P2pkhKeyResource[];
       history: P2pkhHistoryRecord[];
       locals: P2pkhLocalTransaction[];
-      utxos: P2pkhUtxo[];
-      utxosAvailable: boolean;
-      utxosSyncedAt?: string;
+      utxoResult: P2pkhAvailableUtxos;
       sync: P2pkhTransactionSyncState[];
       syncStatus: P2pkhSyncStatus;
       /** 最近一次完整同步成功时间（来自 Coordinator 任务快照，跨进程可见）。 */
@@ -1021,7 +1019,7 @@ const p2pkhPluginDefinition = {
       historyCursors: Record<string, string | undefined>;
       localCursors: Record<string, string | undefined>;
     };
-    const emptyWallet = (): P2pkhWalletResource => ({ resources: [], history: [], locals: [], utxos: [], utxosAvailable: false, sync: [], syncStatus: "idle", historyCursors: {}, localCursors: {} });
+    const emptyWallet = (): P2pkhWalletResource => ({ resources: [], history: [], locals: [], utxoResult: { hasResult: false, utxos: null, seq: null, syncedAt: null }, sync: [], syncStatus: "idle", historyCursors: {}, localCursors: {} });
     const loadWalletResource = async (context: { activePublicKeyHex?: string }): Promise<P2pkhWalletResource> => {
       if (!context.activePublicKeyHex) return emptyWallet();
       const stateRepository = createP2pkhStateRepository(await openP2pkhStateRepository(storage));
@@ -1035,19 +1033,12 @@ const p2pkhPluginDefinition = {
         const values = await Promise.all(resourceIds.map(async (resourceId) => [resourceId, await reader(resourceId)] as const));
         return { items: values.flatMap(([, page]) => page.items), cursors: Object.fromEntries(values.map(([resourceId, page]) => [resourceId, page.nextCursor])) };
       };
-      const [historyPage, localsPage, sync, utxoStatuses] = await Promise.all([
+      const [historyPage, localsPage, sync, utxoResult] = await Promise.all([
         readPagePerResource(() => service.listHistory({ limit: walletLimits.history })),
         readPagePerResource(() => service.listLocalTransactions({ limit: walletLimits.locals })),
         stateRepository.listTransactionSyncStates(),
-        // 每个资源单独取内存快照状态；合并时只要有一个启用网络没有可信快照，
-        // 整体标记为不可用（余额未知），绝不显示 0。
-        Promise.all(resourcesForKey.map(() => service.getAvailableUtxos()))
+        service.getAvailableUtxos()
       ]);
-      const utxoStatus = {
-        available: utxoStatuses.length > 0 && utxoStatuses.every((status) => status.available),
-        syncedAt: utxoStatuses.map((status) => status.syncedAt).filter((value): value is string => typeof value === "string").sort().at(-1),
-        utxos: utxoStatuses.flatMap((status) => status.utxos),
-      };
       const task = coordinator.getBootstrapSnapshot().taskSnapshots.find((snapshot) => snapshot.id === "p2pkh.transactions-sync");
       const syncStatus: P2pkhSyncStatus = !task ? "idle" : task.state === "running" ? "syncing" : task.state === "blocked" ? "blocked" : task.error ? "failed" : task.lastCompletedAt ? "ok" : "idle";
       const blockedReason = task?.blockedReason;
@@ -1056,9 +1047,7 @@ const p2pkhPluginDefinition = {
         resources: resourcesForKey,
         history: historyPage.items,
         locals: localsPage.items,
-        utxos: utxoStatus.utxos,
-        utxosAvailable: utxoStatus.available,
-        ...(utxoStatus.syncedAt === undefined ? {} : { utxosSyncedAt: utxoStatus.syncedAt }),
+        utxoResult,
         sync,
         syncStatus,
         ...(task?.lastCompletedAt === undefined ? {} : { lastSyncedAt: task.lastCompletedAt }),
@@ -1083,11 +1072,11 @@ const p2pkhPluginDefinition = {
       subscribe: (_args, _ctx, invalidate) => { const off = service.onDataChanged(invalidate); return () => off(); },
       invalidation: "microtask"
     });
-    resources.register<{ utxos: P2pkhUtxo[]; available: boolean; syncedAt?: string }, readonly string[]>({
+    resources.register<P2pkhAvailableUtxos, readonly string[]>({
       id: "p2pkh.coins",
       scope: "active-key",
       key: (_args, context) => ["p2pkh.coins", context.activePublicKeyHex ?? "none"],
-      load: async (_args, context) => { const wallet = await loadWalletResource(context); return { utxos: wallet.utxos, available: wallet.utxosAvailable, ...(wallet.utxosSyncedAt === undefined ? {} : { syncedAt: wallet.utxosSyncedAt }) }; },
+      load: async (_args, context) => (await loadWalletResource(context)).utxoResult,
       subscribe: (_args, _ctx, invalidate) => { const off = service.onDataChanged(invalidate); return () => off(); },
       invalidation: "microtask"
     });

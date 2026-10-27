@@ -1,6 +1,6 @@
 import { requireWocNetwork } from "@keymaster/contracts";
-// Compatibility DTO adapter: chain observations go straight into the manager.
-// No external UTXO cache, consumed state, whole-snapshot lock or timeout release.
+// Current manager result adapter; chain observations go straight into the manager.
+// No external UTXO cache, whole-result lock or timeout release.
 import type { WocService, WocUtxoResponse, P2pkhUtxoSnapshotItem, P2pkhUtxoSnapshotResult } from "@keymaster/contracts";
 import type { P2pkhUtxoManager } from "./p2pkhUtxoManager.js";
 
@@ -12,7 +12,7 @@ export interface P2pkhUtxoSnapshotResource {
   address: string;
   generation: number;
 }
-/** Historical name retained at the internal DTO boundary; all data is a manager projection. */
+/** All returned funds data comes from the current manager projection. */
 export interface P2pkhUtxoSnapshotStore {
   refresh(resource: P2pkhUtxoSnapshotResource, options?: { signal?: AbortSignal }): Promise<P2pkhUtxoSnapshotResult>;
   get(resource: P2pkhUtxoSnapshotResource): Promise<P2pkhUtxoSnapshotResult>;
@@ -67,13 +67,12 @@ export function createP2pkhUtxoSnapshotStore(deps: {
     check(captured);
     const view = await deps.manager.available({ ownerPublicKeyHex: resource.publicKeyHex, resource });
     check(captured);
-    if (!view.observed) return { available: false, state: "unavailable", items: [] };
     const items = view.inputs.map(({ utxo }) => ({ txid: utxo.txid, vout: utxo.vout, value: utxo.value, height: utxo.height ?? 0, status: utxo.status, isSpentInMempoolTx: false, ...(utxo.script ? { script: utxo.script } : {}) }));
     const fingerprint = JSON.stringify(items);
     const key = keyFor(resource), prior = cursors.get(key);
     const seq = prior?.fingerprint === fingerprint ? prior.seq : ++nextSeq;
     cursors.set(key, { fingerprint, seq });
-    return { available: true, state: "fresh", seq, syncedAt: deps.now?.() ?? new Date().toISOString(), items };
+    return { hasResult: true, seq, syncedAt: deps.now?.() ?? new Date().toISOString(), items };
   }
   return {
     get,

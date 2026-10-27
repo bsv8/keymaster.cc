@@ -5907,7 +5907,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     assertIdentity();
     const projection = await p2pkhService.getAvailableUtxos();
     assertIdentity();
-    if (!projection.available) throw localFailure("internal_error", "Wallet UTXO projection is unavailable");
+    if (!projection.hasResult) throw localFailure("internal_error", "Wallet UTXO result has not been obtained");
     const utxos = projection.utxos;
     if (utxos.length === 0) {
       throw localFailure(

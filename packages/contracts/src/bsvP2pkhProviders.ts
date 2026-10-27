@@ -224,30 +224,14 @@ export interface P2pkhUtxoSnapshotItem {
   script?: string;
 }
 
-/** 快照状态；只记录整组快照，不记录单张 UTXO 的分配状态。 */
-export type P2pkhUtxoSnapshotState =
-  | "fresh"       // 可用于新的组合与提交
-  | "consumed"    // 已被一次提交消费，等待同步；不可读、不可提交
-  | "unavailable"; // 尚无可信快照
-
 /**
- * UTXO 快照读取结果。
- *
- * `available=false` 表示冷启动/刷新失败后尚无任何可信快照，余额是
- * “未知/不可用”，绝不能当成 0。
+ * 当前 manager 查询结果。hasResult 只说明结果已取得，不要求先完成链上同步。
+ * seq 是本实例内容变化编号，syncedAt 是本次结果生成时间，均不授予资金权限。
+ * 未取得结果时全部材料明确为 null；取得结果时空集合也是正常结果。
  */
-export interface P2pkhUtxoSnapshotResult {
-  /** 是否有可信且可用于组合的快照。consumed / unavailable 时为 false。 */
-  available: boolean;
-  /** 快照序号；内容不变时沿用，内容变化时严格递增。 */
-  seq?: number;
-  /** 快照状态。 */
-  state: P2pkhUtxoSnapshotState;
-  /** 最近一次成功同步时间（ISO 8601）。 */
-  syncedAt?: string;
-  /** UTXO 列表；consumed / unavailable 时必须为空数组。 */
-  items: P2pkhUtxoSnapshotItem[];
-}
+export type P2pkhUtxoSnapshotResult =
+  | { hasResult: false; items: null; seq: null; syncedAt: null }
+  | { hasResult: true; items: P2pkhUtxoSnapshotItem[]; seq: number; syncedAt: string };
 
 export const P2PKH_PROVIDERS_CAPABILITY = defineCapability<P2pkhProviderRegistry>({
   kind: "local",

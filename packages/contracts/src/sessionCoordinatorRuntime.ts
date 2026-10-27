@@ -3686,14 +3686,17 @@ function parseStorageStateEvent(value: unknown): CoordinatorStorageStateEvent {
 
 function parseP2pkhUtxoSnapshotResult(value: unknown, field: string): P2pkhUtxoSnapshotResult {
   const snapshot = expectRecord(value, field);
-  if (typeof snapshot.available !== "boolean") throw new TypeError(`Coordinator ${field}.available is invalid`);
-  if (snapshot.items !== undefined && (!Array.isArray(snapshot.items) || snapshot.items.length > 100_000)) throw new TypeError(`Coordinator ${field}.items is invalid`);
-  if (snapshot.syncedAt !== undefined && typeof snapshot.syncedAt !== "string") throw new TypeError(`Coordinator ${field}.syncedAt is invalid`);
-  const seq = optionalBoundedNumber(snapshot.seq, field + ".seq", 1);
-  const state = snapshot.state === undefined
-    ? (snapshot.available ? "fresh" : "unavailable")
-    : enumValue(snapshot.state, ["fresh", "consumed", "unavailable"] as const, field + ".state");
-  const items = (snapshot.items ?? []).map((item, index) => {
+  if (Object.keys(snapshot).some(key => !["hasResult", "items", "seq", "syncedAt"].includes(key))) throw new TypeError(`Coordinator ${field} contains unknown fields`);
+  if (typeof snapshot.hasResult !== "boolean") throw new TypeError(`Coordinator ${field}.hasResult is invalid`);
+  if (!snapshot.hasResult) {
+    if (snapshot.items !== null || snapshot.seq !== null || snapshot.syncedAt !== null) throw new TypeError(`Coordinator ${field} without a result requires null data and metadata`);
+    return { hasResult: false, items: null, seq: null, syncedAt: null };
+  }
+  if (!Array.isArray(snapshot.items) || snapshot.items.length > 100_000) throw new TypeError(`Coordinator ${field}.items is invalid`);
+  const seq = boundedNumber(snapshot.seq, field + ".seq", 1);
+  const syncedAt = text(snapshot.syncedAt, field + ".syncedAt", 128);
+  if (!Number.isFinite(Date.parse(syncedAt))) throw new TypeError(`Coordinator ${field}.syncedAt is invalid`);
+  const items = snapshot.items.map((item, index) => {
     const recordValue = expectRecord(item, `${field}.items[${index}]`);
     const txid = text(recordValue.txid, `${field}.items[${index}].txid`, 64);
     if (!/^[0-9a-f]{64}$/u.test(txid)) throw new TypeError(`Coordinator ${field}.items[${index}].txid is invalid`);
@@ -3711,13 +3714,7 @@ function parseP2pkhUtxoSnapshotResult(value: unknown, field: string): P2pkhUtxoS
       ...(recordValue.script === undefined ? {} : { script: text(recordValue.script, `${field}.items[${index}].script`, 100_000) }),
     };
   });
-  return {
-    available: snapshot.available,
-    ...(seq === undefined ? {} : { seq }),
-    state,
-    ...(snapshot.syncedAt === undefined ? {} : { syncedAt: snapshot.syncedAt as string }),
-    items,
-  };
+  return { hasResult: true, seq, syncedAt, items };
 }
 
 function parseMsFilePendingApproval(value: unknown, field: string): CoordinatorMsFileStateEvent["pendingApprovals"][number] {

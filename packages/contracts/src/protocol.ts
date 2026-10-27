@@ -2416,11 +2416,11 @@ export interface P2pkhProtocolAdapter {
   getRawTransaction?(txid: string): Promise<string>;
   /** Local manager lookup only; never implicitly starts conclusion queries. */
   getPaymentStatus?(input: Pick<import("./p2pkhConclusion.js").P2pkhPaymentLookupInput, "paymentId">): Promise<import("./p2pkhConclusion.js").P2pkhPaymentLookupResult>;
-  /** 当前绑定钱包的可用投影；未知与零 UTXO 显式区分。 */
-  getAvailableUtxos(): Promise<{
-    available: boolean;
-    utxos: Array<{ txid: string; vout: number; value: number }>;
-  }>;
+  /** 只消费当前钱包结果的坐标；hasResult=false 时没有 UTXO 材料。 */
+  getAvailableUtxos(): Promise<
+    | { hasResult: false; utxos: null }
+    | { hasResult: true; utxos: Array<{ txid: string; vout: number; value: number }> }
+  >;
   /** 当前钱包的业务转账预览；原样保留返回身份供提交时核对。 */
   prepareTransfer(input: import("./workerTransfer.js").P2pkhTransferRequest): Promise<{
     ownerPublicKeyHex: string;

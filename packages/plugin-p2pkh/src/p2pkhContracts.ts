@@ -163,14 +163,10 @@ export interface P2pkhUtxo {
   syncedAt: string;
 }
 
-/** 当前绑定钱包的 manager 可用投影；available=false 不等于零 UTXO。 */
-export interface P2pkhAvailableUtxos {
-  available: boolean;
-  state: "fresh" | "unavailable";
-  seq?: number;
-  syncedAt?: string;
-  utxos: P2pkhUtxo[];
-}
+/** 当前钱包 manager 的查询结果；hasResult 不表示链上同步完整或资金已授权。 */
+export type P2pkhAvailableUtxos =
+  | { hasResult: false; utxos: null; seq: null; syncedAt: null }
+  | { hasResult: true; utxos: P2pkhUtxo[]; seq: number; syncedAt: string };
 
 /** 查询始终绑定当前钱包，调用方只指定业务筛选与有界分页。 */
 export interface P2pkhHistoryQuery {

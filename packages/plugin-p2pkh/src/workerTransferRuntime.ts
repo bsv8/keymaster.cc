@@ -68,7 +68,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     const resource = { resourceId: `p2pkh:${request.network}`, network: request.network, address };
     const snapshot = await deps.snapshot({ ownerPublicKeyHex: request.ownerPublicKeyHex, network: request.network }, refresh);
     if (manager !== utxoManager) throw new Error("Protocol manager instance revoked");
-    const utxos = snapshot.status === "ok"
+    const utxos = snapshot.status === "ok" && snapshot.value.hasResult
       ? snapshot.value.items.filter(item => !item.isSpentInMempoolTx).map(item => ({
         id: `utxo:${resource.resourceId}:${item.txid}:${item.vout}`, resourceId: resource.resourceId,
         publicKeyHex: request.ownerPublicKeyHex, network: request.network, address,
@@ -315,7 +315,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     const assertActive = () => { deps.assertActive(); const now = deps.session(); if (generation !== token || !now.unlocked || now.owner !== owner || now.epoch !== epoch || deps.settings().bsvNetwork !== network) throw new Error("Protocol wallet instance revoked"); };
     const run = createWorkerProtocolRuntime({
       requestPayment: deps.requestPayment, assertActive, owner, network, storage: deps.storage(), crypto: deps.crypto,
-      central: central!, transfer, query: () => deps.query?.(), snapshot: async network => { const result = await deps.snapshot({ ownerPublicKeyHex: owner, network }, false); assertActive(); return result.status === "ok" ? result.value : { available: false, state: "unavailable", items: [] }; },
+      central: central!, transfer, query: () => deps.query?.(), snapshot: async network => { const result = await deps.snapshot({ ownerPublicKeyHex: owner, network }, false); assertActive(); return result.status === "ok" ? result.value : { hasResult: false, items: null, seq: null, syncedAt: null }; },
       protocolManager: protocolManagerPort,
     });
     protocolStarting = run;

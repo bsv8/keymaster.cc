@@ -51,7 +51,7 @@ export async function refreshWorkerP2pkhResources(deps: P2pkhWorkerRefreshDepend
     deps.assertFresh();
     const result = await deps.snapshots.refresh(resource, signal ? { signal } : {}).catch(() => undefined);
     deps.assertFresh();
-    if (result?.seq !== undefined) utxoSeqs[resource.network] = result.seq;
+    if (result?.hasResult) utxoSeqs[resource.network] = result.seq;
   }
   deps.assertFresh();
   return utxoSeqs;

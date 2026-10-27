@@ -76,7 +76,7 @@ export async function createWorkerProtocolRuntime(deps: WorkerProtocolDependenci
     centralBroadcastService: deps.central,
     getUtxoBinding: async ({ ownerPublicKeyHex, network }) => {
       check(ownerPublicKeyHex); const snapshot = await deps.snapshot(network); check();
-      return snapshot.available && snapshot.state === "fresh" && snapshot.seq !== undefined ? { resourceId: `p2pkh:${network}`, seq: snapshot.seq } : undefined;
+      return snapshot.hasResult ? { resourceId: `p2pkh:${network}`, seq: snapshot.seq } : undefined;
     },
     getKeyForOwner: async owner => { check(owner); return { publicKeyHex: deps.owner }; },
     claimStore: {

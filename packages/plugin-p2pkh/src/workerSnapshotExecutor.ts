@@ -20,17 +20,17 @@ export async function executeWorkerP2pkhSnapshot(requestId: string, input: Snaps
   const resource = await readWorkerP2pkhResource(ports.storage, input);
   ports.assertFresh();
   const snapshots = ports.snapshots;
-  if (!resource || !snapshots) return { requestId, sessionEpoch: ports.epoch(), ack: { status: "ok" }, operationResult: { available: false, state: "unavailable", items: [] } satisfies P2pkhUtxoSnapshotResult };
+  if (!resource || !snapshots) return { requestId, sessionEpoch: ports.epoch(), ack: { status: "ok" }, operationResult: { hasResult: false, items: null, seq: null, syncedAt: null } satisfies P2pkhUtxoSnapshotResult };
   try {
     const snapshot = refresh ? await snapshots.refresh(resource) : await snapshots.get(resource);
     ports.assertFresh();
     // Projection has already passed the manager's occupation/protection rules.
     const result = snapshot;
     ports.assertFresh();
-    if (refresh) ports.publish({ type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: input.ownerPublicKeyHex, kinds: ["utxo", "balance"], ...(result.seq === undefined ? {} : { utxoSeqs: { [input.network]: result.seq } }) });
+    if (refresh) ports.publish({ type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: input.ownerPublicKeyHex, kinds: ["utxo", "balance"], ...(result.hasResult ? { utxoSeqs: { [input.network]: result.seq } } : {}) });
     return { requestId, sessionEpoch: ports.epoch(), ack: { status: "ok" }, operationResult: result };
   } catch (error) {
-    // Provider failure retains the old snapshot; callers must not spend from an unrefreshed result.
+    // Refresh failure does not replace prior manager facts or clear signed responsibilities.
     const message = error instanceof Error ? error.message : String(error);
     return { requestId, sessionEpoch: ports.epoch(), ack: { status: "error", message: `P2PKH UTXO snapshot ${refresh ? "refresh" : "read"} failed: ${message}` } };
   }

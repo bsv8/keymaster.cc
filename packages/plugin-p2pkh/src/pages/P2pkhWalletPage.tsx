@@ -4,7 +4,7 @@ import { Button, DataTable, EmptyState, PageHeader, formatSats, formatSatsWithPr
 import { useOptionalPluginCapability } from "webloom-framework/react";
 import { router, usePluginBsvPrice, usePluginI18n, usePluginLocale, useOptionalResourceSelector } from "@keymaster/runtime";
 import { emptyGlobalBalanceSnapshot, P2PKH_COORDINATOR_CONTROL_CAPABILITY, type GlobalBalanceSnapshot, type P2pkhCoordinatorControl } from "@keymaster/contracts";
-import type { P2pkhBalanceBreakdown, P2pkhGlobalSettings, P2pkhHistoryRecord, P2pkhKeyResource, P2pkhLocalTransaction, P2pkhService, P2pkhSyncStatus, P2pkhTransactionSyncState, P2pkhUtxo } from "../p2pkhContracts.js";
+import type { P2pkhBalanceBreakdown, P2pkhGlobalSettings, P2pkhHistoryRecord, P2pkhKeyResource, P2pkhLocalTransaction, P2pkhService, P2pkhSyncStatus, P2pkhTransactionSyncState, P2pkhAvailableUtxos } from "../p2pkhContracts.js";
 import { P2PKH_CAPABILITY } from "../p2pkhContracts.js";
 import { detailPath, listPath, parseStoredTransaction, readPage, type P2pkhNetwork, type P2pkhWalletView } from "./p2pkhTransactionView.js";
 
@@ -16,9 +16,7 @@ export type WalletSnapshot = {
   resources: P2pkhKeyResource[];
   history: P2pkhHistoryRecord[];
   locals: P2pkhLocalTransaction[];
-  utxos: P2pkhUtxo[];
-  utxosAvailable: boolean;
-  utxosSyncedAt?: string;
+  utxoResult: P2pkhAvailableUtxos;
   sync: P2pkhTransactionSyncState[];
   syncStatus: P2pkhSyncStatus;
   lastSyncedAt?: string;
@@ -43,7 +41,7 @@ function amountLabel(value: number | undefined): string {
 }
 
 const EMPTY_WALLET_SNAPSHOT: WalletSnapshot = {
-  resources: [], history: [], locals: [], utxos: [], utxosAvailable: false,
+  resources: [], history: [], locals: [], utxoResult: { hasResult: false, utxos: null, seq: null, syncedAt: null },
   sync: [], syncStatus: "idle", historyCursors: {}, localCursors: {}
 };
 
@@ -173,8 +171,7 @@ function P2pkhWalletPageInner({
     setRefreshing(true);
     setActionError(null);
     try {
-      // service 与页面均绑定身份网络；钱包页将当前
-      // 路由网络明确传下去，否则 testnet 页的按钮只会刷新另一张快照。
+      // 仅请求当前绑定钱包刷新；已有结果保留到新结果完整交付。
       await service.refreshUtxos();
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error));
@@ -258,7 +255,7 @@ function P2pkhWalletPageInner({
       <section className="p2pkh-wallet__balances" aria-label={t("p2pkh.wallet.balances", { defaultValue: "BSV balances" })}>
         <article>
           <h2>{networkTitle}</h2>
-          <strong>{balanceKnown ? formatSatsWithPrice(balance!.total, price, { locale, network }) : t("p2pkh.balance.unknown", { defaultValue: "未知（尚未取得 UTXO 快照）" })}</strong>
+          <strong>{balanceKnown ? formatSatsWithPrice(balance!.total, price, { locale, network }) : t("p2pkh.balance.unknown", { defaultValue: "未知（尚未取得 UTXO 结果）" })}</strong>
           <BalanceBreakdown breakdown={balanceKnown ? balance?.breakdown : undefined} />
           <Button variant="ghost" disabled={refreshing || selectedResources.length === 0} onClick={() => void refreshUtxos()}>{refreshing ? t("p2pkh.action.inProgress", { defaultValue: "处理中…" }) : t("p2pkh.action.refreshUtxos", { defaultValue: "刷新 UTXO" })}</Button>
         </article>
@@ -266,7 +263,7 @@ function P2pkhWalletPageInner({
       <section className="p2pkh-wallet__sync" aria-label={t("p2pkh.wallet.syncStatus", { defaultValue: "Confirmed synchronization status" })}>
         <p>{t("p2pkh.wallet.lastCompleteSync", { defaultValue: "Last complete sync: {{time}}", time: wallet.lastSyncedAt ?? sync?.lastSuccessAt ?? "—" })}</p>
         <p>{t("p2pkh.wallet.taskStatus", { defaultValue: "Task status: {{status}}", status: t(`p2pkh.syncStatus.${wallet.syncStatus}`, { defaultValue: wallet.syncStatus }) })}</p>
-        {wallet.utxosAvailable ? <p>{t("p2pkh.wallet.utxoSnapshot", { defaultValue: "UTXO 快照：{{time}}（{{count}} 个输出）", time: wallet.utxosSyncedAt ?? "—", count: wallet.utxos.length })}</p> : null}
+        {wallet.utxoResult.hasResult ? <p>{t("p2pkh.wallet.utxoSnapshot", { defaultValue: "UTXO 结果：{{time}}（{{count}} 个输出）", time: wallet.utxoResult.syncedAt, count: wallet.utxoResult.utxos.length })}</p> : null}
         {(wallet.syncError ?? sync?.lastError) ? <p role="alert">{t("p2pkh.wallet.syncError", { defaultValue: "Sync error: {{error}}", error: wallet.syncError ?? sync?.lastError })}</p> : null}
         {actionError ? <p role="alert">{actionError}</p> : null}
       </section>
