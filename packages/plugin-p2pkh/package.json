@@ -20,7 +20,6 @@
     "@bsv/sdk": "^2.1.7",
     "qrcode.react": "^4.2.0",
     "lucide-react": "^0.468.0",
-    "@keymaster/vaultlink-integration": "workspace:*",
     "@keymaster/utxo-manager": "workspace:*"
   },
   "scripts": {}

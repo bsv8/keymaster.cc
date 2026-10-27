@@ -64,7 +64,7 @@ export const VAULT_SERVICE_CAPABILITY = defineCapability<VaultService>({
 export type VaultStatus = "booting" | "uninitialized" | "locked" | "unlocked";
 
 export interface KeyIdentity extends NetworkIdentity {
-  /** 已提交的执行后端；旧软件身份省略时仍按软件处理。 */
+  /** 已提交的执行后端；新代码只产生软件，硬件仅为旧数据解析保留。 */
   backend?: "software" | "hardware";
   publicKeyHex: string;
   label: string;
@@ -128,9 +128,6 @@ export interface VaultLocalSecretService {
  * Vault 内部重置 UI 之后的重新创建或导入。
  */
 export interface VaultService {
-  /** 业务入口不包含设置额度或代替用户回答确认。 */
-  requestPayment(command: Exclude<import("./sessionCoordinator.js").CoordinatorWalletPaymentCommand,
-    {action: "configure" | "answer" | "list" | "pending" | "spend-notices" | "notice-dismiss" | "backend" | "signing-list" | "signing-configure"}>): Promise<import("./channel.js").JSONValue>;
   /** 当前状态。 */
   status(): VaultStatus;
 
@@ -233,7 +230,6 @@ export function sameWalletSession(a: Readonly<VaultLifecycleSnapshot>, b: Readon
 export interface VaultWorkerWalletControl {
   coldStart(): Promise<import("./index.js").WalletColdStartSnapshot>;
   persistence(): Promise<{ persisted: boolean }>;
-  closeHardware(): Promise<void>;
   execute(control: import("./sessionCoordinator.js").CoordinatorStorageControl): Promise<unknown>;
 }
 

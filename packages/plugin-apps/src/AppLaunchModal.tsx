@@ -38,7 +38,6 @@ export function AppLaunchModal({
   const [currentKey, setCurrentKey] = useState<KeyIdentity | null>(null);
   const [password, setPassword] = useState("");
   const [loadError, setLoadError] = useState<string | null>(null);
-  const hardware = currentKey?.backend === "hardware";
 
   const close = useRef(onClose);
   close.current = onClose;
@@ -75,8 +74,8 @@ export function AppLaunchModal({
   }, [open]);
 
   async function submit() {
-    if (!currentKey || (!hardware && !password) || !entry || !boundSession.current || !sameWalletSession(boundSession.current, walletState.snapshot())) return;
-    await onConfirm({ password: hardware ? "" : password });
+    if (!currentKey || !password || !entry || !boundSession.current || !sameWalletSession(boundSession.current, walletState.snapshot())) return;
+    await onConfirm({ password });
   }
 
   return (
@@ -98,7 +97,7 @@ export function AppLaunchModal({
           <Button
             onClick={() => void submit()}
             loading={busy}
-            disabled={busy || (!hardware && !password) || currentKey === null}
+            disabled={busy || !password || currentKey === null}
             data-testid="app-launch-confirm"
           >
             {t("apps.open.cta", { defaultValue: "Open App" })}
@@ -130,15 +129,15 @@ export function AppLaunchModal({
         </span>
       </div>
       {loadError ? <div className="apps-launch-modal__error">{loadError}</div> : null}
-      {hardware ? <p>{t("apps.launch.hardware", {defaultValue: "使用已连接并在设备上解锁的 RocKey。PIN 只在设备上输入。"})}</p> : <TextInput
+      <TextInput
         label={t("apps.launch.password", { defaultValue: "Vault password" })}
         type="password"
         autoComplete="current-password"
         value={password}
         onChange={(e) => setPassword(e.currentTarget.value)}
         error={error ?? undefined}
-      />}
-      {hardware && error ? <div className="apps-launch-modal__error" role="alert">{error}</div> : null}
+      />
+      {error ? <div className="apps-launch-modal__error" role="alert">{error}</div> : null}
       {loadError ? (
         <div className="apps-launch-modal__error">{loadError}</div>
       ) : null}

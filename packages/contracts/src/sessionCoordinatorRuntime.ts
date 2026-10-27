@@ -175,10 +175,8 @@ const STORAGE_DATA_TYPES = [
 ] as const satisfies readonly CoordinatorStorageData["type"][];
 
 const VAULT_OPERATION_TYPES = [
-  "hardware", "migrateToHardware", "migrateToSoftware", "migrationState",
   "getCurrentKey", "verifyPassword", "changePassword", "renameKey", "exportKeyHold",
   "sealLocalSecret", "openLocalSecret",
-  "payment",
 ] as const satisfies readonly CoordinatorVaultOperation["type"][];
 
 const CHANNEL_OPERATION_TYPES = [
@@ -227,11 +225,6 @@ export type CoordinatorClientCommandRequest = Exclude<CoordinatorClientRequest, 
 
 /** 依据 Vault 内层操作 discriminant 收窄 operationResult。 */
 export type CoordinatorVaultOperationResultFor<O extends CoordinatorVaultOperation> =
-  O extends {type:"migrationState"} ? {migrationId:string;phase:"prepared"|"device-committed"|"local-committed";publicKeyHex:string;passwordRequired:boolean;target:"software"|"hardware";failure?:string}|null :
-  O extends {type:"migrateToHardware"} ? {migrationId:string;phase:"complete";target:"hardware"} :
-  O extends {type:"migrateToSoftware"} ? {migrationId:string;phase:"complete";target:"software"} :
-  O extends { type: "hardware" } ? import("./sessionCoordinator.js").CoordinatorHardwareState :
-  O extends { type: "payment" } ? JSONValue :
   O extends { type: "getCurrentKey" } ? CoordinatorVaultKeyView | undefined :
   O extends { type: "verifyPassword" | "changePassword" | "renameKey" } ? true :
   O extends { type: "exportKeyHold" } ? Uint8Array :
@@ -1284,75 +1277,6 @@ function parseVaultOperation(value: unknown): CoordinatorVaultOperation {
   const type = enumValue(operation.type, VAULT_OPERATION_TYPES, "Vault operation.type");
   const password = (field: string): string => text(operation[field], "Vault operation." + field, 4_096);
   switch (type) {
-    case "migrationState":
-      if(Object.keys(operation).length!==1)throw new TypeError("Invalid migration state request");return {type};
-    case "migrateToHardware":
-      if(Object.keys(operation).length!==1)throw new TypeError("Invalid migration request fields");
-      return {type};
-    case "migrateToSoftware":
-      if(Object.keys(operation).length!==2)throw new TypeError("Invalid migration request fields");
-      return {type,newPassword:password("newPassword")};
-    case "hardware": {
-      const command = expectRecord(operation.command, "hardware.command");
-      const action = enumValue(command.action, ["state", "attach", "recover", "recover-erased", "provision", "recover-import", "enroll", "disconnect"] as const, "hardware.action");
-      const allowed = action === "state" ? ["action"] : (action === "attach"||action === "recover"||action === "recover-erased"||action === "provision"||action === "recover-import") ? ["action", "leaseId", "port"] : action === "enroll" ? ["action", "leaseId", "port", "label"] : ["action", "leaseId"];
-      if (Object.keys(command).length !== allowed.length || Object.keys(command).some(key => !allowed.includes(key))) throw new TypeError("Invalid hardware command fields");
-      if (action === "state") return { type, command: { action } };
-      const leaseId = text(command.leaseId, "hardware.leaseId", 36);
-      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(leaseId)) throw new TypeError("Invalid USB lease");
-      if (action === "enroll") return {type, command: {action, leaseId, port: messagePortValue(command.port, "hardware.port"), label: text(command.label, "hardware.label", 64)}};
-      if (action === "attach"||action === "recover"||action === "recover-erased"||action === "provision"||action === "recover-import") return { type, command: { action, leaseId, port: messagePortValue(command.port, "hardware.port") } };
-      return { type, command: { action, leaseId } };
-    }
-    case "payment": {
-      const command = expectRecord(operation.command, "payment.command");
-      const action = enumValue(command.action, ["signature-history", "backend", "signing-list", "signing-configure", "list", "pending", "spend-notices", "notice-dismiss", "connect-payment-recovery", "connect-payment-recovery-ack", "connect-payment-signed-recovery", "protocol-payment-prepare", "protocol-payment-status", "protocol-payment-ack", "protocol-payment-recovery", "register", "configure", "session-open", "session-close", "session-cancel", "answer", "sign-p2pkh", "sign-standard", "sign-feepool"] as const, "payment.action");
-      const id = (key: string) => text(command[key], `payment.${key}`, 96);
-      const amount = (v: unknown): string => {
-        const s = text(v, "payment.amount", 20);
-        if (!/^(0|[1-9][0-9]*)$/.test(s) || BigInt(s) > 0xffffffffffffffffn) throw new TypeError("payment amount is invalid");
-        return s;
-      };
-      const execution = () => { const value = expectRecord(command.protocolExecution, "payment.protocolExecution"); return { executionId: text(value.executionId,"execution.id",128), allocationId: text(value.allocationId,"execution.allocation",128), submissionId: text(value.submissionId,"execution.submission",128) }; };
-      if (action === "protocol-payment-status") return { type, command: { action, executionId: text(command.executionId,"execution.id",128) } };
-      if (action === "protocol-payment-ack") return { type, command: { action, executionIds: stringList(command.executionIds,"execution.ids",4096,128) } };
-      if (action === "protocol-payment-prepare") return { type, command: { action, paymentId: id("paymentId"), rawTxHex: text(command.rawTxHex,"payment.rawTxHex",16384), prevTransactionHexes: stringList(command.prevTransactionHexes,"payment.previous",10,16384), protocolExecution: execution() } };
-      if (action === "protocol-payment-recovery") return { type, command: { action } };
-      if (action === "signature-history" || action === "list" || action === "pending" || action === "spend-notices" || action === "backend" || action === "signing-list" || action === "connect-payment-recovery" || action === "connect-payment-signed-recovery") return {type, command: {action}};
-      if (action === "connect-payment-recovery-ack") {
-        const ids = command.paymentIds;
-        if (!Array.isArray(ids) || ids.length > 256) throw new TypeError("payment recovery ack ids are invalid");
-        return {type, command: {action, paymentIds: ids.map((value, index) => text(value, `payment.paymentIds[${index}]`, 96))}};
-      }
-      if(action==="signing-configure"){
-        const n=command.revision;if(typeof n!=="number"||!Number.isSafeInteger(n)||n<1||n>=0xffffffff)throw new TypeError("invalid signing revision");
-        return {type,command:{action,id:id("id"),mode:enumValue(command.mode,["automatic","manual"] as const,"signing.mode"),revision:n}};
-      }
-      if (action === "register") return {type, command: {action, id: id("id"), owner: id("owner"), kind: enumValue(command.kind, ["app", "plugin"] as const, "payment.kind"), network: id("network"), paymentType: id("paymentType")}};
-      if (action === "configure") {
-        const c = expectRecord(command.channel, "payment.channel");
-        return {type, command: {action, channel: {id: text(c.id,"payment.id",96), owner: text(c.owner,"payment.owner",96), kind: enumValue(c.kind,["app","plugin"] as const,"payment.kind"), network: text(c.network,"payment.network",96), paymentType: text(c.paymentType,"payment.type",96), enabled: booleanValue(c.enabled,"payment.enabled"), singleLimit: amount(c.singleLimit), defaultSessionLimit: amount(c.defaultSessionLimit), revision: (() => { const n = c.revision; if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 1 || n >= 0xffffffff) throw new TypeError("invalid payment revision"); return n; })()}}};
-      }
-      if (action === "session-open") return {type, command: {action, id: id("id"), owner: id("owner")}};
-      if (action === "session-close" || action === "session-cancel" || action === "notice-dismiss") return {type, command: {action, id: id("id")}};
-      if (action === "answer") return {type, command: {action, id: id("id"), allow: booleanValue(command.allow,"payment.allow"), ...(command.raiseSessionLimit === undefined ? {} : {raiseSessionLimit: amount(command.raiseSessionLimit)})}};
-      if (command.protocolExecution !== undefined && action !== "sign-standard" && !(action === "sign-feepool" && command.family === "bitfs" && command.stage === "fund")) throw new TypeError("Invalid protocol execution signing operation");
-      const transaction = {rawTxHex: text(command.rawTxHex,"payment.rawTxHex",16384), prevTransactionHexes: stringList(command.prevTransactionHexes,"payment.previous",10,16384), channelId: id("channelId"), paymentId: id("paymentId"), sessionId: command.sessionId === null ? null : id("sessionId"), ...(command.protocolExecution === undefined ? {} : { protocolExecution: execution() })};
-      const connectPaymentReview = command.connectPaymentReview === undefined ? undefined : parseP2pkhConnectPaymentPreview(command.connectPaymentReview, "payment.connectPaymentReview");
-      if (connectPaymentReview !== undefined && action !== "sign-p2pkh") throw new TypeError("connectPaymentReview is only valid for sign-p2pkh");
-      let authorization: {documentHex:string;refundTemplateHex:string}|undefined;
-      if(command.authorization!==undefined){
-        if(action!=="sign-feepool"||command.family!=="bitfs"||command.stage!=="state"||(command.role!==undefined&&command.role!=="payer"))throw new TypeError("invalid payment authorization");
-        const a=expectRecord(command.authorization,"payment.authorization");authorization={documentHex:text(a.documentHex,"payment.authorization.document",32768),refundTemplateHex:text(a.refundTemplateHex,"payment.authorization.refund",16384)};
-      }
-      let openingRequestHex:string|undefined;
-      if(command.openingRequestHex!==undefined){
-        if(action!=="sign-feepool"||command.family!=="bitfs"||command.stage!=="state"||command.role!=="cosigner"||authorization||transaction.prevTransactionHexes.length)throw new TypeError("invalid payment opening");
-        openingRequestHex=text(command.openingRequestHex,"payment.openingRequest",32768);
-      }
-      if(action === "sign-feepool") return {type, command: {action, ...transaction, ...(authorization ? {authorization} : {}), ...(openingRequestHex ? {openingRequestHex} : {}), family: enumValue(command.family,["connect","bitfs"] as const,"payment.family"), ...(command.role === undefined ? {} : {role: enumValue(command.role,["payer","cosigner"] as const,"payment.role")}), stage: enumValue(command.stage,["fund","state"] as const,"payment.stage")}};
-      return {type, command: {action, ...transaction, ...(connectPaymentReview === undefined ? {} : {connectPaymentReview})}};
-    }
     // 唯一 Key：读取公开摘要，不存在列表、选择、切换或第二把 Key 的入口。
     case "getCurrentKey": case "exportKeyHold":
       return { type };
@@ -2815,43 +2739,6 @@ function parseCoordinatorVaultOperationResultFor(
   field: string,
 ): unknown {
   switch (operation.type) {
-    case "migrationState": {
-      if(value===null)return null;
-      const result=expectRecord(value,field);
-      if(Object.keys(result).length!==(result.failure===undefined?5:6)||Object.keys(result).some(k=>!["migrationId","phase","publicKeyHex","passwordRequired","target","failure"].includes(k)))throw new TypeError("Invalid migration state");
-      const migrationId=text(result.migrationId,field+".migrationId",36),publicKeyHex=text(result.publicKeyHex,field+".publicKeyHex",66);
-      const phase=enumValue(result.phase,["prepared","device-committed","local-committed"] as const,field+".phase");
-      if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(migrationId)||!/^(02|03)[0-9a-f]{64}$/u.test(publicKeyHex)||result.passwordRequired!==(phase!=="local-committed"))throw new TypeError("Invalid migration binding");
-      const target=enumValue(result.target,["software","hardware"] as const,field+".target");
-      const failure=result.failure===undefined?undefined:text(result.failure,field+".failure",512);
-      return {migrationId,phase,publicKeyHex,passwordRequired:result.passwordRequired,target,...(failure===undefined?{}:{failure})};
-    }
-    case "migrateToHardware":
-    case "migrateToSoftware": {
-      const result=expectRecord(value,field);
-      if(Object.keys(result).length!==3||result.phase!=="complete"||result.target!==(operation.type==="migrateToHardware"?"hardware":"software"))throw new TypeError("Invalid migration result");
-      const migrationId=text(result.migrationId,field+".migrationId",36);
-      if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(migrationId))throw new TypeError("Invalid migration identity");
-      return {migrationId,phase:"complete",target:operation.type==="migrateToHardware"?"hardware":"software"};
-    }
-    case "hardware": {
-      const result = expectRecord(value, field);
-      const status = enumValue(result.status, ["disconnected", "connecting", "pairing", "connected"] as const, field + ".status");
-      const leaseId = optionalText(result.leaseId, field + ".leaseId", 36);
-      const pairingCode = optionalText(result.pairingCode, field + ".pairingCode", 6);
-      if (status === "disconnected" ? leaseId !== undefined : !leaseId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(leaseId)) throw new TypeError("Invalid hardware lease result");
-      if (status === "pairing" ? !pairingCode || !/^[0-9]{6}$/u.test(pairingCode) : pairingCode !== undefined) throw new TypeError("Invalid hardware pairing result");
-      let activity: {operation: string; state: "awaiting-user" | "executing" | "completed" | "denied" | "cancelled" | "unknown" | "failed"} | undefined;
-      if (result.activity !== undefined) {
-        if (status !== "connected") throw new TypeError("Disconnected hardware cannot have activity");
-        const source = expectRecord(result.activity, field + ".activity");
-        if (Object.keys(source).length !== 2 || Object.keys(source).some(key => key !== "operation" && key !== "state")) throw new TypeError("Invalid hardware activity fields");
-        activity = {operation: text(source.operation, field + ".activity.operation", 96),
-          state: enumValue(source.state, ["awaiting-user", "executing", "completed", "denied", "cancelled", "unknown", "failed"] as const, field + ".activity.state")};
-      }
-      return { status, ...(leaseId === undefined ? {} : { leaseId }), ...(pairingCode === undefined ? {} : { pairingCode }), ...(activity === undefined ? {} : {activity}) };
-    }
-    case "payment": return parseJsonValue(value, field);
     case "getCurrentKey":
       return value === undefined ? undefined : parseCoordinatorVaultKeyView(value, field);
     case "verifyPassword":

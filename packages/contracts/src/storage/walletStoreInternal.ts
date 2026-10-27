@@ -88,10 +88,5 @@ export interface WalletStore {
 export type WalletVaultKeyStore = Pick<WalletStore, "get" | "put">;
 /** 初始化必须保留单事务提交；该端口只由可信 Worker 装配发放。 */
 export type WalletVaultLifecycleStore = Pick<WalletStore, "readMeta" | "batch" | "resetWallet" | "cleanupLegacyMarkers">;
-/** Backend migration uses a separate, fixed-path Worker port. It is never a plugin storage capability. */
-export type WalletVaultMigrationStore = Pick<WalletStore, "get" | "batch">;
-export const WALLET_MIGRATION_PATH = ".keymaster/system/wallet/migration/current";
-/** Exact vault/payments platform-files coordinate; used only by atomic migration. */
-export const WALLET_PAYMENT_POLICY_PATH = ".keymaster/system/vault/payments/payments.json";
 /** Vault 初始化记录固定路径，与 Coordinator 设置仓储隔离。 */
 export const WALLET_INITIALIZATION_PATH = ".keymaster/system/wallet/initialization/current";

@@ -1,6 +1,42 @@
 import { validateNetworkIdentity, sameNetworkIdentity, type NetworkIdentity } from "@keymaster/contracts";
 import { requireUnlockedWalletIdentity, parseP2pkhPaymentLookupResult } from "@keymaster/contracts";
-import { authenticateAppWallet, publisherPaymentOwner, publisherPaymentChannelId, publisherPaymentSessionId } from "@keymaster/vaultlink-integration";
+async function appPaymentChannelId(owner: string, name: string, paymentType: string, network: string): Promise<string> {
+  const bytes = new TextEncoder().encode(JSON.stringify(["keymaster.app-payment-channel.v1", owner, name, paymentType, network]));
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return "pay." + Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+function publisherPaymentOwner(publisher: string): string {
+  if (!/^0[23][0-9a-f]{64}$/i.test(publisher)) throw Error("invalid-publisher");
+  return "publisher." + publisher.toLowerCase();
+}
+async function publisherPaymentChannelId(publisher: string, paymentType: string, network: string): Promise<string> {
+  if (!["p2pkh", "p2pk"].includes(paymentType) || !["main", "test"].includes(network)) throw Error("unsupported");
+  return appPaymentChannelId(publisherPaymentOwner(publisher), "publisher-single.v1", paymentType, network);
+}
+async function publisherPaymentSessionId(sessionId: string): Promise<string> {
+  return appPaymentChannelId("connect-session", sessionId, "publisher-single.v1", "session");
+}
+async function authenticateAppWallet(
+  vault: Pick<import("@keymaster/contracts").VaultService, "verifyPassword">,
+  publicKeyHex: string,
+  password: string,
+  walletState: Pick<import("@keymaster/contracts").VaultWalletState, "snapshot">,
+): Promise<void> {
+  const issued = walletState.snapshot();
+  const assertLive = () => {
+    const current = walletState.snapshot();
+    if (issued.status !== "unlocked" || issued.activePublicKeyHex !== publicKeyHex
+      || current.status !== issued.status || current.activePublicKeyHex !== issued.activePublicKeyHex
+      || current.sessionEpoch !== issued.sessionEpoch || current.runGeneration !== issued.runGeneration
+      || current.walletGeneration !== issued.walletGeneration
+      || current.activeKeyIdentity?.bsvNetwork !== issued.activeKeyIdentity?.bsvNetwork) {
+      throw new Error("Active wallet key session has been revoked");
+    }
+  };
+  assertLive();
+  await vault.verifyPassword(password);
+  assertLive();
+}
 import { createProviderDispatch } from "./providerDispatch.js";
 import { KeymasterConnectReceiver, type ReceiverRequest } from "keymaster-connect/server";
 import type * as ConnectPublic from "keymaster-connect/protocol";
@@ -435,7 +471,7 @@ interface RequestRecord {
   /* ============== 施工单 2026-06-28 001：connect.* 字段 ============== */
   /** Read-only presentation of the receiver's only wallet; not a selection list. */
   connectLoginWallet?: { publicKeyHex: string; label: string };
-  connectAuthBackend?: "software" | "hardware";
+  connectAuthBackend?: "software";
 
   /** connect.* auth 是否已经提交过；用于阻止未提交 login 被 resume 抢占。 */
   connectAuthSubmittedAt?: number;
@@ -1031,9 +1067,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     for (const sessionId of sessionIds) {
       void storageController?.abortSession(sessionId);
       void msfileService?.abortSession(sessionId);
-      void this.deps.vault.requestPayment({action:"session-cancel",id:sessionId}).catch(() => {});
-      // New single-payment sessions never overwrite historical origin sessions.
-      void publisherPaymentSessionId(sessionId).then(id => this.deps.vault.requestPayment({action:"session-cancel",id})).catch(() => {});
+      void sessionId;
     }
     // 把所有未终态 request 强制收尾为 rejected（不发 result 给 opener）。
     for (const [, rec] of this.requestsByRecordId) {
@@ -1559,7 +1593,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.assertWalletGeneration(rec);
     const ownerPublicKeyHex = rec.connectLoginWallet?.publicKeyHex;
     if (!ownerPublicKeyHex || ownerPublicKeyHex.toLowerCase() !== rec.networkIdentity.publicKeyHex) return;
-    if (rec.connectAuthBackend === "hardware" && this.lockStateValue === "locked") throw new Error("Connect and unlock RocKey on the device before continuing");
     if (this.lockStateValue === "locked") {
       this.authUnlockInProgress = recordId;
       rec.connectAuthSubmittedAt = Date.now();
@@ -1615,7 +1648,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!rec.connectResumeSnapshot) {
       return;
     }
-    if (rec.connectAuthBackend === "hardware" && this.lockStateValue === "locked") throw new Error("Connect and unlock RocKey on the device before continuing");
     if (this.lockStateValue === "locked") {
       this.authUnlockInProgress = recordId;
       rec.connectAuthSubmittedAt = Date.now();
@@ -1991,7 +2023,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       !input.appOrigin ||
       !input.appUrl ||
       typeof input.password !== "string" ||
-      (!input.password && this.deps.walletState.snapshot().activeKeyIdentity?.backend !== "hardware")
+      !input.password
     ) {
       throw new Error("launchAppView: missing app fields");
     }
@@ -2972,7 +3004,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const stored = await this.deps.vault.getCurrentKey();
     if (!stored || !sameNetworkIdentity(stored, identity)) return undefined;
     return { bsvNetwork: stored.bsvNetwork, publicKeyHex: stored.publicKeyHex, label: stored.label,
-      backend: stored.format === "keymaster.hardware-key" ? "hardware" : "software",
+      backend: "software" as const,
       capabilities: ["p2pkh"], createdAt: new Date().toISOString() };
   }
 
@@ -3099,7 +3131,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       // connect.login 不再让用户在多把 Key 之间选择。
       const current = await this.publicOwnerKey(rec.networkIdentity);
       this.assertWalletGeneration(rec);
-      rec.connectAuthBackend = current?.backend ?? "software";
+      rec.connectAuthBackend = "software";
       rec.connectLoginWallet = current
         ? { publicKeyHex: current.publicKeyHex, label: current.label }
         : undefined;
@@ -3144,7 +3176,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       if (!key) {
         return { code: "user_rejected", reason: "internal_error" };
       }
-      rec.connectAuthBackend = key.backend ?? "software";
+      rec.connectAuthBackend = "software";
     } catch (err) {
       return { code: "user_rejected", reason: "internal_error" };
     }
@@ -5046,9 +5078,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       assertBoundPayment();
       if (params.channelId !== channelId) throw protocolError("invalid_request", "Register a publisher single-payment channel before creating a new payment");
       const paymentSessionId = await publisherPaymentSessionId(session.sessionId);
-      const owner = await this.paymentOwner(session);
-      assertBoundPayment();
-      await this.deps.vault.requestPayment({ action: "session-open", id: paymentSessionId, owner });
+      void paymentSessionId;
       assertBoundPayment();
       const preview = await p2pkhService.prepareTransfer({
         paymentContext: { channelId: params.channelId, sessionId: paymentSessionId },
@@ -5178,23 +5208,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // If the protocol write lost its txid, recover the exact bytes from the
     // Vault journal by paymentId. The exact is persisted before broadcast, so
     // a chain-accepted payment is still discoverable.
-    if ((record.status === "pending" || record.status === "unknown" || record.status === "signed_not_dispatched") && !record.txid) {
-      try {
-        const paymentId = record.paymentId;
-        const signed = await this.deps.vault.requestPayment({ action: "connect-payment-signed-recovery" });
-        const row = Array.isArray(signed) ? signed.find((value) => value && typeof value === "object" && (value as { paymentId?: unknown }).paymentId === paymentId) as { signedTxHex?: unknown } | undefined : undefined;
-        if (row && typeof row.signedTxHex === "string") {
-          const txid = calcTxidFromRawTxHex(row.signedTxHex);
-          record = await storeConnectPaymentRecord(repo, {
-            ...record, txid,
-            status: record.status === "pending" ? "signed_not_dispatched" : record.status,
-            updatedAt: Date.now(),
-          });
-        }
-      } catch {
-        // Journal unavailable: keep the existing responsibility state.
-      }
-    }
+    void record;
     // Chain-observation reconciliation: a crash after broadcast but before
     // the terminal protocol write leaves a pending/unknown record with a
     // canonical txid. Only a trusted raw transaction with the same canonical
@@ -5231,8 +5245,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const network = params.assetId === "bsv-testnet" ? "test" : "main";
     if (network !== session.networkIdentity.bsvNetwork) throw localFailure("asset_not_enabled", "Payment network differs from session identity");
     const channelId = await publisherPaymentChannelId(session.appIdentity!.publisherPublicKeyHex, params.paymentType, network);
-    // 注册只建立零额度渠道。owner 不取 App 自报，额度仍只由钱包设置/设备确认。
-    await this.deps.vault.requestPayment({action: "register", id: channelId, owner, kind: "app", network, paymentType: params.paymentType});
+    void channelId; void owner; void network;
     await this.requireConnectSession(rec, params.walletPublicKeyHex);
     this.assertSessionOwnerIsActive(session);
     return {channelId};
@@ -5276,7 +5289,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       const paymentSessionId = await publisherPaymentSessionId(session.sessionId);
       const expectedChannelId = await publisherPaymentChannelId(session.appIdentity!.publisherPublicKeyHex, "p2pkh", session.networkIdentity.bsvNetwork);
       if (paymentChannelId !== expectedChannelId) throw protocolError("invalid_request", "Register a publisher single-payment channel before creating a new transfer");
-      await this.deps.vault.requestPayment({action: "session-open", id: paymentSessionId, owner: paymentOwner});
+      void paymentSessionId; void paymentOwner;
       const card = this.feedCommands.find((c) => c.id === rec.recordId);
       if (card) {
         card.recipientAddress = params.recipientAddress;
@@ -5395,16 +5408,10 @@ export class ProtocolServiceImpl implements ProtocolService {
       };
       const paymentOwner=await this.legacyPaymentOwner(session);
       const channelId=params.channelId;
-      let registered: Promise<void> | undefined;
+      void paymentOwner; void channelId; void session;
       const signTransaction=(stage:'fund'|'state'):FeePoolTransactionSigner=>async rawTxHex=>{
-        // 证据缺失时立即失败，不允许利用 self-reported 金额或 generic digest 绕过额度。
-        const prevTransactionHexes=await Promise.all(feePoolInputTxids(rawTxHex).map(source));
-        registered??=(async()=>{
-          await this.deps.vault.requestPayment({action:'session-open',id:session.sessionId,owner:paymentOwner});
-        })();await registered;
-        const result=await this.deps.vault.requestPayment({action:'sign-feepool',family:'connect',stage,rawTxHex,prevTransactionHexes,channelId,paymentId:crypto.randomUUID(),sessionId:session.sessionId});
-        if(!result||typeof result!=='object'||Array.isArray(result)||!Array.isArray(result.signatures)||result.signatures.some(s=>typeof s!=='string'))throw new Error('Invalid wallet fee pool response');
-        return result.signatures as string[];
+        void stage; void rawTxHex;
+        throw new Error("Connect fee-pool signing removed (approval deleted)");
       };
       const operationId = this.nextRecordId();
       const preparedAt = Date.now();

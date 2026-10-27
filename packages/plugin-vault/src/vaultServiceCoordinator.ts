@@ -1,6 +1,5 @@
 import { requireUnlockedWalletIdentity } from "@keymaster/contracts";
 import { sameWalletSession } from "@keymaster/contracts";
-import { authenticateAppWallet } from "@keymaster/vaultlink-integration";
 import type { InternalVaultService } from "./internalVaultService.js";
 // packages/plugin-vault/src/vaultServiceCoordinator.ts
 // VaultService Coordinator Facade —— 单 Key 钱包的唯一页面侧入口。
@@ -252,18 +251,7 @@ export class VaultServiceCoordinator implements InternalVaultService {
   async renameKey(label: string): Promise<void> {
     await this.vaultOperation({ type: "renameKey", label });
   }
-  async migrationState(){return this.vaultOperation({type:"migrationState"});}
-  async migrateToHardware():Promise<void>{await this.vaultOperation({type:"migrateToHardware"});}
-  async migrateToSoftware(newPassword:string):Promise<void>{await this.vaultOperation({type:"migrateToSoftware",newPassword});}
-  async hardware(command: import("@keymaster/contracts").CoordinatorHardwareCommand): Promise<import("@keymaster/contracts").CoordinatorHardwareState> {
-    return this.vaultOperation({ type: "hardware", command });
-  }
-  async payment(command: import("@keymaster/contracts").CoordinatorWalletPaymentCommand): Promise<import("@keymaster/contracts").JSONValue> {
-    return this.vaultOperation({type: "payment", command});
-  }
-  async requestPayment(command: Parameters<VaultService["requestPayment"]>[0]): Promise<import("@keymaster/contracts").JSONValue> {
-    return this.payment(command);
-  }
+
 
   /**
    * 原样导出加密 KeyHold 文档。
@@ -307,7 +295,7 @@ export class VaultServiceCoordinator implements InternalVaultService {
     if ("publicKeyHex" in input || "network" in input || "ownerPublicKeyHex" in input) throw new TypeError("AppView sessions do not accept wallet selectors");
     const issued = this.walletSnapshot();
     const identity = requireUnlockedWalletIdentity(issued);
-    await authenticateAppWallet(this, identity.publicKeyHex, input.password, this.walletState);
+    await this.verifyPassword(input.password);
     if (!sameWalletSession(issued, this.walletSnapshot())) throw new Error("AppView wallet session has been revoked");
     this.disposeAppViewSession(input.sessionId, "appView session replaced");
     const crypto = await this.createCoordinatorCrypto(identity.publicKeyHex, input.sessionId);

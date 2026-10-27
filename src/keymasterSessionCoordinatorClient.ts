@@ -710,7 +710,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   async vaultOperation<O extends CoordinatorVaultOperation>(operation: O): Promise<CoordinatorValueResult<CoordinatorVaultOperationResultFor<O>>> {
     const request = { kind: "vault.operation" as const, clientId: this.clientId, requestId: this.generateRequestId(), operation, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
     try {
-      const awaitingWallet = operation.type === "hardware" || operation.type === "migrateToHardware" || operation.type === "migrateToSoftware" || operation.type === "sealLocalSecret" || operation.type === "openLocalSecret" || operation.type === "payment" && ["register","session-open","sign-p2pkh","sign-standard","sign-feepool"].includes(operation.command.action);
+      const awaitingWallet = operation.type === "sealLocalSecret" || operation.type === "openLocalSecret";
       const response = await this.sendRequest(request, awaitingWallet ? 300_000 : undefined);
       if (response.ack.status !== "ok") return response.ack;
       return {

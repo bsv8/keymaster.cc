@@ -48,7 +48,6 @@ export function createStorageWorkerControl(ports: StorageWorkerControlPorts) {
 
     if (control.type === "status") {
       if (ports.root.failed) {
-        void ports.wallet.closeHardware();
         const detail = ports.recoveryOperations().length > 0
           ? `; active final I/O=${ports.recoveryOperations().join(",")}`
           : "";

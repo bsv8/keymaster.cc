@@ -356,7 +356,7 @@ const vaultWorkerKeys = createVaultWorkerKeys({
   session: () => ({ vaultStatus: coordinatorState.vaultStatus, sessionEpoch: coordinatorState.sessionEpoch, activePublicKeyHex: coordinatorState.activePublicKeyHex, runGeneration: coordinatorState.runGeneration }),
   storage: {
     ready: () => storageWorkerRoot.ready && Boolean(storageWorkerRoot.root), token: () => storageWorkerRoot.token,
-    payments: () => workerStorageClients.platformFiles("vault", "payments"), unavailable: storageUnavailableError
+    unavailable: storageUnavailableError
   },
   lock: reason => performGlobalLock(reason), providerScope: () => vaultWorkerRuntime.providerScope(),
   allowUnscopedCrypto: () => testDomainUnitReadiness,
@@ -397,7 +397,7 @@ const vaultWorkerOperations = createVaultWorkerOperations({
   commit: patch => Object.assign(coordinatorState, patch), cleanupPending: () => walletLockBarrier.snapshot(), peerRevoked: peerId => revokedCoordinatorPeerIds.has(peerId), newEpoch: generateEpoch,
   publishWallet: () => workerWalletState.publish(), publishSession: cause => publishSessionState(cause), clearActivationCredential: () => { testHarnessActivationSecret = undefined; },
   storage: {
-    token: () => storageWorkerRoot.token, hasRoot: () => Boolean(storageWorkerRoot.root), payments: () => workerStorageClients.platformFiles("vault", "payments"),
+    token: () => storageWorkerRoot.token, hasRoot: () => Boolean(storageWorkerRoot.root),
     revokeGrants: () => storageWorkerRequests.revokeStorageSessionGrants(), invalidateClients: () => workerStorageClients.invalidateAll(), unavailable: storageUnavailableError, failure: markStorageIoFailure, errorResponse: storageErrorResponse, changed: () => emitStorageState(), revokeBindingAndDrain: reason => revokeStorageBindingAndDrain(reason), discardBinding: () => discardCurrentPlatformStorageBinding()
   },
   binding: { installRoot: () => installPlatformStorage(), loadSettings: () => loadCoordinatorMeta(), ensureStorage: () => ensureStorageRuntime(), ensureTasks: () => ensureCoordinatorTasksRegistered(), complete: cause => completeUnlockedBinding(cause), lock: reason => performGlobalLock(reason) },
@@ -432,7 +432,7 @@ function walletControl(): VaultWorkerWalletControl {
   return coordinatorWalletControl;
 }
 const storageWorkerControl = createStorageWorkerControl({
-  root: storageWorkerRoot, wallet: { coldStart: () => walletControl().coldStart(), persistence: () => walletControl().persistence(), closeHardware: () => walletControl().closeHardware(), execute: control => walletControl().execute(control) },
+  root: storageWorkerRoot, wallet: { coldStart: () => walletControl().coldStart(), persistence: () => walletControl().persistence(), execute: control => walletControl().execute(control) },
   session: () => ({ sessionEpoch: coordinatorState.sessionEpoch }), commit: patch => Object.assign(coordinatorState, patch), cleanupPending: () => walletLockBarrier.snapshot(), recoveryOperations: () => coordinatorAuthority.coordinatorAuthorityRecoveryOperationNames, unavailable: storageUnavailableError,
   lock: reason => performGlobalLock(reason), revokeBinding: reason => revokeStorageBindingAndDrain(reason), discardBinding: () => discardCurrentPlatformStorageBinding(), publishSession: cause => publishSessionState(cause),
   io: { run: (kind, signal, execute, options) => withCoordinatorFinalIoLease(kind, signal, execute, { ...options, auditOperation: options.auditOperation }) },
@@ -519,7 +519,6 @@ function disposeCurrentPlatformStorageBinding(binding: CurrentPlatformStorageBin
 
 /** 撤销当前存储根：所有已发放句柄与迟到结果立即失效。 */
 function discardCurrentPlatformStorageBinding(): void {
-  void vaultWorkerKeys.hardwareConnections.close();
   stopCoordinatorKeyValueMaintenance();
   storageWorkerRequests.storageBrowseCoordinator.dropBinding();
   const binding = captureCurrentPlatformStorageBinding();
@@ -801,15 +800,11 @@ const windowP2pWorkerRuntime = createWindowP2pWorkerRuntime({
     publicKey() {
       const owner = coordinatorState.activePublicKeyHex;
       if (!owner) throw new Error("Window P2P executor active key is unavailable");
-      if (vaultWorkerKeys.activeKeyBackend === "hardware") vaultWorkerKeys.hardwareConnections.backend(); else vaultWorkerKeys.vaultKeySession.assert(owner);
+      vaultWorkerKeys.vaultKeySession.assert(owner);
       return validatePublicKey(cryptoHexToBytes(owner));
     },
     sign: (request, digest, owner, signal) => withCoordinatorFinalIoLease("write", signal,
-      () => vaultWorkerKeys.activeKeyBackend === "hardware"
-        ? vaultWorkerKeys.hardwareConnections.backend().signNetworkIdentity(request.kind === "window-p2p.executor.identity.sign-noise" ? "noise" : "peer-record",
-          request.kind === "window-p2p.executor.identity.sign-noise" ? { staticKey: new Uint8Array(request.noiseStaticPublicKey) } : { sequence: request.sequence }, signal)
-        : vaultWorkerKeys.authorizeSoftwareSignature(request.kind === "window-p2p.executor.identity.sign-noise" ? "identity.noise-proof" : "identity.peer-record",
-          () => vaultWorkerKeys.vaultKeySession.signDigest(digest, "der", owner), signal, { digest: bytesToHex(digest) }),
+      () => vaultWorkerKeys.vaultKeySession.signDigest(digest, "der", owner),
       { auditOperation: "window-p2p.identity.sign", durableLease: false }),
   },
   inbound: { request: id => satIncomingHandlers.get(id), state: id => satConnectionStateHandlers.get(id), clearStates: () => satConnectionStateHandlers.clear() },
@@ -893,7 +888,7 @@ const msfileFundingRuntime = createWorkerFundingRuntime({
   parseTransaction: parseP2pkhTransaction,
 });
 const msfileBitfsRuntime = createBitfsWorkerRuntime({
-  requestPayment: async command => (await vaultWorkerKeys.currentWalletPayments()).handle(command),
+  // 无审批直签：BitFS业务自核后经Vault直接签名，不走支付账本。
   session: () => ({ vaultStatus: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.activePublicKeyHex, sessionEpoch: coordinatorState.sessionEpoch, runGeneration: coordinatorState.runGeneration }),
   service: () => msfileWorkerLifecycle.service(),
   ensureService: () => ensureMsfileRuntime(),
@@ -1496,7 +1491,6 @@ function fenceCoordinatorPeerSession(
   if (state.status === "revoked") return false;
   const currentBinding = coordinatorSessionBinding(state);
   if (options.binding !== undefined && !sameCoordinatorSessionBinding(currentBinding, options.binding)) return false;
-  void vaultWorkerKeys.hardwareConnections.closePeer(state.peer.peerId);
   state.sessionGeneration += 1;
   state.sessionOpen = false;
   state.status = options.physical ? "revoked" : "closing";
@@ -2129,7 +2123,6 @@ const p2pkhWorkerRuntime = createP2pkhWorkerRuntime({
   refresh: (signal, storage, assertActive) => refreshP2pkhUtxoSnapshots(signal, storage, assertActive),
   emit: (kinds, utxoSeqs) => { publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: coordinatorState.activePublicKeyHex ?? "", kinds, ...(utxoSeqs ? { utxoSeqs } : {}) }); },
   transfer: {
-    requestPayment: command => vaultWorkerOperations.executeVaultOperation({ type: "payment", command }) as Promise<import("@keymaster/contracts").JSONValue>,
     assertActive: () => {
       assertCoordinatorUnitConstructible("p2pkh.coordinator-worker");
       if (!testDomainUnitReadiness) { if (!p2pkhWorkerRuntime.binding()) throw new Error("P2PKH Worker instance is unavailable"); p2pkhWorkerRuntime.binding()!.assertActive(); }
@@ -2612,11 +2605,7 @@ async function completeUnlockedBinding(cause: SessionStateEvent["cause"] = "unlo
  * 让已经拿到句柄的迟到写入在任何数据检查之前就被拒绝。
  */
 function revokeWalletGrants(reason: "lock" | "reset"): void {
-  vaultWorkerKeys.activeKeyBackend = undefined;
-  const hardwareCleanup = vaultWorkerKeys.hardwareConnections.close();
-  walletRevocationCleanup?.push(hardwareCleanup);
-  void hardwareCleanup.catch(() => undefined);
-  vaultWorkerKeys.walletPayments?.close(); vaultWorkerKeys.walletPayments = undefined; vaultWorkerKeys.walletPaymentsOpening = undefined;
+  void reason;
   storageWorkerRequests.revokeStorageSessionGrants();
   releaseMsfileRuntime(reason);
   // 授权已经撤销，不能让退出依赖旧存储句柄写入或旧身份签名。
@@ -2704,7 +2693,7 @@ function performGlobalLock(reason: string): Promise<void> {
           // before recording the failure; retries come from the user's button.
           await Promise.all(revocations);
         }
-        await vaultWorkerKeys.hardwareConnections.close(); await satWorkerLifecycle.retryCleanup();
+        await satWorkerLifecycle.retryCleanup();
       }
     },
     {
@@ -3323,7 +3312,6 @@ function configureCoordinatorPeer(peer: PeerController): void {
   // select this peer for physical Local I/O.
   peer.scope.onRevoke(() => {
     if (coordinatorPeers.get(peer.peerId) !== state) return;
-    void vaultWorkerKeys.hardwareConnections.closePeer(peer.peerId);
     revokedCoordinatorPeerIds.add(peer.peerId);
     fenceCoordinatorPeerSession(state, { physical: true });
   });

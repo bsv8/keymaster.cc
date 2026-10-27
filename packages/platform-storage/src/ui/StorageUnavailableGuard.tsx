@@ -31,15 +31,15 @@ export function StorageUnavailableGuard({ children }: { children: ReactNode }) {
   if (status === undefined || !BLOCKING_STATUSES.has(status)) return <>{children}</>;
 
   if (status === "corrupt") {
+    void recoveryPages;
     return (
-      <><StorageGate
+      <StorageGate
         title={t("storage.guard.corrupt.title", { defaultValue: "本地钱包数据无法读取" })}
         message={t("storage.guard.corrupt.body", {
           defaultValue:
-            "本机的钱包记录不完整，或私钥迁移尚未完成。系统已暂停其它业务，保留现有数据。"
-              + "如果下方出现迁移恢复入口，请连接原 RocKey 继续迁移；不要重置钱包或清除浏览器数据。"
+            "本机的钱包记录不完整。系统已暂停其它业务，保留现有数据，不要重置钱包或清除浏览器数据。"
         })}
-      />{recoveryPages?.renderFrame("wallet-recovery")}</>
+      />
     );
   }
   if (status === "unsupported") {

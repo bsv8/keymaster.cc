@@ -1,4 +1,3 @@
-import {VaultMigrationRecovery} from "./VaultMigrationRecovery.js";
 import { createPublicVaultService } from "./publicVaultService.js";
 import { createVaultImporters } from "./VaultInternalContext.js";
 import { keyImportResources, hexResources, wifResources, jsonFileResources } from "./import/resources.js";
@@ -752,8 +751,6 @@ const vaultPluginDefinition = {
     const sendActivity = () => coordinatorClient.sendActivity();
     pages.register({ kind: "frame", slot: "wallet-guard", id: "vault.wallet-guard", label: "Wallet", render: location => createElement(Guard, { children: location.children, sendActivity }) });
     pages.register({ kind: "header", slot: "topbar", id: "vault.lock-button", order: 1000, label: "Lock", render: () => createElement(Lock) });
-    const MigrationRecovery=bindVaultUi(ctx,VaultMigrationRecovery,service,importers);
-    pages.register({kind:"frame",slot:"wallet-recovery",id:"vault.migration-recovery",label:"Migration recovery",render:()=>createElement(MigrationRecovery)});
     const WalletEntry = bindVaultUi(ctx, VaultWalletEntry, service, importers);
     pages.register({ kind: "frame", slot: "wallet-entry", id: "vault.wallet-entry", label: "Wallet", render: () => createElement(WalletEntry) });
     const Unlock = bindVaultUi(ctx, VaultUnlockPage, service, importers);

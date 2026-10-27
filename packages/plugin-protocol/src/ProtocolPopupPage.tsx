@@ -1065,18 +1065,17 @@ function ConnectLoginAuthPage({
   auth: ProtocolConnectAuthSnapshot;
 }) {
   const login = auth.login;
-  const hardware = auth.backend === "hardware";
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (busy || !login?.wallet || (!hardware && !password) || !auth.canSubmit) return;
+    if (busy || !login?.wallet || !password || !auth.canSubmit) return;
     setBusy(true);
     setError(null);
     try {
-      await service.confirmConnectLogin(auth.recordId!, hardware ? "" : password);
+      await service.confirmConnectLogin(auth.recordId!, password);
       setPassword("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");
@@ -1096,7 +1095,7 @@ function ConnectLoginAuthPage({
             {t("protocol.connect.login.title", { defaultValue: "重新登录并建立新会话" })}
           </h1>
           <p className="protocol-auth__desc">
-            {hardware ? t("protocol.connect.hardware.desc", {defaultValue: "使用当前已连接并在设备上解锁的 RocKey。PIN 只在设备上输入；后续超额度支付由设备确认。"}) : t("protocol.connect.login.desc", {
+            {t("protocol.connect.login.desc", {
               defaultValue:
                 "该站点请求连接当前钱包。请再次输入密码授权；成功后将替换同来源的旧连接。"
             })}
@@ -1114,7 +1113,7 @@ function ConnectLoginAuthPage({
               })}
             </div>
           )}
-          {!hardware ? <label className="protocol-auth__password">
+          <label className="protocol-auth__password">
             <span className="protocol-auth__label">
               {t("protocol.unlock.password", { defaultValue: "密码" })}
             </span>
@@ -1125,7 +1124,7 @@ function ConnectLoginAuthPage({
               disabled={busy || auth.submitted}
               onChange={(e) => setPassword(e.currentTarget.value)}
             />
-          </label> : null}
+          </label>
           {error ? (
             <div className="protocol-auth__error" role="alert">
               <code>{error}</code>
@@ -1145,7 +1144,7 @@ function ConnectLoginAuthPage({
             <button
               type="submit"
               className="protocol-popup__back-top protocol-popup__back-top--primary"
-              disabled={busy || auth.submitted || !auth.canSubmit || !login?.wallet || (!hardware && !password)}
+              disabled={busy || auth.submitted || !auth.canSubmit || !login?.wallet || !password}
             >
               {t("protocol.connect.login.confirm", {
                 defaultValue: "重新认证并建立新会话"
@@ -1168,18 +1167,17 @@ function ConnectResumeAuthPage({
   auth: ProtocolConnectAuthSnapshot;
 }) {
   const resume = auth.resume;
-  const hardware = auth.backend === "hardware";
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (busy || !resume || (!hardware && !password) || !auth.canSubmit) return;
+    if (busy || !resume || !password || !auth.canSubmit) return;
     setBusy(true);
     setError(null);
     try {
-      await service.confirmConnectResume(auth.recordId!, hardware ? "" : password);
+      await service.confirmConnectResume(auth.recordId!, password);
       setPassword("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Resume failed");
@@ -1199,7 +1197,7 @@ function ConnectResumeAuthPage({
             {t("protocol.connect.resume.title", { defaultValue: "恢复当前会话" })}
           </h1>
           <p className="protocol-auth__desc">
-            {hardware ? t("protocol.connect.hardware.desc", {defaultValue: "使用当前已连接并在设备上解锁的 RocKey。PIN 只在设备上输入；后续超额度支付由设备确认。"}) : t("protocol.connect.resume.desc", {
+            {t("protocol.connect.resume.desc", {
               defaultValue:
                 "该站点的 session 仍然有效。输入密码后即可恢复当前会话，不会重新选择 key。"
             })}
@@ -1219,7 +1217,7 @@ function ConnectResumeAuthPage({
           </div>
         ) : null}
         <form onSubmit={submit} className="protocol-auth__form">
-          {!hardware ? <label className="protocol-auth__password">
+          <label className="protocol-auth__password">
             <span className="protocol-auth__label">
               {t("protocol.unlock.password", { defaultValue: "密码" })}
             </span>
@@ -1230,7 +1228,7 @@ function ConnectResumeAuthPage({
               disabled={busy || auth.submitted}
               onChange={(e) => setPassword(e.currentTarget.value)}
             />
-          </label> : null}
+          </label>
           {error ? (
             <div className="protocol-auth__error" role="alert">
               <code>{error}</code>
@@ -1250,7 +1248,7 @@ function ConnectResumeAuthPage({
             <button
               type="submit"
               className="protocol-popup__back-top protocol-popup__back-top--primary"
-              disabled={busy || auth.submitted || !auth.canSubmit || (!hardware && !password)}
+              disabled={busy || auth.submitted || !auth.canSubmit || !password}
             >
               {t("protocol.connect.resume.confirm", { defaultValue: "恢复当前会话" })}
             </button>

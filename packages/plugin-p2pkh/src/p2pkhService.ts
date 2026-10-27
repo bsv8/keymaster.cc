@@ -160,7 +160,7 @@ export function calculateP2pkhBalanceBreakdown(input: {
 }
 
 export interface P2pkhServiceDeps {
-  vault: Pick<VaultService, "status" | "createActiveKeyCrypto" | "requestPayment">;
+  vault: Pick<VaultService, "status" | "createActiveKeyCrypto">;
   coordinator?: Pick<P2pkhCoordinatorControl, "p2pkhUtxosGet" | "p2pkhUtxosRefresh" | "p2pkhArtifactOccupy">
     & Partial<Pick<P2pkhCoordinatorControl, "subscribeTopic" | "p2pkhPaymentStatus">>;
   messageBus: MessageBus;

@@ -7,7 +7,6 @@
 // 硬切换 002 收尾：所有签名 / 选币 / owner 真值走 `publicKeyHex`；
 
 import type { CentralBroadcastService, CoordinatorP2pkhBroadcastResult, CoordinatorValueResult, P2pkhBroadcastSubmission, P2pkhUtxoBinding, VaultService } from "@keymaster/contracts";
-import { publisherPaymentChannelId } from "@keymaster/vaultlink-integration";
 import type { MessageBus } from "webloom-framework";
 import type {
   P2pkhAssetId,
@@ -27,14 +26,14 @@ import {
   calcTxidFromRawTxHex,
   type UnsignedTx,
   rawTxHexByteLength,
-  serializeTx, attachP2pkhSignatures
+  serializeTx, signP2pkhTx
 } from "./p2pkhSigner.js";
 import { P2PKH_MSG } from "./p2pkhMessages.js";
 import { parseP2pkhTransaction, p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
 import type { P2pkhManagerInputEvidence, P2pkhUtxoManager } from "./p2pkhUtxoManager.js";
 
 export interface P2pkhTransferServiceDeps {
-  vault: Pick<VaultService, "status" | "createActiveKeyCrypto" | "requestPayment">;
+  vault: Pick<VaultService, "status" | "createActiveKeyCrypto">;
   previousTransactions(network: "main" | "test", inputs: readonly P2pkhUtxo[]): Promise<string[]>;
   /** A transaction-specific spent-output check; unlike snapshot sequence membership it does not require WoC to index local change. */
   assertInputsUnspent?(network: "main" | "test", inputs: readonly Pick<P2pkhUtxo, "txid" | "vout">[]): Promise<void>;
@@ -152,7 +151,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       const validated = validateTransferInput(input);
       const paymentContext = input.paymentContext ? Object.freeze({...input.paymentContext}) : undefined;
       const network = assetIdToNetwork(validated.assetId);
-      if (input.payment && (!paymentContext?.sessionId || paymentContext.channelId !== await publisherPaymentChannelId(input.payment.publisherPublicKeyHex, input.payment.paymentType, network))) throw new Error("Connect payment requires its publisher channel/session context");
+      void paymentContext;
       const owner = await resolveOwnerKeyIdentity(deps, input.ownerPublicKeyHex);
       const stateRepository = await deps.getStore(owner.publicKeyHex);
       const activeCrypto = await resolveActiveKeyCrypto(deps.vault, owner.publicKeyHex);
@@ -314,9 +313,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
             }
           : buildP2pkhTx({allocation:frozen.allocation,recipientAddress:frozen.recipientAddress,changeAddress:frozen.changeAddress});
         const unsignedTxHex = Array.from(serializeTx(unsigned), byte => byte.toString(16).padStart(2, "0")).join("");
-        const context = frozen.paymentContext;
-        const channelId = context?.channelId ?? (network === "main" ? "p2pkh.transfer.main" : "p2pkh.transfer.test");
-        if (!context) await deps.vault.requestPayment({action:"register",id:channelId,owner:"p2pkh",kind:"plugin",network,paymentType:"p2pkh"});
+        void frozen.paymentContext;
         let previous: string[];
         let durableIntent = false;
         try {
@@ -337,25 +334,12 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
           throw error;
         }
         if (options?.signal?.aborted) throw new Error("Transfer signing cancelled");
-        let signatures: unknown;
-        try {
-          signatures = await deps.vault.requestPayment({action:"sign-p2pkh",rawTxHex:frozen.rawTxHex,prevTransactionHexes:previous,
-            channelId,paymentId:frozen.payment?.paymentId ?? crypto.randomUUID(),sessionId:context?.sessionId??null,
-            ...(frozen.payment ? { connectPaymentReview: frozen.payment } : {})});
-        } catch (error) {
-          const proof = (error as { connectPaymentNotSigned?: { paymentId: string; planDigest: string; version: number; state: "cancelled_before_sign" } }).connectPaymentNotSigned;
-          if (proof && frozen.managerAllocationId && deps.utxoManager) {
-            await deps.utxoManager.cancelPayment({
-              ownerPublicKeyHex: owner.publicKeyHex, network, allocationId: frozen.managerAllocationId,
-              proof: { ...proof, allocationId: frozen.managerAllocationId },
-            });
-            return { submissionId: "", result: { status: "not-dispatched", reason: "cancelled" }, localInputClaimIds: [], preview: frozen };
-          }
-          throw error;
-        }
-        if (!signatures || typeof signatures !== "object" || Array.isArray(signatures) || !Array.isArray((signatures as { signatures?: unknown }).signatures) || (signatures as { signatures: unknown[] }).signatures.some(v=>typeof v!=="string")) throw new Error("Invalid wallet payment response");
-        if (options?.signal?.aborted) throw new Error("Transfer cancelled after signing; payment quota remains occupied");
-        const rawTxHex = attachP2pkhSignatures(unsigned,(signatures as { signatures: string[] }).signatures,owner.publicKeyHex);
+        if (options?.signal?.aborted) throw new Error("Transfer cancelled after signing");
+        void previous;
+        const rawTxHex = await signP2pkhTx(unsigned, frozen.allocation.selected as import("./p2pkhContracts.js").P2pkhUtxo[], async (digest) => {
+          const result = await activeCrypto.signDigest({ digest: new Uint8Array(digest).buffer as ArrayBuffer, format: "der" });
+          return new Uint8Array(result.signature);
+        }, owner.publicKeyHex);
         const signedSize = rawTxHexByteLength(rawTxHex);
         if (signedSize > frozen.serializedSizeBytes) throw new Error("P2PKH signature exceeded fee size bound");
         currentPreview = {...frozen,rawTxHex,txid:calcTxidFromRawTxHex(rawTxHex),serializedSizeBytes:signedSize};

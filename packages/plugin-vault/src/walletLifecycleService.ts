@@ -29,8 +29,6 @@ import {
 } from "@keymaster/contracts";
 import * as secp256k1 from "@noble/secp256k1";
 import type { WalletVaultLifecycleStore } from "@keymaster/contracts/storage-internal";
-import { validateHardwareKeyDocument, type HardwareKeyDocumentV1 } from "@keymaster/vaultlink-integration";
-
 import type { WalletKeyRepository } from "./walletKeyRepository.js";
 import { createKeyHoldDocument, serializeKeyHoldDocument } from "./keyholdDocument.js";
 import { StorageRuntimeError, storageErrorCode } from "@keymaster/contracts/storage-internal";
@@ -132,8 +130,6 @@ function userFacingError(input: {
 export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletLifecycleService & {
   /** 当前钱包身份世代；未初始化时为空串。 */
   walletGeneration(): string;
-  /** Worker 内部：调用方已完成设备配对与持有权证明。 */
-  initializeHardware(document: HardwareKeyDocumentV1): Promise<{ walletGeneration: string }>;
   /** 校验某个 grant 的世代是否仍然是当前的。 */
   isGrantLive(input: { walletGeneration: string; sessionEpoch: string; runGeneration: string }): boolean;
   /** 撤销指定 App 的授权并清空它的独立目录。 */
@@ -196,18 +192,6 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
    * 失败或取消时整批 abort，IndexedDB 里不会留下可被当作完整钱包使用的
    * 半成品。
    */
-  async function initializeHardware(candidate: HardwareKeyDocumentV1): Promise<{ walletGeneration: string }> {
-    const document = validateHardwareKeyDocument(candidate);
-    secp256k1.Point.fromHex(document.publicKeyHex);
-    if ((await coldStart()).state !== "uninitialized") throw new StorageRuntimeError("storage_conflict", "Wallet already has a Key");
-    await deps.store.batch({ operations: [
-      { type: "put", path: "key.json", bytes: encode(document), contentType: "application/json" },
-    ], conditions: [{ path: "key.json", ifNoneMatch: true }] });
-    walletGeneration = identityBinding(document);
-    emit({ type: "initialized", walletGeneration });
-    return { walletGeneration };
-  }
-
   async function initialize(plan: WalletInitializePlan): Promise<WalletInitializeResult> {
     let draft: WalletInitializePlan["firstKey"];
     try {
@@ -500,7 +484,7 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
   return {
     coldStart,
     initialize,
-    initializeHardware,
+
     unlock,
     verifyPassword,
     lock,

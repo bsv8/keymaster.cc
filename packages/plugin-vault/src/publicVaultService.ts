@@ -1,10 +1,9 @@
 import type { VaultService } from "@keymaster/contracts";
 import type { InternalVaultService } from "./internalVaultService.js";
-/** 显式白名单对象，不能通过原型或字段访问内部管理服务。 */
+/** 显式白名单对象，不能通过原型或字段访问内部管理服务。无审批入口。 */
 export function createPublicVaultService(service: InternalVaultService): VaultService {
   return Object.freeze(Object.assign(Object.create(null), {
     status: service.status.bind(service),
-    requestPayment: service.requestPayment.bind(service),
     getCurrentKey: service.getCurrentKey.bind(service),
     hasVault: service.hasVault.bind(service),
     unlock: service.unlock.bind(service),

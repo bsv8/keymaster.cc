@@ -1,4 +1,4 @@
-import { signProtocolPayment } from "@keymaster/vaultlink-integration";
+import { signMixedInputs } from "./p2pkhSigner.js";
 // P2PKH 协议 spend：受控签名 + 广播任意输出计划。
 
 import type {
@@ -83,7 +83,7 @@ export interface P2pkhProtocolManagerPort {
     deferDispatch?: boolean;
     executionId?: string;
   }): Promise<{ allocationId: string }>;
-  cancelProtocolSubmission(input: { ownerPublicKeyHex: string; network: BsvNetwork; submissionId: string; allocationId?: string; txid?: string; reason?: "cancelled" | "execution-failed" }): Promise<void>;
+  cancelProtocolSubmission(input: { ownerPublicKeyHex: string; network: BsvNetwork; submissionId: string; allocationId?: string; txid?: string; reason?: "cancelled" | "execution-failed"; proof?: { executionId: string; allocationId: string; submissionId: string; owner: string; network: BsvNetwork; unsignedTxHex: string; state: "cancelled_before_sign"; version: number } | null }): Promise<void>;
   completeProtocolIntent(input: {
     ownerPublicKeyHex: string;
     network: BsvNetwork;
@@ -94,7 +94,7 @@ export interface P2pkhProtocolManagerPort {
 }
 
 export interface P2pkhProtocolSpendDeps {
-  vault: Pick<VaultService, "status" | "createActiveKeyCrypto" | "requestPayment">;
+  vault: Pick<VaultService, "status" | "createActiveKeyCrypto">;
   previousTransactions(network: BsvNetwork, inputs: readonly ProtocolSpendInput[]): Promise<string[]>;
   /** Production query: reject spent/unknown inputs immediately before claiming/signing. */
   assertInputsUnspent?(network:BsvNetwork,inputs:readonly ProtocolSpendInput[]):Promise<void>;
@@ -125,6 +125,26 @@ function hexToBytes(hex: string): Uint8Array {
 /** The wallet's own P2PKH locking script, derived from the owner public key. */
 function p2pkhScriptForPublicKey(publicKeyHex: string): string {
   return `76a914${pubKeyHash160Hex(publicKeyHex).toLowerCase()}88ac`;
+}
+
+function hexToSigningBytes(hex: string): Uint8Array {
+  const clean = hex.replace(/^0x/, "");
+  if (clean.length % 2 !== 0 || !/^[0-9a-f]*$/i.test(clean)) throw new Error("Invalid locking script hex");
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+function isP2pkhLockingScript(script: Uint8Array): boolean {
+  return script.length === 25 && script[0] === 0x76 && script[1] === 0xa9 && script[2] === 0x14 && script[23] === 0x88 && script[24] === 0xac;
+}
+
+function isOwnerBarePubkeyLockingScript(script: Uint8Array, ownerPublicKeyHex: string): boolean {
+  if (script.length !== 35 || script[0] !== 33 || script[34] !== 0xac) return false;
+  const owner = hexToSigningBytes(ownerPublicKeyHex);
+  if (owner.length !== 33) return false;
+  for (let i = 0; i < 33; i++) if (script[1 + i] !== owner[i]) return false;
+  return true;
 }
 
 function buildUnsignedTx(
@@ -321,6 +341,9 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
       let inputClaimIds: string[] = [];
       const submissionId = crypto.randomUUID();
       let managerAllocationId: string | undefined;
+      // 本次提交是否已产生签名：仅当能证明尚未签名时才可安全释放，否则保责。
+      let signingStarted = false;
+      let signingUnsignedTxHex: string | undefined;
       // 放在 try 之前：签名闭包要读它，而闭包定义在 owner 解析之前。
       const resolvedOwner = await resolveOwnerKeyIdentity(deps, input.ownerPublicKeyHex);
 
@@ -428,15 +451,31 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           ),
         });
         managerAllocationId = managerIntent!.allocationId;
-        const rawTxHex = await signProtocolPayment({
-          rawTxHex: Array.from(serializeTx(unsigned), b => b.toString(16).padStart(2, "0")).join(""),
-          prevTransactionHexes: previousTransactions,
-          publicKeyHex: resolvedOwner.publicKeyHex, network: input.network,
-          protocolExecution: { executionId: submissionId, submissionId, allocationId: managerAllocationId },
-          pluginId: input.requestingPluginId ?? "p2pkh", requestPayment: c => deps.vault.requestPayment(c),
+        const unsignedTxHex = Array.from(serializeTx(unsigned), b => b.toString(16).padStart(2, "0")).join("");
+        signingUnsignedTxHex = unsignedTxHex;
+        // 无审批直签：按实际输入锁定脚本选择 scriptCode/解锁结构（P2PKH 缺省，裸公钥按脚本本身）。
+        const activeCrypto = await deps.vault.createActiveKeyCrypto();
+        const signingInputs = plan.inputs.map((utxo, index) => {
+          const lockingHex = plan.lockingScripts?.[index];
+          if (lockingHex === undefined) {
+            return { scriptCode: hexToSigningBytes(p2pkhScriptForPublicKey(resolvedOwner.publicKeyHex)), value: utxo.value, pushPublicKeyInUnlock: true };
+          }
+          const script = hexToSigningBytes(lockingHex);
+          if (isP2pkhLockingScript(script)) return { scriptCode: script, value: utxo.value, pushPublicKeyInUnlock: true };
+          if (isOwnerBarePubkeyLockingScript(script, resolvedOwner.publicKeyHex)) return { scriptCode: script, value: utxo.value, pushPublicKeyInUnlock: false };
+          throw new Error("Unsupported protocol input locking script");
         });
+        const rawTxHex = await signMixedInputs(
+          unsigned,
+          signingInputs,
+          async (digest) => {
+            const result = await activeCrypto.signDigest({ digest: new Uint8Array(digest).buffer as ArrayBuffer, format: "der" });
+            signingStarted = true;
+            return new Uint8Array(result.signature);
+          },
+          { publicKey: Uint8Array.from(Buffer.from(resolvedOwner.publicKeyHex, "hex")) },
+        );
         if (managerIntent) {
-          // The exact bytes become durable BEFORE the broadcast is attempted.
           await deps.protocolManager!.completeProtocolIntent({
             ownerPublicKeyHex: resolvedOwner.publicKeyHex,
             network: input.network,
@@ -444,8 +483,6 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
             signedTxHex: rawTxHex,
             delivery: "wallet",
           });
-          try { await deps.vault.requestPayment({ action: "protocol-payment-ack", executionIds: [submissionId] }); }
-          catch (error) { console.warn("[p2pkh] Protocol execution ACK lost; durable manager exact retained", error); }
         }
         const serializedSizeBytes = rawTxHexByteLength(rawTxHex);
 
@@ -588,9 +625,25 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
         throw new Error("Protocol spend fee failed to converge");
       } catch (err) {
         if (managerAllocationId) {
-          // No error string proves that a signer never ran. The trusted Vault
-          // journal decides release; otherwise preserve a visible responsibility.
-          await deps.protocolManager!.cancelProtocolSubmission({ ownerPublicKeyHex: input.ownerPublicKeyHex, network: input.network, submissionId, allocationId: managerAllocationId, reason: "execution-failed" });
+          if (!signingStarted && signingUnsignedTxHex) {
+            // 能证明尚未签名（如 Vault 能力获取失败）：安全释放，避免卡住资金。
+            const owner = await resolveOwnerKeyIdentity(deps, input.ownerPublicKeyHex).catch(() => undefined);
+            if (owner) {
+              await deps.protocolManager!.cancelProtocolSubmission({
+                ownerPublicKeyHex: input.ownerPublicKeyHex, network: input.network, submissionId, allocationId: managerAllocationId, reason: "cancelled",
+                proof: {
+                  executionId: submissionId, allocationId: managerAllocationId, submissionId,
+                  owner: owner.publicKeyHex, network: input.network, unsignedTxHex: signingUnsignedTxHex.toLowerCase(),
+                  state: "cancelled_before_sign", version: 1,
+                },
+              });
+            } else {
+              await deps.protocolManager!.cancelProtocolSubmission({ ownerPublicKeyHex: input.ownerPublicKeyHex, network: input.network, submissionId, allocationId: managerAllocationId, reason: "execution-failed" });
+            }
+          } else {
+            // 已签、部分签或结果未知：不得误释放，保留可见责任，已保存 exact 可经 Manager 对账恢复。
+            await deps.protocolManager!.cancelProtocolSubmission({ ownerPublicKeyHex: input.ownerPublicKeyHex, network: input.network, submissionId, allocationId: managerAllocationId, reason: "execution-failed" });
+          }
         }
         if (protectedClaimIds.length > 0 && deps.protectedOutpoints) {
           await deps.protectedOutpoints.releaseClaims(protectedClaimIds);

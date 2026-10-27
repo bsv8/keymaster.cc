@@ -130,4 +130,4 @@ export type StorageBindingGrant = StorageOwnerGrant | ThirdPartyAppStorageGrant;
 export type { WalletStore, WalletObject, WalletObjectMeta, WalletWriteCondition, WalletPutResult, WalletBatchOperation, WalletBatchCondition, WalletBatchInput, WalletBatchResult } from "./walletStoreInternal.js";
 export { StorageRuntimeError, storageErrorCode, type StorageDiagnostic } from "./runtimeError.js";
 
-export { WALLET_INITIALIZATION_PATH, WALLET_MIGRATION_PATH, WALLET_PAYMENT_POLICY_PATH, type WalletVaultKeyStore, type WalletVaultLifecycleStore, type WalletVaultMigrationStore } from "./walletStoreInternal.js";
+export { WALLET_INITIALIZATION_PATH, type WalletVaultKeyStore, type WalletVaultLifecycleStore } from "./walletStoreInternal.js";

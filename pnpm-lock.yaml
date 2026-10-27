@@ -184,46 +184,6 @@ importers:
         specifier: 3.3.9
         version: 3.3.9
 
-  coding/keymaster/vaultlink-integration:
-    dependencies:
-      '@keymaster/contracts':
-        specifier: workspace:*
-        version: link:../../../packages/contracts
-      '@keymaster/ui':
-        specifier: workspace:*
-        version: link:../../../packages/ui
-      '@vaultlink/sdk':
-        specifier: workspace:0.2.0-draft.1
-        version: link:../vaultlink-sdk
-      bsv8-channel-protocol:
-        specifier: 0.6.0
-        version: 0.6.0
-      react:
-        specifier: ^18.3.1
-        version: 18.3.1
-    devDependencies:
-      '@keymaster/p2p-host':
-        specifier: workspace:*
-        version: link:../p2p-host
-      '@libp2p/websockets':
-        specifier: 10.1.20
-        version: 10.1.20
-      '@multiformats/multiaddr':
-        specifier: 13.0.3
-        version: 13.0.3
-      go-bitfs:
-        specifier: 0.5.0
-        version: 0.5.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
-
-  coding/keymaster/vaultlink-sdk:
-    dependencies:
-      '@noble/curves':
-        specifier: 1.9.7
-        version: 1.9.7
-      '@noble/hashes':
-        specifier: 1.8.0
-        version: 1.8.0
-
   packages/contracts:
     dependencies:
       '@noble/hashes':
@@ -424,9 +384,6 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
-      '@keymaster/vaultlink-integration':
-        specifier: workspace:*
-        version: link:../../coding/keymaster/vaultlink-integration
       '@libp2p/webrtc':
         specifier: 6.0.30
         version: 6.0.30(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
@@ -475,9 +432,6 @@ importers:
       '@keymaster/utxo-manager':
         specifier: workspace:*
         version: link:../utxo-manager
-      '@keymaster/vaultlink-integration':
-        specifier: workspace:*
-        version: link:../../coding/keymaster/vaultlink-integration
       '@noble/hashes':
         specifier: ^1.4.0
         version: 1.8.0
@@ -536,9 +490,6 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
-      '@keymaster/vaultlink-integration':
-        specifier: workspace:*
-        version: link:../../coding/keymaster/vaultlink-integration
       '@noble/ciphers':
         specifier: ^2.2.0
         version: 2.2.0
@@ -629,9 +580,6 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
-      '@keymaster/vaultlink-integration':
-        specifier: workspace:*
-        version: link:../../coding/keymaster/vaultlink-integration
       '@noble/ciphers':
         specifier: ^2.2.0
         version: 2.2.0
@@ -644,6 +592,9 @@ importers:
       bsv8-channel-protocol:
         specifier: 0.6.0
         version: 0.6.0
+      go-bitfs:
+        specifier: 0.5.0
+        version: 0.5.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       keyhold:
         specifier: 2.1.0
         version: 2.1.0

@@ -5,6 +5,7 @@ import { sign as signPublic } from "bsv8-channel-protocol/public-message";
 import { sign as signHash } from "bsv8-channel-protocol/hash-request";
 import { signPrivateMessage, sealSigned, open, privateMessageMaxLifetimeMs, type UnsignedPrivateMessage, type SignedPrivateMessage } from "bsv8-channel-protocol/inbox";
 import { bytesToHex, hexToBytes, signEcdsaDigest, verifySessionKeyPair } from "./sessionCryptoCore.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 
 export interface WorkerKeyIdentity { unlocked: boolean; publicKeyHex?: string; sessionEpoch: string }
 export interface PrivateMessageSigningInput {
@@ -47,14 +48,6 @@ export function createWorkerKeySession(identity: () => WorkerKeyIdentity) {
     clear() { session.replace(undefined); },
     hasKey: () => privateKeyBytes !== undefined,
     assert(publicKeyHex?: string, sessionEpoch?: string) { assert({ publicKeyHex, sessionEpoch }); },
-    /** Private Worker callback for physical migration. Bind the copy to the
-     * unlocked session, revoke stale results and wipe it on every exit. This
-     * method has no Window/RPC operation and does not request the password. */
-    async useForMigration<T>(run: (key: Uint8Array) => Promise<T>): Promise<T> {
-      const captured = assert(), copy = new Uint8Array(privateKeyBytes!);
-      try { const result = await run(copy); assert(captured); return result; }
-      finally { copy.fill(0); }
-    },
     async signDigest(digest: Uint8Array, format: EcdsaSignatureFormat, publicKeyHex?: string) {
       const captured = assert({ publicKeyHex });
       const signature = await signEcdsaDigest({ privateKeyBytes: privateKeyBytes!, digest, format });
@@ -66,6 +59,11 @@ export function createWorkerKeySession(identity: () => WorkerKeyIdentity) {
       if (operation.type === "signDigest") {
         const signature = await session.signDigest(hexToBytes(operation.digestHex), operation.format, current.publicKeyHex);
         assert(current); return { type: operation.type, signatureHex: bytesToHex(signature), format: operation.format };
+      }
+      if (operation.type === "signConnectEnvelope") {
+        if (operation.envelope.length === 0) throw new Error("Connect envelope is empty");
+        const signature = await session.signDigest(sha256(operation.envelope), "compact", current.publicKeyHex);
+        assert(current); return { type: operation.type, signatureHex: bytesToHex(signature), format: "compact" as const };
       }
       throw new Error("Unsupported coordinator crypto operation");
     },

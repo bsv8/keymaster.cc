@@ -20,20 +20,46 @@ export { executeWorkerUnlock } from "./workerUnlock.js";
 
 export { createWalletStateAccess, createWalletStateSource } from "./walletStateAccess.js";
 
-// VLP 连接只供钱包协调器使用，不向普通插件暴露 USB 或盲签接口。
-export { HardwareConnectionOwner, VaultLinkHardwareBackend, vaultLinkSupport } from "@keymaster/vaultlink-integration";
-export { createHardwareChannelAdapter } from "@keymaster/vaultlink-integration";
-export { WalletPayments, HardwareWalletPayments } from "@keymaster/vaultlink-integration";
-export type { WalletContext as VaultLinkWalletContext, PaymentInput as VaultLinkPaymentInput } from "@keymaster/vaultlink-integration";
-
-export { verifyMigratedHardwareLedger } from "@keymaster/vaultlink-integration/migration";
 export { inspectWalletKeyBytes } from "./walletKeyRepository.js";
 export { createAndVerifyMigrationKeyHold } from "./migrationKeyHold.js";
-export { createMigrationJournalService, createHardwareToSoftwareMigration, requestMigratedDeviceErase } from "@keymaster/vaultlink-integration/migration";
-export {WalletMigrationFence} from '@keymaster/vaultlink-integration/migration';
 
-export {verifyDeviceMigrationJournal} from '@keymaster/vaultlink-integration/migration';
-
-export {createSoftwareToHardwareMigration} from "@keymaster/vaultlink-integration/migration";
-
-export {SignatureHistory} from "@keymaster/vaultlink-integration";
+/** Worker-local wallet I/O admission (local copy, no VaultLink dependency).
+ * Migration admission is no longer used, but the fence object is retained
+ * so workerAuthority/final-IO-lease integration keeps its shape. */
+export class WalletMigrationFence {
+  private active = new Set<symbol>();
+  private exclusive: symbol | undefined;
+  private notify = new Set<() => void>();
+  async acquire(migration = false, signal?: AbortSignal): Promise<{ release(): void }> {
+    if (signal?.aborted) throw Error("migration-session-revoked");
+    if (this.exclusive) throw Error("migration-pending");
+    const id = Symbol();
+    if (migration) {
+      this.exclusive = id;
+      try {
+        while (this.active.size) {
+          await new Promise<void>((resolve, reject) => {
+            const changed = () => { cleanup(); resolve(); };
+            const aborted = () => { cleanup(); reject(Error("migration-session-revoked")); };
+            const cleanup = () => { this.notify.delete(changed); signal?.removeEventListener("abort", aborted); };
+            this.notify.add(changed);
+            signal?.addEventListener("abort", aborted, { once: true });
+            if (signal?.aborted) aborted();
+          });
+        }
+        if (signal?.aborted) throw Error("migration-session-revoked");
+      } catch (error) { if (this.exclusive === id) this.exclusive = undefined; throw error; }
+    }
+    this.active.add(id);
+    let released = false;
+    return {
+      release: () => {
+        if (released) return;
+        released = true;
+        this.active.delete(id);
+        if (this.exclusive === id) this.exclusive = undefined;
+        for (const changed of [...this.notify]) changed();
+      },
+    };
+  }
+}

@@ -1,8 +1,7 @@
 import type { WalletColdStartSnapshot, WalletInitializePlan, WalletInitializeResult, WalletLifecycleEvent, WalletLifecycleService } from "@keymaster/contracts";
-import { WALLET_MIGRATION_PATH, StorageRuntimeError, type WalletStore } from "@keymaster/contracts/storage-internal";
+import { StorageRuntimeError, type WalletStore } from "@keymaster/contracts/storage-internal";
 import {
   createWalletKeyRepository, type WalletKeyRepository, createWalletLifecycleService,
-  createMigrationJournalService, inspectWalletKeyBytes,
 } from "./coordinator.js";
 export interface VaultWalletWorkerPorts {
   session(): { walletGeneration: string; sessionEpoch: string; runGeneration: string };
@@ -10,7 +9,6 @@ export interface VaultWalletWorkerPorts {
   createStore(): WalletStore;
   bootstrapStorage(store: WalletStore): {
     keys: Parameters<typeof createWalletKeyRepository>[0]; lifecycle: Parameters<typeof createWalletLifecycleService>[0]["store"];
-    migration: Parameters<typeof createMigrationJournalService>[0]["store"];
   };
   unavailable(message: string): Error;
   transitions: Pick<Parameters<typeof createWalletLifecycleService>[0], "revokeGrants" | "establishSession" | "adoptUnlockedKey">;

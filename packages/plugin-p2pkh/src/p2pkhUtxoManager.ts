@@ -2,7 +2,12 @@ import type { BorrowedModuleFileStore, P2pkhConclusionRow, P2pkhPaymentLookupRes
 import { buildUnsigned, estimateFeeSats, estimateSignedSize, formatAmount, FundingKernel, parseTx, submitSigned, submitProtocolSigned, completeProtocolIntent, prepareProtocolIntent, classifyPaymentScript, buildPaymentTemplate, validatePaymentTemplate, type AllocationView, type BroadcastOutcome, type DurableStore, type ManagerConfig, type PaymentOutputRole, type PaymentType, type Scope, type SnapshotUtxo, type InputObservation, type SubmitResult, retryExact as retryManagerExact, reconcileInputs as reconcileManagerInputs } from "@keymaster/utxo-manager";
 import { p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
 import type { P2pkhKeyResource, P2pkhUtxo } from "./p2pkhContracts.js";
-import type { ProtocolExecutionProof } from "@keymaster/vaultlink-integration";
+export interface ProtocolExecutionIdentity { executionId: string; allocationId: string; submissionId: string; }
+export interface ProtocolExecutionProof extends ProtocolExecutionIdentity {
+  owner: string; network: "main" | "test"; unsignedTxHex: string;
+  state: "authorized" | "signing_started" | "signed_partial" | "signed_complete" | "cancelled_before_sign";
+  version: number; signedTxHex?: string;
+}
 import { createWorkerProtocolEvidence } from "./workerProtocolEvidence.js";
 
 function pathFor(network: "main" | "test"): string { return `utxo-manager/p2pkh-${network}-state.json`; }

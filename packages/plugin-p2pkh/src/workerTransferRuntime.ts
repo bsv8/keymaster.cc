@@ -14,7 +14,6 @@ import { createWocInputObserver } from "./wocInputObserver.js";
 
 type SnapshotInput = { ownerPublicKeyHex: string; network: "main" | "test" };
 export interface WorkerTransferDependencies {
-  requestPayment: import("@keymaster/contracts").VaultService["requestPayment"];
   assertActive(): void;
   session(): { owner?: string; epoch: string; unlocked: boolean };
   loadSettings(owner: string): Promise<void>;
@@ -84,13 +83,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     async cancelProtocolSubmission(request) {
       const manager = utxoManager;
       if (!manager) throw new Error("Protocol manager unavailable");
-      let proof: import("@keymaster/vaultlink-integration").ProtocolExecutionProof | null = null;
-      try { proof = await deps.requestPayment({ action: "protocol-payment-status", executionId: request.submissionId }) as unknown as typeof proof; } catch { /* Missing/unreadable evidence never releases inputs. */ }
-      await manager.cancelProtocolSubmission({ ...request, proof });
-      if (proof && (proof as import("@keymaster/vaultlink-integration").ProtocolExecutionProof).state === "cancelled_before_sign") {
-        try { await deps.requestPayment({ action: "protocol-payment-ack", executionIds: [request.submissionId] }); }
-        catch (error) { console.warn("[p2pkh] Cancelled protocol ACK lost; manager cancellation retained", error); }
-      }
+      await manager.cancelProtocolSubmission({ ...request, proof: null });
       deps.fundsChanged(request);
     },
     async selectFundingInputs(request) {
@@ -214,71 +207,9 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
           },
         },
       });
-      const recoveryManager = utxoManager, recoveryNetwork = network;
-      const assertRecoveryFresh = () => { assertFresh(); const current = requireUnlockedWalletIdentity(deps.walletState().snapshot()); if (utxoManager !== recoveryManager || current.publicKeyHex.toLowerCase() !== owner.toLowerCase() || current.bsvNetwork !== recoveryNetwork) throw new Error('Connect recovery scope changed'); };
-      try {
-        const recovered = await deps.requestPayment({ action: "connect-payment-recovery" });
-        assertRecoveryFresh();
-        if (Array.isArray(recovered) && recovered.length > 0) {
-          const released = await recoveryManager.recoverCancelledPayments({
-            ownerPublicKeyHex: owner,
-            network: recoveryNetwork,
-            proofs: recovered as Array<{ paymentId: string; planDigest: string; version: number; state: "cancelled_before_sign" }>,
-          });
-          assertRecoveryFresh();
-          if (released.length > 0) {
-            await deps.requestPayment({ action: "connect-payment-recovery-ack", paymentIds: released.map((row) => row.paymentId) });
-            assertRecoveryFresh();
-          }
-        }
-      } catch (error) {
-        console.warn("[p2pkh] Connect payment journal recovery failed", error instanceof Error ? error.message : String(error));
-      }
-      assertRecoveryFresh();
-      try {
-        // Startup takeover is local persistence ONLY. Pending signed outboxes
-        // remain stopped until the owner explicitly starts exact retransmission.
-        const signed = await deps.requestPayment({ action: 'connect-payment-signed-recovery' });
-        assertRecoveryFresh();
-        if (!Array.isArray(signed)) throw new Error('Invalid signed payment recovery response');
-        if (signed.length) {
-          const adopted = await recoveryManager.recoverSignedPayments({ ownerPublicKeyHex: owner, network: recoveryNetwork, proofs: signed as Array<{ paymentId: string; planDigest: string; version: number; state: 'signed_complete' | 'quarantined'; signedTxHex?: string }> });
-          assertRecoveryFresh();
-          if (adopted.length) {
-            try {
-              await deps.requestPayment({ action: 'connect-payment-recovery-ack', paymentIds: adopted.map(row => row.paymentId) });
-            } catch (error) {
-              assertRecoveryFresh(); // durable manager exact already covers the duty; lost ACK is safely retryable.
-              console.warn('[p2pkh] Connect signed handoff ACK failed', error instanceof Error ? error.message : String(error));
-            }
-            assertRecoveryFresh();
-          }
-        }
-      } catch (error) {
-        console.warn('[p2pkh] Connect signed payment takeover failed', error instanceof Error ? error.message : String(error));
-        // Missing original intents/orphan signatures cannot permit a fresh
-        // wallet snapshot to treat potentially signed inputs as free money.
-        throw error;
-      }
-      assertRecoveryFresh();
-      // Adopt exact/cancellation evidence before any new protocol funding.
-      // Partial or unknown executions remain held and visible, never re-signed.
-      const protocolProofs = await deps.requestPayment({ action: "protocol-payment-recovery" });
-      assertRecoveryFresh();
-      if (!Array.isArray(protocolProofs)) throw new Error("Invalid protocol execution recovery response");
-      const protocolAck: string[] = [];
-      for (const proof of protocolProofs) {
-        const adopted = await recoveryManager.recoverProtocolExecution({ ownerPublicKeyHex: owner, network: recoveryNetwork, proof: proof as unknown as import("@keymaster/vaultlink-integration").ProtocolExecutionProof });
-        assertRecoveryFresh();
-        if (adopted) protocolAck.push((proof as unknown as { executionId: string }).executionId);
-      }
-      if (protocolAck.length) {
-        try { await deps.requestPayment({ action: "protocol-payment-ack", executionIds: protocolAck }); }
-        catch (error) { console.warn("[p2pkh] Protocol journal ACK lost; manager responsibility retained", error); }
-        assertRecoveryFresh();
-      }
+      void utxoManager; void network;
       const { service } = createP2pkhService({
-        vault: { status: deps.vaultStatus, createActiveKeyCrypto: async () => { assertFresh(); const crypto = await deps.crypto(owner); assertFresh(); return crypto; }, requestPayment: deps.requestPayment },
+        vault: { status: deps.vaultStatus, createActiveKeyCrypto: async () => { assertFresh(); const crypto = await deps.crypto(owner); assertFresh(); return crypto; } },
         utxoManager,
         woc: deps.query?.(),
         effectiveFeeRate: deps.effectiveFeeRate,
@@ -322,7 +253,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     const network = requireUnlockedWalletIdentity(deps.walletState().snapshot()).bsvNetwork;
     const assertActive = () => { deps.assertActive(); const now = deps.session(); const current = requireUnlockedWalletIdentity(deps.walletState().snapshot()); if (generation !== token || !now.unlocked || now.owner !== owner || now.epoch !== epoch || current.publicKeyHex.toLowerCase() !== owner.toLowerCase() || current.bsvNetwork !== network) throw new Error("Protocol wallet instance revoked"); };
     const run = createWorkerProtocolRuntime({
-      requestPayment: deps.requestPayment, assertActive, owner, network, storage: deps.storage(), crypto: deps.crypto,
+       assertActive, owner, network, storage: deps.storage(), crypto: deps.crypto,
       central: central!, transfer, query: () => deps.query?.(), snapshot: async network => { const result = await deps.snapshot({ ownerPublicKeyHex: owner, network }, false); assertActive(); return result.status === "ok" ? result.value : { hasResult: false, items: null, seq: null, syncedAt: null }; },
       protocolManager: protocolManagerPort,
     });
@@ -406,24 +337,15 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
   }
   async function recoverSigning(input: SnapshotInput & { allocationId: string }) {
     await ensure();
-    const manager = utxoManager!, session = deps.session();
-    const assertFresh = () => { const now = deps.session(); deps.assertActive(); const identity = requireUnlockedWalletIdentity(deps.walletState().snapshot()); if (utxoManager !== manager || !now.unlocked || now.epoch !== session.epoch || now.owner?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase() || identity.publicKeyHex.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase() || identity.bsvNetwork !== input.network) throw new Error("Protocol recovery scope mismatch"); };
-    assertFresh();
-    const identity = await manager.protocolExecutionIdentity(input);
-    assertFresh();
+    const manager = utxoManager!;
+    const session = deps.session();
+    if (!session.unlocked || session.owner?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) throw new Error("Protocol recovery scope mismatch");
+    // 已保存 exact 经 Manager 对账恢复（持久化在派发前完成）；未签名已在 presign 失败时释放，此处不再重签。
+    const identity = await manager.protocolExecutionIdentity(input).catch(() => null);
     if (!identity) throw new Error("No verifiable protocol execution identity; responsibility retained");
-    const proof = await deps.requestPayment({ action: "protocol-payment-status", executionId: identity.executionId });
-    assertFresh();
-    if (!proof) throw new Error("Protocol execution journal is missing; responsibility retained");
-    const recovered = await manager.recoverProtocolExecution({ ...input, proof: proof as unknown as import("@keymaster/vaultlink-integration").ProtocolExecutionProof });
-    assertFresh();
-    if (recovered) {
-      try { await deps.requestPayment({ action: "protocol-payment-ack", executionIds: [identity.executionId] }); }
-      catch (error) { console.warn("[p2pkh] Protocol recovery ACK lost", error); }
-    }
-    assertFresh();
+    await manager.reconcile({ ownerPublicKeyHex: input.ownerPublicKeyHex, network: input.network }).catch(() => undefined);
     deps.fundsChanged(input);
-    return recovered;
+    return identity;
   }
   async function ownsWalletExact(input: SnapshotInput & { txid: string; rawTxHex: string }) { await ensure(); return utxoManager!.ownsWalletExact(input); }
   async function previousTransaction(input: SnapshotInput & { txid: string }) { await ensure(); return utxoManager!.previousTransaction(input); }

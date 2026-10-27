@@ -29,7 +29,7 @@ export function createVaultWorkerRuntime(ports: {
         };
         return Object.freeze({
           coldStart: () => invoke(ports.walletControl.coldStart),
-          persistence: () => invoke(ports.walletControl.persistence), closeHardware: () => invoke(ports.walletControl.closeHardware),
+          persistence: () => invoke(ports.walletControl.persistence),
           execute: (control: Parameters<VaultWorkerWalletControl["execute"]>[0]) => invoke(() => ports.walletControl.execute(control)),
         });
       },
