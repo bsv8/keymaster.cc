@@ -7,9 +7,7 @@ import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 // 设计缘由（施工单 2026-06-29 002 硬切换 + 2026-06-29 003 硬切换）：
 //   - 注册 `/apps` 页面，并接入新业务导航的首页域与首页 widget；
 //   - 点击 `Open App` 时调用 `protocol.service.launchAppView(...)`；
-//   - 插件自身**不**直接 import `protocolStorageRepository` /
-//     `buildAppBootstrapPayload` / `installLauncherBootstrapRegistry` /
-//     `window.open` popup URL——这些细节全部收口在 service 内部。
+//   - 插件不自行操作协议存储、App 运行材料或窗口，由主钱包连接宿主统一管理。
 //   - 依赖 `page.ui.registry` / `business.registry` / `protocol.service`。
 //   - plugin-apps 拥有 launcher 入口，寿命由依赖与作用域决定。
 //   - 启动失败的 user-facing 文案（与 LaunchAppViewError.code 一一对应）；

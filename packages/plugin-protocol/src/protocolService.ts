@@ -209,8 +209,7 @@ import {
 } from "./protocolCrypto.js";
 import { cborDecode, cborEncode, type CborValue } from "./protocolCbor.js";
 import { buildClaimProjectionFromParams, resolveBuiltinClaim, resolveClaims } from "./protocolClaims.js";
-import { consumeLauncherBootstrap, encodeOrigin, parseBootstrapToken } from "./sessionWindowBootstrap.js";
-import { buildAppBootstrapPayload } from "./sessionWindowBootstrap.js";
+import { buildAppBootstrapPayload } from "./applicationLaunch.js";
 import { bindWalletIdentity } from "@keymaster/contracts";
 import type { FeepoolPendingOpsMap } from "./feepoolOperations.js";
 import {
@@ -265,29 +264,6 @@ function feePoolKeyFor(
  *     不视为"关闭"，而是回退到缺省 30。
  */
 const DEFAULT_CONFIRM_TIMEOUT_SECONDS = 30;
-
-/**
- * Session Window 等待 launcher bootstrap 的最长时间（施工单 2026-06-29 001）。
- *
- * 设计缘由（修复 issue #3）：
- *   - launcher 在合理时间内（如 30s）必须把 bootstrap 发过来；超过这个时间
- *     视同 launcher 已关闭 / 失败 / 走错路径。
- *   - 到点 fail-closed：UI 渲染错误态，让用户关闭 Session Window 重新从
- *     launcher 启动 app。**不**无限等待。
- */
-const BOOTSTRAP_TIMEOUT_MS = 30_000;
-/**
- * Session Window 等待 child `ready` 的最长时间（施工单 2026-06-30 003）。
- *
- * 设计缘由：
- *   - child `ready` 是 UI 切段信号，到点未到**只**用于提示"连接较慢"。
- *   - 到点只清等待态、提示用户，不重建 `walletPublicKeyHex` / `launchToken` /
- *     bootstrap、不偷偷重发 ready。
- *   - 旧 `APPVIEW_READY_RETRY_INTERVAL_MS`（300ms pump 间隔）已删除：
- *     `ready` 方向对称，child 自己声明 listener 就绪，Session Window
- *     不再主动 pump。
- */
-const APPVIEW_READY_RETRY_WINDOW_MS = 5_000;
 
 /**
  * 把 K-V 读到的 origin 记录补齐新字段默认值。**纯函数**；不改入参，不读 K-V。
@@ -377,6 +353,8 @@ export interface ProtocolServiceDeps {
   /** Shared main-wallet connection: App logout must not lock the whole wallet. */
   hostedApplication?: boolean;
   applicationLoggedOut?: () => void;
+  /** 接收端确认应用身份后通知主钱包宿主；身份信息不从未验证消息直接展示。 */
+  applicationIdentified?: (origin: string, identity?: AppIdentitySnapshot) => Promise<void>;
 }
 
 /**
@@ -639,44 +617,6 @@ export class ProtocolServiceImpl implements ProtocolService {
    */
   private currentAppClientSource: Window | null = null;
   /**
-   * child app 是否已发来合法 `ready`（施工单 2026-06-30 003 硬切换）。
-   *
-   * 设计缘由：
-   *   - `ready` 方向对称：`client web -> Session Window`。
-   *   - 这是 appView UI 的"两段式"切段信号：未 ready → `show app`；
-   *     ready → 切回传统 popup 界面。
-   *   - `connect mode` 下恒为 false；`appView mode` 但 bootstrap 未完成
-   *     时也恒为 false。
-   *   - 一旦置 true 不再回 false；同 Session Window 生命周期内
-   *     不可重复切段。
-   */
-  private childReadyFlag: boolean = false;
-  /**
-   * child `ready` 软超时（施工单 2026-06-30 003）。
-   *
-   * 设计缘由：
-   *   - Session Window 不再向 child 主动泵 `ready`；因此这里的 setTimeout
-   *     只表达"等待 child 主动发来 `ready`"的 5s 软超时。
-   *   - 到点只把 `appClientConnectTimedOutFlag = true` 并清掉
-   *     `appClientWaitingForReadyFlag`，**不**重建 `walletPublicKeyHex`、
-   *     **不**重新 bootstrap、**不**偷偷重发 ready。
-   *   - 旧 `appClientReadyPumpHandle`（setInterval 反复 pump ready）
-   *     已删除；`ready` 职责改由 child 自己声明。
-   */
-  private appClientConnectTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
-  private appClientConnectTimedOutFlag: boolean = false;
-  /**
-   * "等待 child `ready`"的活跃等待态（施工单 2026-06-30 003）。
-   *
-   * 设计缘由：
-   *   - 用户点过 `Open App` 且 child `ready` 仍未到、5s 软超时也未触发
-   *     → true；UI 据此把 `Open App` 按钮置 disabled。
-   *   - child `ready` 到达、软超时触发、`Open App` 打开失败，三者任一
-   *     → false。
-   */
-  private appClientWaitingForReadyFlag: boolean = false;
-
-  /**
    * launchToken 内存 Map：token -> LaunchTokenRecord（V1 **不**落盘）。
    *
    * 设计缘由（施工单 2026-06-29 001 硬切换）：
@@ -777,33 +717,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.disposeSessionRuntimeBootstrap(entry.runtime, reason);
     this.ownerRuntimesBySessionId.delete(sessionId);
   }
-
-  /**
- * 当前 Session Window 一次性 bootstrap consume 状态。
- *
- * 设计缘由（修复 issue #1 / #3）：
- *   - 旧实现用 postMessage listener 等 launcher 推消息，存在时序竞态
- *     （launcher 在子窗口 listener 挂好之前发消息会丢失）。
- *   - 新实现：Session Window mount 时**主动**调
- *     `consumeLauncherBootstrap({ token, opener, ownOrigin, timeoutMs })`，
- *     内部走 `window.opener.__keymaster_session_window_bootstrap__
- *     .acquire(token)` 同源直接调用——**没有**时序竞态。
- *   - 该 flag 用于幂等门禁：避免重复触发 consume；startSession 时重置。
- */
-  private bootstrapConsumed: boolean = false;
-
-  /**
-   * bootstrap 失败标记。
-   *
-   * 设计缘由（修复 issue #3）：
-   *   - 旧实现失败 / 超时永远停在"等待 launcher"，对用户无意义。
-   *   - 新实现：launcher registry 不存在 / acquire 抛错 / 超时 / token
-   *     不命中 / vault import 失败 / payload 不全都会设置
-   *     `bootstrapFailed = true`，UI 据此渲染明确错误态。
-   */
-  private bootstrapFailedFlag: boolean = false;
-  /** bootstrap 失败原因（local reason；不进对外 result，仅本地历史）。 */
-  private bootstrapFailureReasonValue: string | null = null;
 
   constructor(private readonly deps: ProtocolServiceDeps) {
     this.historyAvailableFlag = Boolean(deps.storageRepository);
@@ -959,10 +872,6 @@ export class ProtocolServiceImpl implements ProtocolService {
       this.disposeSessionRuntimeBootstrap(runtime, "session-reset");
     }
     this.ownerRuntimesBySessionId.clear();
-    this.bootstrapConsumed = false;
-    this.bootstrapFailedFlag = false;
-    this.bootstrapFailureReasonValue = null;
-    this.appClientConnectTimedOutFlag = false;
     // 6. 重置会话级 phase / lockState / closing 标志。
     this.phase = "waiting";
     this.lockStateValue = this.readVaultLockState();
@@ -972,9 +881,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.currentAppClientSource = null;
     // 施工单 2026-06-30 003：appView UI 两段式。重启会话时 child `ready`
     // 必须重置回 false，否则新会话会在第一次启动时就直接进入 popup 阶段。
-    this.childReadyFlag = false;
-    this.appClientWaitingForReadyFlag = false;
-    this.stopAppClientConnectTimer();
     this.launchTokensByToken.clear();
     this.emit();
     this.emitFeed();
@@ -1055,10 +961,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.currentAppClientSource = null;
     // 施工单 2026-06-30 003：endSession 同样要把 child `ready` 等待态
     // 重置；否则下次 startSession 启动新会话时等待态可能跨会话污染。
-    this.childReadyFlag = false;
-    this.appClientWaitingForReadyFlag = false;
-    this.stopAppClientConnectTimer();
-    this.appClientConnectTimedOutFlag = false;
     this.launchTokensByToken.clear();
     // 施工单 2026-06-30 002 硬切换：endSession 清空 owner runtimes。
     for (const { runtime } of this.ownerRuntimesBySessionId.values()) {
@@ -1219,7 +1121,6 @@ export class ProtocolServiceImpl implements ProtocolService {
       // childReady + 清等待态 / 软超时提示，确保任何路径到达都不
       // 留遗漏。`markChildAliveFromBoundSource` 幂等，已 true 时
       // 不重复 emit。
-      this.markChildAliveFromBoundSource();
       await this.finalizeRequestByCancel(rec.recordId, "client_canceled");
       return;
     }
@@ -1236,7 +1137,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     const parsed = { ...context, method, protocol: context, params: internalExecutionParams(method, context.params, context.networkIdentity) };
 
     // 来源、绑定、公开范围、wire 参数和重复在途 ID 已由独立 Receiver 校验。
-    this.markChildAliveFromBoundSource();
     await this.acceptRequest(event, parsed);
   }
 
@@ -1697,241 +1597,15 @@ export class ProtocolServiceImpl implements ProtocolService {
     await this.finalizeRequestByCancel(recordId, "user_canceled");
   }
 
-  /* ============== Session Window 公共 API（施工单 2026-06-29 001） ============== */
-
-  /** Session Window 当前 boot mode。 */
-  bootMode(): "connect" | "appView" {
-    return this.bootModeValue;
-  }
-
-  /** 当前 appView 上下文；仅 appView mode + bootstrap 成功后非空。 */
-  appViewContext(): AppViewContext | null {
-    return this.currentAppViewContext;
-  }
-
-  /**
-   * Session Window 一次性 bootstrap consume 入口。
-   *
-   * 设计缘由（施工单 2026-06-29 001 硬切换 + 用户确认；修复 issue #1）：
-   *   - 仅在 appView mode 下启用；connect mode 下是 no-op。
-   *   - **不**挂 message listener、**不**做 postMessage handoff——
-   *     postMessage 是事件队列，launcher 在子窗口 listener 挂好之前发
-   *     消息会**丢失**。
-   *   - 改走"Session Window 主动从同源 `window.opener` 直接消费
-   *     bootstrap capsule"模型：`consumeLauncherBootstrap()` 内部调
-   *     `window.opener.__keymaster_session_window_bootstrap__.acquire(token)`，
-   *     是同源普通 JS 函数调用，**没有**事件队列时序竞态。
-   *   - consume 内置超时（`BOOTSTRAP_TIMEOUT_MS`）→ 到点未拉到
-   *     capsule → fail-closed（`bootstrapFailed = true`，UI 渲染错误态）。
-   *   - 该方法**幂等**：第二次调用直接忽略。
-   */
-  awaitLauncherBootstrap(): void {
-    if (this.bootModeValue !== "appView") return;
-    if (this.bootstrapConsumed || this.bootstrapFailedFlag) return;
-    this.bootstrapConsumed = true;
-    if (typeof window === "undefined") {
-      this.markBootstrapFailed("window_undefined");
-      return;
-    }
-    const token = parseBootstrapToken(window.location.search);
-    void (async () => {
-      const out = await consumeLauncherBootstrap({
-        token,
-        opener: window.opener ?? null,
-        ownOrigin: window.location.origin,
-        timeoutMs: BOOTSTRAP_TIMEOUT_MS
-      });
-      if (out.failureReason || !out.bootstrap) {
-        this.markBootstrapFailed(out.failureReason ?? "bootstrap_unknown");
-        return;
-      }
-      await this.applyLauncherBootstrap(out.bootstrap);
-    })();
-  }
-
-  /** 主钱包的受信装配入口，不对外部 App 暴露。 */
+  /** 主钱包的受信装配入口，不对外部 App 暴露，也不再进行跨钱包窗口的 bootstrap 交接。 */
   async acceptLaunchedApplication(payload: AppBootstrapPayload, source: Window): Promise<void> {
-    await this.applyLauncherBootstrap(payload);
-    if (this.bootstrapFailedFlag) throw new Error(this.bootstrapFailureReasonValue ?? "App initialization failed");
+    await this.applyApplicationLaunch(payload);
     this.currentAppClientSource = source;
-    this.childReadyFlag = true;
-  }
-
-  /** bootstrap 是否失败。 */
-  bootstrapFailed(): boolean {
-    return this.bootstrapFailedFlag;
-  }
-
-  /** bootstrap 失败原因（仅本地历史；不进对外 result）。 */
-  bootstrapFailureReason(): string | null {
-    return this.bootstrapFailureReasonValue;
-  }
-
-  appClientConnectTimedOut(): boolean {
-    return this.appClientConnectTimedOutFlag;
-  }
-
-  /**
-   * 是否有"等待 child `ready`"的活跃等待态（施工单 2026-06-30 003）。
-   */
-  appClientWaitingForReady(): boolean {
-    return this.appClientWaitingForReadyFlag;
-  }
-
-  /**
-   * child app 是否已发来合法 `ready`（施工单 2026-06-30 003 硬切换）。
-   *
-   * 设计缘由：
-   *   - UI 据此决定渲染 `show app` 页（false）还是回传统 popup 页（true）。
-   *   - 一旦 true 在当前 Session Window 生命周期内不再回 false；
-   *     重新启动会话时由 `startSession` 清回 false。
-   */
-  childReady(): boolean {
-    return this.childReadyFlag;
-  }
-
-  /**
-   * 把 bootstrap 状态切到 failed；UI 立刻据此渲染错误页。
-   *
-   * 设计缘由：
-   *   - 不抛错：抛错会被 await 的 caller 吞掉、不传到 UI。
-   *   - 触发 emit() 让 UI 立即收到状态变更。
-   */
-  private markBootstrapFailed(reason: string): void {
-    if (this.bootstrapFailedFlag) return;
-    this.stopAppClientConnectTimer();
-    this.currentAppClientSource = null;
-    this.bootstrapFailedFlag = true;
-    this.bootstrapFailureReasonValue = reason;
-    this.emit();
-  }
-
-  /**
-   * Session Window bootstrap 成功后调用：把 client app URL（含 launchToken
-   * + `sessionWindowOrigin`）在命名窗口打开。Session Window 与 client app
-   * 后续走现有 transport（child → Session Window `ready` → request →
-   * result）。
-   *
-   * 设计缘由（施工单 2026-06-30 003 硬切换 + 2026-06-30 004 硬切换）：
-   *   - 仅允许在 appViewContext 非空时调用；否则 throw。
-   *   - 命名窗口 target = `keymaster-app-<encodeOrigin(appOrigin)>`：
-   *     浏览器按 target 复用同一扇 child app 窗口，避免 `_blank` 每次
-   *     点 `Open App` 都新开一扇、多个 client 实例互相打架。
-   *   - **不**带 `noopener`：client app 必须能拿到
-   *     `window.opener = Session Window`，否则无法把第一条
-   *     `connect.launch` 发回，transport 完全失效。
-   *   - **不**主动向 child 发 `ready` / 不再走 ready 泵（施工单
-   *     2026-06-30 003）：
-   *     `ready` 方向对称要求 child 在自己 listener 就绪后向 Session
-   *     Window 发 `ready`。Session Window 不再猜测 child listener
-   *     是否就绪。
-   *   - **显式注入 `sessionWindowOrigin`**（施工单 2026-06-30 004）：
-   *     当前 Session Window 的 `window.location.origin` 作为 query 参数
-   *     拼到 child URL 上；下游 client app 在 appView 模式下**只**认
-   *     这份值做 transport target origin，不再使用 UI / 用户输入的
-   *     `targetOrigin`。构造失败一律按 fail-closed 返回 null，不重建
-   *     session / launchToken / bootstrap。
-   *   - 5s 软超时只用于 UI 提示"连接较慢"；到点只清等待态，**不**重建
-   *     `walletPublicKeyHex` / `launchToken` / bootstrap。
-   *   - 返回被打开的 window；失败返回 null（best-effort）。
-   *   - **不**在打开后立即绑定 `currentAppClientSource`——`ready` 应当
-   *     由 child 自己声明，source 绑定由 child `ready` 到达后做；
-   *     若 child 漏发 `ready` 直接发 `connect.launch`，再由
-   *     `isAllowedRequestSource` 兜底绑定。
-   */
-  openClientApp(): Window | null {
-    const ctx = this.currentAppViewContext;
-    if (!ctx) {
-      throw new Error("openClientApp: appViewContext not set");
-    }
-    if (typeof window === "undefined") return null;
-    // 施工单 2026-06-30 003：命名窗口 target。浏览器按 target 复用同一扇
-    // child 窗口；encodeOrigin 来自 sessionWindowBootstrap，仅用于
-    // 构造 window.name target，不承载任何业务真值。
-    const target = `keymaster-app-${encodeOrigin(ctx.appOrigin)}`;
-    // 施工单 2026-06-30 004：显式注入 `sessionWindowOrigin`。以当前
-    // Session Window `window.location.origin` 为真值，写入 child URL
-    // 的 query 里；下游 client app 用它做 transport target origin。
-    // 不读 UI 默认 `targetOrigin`、不读 popup targetOrigin；当前窗口
-    // origin 缺失 / 非法时按 fail-closed 返回 null（不开窗）。
-    const sessionWindowOrigin =
-      typeof window.location?.origin === "string" && window.location.origin.length > 0
-        ? window.location.origin
-        : "";
-    let childUrlWithSessionWindowOrigin: string;
-    if (!sessionWindowOrigin) {
-      this.appClientWaitingForReadyFlag = false;
-      this.stopAppClientConnectTimer();
-      return null;
-    }
-    try {
-      const u = new URL(ctx.appUrl);
-      u.searchParams.set("sessionWindowOrigin", sessionWindowOrigin);
-      childUrlWithSessionWindowOrigin = u.toString();
-    } catch {
-      this.appClientWaitingForReadyFlag = false;
-      this.stopAppClientConnectTimer();
-      return null;
-    }
-    try {
-      const opened = window.open(childUrlWithSessionWindowOrigin, target);
-      // 失败 / null：视为打开失败。`show app` 页面据此展示错误，
-      // 用户可再次点击；不新建 session，不重建 launchToken。
-      if (!opened) {
-        this.appClientWaitingForReadyFlag = false;
-        this.stopAppClientConnectTimer();
-        return null;
-      }
-      // 打开成功：进入 5s 等待 child `ready` 的软超时。超时**只**清等待态
-      // 和标记"连接较慢"提示，**不**重建 session / launchToken / bootstrap。
-      this.beginAppClientConnectTimer();
-      return opened;
-    } catch (err) {
-      this.appClientWaitingForReadyFlag = false;
-      this.stopAppClientConnectTimer();
-      return null;
-    }
   }
 
   /* ============== plugin-apps launcher 启动入口（施工单 2026-06-29 002 硬切换） ============== */
 
-  /**
-   * Keymaster 内部 app launcher 启动入口（`plugin-apps` 唯一允许调用）。
-   *
-   * 设计缘由（施工单 2026-06-29 002 硬切换 + 2026-06-30 002 硬切换）：
-   *   - plugin-apps 是**唯一**允许调用本入口的业务插件；plugin-apps 自己
-   *     **不**直接 import / 操作：
-   *       - `protocolMultipartUploadRepository`
-   *       - `buildAppBootstrapPayload`
-   *       - `installLauncherBootstrapRegistry`
-   *       - `window.open("/protocol/v1/popup?...")`
-   *   - 完整 launcher 流程在 service 内部一次性收口：
-   *       1. 校验 vault 已解锁（否则 throw "vault_locked"）；
-   *       2. 校验当前 walletState active key ready（否则 throw "no_active_key"）；
-   *       3. 校验 app 配置合法（`appOrigin` 是合法 origin；
-   *          `new URL(appUrl).origin === appOrigin`；否则 throw "invalid_app_config"）；
-   *       4. 解析 claims 快照（按 input.claims 走 builtin claim 解析，与
-   *          `connect.login` 一致）；
-   *       5. 创建新 `walletPublicKeyHex`，按 session 真值三元组落库
-   *          （sessionId + origin + ownerPublicKeyHex，无 `runtimeBinding`）；
-   *       6. 用现有 `vault.createAppViewSession({ sessionId, publicKeyHex, password })`
-   *          取 capability，组装 `SessionRuntimeBootstrap`；
-   *       7. 生成新 `launchToken`（`crypto.randomUUID()`）；
-   *       8. 组装 `AppBootstrapPayload`（含 `sessionRuntimeBootstrap`）；
-   *       9. 在 launcher `window` 上挂一次性 bootstrap registry；
-   *       10. 在用户点击的同步调用栈中预开一个空白 Session Window；
-   *       11. bootstrap 准备完成后，将该窗口导航到
-   *           `/protocol/v1/popup?boot=appView&bootstrapToken=...`；
-   *       12. 开窗或导航失败 → throw "open_session_window_*"。
-   *   - 任何一道闸失败：throw，**不**补偿、**不**回退、**不**做"半启动"。
-   *   - session 在 launcher 点击 `Open App` 时**预建**；`connect.launch`
-   *     先验 signed proof 的 digest 与 session/catalog 一致，再一次性消费
-   *     `launchToken`，不创建 session。
-   *   - 借 owner capability 失败时 throw `export_owner_runtime_failed`；
-   *     旧的 unlock-runtime handoff 描述已删除；这里只剩 session runtime
-   *     bootstrap capability。
-   *     已删除，不再向 Session Window 交接整套 vault unlock runtime。
-   */
+  /** 目录启动只信任本地已验证 proof；运行上下文由主钱包接管，直接导航外部 App。 */
   private resolveAppCatalog(
     origin: string,
     supplied?: AppIdentityProofV1,
@@ -2216,45 +1890,11 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
   }
 
-  /**
-   * 应用 launcher bootstrap payload（施工单 2026-06-30 002 硬切换）。
-   *
-   * 设计缘由：
-   *   - 校验 payload 完整性 + owner runtime bootstrap 真值（hex 派生
-   *     的压缩公钥必须等于 payload.ownerPublicKeyHex）；
-   *   - 校验通过后**只**在当前 Session Window 内存里注册 owner runtime，
-   *     `OwnerRuntimeSource = "bootstrap_runtime"`；**不**调用
-   *     `vault.importUnlockRuntime*`（已删除）；
-   *   - 写 `appViewContext` + launchToken 缓存 + 内部
-   *     `ownerRuntimesBySessionId`。
-   *
-   * 关键约束：
-   *   - **不**导入 unlock runtime；**不**把 vault 切到 unlocked 态。
-   *   - 校验失败一律 fail-closed：不缓存半残 runtime / 不写 appViewContext /
-   *     不打开 client app。`bootstrapFailed = true` 让 UI 渲染错误页。
-   */
-  private async applyLauncherBootstrap(payload: AppBootstrapPayload): Promise<void> {
-    if (!payload || !payload.app || !payload.launchToken) {
-      this.markBootstrapFailed("bootstrap_payload_invalid");
-      return;
-    }
-    if (!payload.sessionRuntimeBootstrap) {
-      this.markBootstrapFailed("bootstrap_runtime_missing");
-      return;
-    }
+  /** 同一钱包内接收受控 App 句柄，保留原身份与运行代际，不导入整套 unlock runtime。 */
+  private async applyApplicationLaunch(payload: AppBootstrapPayload): Promise<void> {
     const runtime = payload.sessionRuntimeBootstrap;
-    const runtimeIdentity = runtime.crypto?.getIdentity?.();
-    if (!runtime.ownerPublicKeyHex || !runtime.crypto || !runtimeIdentity?.publicKeyHex) {
-      this.markBootstrapFailed("bootstrap_runtime_invalid");
-      return;
-    }
-    if (
-      runtime.ownerPublicKeyHex.toLowerCase() !== payload.ownerPublicKeyHex.toLowerCase() ||
-      runtimeIdentity.publicKeyHex.toLowerCase() !== payload.ownerPublicKeyHex.toLowerCase()
-    ) {
-      this.markBootstrapFailed("bootstrap_runtime_pubkey_mismatch");
-      return;
-    }
+    // DTO 来自同一受信钱包宿主；仅保留实际句柄是否仍有效的运行态判断。
+    runtime.crypto.getIdentity();
     // 2) 写入 appViewContext + launchToken 缓存 + owner runtime。
     //    注意 Session Window **不**调 `vault.importUnlockRuntime*`——
     //    那是 unlock runtime 模型下的旧接口，本单已删除。appView mode
@@ -2437,148 +2077,12 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.postReadyToTarget(opener);
   }
 
-  /**
-   * 启动 child `ready` 软超时（施工单 2026-06-30 003）。
-   *
-   * 设计缘由：
-   *   - 旧实现这里用 setInterval 反复 pump `ready`；新实现已删除 pump，
-   *     `ready` 方向对称要求 child 自己声明。
-   *   - 这里只启动 5s setTimeout：到点只把 `appClientConnectTimedOut = true`
-   *     并清掉等待态，**不**重建 `walletPublicKeyHex` / `launchToken` /
-   *     bootstrap、**不**重发 `ready`、**不**自动补救。
-   *   - child `ready` 到达或 child request 到达都会清掉 timer。
-   */
-  private beginAppClientConnectTimer(): void {
-    this.stopAppClientConnectTimer();
-    this.appClientWaitingForReadyFlag = true;
-    this.appClientConnectTimeoutHandle = setTimeout(() => {
-      this.appClientConnectTimeoutHandle = null;
-      this.appClientWaitingForReadyFlag = false;
-      this.markAppClientConnectTimedOut();
-    }, APPVIEW_READY_RETRY_WINDOW_MS);
-  }
-
-  /**
-   * 停止 child `ready` 软超时 timer（施工单 2026-06-30 003）。
-   *
-   * 设计缘由：
-   *   - 旧 `stopAppClientReadyPump` 同时 clearInterval + clearTimeout；
-   *     新实现不再有 setInterval，仅 clearTimeout 一项。
-   *   - 本方法**不**改 waiting / 软超时提示 flag；flag 由
-   *     `markChildReady` / `markAppClientConnectTimedOut` /
-   *     `clearAppClientConnectTimeout` 单独维护。
-   */
-  private stopAppClientConnectTimer(): void {
-    if (this.appClientConnectTimeoutHandle !== null) {
-      clearTimeout(this.appClientConnectTimeoutHandle);
-      this.appClientConnectTimeoutHandle = null;
-    }
-  }
-
-  /**
-   * 标记 app 已触发连接超时提示。
-   *
-   * 设计缘由：
-   *   - 这是 UI 层的软超时，不是协议硬失败；
-   *   - 5s 到点后只提示用户"连接较慢/超时"；
-   *   - 迟到的 `ready` / `connect.launch` 仍允许恢复，因此**不能**复用
-   *     `bootstrapFailed` 这条 fail-closed 真值。
-   *   - 施工单 2026-06-30 003：到点**不**重建 session / launchToken /
-   *     bootstrap；只翻 flag 让 UI 把按钮恢复可点 + 显示提示。
-   */
-  private markAppClientConnectTimedOut(): void {
-    if (this.appClientConnectTimedOutFlag) return;
-    this.appClientConnectTimedOutFlag = true;
-    this.appClientWaitingForReadyFlag = false;
-    this.emit();
-  }
-
-  /**
-   * child app 连回后清掉软超时提示（施工单 2026-06-30 003）。
-   *
-   * 设计缘由：
-   *   - 由 `tryAcceptChildReady` 与"bound source 收到 request"路径调用；
-   *   - 同时把 waiting flag 也清掉，保证按钮态与提示态同步。
-   */
-  private clearAppClientConnectTimeout(): void {
-    this.appClientWaitingForReadyFlag = false;
-    if (!this.appClientConnectTimedOutFlag) {
-      this.emit();
-      return;
-    }
-    this.appClientConnectTimedOutFlag = false;
-    this.emit();
-  }
-
-  /**
-   * 处理 child `ready`（施工单 2026-06-30 003 硬切换）。
-   *
-   * 设计缘由：
-   *   - 仅在 appView mode 下生效；connect mode 收到 ready 视为非法忽略。
-   *   - 合法性：event.origin === appViewContext.appOrigin；若
-   *     `currentAppClientSource` 已绑定则 event.source 必须等于它；
-   *     若未绑定则把 event.source 绑定为当前合法 child app source。
-   *   - `childReadyFlag` 翻转后**不**再回 false；同 Session Window 生命周期
-   *     内 UI 切到 popup 阶段后不再回 show app 阶段。
-   *   - 收到合法 ready 后清掉 waiting flag、停止软超时 timer、清除
-   *     `appClientConnectTimedOut` 提示。
-   *   - 重复 ready 到达：`childReadyFlag` 已经 true → 直接忽略，不重复 emit
-   *     避免 UI 闪烁。
-   *   - 注：`childReadyFlag` 也可在首条合法 request 路径由
-   *     `markChildAliveFromBoundSource` 翻 true（见 handleMessage）。
-   *     本函数仅处理显式 `ready` 路径；两路汇到同一份真值。
-   */
+  /** ready 只表示已登记的外部窗口可通信，不再承担独立页面切段。 */
   private tryAcceptChildReady(event: MessageEvent): void {
-    if (!this.receiver.acceptReady(event)) return;
-    this.currentAppClientSource = event.source as Window;
-    if (this.childReadyFlag) {
-      // 已 ready：重复 ready 直接忽略；source 绑定已稳定，重复 ready
-      // 不再触发 UI 切段、不再 emit。
-      return;
-    }
-    this.childReadyFlag = true;
-    this.stopAppClientConnectTimer();
-    this.clearAppClientConnectTimeout();
-    this.emit();
+    if (this.receiver.acceptReady(event)) this.currentAppClientSource = event.source as Window;
   }
 
-  /**
-   * 标记 child 已"活着"：appView mode 下首条合法 child 协议消息到达
-   * 即触发；后续不论来自显式 `ready` 还是首条 `connect.*`，UI 都应
-   * 切到传统 popup（施工单 2026-06-30 003 硬切换）。
-   *
-   * 设计缘由：
-   *   - 之前只有显式 `ready` 才能翻 childReady；child app 漏发 ready
-   *     直接发 connect.launch 时 UI 仍会卡在 `show app` 分支——但请求
-   *     已经被执行，状态错位。
-   *   - 现在任何从 bound source 来的合法协议消息（无论是 ready /
-   *     request / cancel）都把 childReady 翻 true；source 绑定已由
-   *     `tryAcceptChildReady` / `isAllowedRequestSource` 在调用本方法
-   *     之前完成。
-   *   - 幂等：childReadyFlag 已 true 时直接返回，不重复 emit。
-   */
-  private markChildAliveFromBoundSource(): void {
-    if (this.bootModeValue !== "appView") return;
-    // 即便 childReadyFlag 已是 true，也顺手清掉等待态 / 软超时提示——
-    // 例如迟到的 connect.* 在软超时之后到达，仍应清掉"连接较慢"提示。
-    this.stopAppClientConnectTimer();
-    this.clearAppClientConnectTimeout();
-    if (this.childReadyFlag) return;
-    this.childReadyFlag = true;
-    this.emit();
-  }
-
-  /**
-   * 向指定 transport 对端发送 `ready`。
-   *
-   * 设计缘由：
-   *   - connect mode：startSession 时给 opener 发 ready；
-   *   - appView mode：手动 `Open App` 后必须给新开的 child app 再发一条
-   *     ready，否则它会一直停在"等待 Session Window ready"阶段，永远不发
-   *     `connect.launch`。
-   *   - `ready` 是 transport-ready 信号，不承载授权语义；重复发送的
-   *     语义是幂等的。
-   */
+  /** 向已登记的真实外部窗口发送传输就绪通知；不授予业务权限。 */
   private postReadyToTarget(target: Window): void {
     this.receiver.sendReady(target);
   }
@@ -2707,6 +2211,22 @@ export class ProtocolServiceImpl implements ProtocolService {
       errorMessage: ""
     };
     this.requestsByRecordId.set(recordId, rec);
+
+    if (this.deps.applicationIdentified && (method === "connect.login" || method === "connect.resume")) {
+      try {
+        const proof = (parsed.params as ConnectLoginParams | ConnectResumeParams).appIdentity;
+        const identity = proof ? verifyAppIdentityProof(proof) : method === "connect.resume"
+          ? (await this.deps.storageRepository?.getConnectSession(rec.networkIdentity, origin))?.appIdentity
+          : undefined;
+        rec.applicationKey = applicationKey(origin, identity);
+        await this.deps.applicationIdentified(origin, identity);
+        this.assertWalletGeneration(rec);
+        this.receiver.assertCurrent(rec.protocol);
+      } catch {
+        await this.scheduleFailFastRequest(recordId, "invalid_request", "internal_error");
+        return;
+      }
+    }
 
     // 决定初始 phase。`setRecordPhase` 只更新内存 feed 卡（施工单
     // 2026-06-27 002 硬切换：feed 投影走 `buildFeedDisplay`，活卡按

@@ -35,6 +35,8 @@ export interface ApplicationConnectionsSnapshot {
   error?: string;
 }
 export interface ApplicationConnections {
+  /** 完整钱包壳层就绪后登记浏览器的真实 opener；不从外部消息认领来源。 */
+  acceptOpener(source: Window | null): void;
   snapshot(): ApplicationConnectionsSnapshot;
   subscribe(listener: () => void): () => void;
   permissions(key: string): Promise<ProtocolMethod[]>;

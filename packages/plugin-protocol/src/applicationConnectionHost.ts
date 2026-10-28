@@ -1,14 +1,18 @@
 import type {
-  AppBootstrapPayload, ApplicationConnection, ApplicationConnections, ApplicationConnectionsSnapshot,
+  AppBootstrapPayload, AppIdentitySnapshot, ApplicationConnection, ApplicationConnections, ApplicationConnectionsSnapshot,
   ApplicationConnectionEvent, ConnectedApplication, ProtocolCommandRecord, ProtocolMethod, ProtocolStorageRepository,
 } from "@keymaster/contracts";
 import { createProtocolService, type ProtocolServiceDeps, type ProtocolServiceImpl } from "./protocolService.js";
 import { applicationKey, readApplicationPermissions, setApplicationPermission } from "./applicationPermissions.js";
 
+type HostedConnection = ApplicationConnection & { source: Window; service: ProtocolServiceImpl; off: () => void; identifyingKey?: string };
+
 /** One Receiver per registered Window: unrelated pages cannot elect themselves a trusted peer. */
 export class ApplicationConnectionHost implements ApplicationConnections {
   private applications = new Map<string, ConnectedApplication>();
-  private connections = new Map<string, ApplicationConnection & { source: Window; service: ProtocolServiceImpl; off: () => void }>();
+  private connections = new Map<string, HostedConnection>();
+  private incomingSource: Window | null = null;
+  private incomingRegistered = false;
   private listeners = new Set<() => void>();
   private history = new Map<string, ProtocolCommandRecord>();
   private events: ApplicationConnectionEvent[] = [];
@@ -29,6 +33,7 @@ export class ApplicationConnectionHost implements ApplicationConnections {
       } else {
         for (const connection of this.connections.values()) if (!connection.closedAt) connection.service.syncWalletState();
       }
+      this.tryAttachIncoming();
     });
     this.timer = setInterval(() => {
       for (const connection of this.connections.values()) if (!connection.closedAt && connection.source.closed) this.disconnect(connection.id);
@@ -79,10 +84,50 @@ export class ApplicationConnectionHost implements ApplicationConnections {
     this.connections.set(id, connection);
     this.emit();
   }
+  /** 只接收浏览器提供的真实 opener；初始化/解锁完成前不发布 ready，也不让任意消息认领来源。 */
+  acceptOpener(source: Window | null): void {
+    if (this.incomingSource || this.incomingRegistered || !source || source.closed) return;
+    this.incomingSource = source;
+    this.tryAttachIncoming();
+  }
+  private tryAttachIncoming(): void {
+    if (this.disposed || this.incomingRegistered || !this.incomingSource || this.incomingSource.closed || this.deps.walletState.snapshot().status !== "unlocked") return;
+    this.incomingRegistered = true;
+    const source = this.incomingSource;
+    const id = crypto.randomUUID();
+    const service = createProtocolService({ ...this.deps, bootMode: "connect", hostedApplication: true, resolveOpener: () => source, storageRepository: this.repo,
+      applicationIdentified: (origin, identity) => this.identifyIncoming(id, origin, identity),
+      applicationLoggedOut: () => this.disconnect(id), applicationPermissionChanged: () => this.refreshEvents() });
+    const connection: HostedConnection = { id, applicationKey: "", createdAt: Date.now(), source, service, off: () => {} };
+    this.connections.set(id, connection);
+    connection.off = service.subscribeFeed(() => this.emit());
+    // 先注册来源与监听，再发布 ready，避免客户端立即请求时丢失连接。
+    service.startSession();
+    this.emit();
+  }
+  private async identifyIncoming(id: string, origin: string, identity?: AppIdentitySnapshot): Promise<void> {
+    const connection = this.connections.get(id);
+    if (!connection || connection.closedAt || this.disposed) throw new Error("Connection expired");
+    const key = applicationKey(origin, identity);
+    if ((connection.applicationKey && connection.applicationKey !== key) || (connection.identifyingKey && connection.identifyingKey !== key)) throw new Error("Application identity changed; reconnect explicitly");
+    if (connection.applicationKey === key) return;
+    connection.identifyingKey = key;
+    try {
+      const app: ConnectedApplication = { key, origin, name: identity?.appName ?? new URL(origin).host, identity, updatedAt: Date.now() };
+      await this.repo.putApplication!(app);
+      if (connection.closedAt || this.disposed) throw new Error("Connection expired");
+      await this.recordEvent({ id: crypto.randomUUID(), applicationKey: key, at: connection.createdAt, kind: "connected", connectionId: id });
+      if (connection.closedAt || this.disposed) throw new Error("Connection expired");
+      this.applications.set(key, app);
+      connection.applicationKey = key;
+      this.emit();
+    } finally { connection.identifyingKey = undefined; }
+  }
   async handleMessage(event: MessageEvent): Promise<void> {
     for (const connection of this.connections.values()) {
       if (connection.closedAt || connection.source !== event.source) continue;
-      if (this.applications.get(connection.applicationKey)?.origin !== event.origin) return;
+      const application = this.applications.get(connection.applicationKey);
+      if (application && application.origin !== event.origin) return;
       await connection.service.handleMessage(event);
       return;
     }
@@ -116,7 +161,7 @@ export class ApplicationConnectionHost implements ApplicationConnections {
     const connection = this.connections.get(id);
     if (!connection || connection.closedAt) return;
     connection.closedAt = Date.now();
-    void this.recordEvent({ id: crypto.randomUUID(), applicationKey: connection.applicationKey, at: connection.closedAt, kind: "disconnected", connectionId: id }).catch(() => { this.available = false; this.error = "连接历史写入失败。"; this.emit(); });
+    if (connection.applicationKey) void this.recordEvent({ id: crypto.randomUUID(), applicationKey: connection.applicationKey, at: connection.closedAt, kind: "disconnected", connectionId: id }).catch(() => { this.available = false; this.error = "连接历史写入失败。"; this.emit(); });
     connection.service.pageUnloading();
     for (const command of connection.service.feedSnapshot().commands) {
       const terminal = ["approved", "rejected", "failed", "timed_out"].includes(command.phase);

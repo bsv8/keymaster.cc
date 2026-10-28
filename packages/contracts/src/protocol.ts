@@ -98,17 +98,9 @@ import type {
 //         / invalid_origin；不进 waiting_unlock / confirming UI）。
 //       - 业务执行阶段再次校验 session 仍有效（logout 后同 session 下挂
 //         的旧 request 后续执行必须失败；不允许"老 session 复用新 key"）。
-//   - 施工单 2026-06-29 001 硬切换：Session Window 统一 + appView 启动 +
-//     `connect.launch`：
-//       - 唯一窗口入口仍是 `/protocol/v1/popup`，无第二套路由；语义上称
-//         Session Window（"popup"只是窗口形态称谓，不再承载权限模型）。
-//       - Session Window 只允许两种 boot mode：`connect`（默认）与
-//         `appView`（由 launcher 一次性 bootstrap 启动）；同一套
-//         `protocolService` / `ProtocolPopupPage` 同时承载两种 mode，
-//         启动后执行路径不再区分 mode。
-//       - 新增 `connect.launch`：appView mode 下 client app 首登入口；
-//         入参 `{ launchToken }`，成功结果形状与 `connect.login` 对齐；
-//         launchToken 一次性消费；不允许 fallback 到 `connect.login`。
+//   - 双向 Connect 都由完整钱包的应用连接宿主管理，无独立协议页。
+//     App 主动连接采用真实 opener；目录启动的 appView 采用已登记的 child。
+//     connect.launch 一次性消费启动 token，不回退到登录。
 //   - Connect Storage 施工单：`storage.*` 使用独立 `storage.service` capability
 //     与 `keymaster.storage` K-V；旧 protocol K-V 中的 plaintext
 //     `storageProviderConfig` 只在历史迁移中物理删除，绝不恢复或读取。
@@ -1523,34 +1515,8 @@ export interface AppViewContext {
   appIdentity?: AppIdentitySnapshot;
 }
 
-/**
- * Owner runtime bootstrap：launcher → Session Window 一次性交接的
- * "Session Window 启动早期注入统一 owner execution runtime 用的材料"。
- *
- * 设计缘由（施工单 2026-06-30 002 硬切换）：
- *   - bootstrap 内字段叫 `sessionRuntimeBootstrap`，表达"启动时注入的
- *     统一 owner runtime 材料"。
- *   - Session Window 在 bootstrap 成功后**只在内存**注册 owner runtime；
- *     **不**导入整套 vault unlock runtime，**不**把 vault 切到
- *     unlocked 态——appView mode 下 Session Window 不假装是"完整解锁
- *     钱包窗口"。
- *   - 持有这套材料就持有这扇 Session Window 的全部签名 / 派生能力；
- *     不需要旧的全局解锁材料、keySnapshot 或 activePublicKeyHex。
- *   - 校验：Session Window consume 时必须验
- *     `ownerPublicKeyHex === payload.ownerPublicKeyHex` 且
- *     `crypto.getIdentity()` 返回的压缩公钥确实等于该 publicKeyHex。
- *   - 失败一律 fail-closed：不缓存半残 runtime / 不写 appViewContext /
- *     不打开 client app。
- *   - **不**走 postMessage 事件队列（launcher 在子窗口 listener 挂好
- *     之前发消息会丢失）。Session Window mount 时**主动**调 launcher
- *     `window` 上的 `__keymaster_session_window_bootstrap__.acquire
- *     (token)` 拉取——同源普通 JS 函数调用，**没有**时序竞态。
- *   - Session Window 刷新 / 关闭后 bootstrap runtime 随窗口内存丢失；
- *     connect mode 下允许本窗口用户后续 unlock 后按同 owner 从 vault 重建
- *     runtime；appView mode 不允许依赖这种回退。
- *   - raw 私钥材料 **不**写 platform K-V repository / localStorage / sessionStorage
- *     / URL / command history / 明文日志；只允许存在于 launcher 当前内存
- *     与 Session Window 当前内存。
+/** 主钱包为目录启动的单个 App 创建的受控 crypto 句柄，仅保留在当前钱包内存。
+ * 句柄自动绑定原钱包/运行代际；不交接 raw 私钥，不写 URL 或持久历史。
  */
 export interface SessionRuntimeBootstrap {
   networkIdentity: import("./networkIdentity.js").NetworkIdentity;
@@ -1566,32 +1532,8 @@ export interface SessionRuntimeBootstrap {
   crypto: ActiveKeyCrypto;
 }
 
-/**
- * Launcher 在 bootstrap 阶段一次性塞给 Session Window 的 capsule。
- *
- * 设计缘由（施工单 2026-06-30 002 硬切换，撤销 2026-06-29/003）：
- *   - **不**走 postMessage handoff。Launcher 在 `window` 上挂一个
- *     `LauncherBootstrapRegistry` 接口（`__keymaster_session_window_bootstrap__`），
- *     Session Window mount 后**主动**从同源 `window.opener` 调
- *     `acquire(token)` 拉取 capsule。
- *   - URL 里**只**承载"此窗口要以哪种模式启动"的轻量标记
- *     （`?boot=appView&bootstrapToken=<id>`）：token 是 launcher 生成的
- *     不透明 ID，本身不敏感；真正的 owner runtime + session 真值只在
- *     launcher 的当前内存中。
- *   - capsule 包含 launcher 已建的 session 真值、claims 快照、
- *     launchToken，以及本次 session 绑定 owner 的 session runtime bootstrap
- *     （见 `SessionRuntimeBootstrap`）。
- *   - Session Window 拿到 capsule 后做校验：launchToken 非空 /
- *     bootstrap payload 完整 / `bootstrap.ownerPublicKeyHex ===
- *     payload.ownerPublicKeyHex` / `bootstrap.crypto.getIdentity()` 返回
- *     的公钥与 `ownerPublicKeyHex` 一致；通过后**只在内存**注册 owner
- *     runtime + 应用 appViewContext + 缓存 launchToken。
- *   - **不**导入 unlock runtime，**不**把 vault 切到 unlocked 态；
- *     appView mode 下的 Session Window 不假装是"完整解锁钱包窗口"。
- *   - 这只是"启动时拥有 owner runtime 的一种方式"：connect mode 下，
- *     本窗口用户后续在 Session Window 内 unlock，且 vault 里 owner 可读，
- *     运行时可以按同 owner 切到 `vault_runtime` 来源继续处理同 session
- *     request；appView mode 不允许依赖这种回退。
+/** 主钱包内部的 App 启动材料；不经 registry、postMessage 或另一个钱包页面传递。
+ * 只有一次性 launchToken 与钱包精确 origin 注入外部 App URL。
  */
 export interface AppBootstrapPayload {
   networkIdentity: import("./networkIdentity.js").NetworkIdentity;
@@ -1607,14 +1549,13 @@ export interface AppBootstrapPayload {
   resolvedClaims: Record<string, ResolvedClaimValue>;
   resolvedAt: number;
   appIdentity?: AppIdentitySnapshot;
-  /** launcher 给 client app 的 launchToken；Session Window 收 bootstrap 时缓存、消费在 connect.launch。 */
+  /** 主钱包内缓存的一次性 token；外部 App 用 connect.launch 消费。 */
   launchToken: string;
   /**
    * 本次 session 绑定 owner 的 owner runtime bootstrap（施工单
    * 2026-06-30 002 硬切换）。
    *
-   * Session Window 校验通过后**只**把它注册到当前窗口的 owner
-   * runtime，**不**写任何长期存储，**不**调用 vault import runtime。
+   * 主钱包连接宿主只在当前内存注册该受控句柄，不写长期存储，不导入 unlock runtime。
    */
   sessionRuntimeBootstrap: SessionRuntimeBootstrap;
 }
@@ -1665,152 +1606,6 @@ export interface OwnerExecutionRuntime {
   source: OwnerRuntimeSource;
   /** 受控 capability；不暴露 raw 私钥材料。 */
   crypto: ActiveKeyCrypto;
-}
-
-/**
- * Launcher 在 `window` 上挂的 bootstrap registry 接口。
- *
- * 设计缘由（施工单 2026-06-29 001 硬切换 + 用户确认）：
- *   - **不**用 postMessage listener 做 handoff——launcher 在子窗口
- *     listener 挂好之前发出消息会丢失。
- *   - launcher 在自己的 `window.__keymaster_session_window_bootstrap__`
- *     挂一个对象；Session Window mount 后**主动**调 `window.opener.____
- *     keymaster_session_window_bootstrap__.acquire(token)`。
- *   - 这是同源直接调用：launcher 和 Session Window 同 origin，
- *     `window.opener` 是 launcher's window；acquire 是普通 JS 函数调用，
- *     不是事件队列消息，**不**有时序竞态。
- *   - launcher 在打开 Session Window 之前**先**把 capsule 放进 registry；
- *     Session Window 可能在 launcher 之后 mount，所以 acquire 既要支持
- *     "立即返回"也要支持"launcher 还在准备"（返回 Promise）。
- *   - acquire 成功一次后 launcher 把对应 entry 从 registry 删除，保证
- *     一次性消费（与 `AppBootstrapPayload.launchToken` 一次性语义对齐）。
- *   - URL 中只承载 `bootstrapToken=<id>`（不透明 ID，非敏感），URL
- *     不承载 capsule 内容。
- *   - Session Window 端的 consume 逻辑封装在
- *     `consumeLauncherBootstrap()`；launcher 端的安装逻辑封装在
- *     `installLauncherBootstrapRegistry()`。
- */
-export interface LauncherBootstrapRegistry {
-  /**
-   * Session Window 主动调此函数拉取 capsule。
-   *
-   * @param token launcher 写入 URL 的 `bootstrapToken`，与 launcher
-   *   注册时的 key 一一对应。
-   * @returns 成功返回 capsule；token 未知 / 已消费 / launcher 已
-   *   关闭 → 返回 null。launcher vault 未解锁 / 无 active key → throw。
-   */
-  acquire(token: string): Promise<AppBootstrapPayload | null>;
-}
-
-/**
- * 安装 launcher 端 bootstrap registry。
- *
- * 设计缘由：
- *   - launcher 在打开 Session Window 之前调用本函数挂好 registry；
- *     Session Window mount 后通过 `window.opener.__...__.acquire(token)`
- *     拉取 capsule。
- *   - 返回 uninstall 函数；launcher 自己决定何时卸载（launcher 关闭、
- *     Session Window 消费完、明确放弃时）。
- *   - 挂载前 launcher 自己持有 `Map<token, AppBootstrapPayload>`；
- *     acquire 命中即 `delete`。
- *   - 同一窗口只允许挂一个 registry；重复挂载会覆盖并返回旧 uninstall。
- */
-export function installLauncherBootstrapRegistry(
-  host: Window,
-  registry: LauncherBootstrapRegistry
-): () => void {
-  const symbol = "__keymaster_session_window_bootstrap__" as keyof Window;
-  const previous = host[symbol] as LauncherBootstrapRegistry | undefined;
-  (host as unknown as Record<string, unknown>)[symbol] = registry;
-  return () => {
-    const current = host[symbol] as LauncherBootstrapRegistry | undefined;
-    if (current === registry) {
-      if (previous) {
-        (host as unknown as Record<string, unknown>)[symbol] = previous;
-      } else {
-        delete (host as unknown as Record<string, unknown>)[symbol];
-      }
-    }
-  };
-}
-
-/**
- * Session Window 端：启动一次性的 launcher bootstrap consume 流程。
- *
- * 流程：
- *   1. 解析 URL `?bootstrapToken=<id>`（opaque、非敏感）；
- *   2. 校验 `window.opener` 存在、未关闭、当前 origin 同 launcher origin；
- *   3. 校验 opener 上挂的 `__keymaster_session_window_bootstrap__.acquire`
- *      是函数；
- *   4. 调 `acquire(token)`，与超时定时器 race；
- *   5. 返回 capsule；token 未知 / launcher 异常 / 超时 → 返回 failureReason。
- *
- * 设计缘由：
- *   - 整个 consume 是同源直接调用，**不**挂 message listener，**不**
- *     做 postMessage handoff——完全消除"launcher 在子窗口 listener
- *     挂好之前发消息导致丢失"的时序竞态。
- *   - 一次成功调用之后 launcher 端应把对应 entry 从 registry 删除；
- *     Session Window 端**不**重复调 acquire（`awaitLauncherBootstrap`
- *     内部幂等）。
- */
-export interface SessionWindowBootstrapConsumerInput {
-  /** URL 解析出来的 bootstrapToken；opaque、不透明。 */
-  token: string | null;
-  /** Session Window 的 `window.opener`，即 launcher 的 window。 */
-  opener: Window | null;
-  /** 当前窗口 origin（用于同源校验）。 */
-  ownOrigin: string;
-  /** 超时毫秒；到点未拉到 capsule → fail-closed。 */
-  timeoutMs: number;
-}
-export interface SessionWindowBootstrapConsumerOutput {
-  bootstrap: AppBootstrapPayload | null;
-  /** 失败原因；null 表示成功。 */
-  failureReason: string | null;
-}
-
-/**
- * 从 URL 解析 bootstrap token；不存在时返回 null。
- *
- * 设计缘由：URL 只承载 `?boot=appView&bootstrapToken=<id>`。token 是
- * launcher 生成的不透明 ID，本身**不**敏感；URL 中**不**承载 capsule。
- */
-export function parseBootstrapToken(search: string): string | null {
-  if (typeof search !== "string" || search.length === 0) return null;
-  const params = new URLSearchParams(search.startsWith("?") ? search : `?${search}`);
-  const t = params.get("bootstrapToken");
-  return t && t.length > 0 ? t : null;
-}
-
-/**
- * 从 URL 解析 `sessionWindowOrigin`。
- *
- * 设计缘由（施工单 2026-06-30 004 硬切换）：
- *   - appView / launch 模式下 transport target origin 真值 =
- *     `sessionWindowOrigin`：Session Window 在 `openClientApp()` 时
- *     把自己的 `window.location.origin` 显式注入 child app URL；下游
- *     client app 在 appView 模式下**只**认这个值，**不**再读 UI /
- *     用户输入的 `targetOrigin`。
- *   - 校验：必须是完整 origin（scheme + host + 合法端口），不允许省略
- *     scheme、不允许只传 `domain:port`、不允许传 `*` / 非 http(s)
- *     scheme（file: / blob: / data: / chrome-extension: 等）。
- *   - 校验失败或缺失一律返回 null；调用方按 fail-closed 处理。
- */
-export function parseSessionWindowOrigin(search: string): string | null {
-  if (typeof search !== "string" || search.length === 0) return null;
-  const params = new URLSearchParams(search.startsWith("?") ? search : `?${search}`);
-  const raw = params.get("sessionWindowOrigin");
-  if (!raw || raw.length === 0) return null;
-  if (raw === "*") return null;
-  let parsed: URL;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    return null;
-  }
-  if (parsed.origin !== raw) return null;
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
-  return parsed.origin;
 }
 
 /* ============== Method dispatch ============== */
@@ -2637,166 +2432,9 @@ export interface ProtocolService {
   /** 从当前 Vault 与有效授权 runtime 同步执行状态；页面不传锁屏值。状态变化时撤销 Channel 会话或推进等待请求。 */
   syncWalletState(): void;
 
-  /* ============== Session Window（施工单 2026-06-29 001 硬切换） ============== */
-
-  /**
-   * Session Window 当前 boot mode。
-   *
-   * 设计缘由（施工单 2026-06-29 001 硬切换）：
-   *   - `connect` 是缺省 mode；`appView` 是 launcher 启动模式。
-   *   - mode 仅在启动阶段决定；一旦 session 建立，后续执行路径不再
-   *     区分两种 mode（`connect.resume` / `cipher.*` 都
-   *     按同一套代码走）。
-   */
-  bootMode(): "connect" | "appView";
-
-  /**
-   * 当前 appView 上下文。
-   *
-   * 设计缘由：
-   *   - 仅当 Session Window 处于 `appView` mode 且 bootstrap 成功后
-   *     非空；`connect` mode 下恒为 null。
-   */
-  appViewContext(): AppViewContext | null;
-
-  /**
-   * appView bootstrap 是否已失败。
-   *
-   * 设计缘由（修复 issue #3）：
-   *   - 这里只承载 launcher -> Session Window 这一步的硬失败：
-   *       - launcher 在合理时间（如 30s）内未把 bootstrap 发过来；
-   *       - bootstrap payload / owner runtime bootstrap 校验失败。
-   *   - UI 据此渲染明确错误态，让用户关闭 Session Window 重新从 launcher
-   *     启动 app。**不**无限等待。
-   *   - `Open App` 后 child app 连接超时属于软超时，不写进这里；迟到连接
-   *     仍允许恢复。
-   */
-  bootstrapFailed(): boolean;
-  /** bootstrap 失败原因（仅本地历史；不进对外 result）。 */
-  bootstrapFailureReason(): string | null;
-
-  /**
-   * `Open App` 后 child app 是否已触发连接超时提示。
-   *
-   * 设计缘由（施工单 2026-06-30 003 硬切换）：
-   *   - Session Window 点击 `Open App` 后会启动 5s 软超时；
-   *   - 若 5s 内仍未收到合法 child `ready`，UI 要提示"连接较慢"。
-   *   - 这是**软超时**：只清掉等待态、提示用户；不重建 `walletPublicKeyHex`、
-   *     不重新 bootstrap、不偷偷补偿；按钮恢复可点。
-   *   - 迟到 child `ready` 仍允许进入 popup 阶段；同时清掉本提示。
-   *   - 跑 `connect.*` / 业务方法的请求与本超时**互不绑定**——超时只表达
-   *     "child 还未声明 listener 就绪"，不是"child 没在工作"。
-   */
-  appClientConnectTimedOut(): boolean;
-
-  /**
-   * Session Window 启动早期是否有"等待 child `ready`"的活跃等待态。
-   *
-   * 设计缘由（施工单 2026-06-30 003 硬切换）：
-   *   - true：用户点过 `Open App`，且 child `ready` 仍未到达、5s 软超时
-   *     也未到点；UI 用此把 `Open App` 按钮置为 disabled。
-   *   - false：未点过 `Open App`、child `ready` 已到达、软超时已触发，
-   *     三者任一即 false。**不**因为该 flag 重新进入 waiting。
-   *   - 软超时到点**只**让本 flag 翻回 false；**不**重建 `walletPublicKeyHex`、
-   *     **不**重发 bootstrap、**不**重开 child 窗口。
-   */
-  appClientWaitingForReady(): boolean;
-
-  /**
-   * child app 是否已"活着"（施工单 2026-06-30 003 硬切换）。
-   *
-   * 设计缘由：
-   *   - `ready` 方向对称：`client web -> Session Window` 发 `ready`
-   *     （与传统 popup 流 `Session Window -> client web` 对称）。
-   *   - UI 的 appView 两段式切换信号不**只**盯显式 `ready`——首条
-   *     合法 child 协议消息（无论是顶层 `ready` 还是首条 `connect.*`
-   *     request / cancel）都视为 child 已"活着"，立刻把 UI 切到
-   *     传统 popup。`childReady` 一旦 true 在 Session Window 生命周期
-   *     内不再回 false。
-   *   - 合法性统一按 `event.origin === appViewContext.appOrigin` +
-   *     `currentAppClientSource`（如已绑定）双重校验。
-   *   - `connect mode` 下恒为 false；`appView mode` 但 bootstrap 未完成
-   *     也恒为 false。
-   */
-  childReady(): boolean;
-
-  /**
-   * Session Window 主动从同源 `window.opener` 拉取 bootstrap capsule。
-   *
-   * 设计缘由（施工单 2026-06-29 001 硬切换 + 用户确认；修复 issue #1）：
-   *   - **不**做 postMessage handoff——postMessage 是事件队列，launcher
-   *     在子窗口 message listener 挂好之前发消息会**丢失**。
-   *   - Session Window mount 时**主动**调 launcher `window` 上的
-   *     `__keymaster_session_window_bootstrap__.acquire(token)`（同源
-   *     普通 JS 函数调用），把 token 作为不透明 ID 通过 URL
-   *     `?bootstrapToken=<id>` 传递。
-   *   - 内部走 `consumeLauncherBootstrap` helper：读 URL token + 校验
-   *     `window.opener` 同源 + 读 registry + 调 `acquire(token)` + race
-   *     超时（30s 默认）。到点未拉到 → `bootstrapFailed = true`，UI 渲染
-   *     错误态；用户可关闭 Session Window 重新从 Keymaster 启动 app。
-   *   - launcher 自己持有 `Map<token, AppBootstrapPayload>`；`acquire`
-   *     命中即从 map 删除——一次性消费。
-   *   - 该方法**幂等**：第二次调用直接忽略。
-   */
-  awaitLauncherBootstrap(): void;
-
-  /**
-   * Session Window bootstrap 成功后调用：把 client app URL（含 launchToken）
-   * 在命名窗口打开。Session Window 与 client app 后续走现有 transport
-   * （child → Session Window `ready` → request → result）。
-   *
-   * 设计缘由（施工单 2026-06-30 003 硬切换）：
-   *   - 仅允许在 appViewContext 非空时调用；否则 throw。
-   *   - **不**带 `noopener`：client app 必须能拿到 `window.opener =
-   *     Session Window`，否则无法把第一条 `connect.launch` 发回。
-   *   - 命名窗口 target = `keymaster-app-<encodeOrigin(appOrigin)>`；
-   *     浏览器会按 target 复用同一扇 child app 窗口，避免 `_blank`
-   *     每次点 `Open App` 都新开一扇。
-   *   - **不**主动向 child 发 `ready` / 不再走 ready 泵：
-   *     `ready` 方向对称要求 child 在自己的 listener 就绪后向 Session
-   *     Window 发 `ready`。Session Window 不再猜测 child listener 是否
-   *     就绪。
-   *   - **不**负责 child app 的运行期状态；运行期交互完全走现有 popup
-   *     transport（child 发 `ready` → Session Window 进入 popup 阶段 →
-   *     child 发 request → Session Window 回 result）。
-   *   - 5s 软超时只用于 UI 提示"连接较慢"；到点只清等待态，**不**重建
-   *     `walletPublicKeyHex` / `launchToken` / bootstrap。
-   *   - 返回被打开的 window；失败返回 null（best-effort）。
-   */
-  openClientApp(): Window | null;
-
   /* ============== plugin-apps launcher 启动入口（施工单 2026-06-29 002 硬切换） ============== */
 
-  /**
-   * Keymaster 内部 app launcher 启动入口（`plugin-apps` 唯一允许依赖）。
-   *
-   * 设计缘由（施工单 2026-06-29 002 硬切换）：
-   *   - 这是 plugin-apps 唯一允许的 appView 启动入口。plugin-apps 自己
-   *     **不**直接 import / 操作：
-   *       - `protocolMultipartUploadRepository`
-   *       - `buildAppBootstrapPayload`
-   *       - `installLauncherBootstrapRegistry`
-   *       - `window.open("/protocol/v1/popup?...")` popup URL
-   *     这些细节全部收口在 service 内部，避免协议真值散落到业务插件。
-   *   - 完整流程（施工单 2026-06-30 002 硬切换）：
-   *       1. 校验 vault 已解锁 + active key ready + owner key 命中；
-   *       2. 校验 app 配置合法（`new URL(appUrl).origin === appOrigin`）；
-   *       3. 解析 claims 快照（按 input.claims 走 builtin claim 解析）；
-   *       4. 创建新 `walletPublicKeyHex` 并落 K-V，写 session 真值三元组
-   *          （sessionId + origin + ownerPublicKeyHex）；
-   *       5. 调 `vault.createAppViewSession({ sessionId, password })`
-   *          取受控 capability，组装 `SessionRuntimeBootstrap`；
-   *       6. 生成 `launchToken`；
- *       7. 组装 `AppBootstrapPayload`（含 `sessionRuntimeBootstrap`，
-   *          **不**含 unlock runtime）；
-   *       8. 在 launcher window 上挂一次性 bootstrap registry；
-   *       9. `window.open("/protocol/v1/popup?boot=appView&bootstrapToken=...")`。
-   *   - 任何一道闸失败：throw，**不**补偿、**不**回退、**不**做"半启动"。
-   *     `plugin-apps` 必须以"打开失败就失败"语义收口。
-   *   - session 在 launcher 点击 `Open App` 时**预建**；`connect.launch`
-   *     先验 signed proof 的 digest 与 session/catalog 一致，再一次性消费
-   *     `launchToken`，不创建 session。
-   */
+  /** 钱包目录启动外部 App：创建受控上下文，交给主钱包连接宿主并打开 App 窗口。 */
   launchAppView(input: LaunchAppViewInput): Promise<LaunchAppViewResult>;
 
   /* ============== connect.*（施工单 2026-06-28 001 硬切换） ============== */

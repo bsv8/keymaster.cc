@@ -6,7 +6,7 @@ import { APPLICATION_CONNECTIONS_CAPABILITY, type ApplicationConnection, type Ap
 import { useProtocolResources } from "./ProtocolResourceContext.js";
 import { APPROVAL_METHODS, METHOD_LABELS } from "./applicationPermissions.js";
 import { CommandCard } from "./ProtocolCommandFeed.js";
-import { ConnectLoginAuthPage, ConnectResumeAuthPage, MsFileApprovalSection } from "./ProtocolPopupPage.js";
+import { ApplicationAuthentication, MsFileApprovalSection } from "./ApplicationApprovals.js";
 import "./applicationCenter.css";
 
 const EMPTY: ApplicationConnectionsSnapshot = { applications: [], connections: [], commands: [], events: [], historyAvailable: true };
@@ -26,13 +26,15 @@ function Command({ connection, command, kind }: { connection: ApplicationConnect
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
   const auth = connection.service.connectAuthSnapshot();
   if (kind === "live" && auth?.recordId === command.id) {
-    return auth.ownerType === "login" ? <ConnectLoginAuthPage key={command.id} service={connection.service} auth={auth} t={t} /> : <ConnectResumeAuthPage key={command.id} service={connection.service} auth={auth} t={t} />;
+    return <ApplicationAuthentication key={command.id} service={connection.service} auth={auth} t={t} />;
   }
   return <ul className="application-command"><CommandCard key={command.id} t={t} service={connection.service} command={command} now={now} initiallyExpanded kind={kind} /></ul>;
 }
 
 export function ApplicationConnectionControls() {
-  const { snapshot } = useApplications();
+  const { host, snapshot } = useApplications();
+  // 只在完整钱包壳层装配完成后发 ready；不能在首次 unlock 的代际重绑中提前握手。
+  useEffect(() => { host.acceptOpener(window.opener); }, [host]);
   const { t } = usePluginI18n();
   const msfile = useResourceView<{ approvals: MsFilePendingApprovalView[] }>(useProtocolResources(), "protocol.msfile-approvals", []);
   const msApprovals = msfile.data?.approvals ?? [];

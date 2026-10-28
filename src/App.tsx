@@ -1,20 +1,8 @@
 import { useRuntimeStatus } from "@keymaster/runtime/assembly";
 // src/App.tsx
-// 根组件：根据当前 path 决定渲染协议 popup / LockedShell / UnlockedShell。
-// 设计缘由：Booting/Locked/Unlocked 三态由 runtime 决定，App 只负责调度。
-//
-// 硬切换 003：启动 loading 文案走 i18n。正常路径下 i18n service 在 host
-// 创建时已存在；这里直接 useI18n 取 t() 即可。
-//
-// 施工单 001 收口（协议 V1 硬切换）：
-//   - `/protocol/v1/popup` 是协议页的**唯一**入口。本 App 是这条路径
-//     的唯一入口点；plugin-protocol 自身**不**再注册到 route.registry，
-//     避免 "route.registry 路径 → 组件" 与 "App.tsx 特例直接渲染" 两套
-//     真值并存。
-//   - 钱包状态与协议路径互不干扰：uninitialized / locked / unlocked 都
-//     能进入协议页；locked 态在 popup 内先解锁再继续当前请求。
-//   - 其它路径保持单 Key 本地钱包的壳层逻辑（LockedShell /
-//     UnlockedShell）：uninitialized 走创建/导入，locked 走解锁。
+// 根组件只按真实启动/钱包状态渲染完整钱包，不设置独立协议页入口。
+// 外部 App 打开钱包时也先完成正常创建/导入/解锁；连接由 Protocol 宿主接管，
+// 不从 URL 开启旁路授权或第二套钱包界面。
 
 import { useRef } from "react";
 import type { ApplicationBootstrapSnapshot, ApplicationBootstrapStatus, VaultService, VaultStatus } from "@keymaster/contracts";
@@ -26,30 +14,16 @@ import {
   VAULT_SERVICE_CAPABILITY,
 } from "@keymaster/contracts";
 import { useHasCapability, useOptionalCapability, useResource } from "webloom-framework/react";
-import { useCurrentPath, useI18n } from "@keymaster/runtime";
+import { useI18n } from "@keymaster/runtime";
 import { useHostVersion, usePluginHost } from "@keymaster/runtime/assembly";
 import { PAGE_UI_RENDERER_CAPABILITY, type PageUiRenderer, type PageFrameSlot } from "@keymaster/contracts";
 import { useSyncExternalStore, useCallback, createContext, useContext, type ReactNode } from "react";
 import { StartupError, StartupPlaceholder } from "./shell/StartupPlaceholder.js";
 
-/** 协议 popup 单一路由。 */
-const PROTOCOL_POPUP_PATH = "/protocol/v1/popup";
-
-function isProtocolPopupPath(path: string): boolean {
-  // 单一路由，**不**做前缀匹配：未来若要加 /protocol/v1/popup/sub 时
-  // 再扩展匹配函数；当前只允许这条精确路径走协议入口。
-  return path === PROTOCOL_POPUP_PATH;
-}
-
 const ApplicationPages = createContext<PageUiRenderer | undefined>(undefined);
 export function App() {
-  const path = useCurrentPath();
   const pages = useOptionalCapability(PAGE_UI_RENDERER_CAPABILITY);
-  return <ApplicationPages.Provider value={pages}><ApplicationBootstrapApp path={path} /></ApplicationPages.Provider>;
-}
-
-interface ApplicationBootstrapAppProps {
-  path: string;
+  return <ApplicationPages.Provider value={pages}><ApplicationBootstrapApp /></ApplicationPages.Provider>;
 }
 
 /**
@@ -60,7 +34,7 @@ interface ApplicationBootstrapAppProps {
  * 升级成 fatal。把检查放在独立组件层，既保留 Hook 规则，也让启动恢复
  * 页完全绕过应用启动资源。
  */
-function ApplicationBootstrapApp({ path }: ApplicationBootstrapAppProps) {
+function ApplicationBootstrapApp() {
   const host = usePluginHost();
   const bootstrap = useOptionalCapability(APPLICATION_BOOTSTRAP_READY_CAPABILITY);
   const hostVersion = useHostVersion();
@@ -77,11 +51,10 @@ function ApplicationBootstrapApp({ path }: ApplicationBootstrapAppProps) {
     );
   }
 
-  return <ApplicationBootstrapResourceApp path={path} host={host} hostVersion={hostVersion} bootstrap={bootstrap} />;
+  return <ApplicationBootstrapResourceApp host={host} hostVersion={hostVersion} bootstrap={bootstrap} />;
 }
 
 interface ApplicationBootstrapResourceAppProps {
-  path: string;
   host: ReturnType<typeof usePluginHost>;
   hostVersion: number;
   bootstrap: ApplicationBootstrapStatus | undefined;
@@ -98,7 +71,7 @@ function retryStartup(
   void bootstrap?.retry().catch(() => undefined);
 }
 
-function ApplicationBootstrapResourceApp({ path, host, hostVersion, bootstrap }: ApplicationBootstrapResourceAppProps) {
+function ApplicationBootstrapResourceApp({ host, hostVersion, bootstrap }: ApplicationBootstrapResourceAppProps) {
   // Storage unit 的 bucket-generation 重绑会先同步撤销旧 plugin scope，再
   // 异步安装新 scope；在这个受控窗口中 storage.status 定义暂时不存在。
   // 记住它曾经成功注册过，避免把生命周期重绑的 pending 窗口发布成
@@ -151,8 +124,7 @@ function ApplicationBootstrapResourceApp({ path, host, hostVersion, bootstrap }:
       // never infer that business pages are ready from an older record.
       const currentVault = readVaultStatus(vaultService);
       if (hasUnlockEntry.current && hasStorageStatusResource && hasStorageController
-        && hasVaultWalletState && (currentVault === "locked" || currentVault === "unlocked")
-        && !isProtocolPopupPath(path)) {
+        && hasVaultWalletState && (currentVault === "locked" || currentVault === "unlocked")) {
         return <RuntimeApp vaultStatus="locked" walletEntry />;
       }
       return <StartupPlaceholder />;
@@ -225,12 +197,6 @@ function ApplicationBootstrapResourceApp({ path, host, hostVersion, bootstrap }:
   const vaultStatus = readVaultStatus(vaultService);
   if (vaultStatus === "booting" || vaultStatus === undefined) return <StartupPlaceholder />;
 
-  // 协议 popup 是独立入口；在启动门禁已完成后继续交给 ProtocolPopupPage，
-  // 包括它需要自己处理的 uninitialized/locked/unlocked 状态。
-  if (vaultStatus === "uninitialized" && isProtocolPopupPath(path)) {
-    return <RuntimeApp />;
-  }
-
   // Vault 与 WalletState 是读取钱包真值和提供创建/解锁入口的前置条件。
   // 缺能力时只能停在占位页：不能把「capability 还没注册」误判成空钱包而
   // 渲染创建入口，那会诱导用户在错误的判断上覆盖数据。
@@ -257,7 +223,7 @@ function ApplicationBootstrapResourceApp({ path, host, hostVersion, bootstrap }:
     && bootstrapSnapshot.connectAppsReady
     && hasVaultService
     && hasVaultWalletState;
-  if (!applicationReady && hasUnlockEntry.current && !isProtocolPopupPath(path)) {
+  if (!applicationReady && hasUnlockEntry.current) {
     return <RuntimeApp vaultStatus="locked" walletEntry />;
   }
   if (!bootstrapSnapshot.vaultSelectionReady) return <StartupPlaceholder />;
@@ -285,22 +251,13 @@ interface RuntimeAppProps {
 function RuntimeApp({ vaultStatus, walletEntry }: RuntimeAppProps = {}) {
   const { vault, ready } = useRuntimeStatus();
   const { t } = useI18n();
-  const path = typeof window === "undefined" ? "/" : window.location.pathname;
   const effectiveVault = vaultStatus ?? vault;
   const effectiveReady = ready || vaultStatus !== undefined;
 
-  if (walletEntry && !isProtocolPopupPath(path)) {
+  if (walletEntry) {
     return <ApplicationFrame slot="storage-guard"><ApplicationFrame slot="wallet-entry" /></ApplicationFrame>;
   }
   if (!effectiveReady || effectiveVault === "booting") return <StartupPlaceholder message={t("common.status.loading", { defaultValue: "正在准备存储…" })} />;
-
-  // 协议 popup 顶层特例：这是协议页的**唯一**入口点。
-  // 钱包 locked / uninitialized / unlocked 都直接走协议页，
-  // 协议 service 内部会自己处理 unlock / confirm 状态机。
-  if (isProtocolPopupPath(path)) {
-    // Connect 独立窗口也要承载钱包超额批准；不能依赖主页面仍然打开。
-    return <ApplicationFrame slot="storage-guard"><ApplicationFrame slot="wallet-guard"><ApplicationFrame slot="protocol-popup" /></ApplicationFrame></ApplicationFrame>;
-  }
 
   if (effectiveVault === "uninitialized" || effectiveVault === "locked") {
     return <ApplicationFrame slot="storage-guard"><ApplicationFrame slot="wallet-entry" /></ApplicationFrame>;

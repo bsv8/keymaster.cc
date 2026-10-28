@@ -10,32 +10,10 @@ import { bindProtocolUi } from "./ProtocolResourceContext.js";
 import { PAGE_UI_REGISTRY_CAPABILITY, OWNED_RESOURCE_ACCESS_CAPABILITY } from "@keymaster/contracts";
 import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 // packages/plugin-protocol/src/manifest.ts
-// 对外协议插件：popup 路由 + service capability + 协议页 i18n +
-// 命令流 platform K-V。
-//
-// 设计缘由（施工单 002 硬切换 + 2026-06-28 002 + 2026-06-29 001 +
-// 2026-06-30 002 + 2026-07-01 001 + 2026-07-01 002）：
-//   - 协议页是常驻 popup：单条 request 完成后 popup 不自动关闭；
-//     `closing` 由 pageUnloading 路径发出。
-//   - 命令流历史、origin policy/fee-pool、connect session 分别走中央
-//     `command-history` / `durable-policy` / `sessions` K-V purpose。
-//   - service 收到第一条合法 request 时按 `event.origin` 拉历史；
-//     切换 origin 时重新载入；历史读取失败时仅保留当前运行时内存投影，
-//     但终态写入失败必须传播给用户可见结果。
-//   - popup 入口路径只有一条 `/protocol/v1/popup`，**不**注册到
-//     `route.registry`（与施工单 001 公共语义保持一致）。
-//   - 施工单 2026-06-29 001 硬切换：popup 语义统一为 Session Window；
-//     `boot=appView` 模式下额外挂一次性 bootstrap listener。
-//   - 施工单 2026-06-30 002 硬切换：appView Session Window 改为
-//     `owner execution runtime`——签名 / 加解密 / p2pkh / feepool
-//     走同一套 `resolveOwnerRuntime` resolver；**不**再 import unlock
-//     runtime 交接包。plugin-protocol 的能力依赖描述从"协议需要
-//     active key 与受控 capability"改成"connect mode 需要 vault；
-//     appView mode 可走 owner runtime bootstrap"。
-//   - Connect Storage 施工单：`storage.*` 通过可选 `storage.service` capability
-//     接入；缺少 Storage 插件时，Protocol 仍正常提供其它方法。
-//   - 施工单 2026-09-02/003：Session Window 的消息能力统一为
-//     Coordinator Channel 的精确频道发布/订阅；本插件只消费已验证 facade。
+// 对外协议插件：完整钱包应用连接中心、逐操作外部许可与受限业务网关。
+// 两个连接方向统一由主钱包宿主登记窗口；不注册专用协议页或跨窗口 bootstrap。
+// 应用设置与审计走 durable-policy，连接事实与命令历史各用独立 purpose。
+// 钱包身份、私钥和资金责任仍留在各自业务权威；SDK Receiver 只拥有协议绑定。
 
 import type {
   I18nPluginResources,
@@ -67,12 +45,10 @@ import {
   type ProtocolCoordinatorControl,
 } from "@keymaster/contracts";
 import { defineRuntimeUnitDependencies } from "@keymaster/contracts";
-import { ProtocolPopupPage } from "./ProtocolPopupPage.js";
 import {
   createProtocolService
 } from "./protocolService.js";
 import { openProtocolStorageRepository } from "./storage/protocolStorageRepository.js";
-import { parseBootMode, parseBootstrapToken } from "./sessionWindowBootstrap.js";
 import { createConnectChannelRuntime } from "./channelRuntime.js";
 import { PROTOCOL_STORAGE_DECLARATIONS, PROTOCOL_STORAGE_PURPOSES } from "./storage/protocolStorageDeclarations.js";
 
@@ -577,49 +553,13 @@ const protocolPluginDefinition = {
             return undefined;
           }
         },
-        // 施工单 2026-06-29 001：从 URL `?boot=appView` 解析当前模式。
-        // 仅在 popup 挂载时解析一次；session 启动后不再变动。
-        bootMode: typeof window !== "undefined" ? parseBootMode(window.location.search) : "connect",
+        // 根服务只作为钱包内启动器；连接实例的方向由主钱包宿主装配。
+        bootMode: "connect",
         acceptApplicationLaunch: (payload, source) => applicationHost.acceptLaunch(payload, source),
       };
     const service = createProtocolService(serviceDeps);
       ctx.provide(PROTOCOL_SERVICE_CAPABILITY, createPublicProtocolService(service, () => ctx.scope.assertActive()));
       const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
-      resources.register<{ snapshot: ProtocolSessionSnapshot; feed: ProtocolCommandFeedState }, readonly string[]>({
-        id: "protocol.state",
-        scope: "global",
-        key: () => ["protocol.state"],
-        load: async (_args, context) => {
-          const current = context.optionalCapability(PROTOCOL_SERVICE_CAPABILITY)!;
-          return { snapshot: current.snapshot(), feed: current.feedSnapshot() };
-        },
-        subscribe: (_args, context, invalidate) => {
-          const current = context.optionalCapability(PROTOCOL_SERVICE_CAPABILITY);
-          const a = current?.subscribe(() => invalidate()) ?? (() => {});
-          const b = current?.subscribeFeed(() => invalidate()) ?? (() => {});
-          return () => { a(); b(); };
-        },
-        invalidation: "immediate"
-      });
-      resources.register<VaultStatus, readonly string[]>({
-        id: "protocol.vault-status",
-        scope: "global",
-        key: () => ["protocol.vault-status"],
-        load: async (_args, context) => context.optionalCapability(VAULT_SERVICE_CAPABILITY)?.status() ?? "locked",
-        subscribe: (_args, context, invalidate) => walletStateService.subscribe(() => invalidate()),
-        invalidation: "immediate"
-      });
-      resources.register<{ waiting: boolean; timedOut: boolean }, readonly string[]>({
-        id: "protocol.app-bootstrap",
-        scope: "global",
-        key: () => ["protocol.app-bootstrap"],
-        load: async (_args, context) => {
-          const current = context.optionalCapability(PROTOCOL_SERVICE_CAPABILITY)!;
-          return { waiting: current.appClientWaitingForReady(), timedOut: current.appClientConnectTimedOut() };
-        },
-        subscribe: (_args, context, invalidate) => context.optionalCapability(PROTOCOL_SERVICE_CAPABILITY)?.subscribe(() => invalidate()) ?? (() => {}),
-        invalidation: "immediate"
-      });
 
       const storageRepository = openProtocolStorageRepository({
         durablePolicy: ctx.capability(STORAGE_KV_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, PROTOCOL_STORAGE_PURPOSES.durablePolicy),
@@ -659,9 +599,7 @@ const protocolPluginDefinition = {
           });
           return () => { offConsumer(); off(); };
         }, invalidation: "immediate" });
-      const Popup = bindProtocolUi(ctx, ProtocolPopupPage);
       const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope).view;
-      pages.register({ kind: "frame", slot: "protocol-popup", id: "protocol.popup", label: "Connect", render: () => createElement(Popup) });
       const Center = bindProtocolUi(ctx, ApplicationCenterPage);
       const Controls = bindProtocolUi(ctx, ApplicationConnectionControls);
       pages.register({ kind: "page", path: "/apps/connections", id: "protocol.applications", label: "应用连接", render: () => createElement(Center) });
