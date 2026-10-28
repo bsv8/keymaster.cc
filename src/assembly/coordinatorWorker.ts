@@ -20,9 +20,7 @@ import { createSatSubscriptionWorkerPlugin, createSatWorkerLifecycle, type SatWo
 import type { SatP2pkhService } from "@keymaster/plugin-sat-subscription";
 import { createMsfileWorkerPlugin, createMsFileWorkerLifecycle, productArbitrationServices } from "@keymaster/plugin-msfile/worker";
 import { createP2pkhWorkerRuntime, createP2pkhWorkerOperations } from "@keymaster/plugin-p2pkh/worker";
-import { createContactsWorkerRuntime } from "@keymaster/plugin-contacts/worker";
 import { createWocWorkerRuntime } from "@keymaster/plugin-woc/worker";
-import { createForumWorkerPlugin } from "@keymaster/plugin-forum/worker";
 import { WalletLockBarrier } from "../walletLockBarrier.js";
 
 import { type NetworkIdentity } from "@keymaster/contracts";
@@ -30,10 +28,8 @@ import { type NetworkIdentity } from "@keymaster/contracts";
 import { createVaultBootstrapStorage } from "@keymaster/platform-storage/assembly";
 
 import { createSatWorkerTransport } from "@keymaster/plugin-sat-subscription/coordinator";
-import { createWorkerPresenceProjection } from "@keymaster/plugin-contacts/coordinator";
 import { createWorkerAutoLock } from "@keymaster/plugin-vault/coordinator";
 import { createWorkerBackgroundRuntime, type TaskRuntime } from "@keymaster/plugin-background/coordinator";
-import { FORUM_WORKER_SERVICE_CAPABILITY, FORUM_WORKER_ATTACHMENT_CAPABILITY } from "@keymaster/contracts";
 
 import { type WocWorkerBroadcastService, type WocWorkerChainPort } from "@keymaster/contracts";
 
@@ -65,7 +61,7 @@ import { storagePrivateCapabilities } from "../assembly/storagePrivateCapabiliti
 
 import "../shims/buffer.js";
 
-import type { SessionEpoch, CoordinatorVaultStatus, CoordinatorClientRequest as PublicCoordinatorClientRequest, CoordinatorResponse, CoordinatorTopicEvent, CoordinatorBootstrapSnapshot, CoordinatorTopic, CoordinatorBackgroundSyncSettings, CoordinatorTopicBaseline, SessionStateEvent, P2pkhTransactionBroadcastProvider, P2pkhUtxoSnapshotResult, CoordinatorSatStateEvent, CoordinatorContactsPresenceEvent, CoordinatorWorkerUnitStateEvent, CoordinatorWorkerUnitPublicSnapshot, CoordinatorAuthorityRecovery, CoordinatorRpcRequest, CoordinatorRpcResponse, CoordinatorRpcCommandRequest, CoordinatorSessionOpenRequest, CoordinatorSessionBinding, CoordinatorTopicSubscription, SnapshotStore, StorageSnapshotJsonCompatible, PluginStorageDeclaration } from "@keymaster/contracts";
+import type { SessionEpoch, CoordinatorVaultStatus, CoordinatorClientRequest as PublicCoordinatorClientRequest, CoordinatorResponse, CoordinatorTopicEvent, CoordinatorBootstrapSnapshot, CoordinatorTopic, CoordinatorBackgroundSyncSettings, CoordinatorTopicBaseline, SessionStateEvent, P2pkhTransactionBroadcastProvider, P2pkhUtxoSnapshotResult, CoordinatorSatStateEvent, CoordinatorWorkerUnitStateEvent, CoordinatorWorkerUnitPublicSnapshot, CoordinatorAuthorityRecovery, CoordinatorRpcRequest, CoordinatorRpcResponse, CoordinatorRpcCommandRequest, CoordinatorSessionOpenRequest, CoordinatorSessionBinding, CoordinatorTopicSubscription, SnapshotStore, StorageSnapshotJsonCompatible, PluginStorageDeclaration } from "@keymaster/contracts";
 /** 可信 Worker 入口内的命令联合；私有浏览不进入公共 transport parser。 */
 type CoordinatorClientRequest = PublicCoordinatorClientRequest | StorageBrowsePrivateCommand;
 
@@ -642,8 +638,6 @@ function normalizedCoordinatorOwner(): string | null {
     : null;
 }
 
-/** 将 Worker 内唯一 Contacts 在线真值投影为页面可订阅的快照事件。 */
-function publishCoordinatorContactsPresence(): void { contactsPresenceProjection.publish(); }
 
 const walletLockBarrier = new WalletLockBarrier(() => publishSessionState("lock", lockRevocationPending));
 let lockRevocationPending = false;
@@ -708,7 +702,7 @@ function publishSessionState(cause: SessionStateEvent["cause"], deferCleanup = f
     ...(projection.storageIoOwnerPeer ? { storageIoOwnerPeer: projection.storageIoOwnerPeer } : {}),
   };
   publishTopicEvent("session.state", state);
-  if (!deferCleanup) { workerWalletState.publish(); publishCoordinatorContactsPresence(); }
+  if (!deferCleanup) { workerWalletState.publish(); }
 }
 
 // ============================================================
@@ -1035,7 +1029,6 @@ let lastSatState: CoordinatorSatStateEvent | undefined;
 
 let channelRevision = 0;
 
-const contactsWorkerRuntime = createContactsWorkerRuntime({ tasks: coordinatorTaskRegistrar, changed: () => publishCoordinatorContactsPresence() });
 
 /** 以 connectionId 隔离入站 handler；supplierId 不是连接实例键。 */
 
@@ -1100,7 +1093,6 @@ function releaseSatRelatedResources(reason: string): import("@keymaster/plugin-s
   lastSatState = undefined;
   const channelCleanup = channelWorkerRuntime.release();
   msfileBitfsRuntime.clearBuyerState();
-  contactsWorkerRuntime.current()?.resetPresence?.();
 
   return [...channelCleanup, { label: "stale P2PKH start", run: async () => { await Promise.allSettled([p2pkhStarting, protocolStarting]); } }];
 }
@@ -1316,8 +1308,6 @@ interface CoordinatorPeerState {
   serviceExposure?: { revoke(): void };
   /** 当前 owner/session 世代对应的 WebLoom service exposure；旋转后旧 proxy 必须失效。 */
   serviceExposureIdentity?: string;
-  forumExposure?: { revoke(): void };
-  forumExposureIdentity?: string;
   sessionBinding?: CoordinatorSessionBinding;
   openCommitOrder?: number;
   bridgeRequests: Set<CoordinatorBridgeRequest>;
@@ -1499,9 +1489,6 @@ function fenceCoordinatorPeerSession(
   state.serviceExposure?.revoke();
   state.serviceExposure = undefined;
   state.serviceExposureIdentity = undefined;
-  state.forumExposure?.revoke();
-  state.forumExposure = undefined;
-  state.forumExposureIdentity = undefined;
   if (state.topicStream) closeCoordinatorTopicStreamQueue(state.topicStream, coordinatorSessionStaleError("Coordinator topic stream was revoked"));
   state.topicStream = undefined;
   for (const pending of state.bridgeRequests) pending.controller.abort();
@@ -1931,7 +1918,6 @@ let backgroundSnapshotRevision = 0;
 let chainFeeRevision = 0;
 let chainHeightRevision = 0;
 let assetDataRevision = 0;
-let contactsPresenceRevision = 0;
 /** 统一主会话只保留一个自动锁定计时器；旧计时器不能跨解锁世代存活。 */
 const vaultAutoLock = createWorkerAutoLock({
   session: () => coordinatorState,
@@ -1946,13 +1932,6 @@ const vaultAutoLock = createWorkerAutoLock({
 });
 function resetAutoLockTimer(): void { vaultAutoLock.reset(); }
 const handleAutolockSettingsUpdate = vaultAutoLock.update;
-const contactsPresenceProjection = createWorkerPresenceProjection({
-  admission: { available: () => isCoordinatorProductRegistered("contacts"), blocked: requestId => coordinatorProductBlockedResponse(requestId, "contacts") },
-  service: () => contactsWorkerRuntime.current(),
-  session: () => ({ owner: normalizedCoordinatorOwner(), epoch: coordinatorState.sessionEpoch }),
-  publish: event => publishTopicEvent("contacts.presence", event) as CoordinatorContactsPresenceEvent,
-});
-
 /** Coordinator 真实任务的最终 I/O 审计入口；测试任务不进入生产台账。 */
 const COORDINATOR_TASK_FINAL_IO_AUDIT: Readonly<Record<string, FinalIoAuditOperation>> = Object.fromEntries(
   COORDINATOR_WORKER_UNIT_CATALOG.flatMap((unit) => unit.finalIoAuditEntries.map((entry) => [entry.taskId, entry.operation] as const)),
@@ -2303,29 +2282,6 @@ async function buildTopicBaselines(
         }
       }];
     }
-    if (topic === "contacts.presence") {
-      const activePublicKeyHex = normalizedCoordinatorOwner();
-      const projection = contactsPresenceProjection.current();
-      const cached = projection
-        && projection.sessionEpoch === coordinatorState.sessionEpoch
-        && projection.activePublicKeyHex === activePublicKeyHex
-        ? projection
-        : {
-          topic: "contacts.presence" as const,
-          type: "contacts.presence.changed" as const,
-          presenceRevision: contactsPresenceRevision,
-          sessionEpoch: coordinatorState.sessionEpoch,
-          activePublicKeyHex,
-          presence: {}
-        };
-      return [{
-        topic,
-        baselineRevision: contactsPresenceRevision,
-        sessionEpoch: coordinatorState.sessionEpoch,
-        snapshot: cached
-      }];
-    }
-
     if (topic === "worker.units") {
       const baselineRevision = coordinatorRuntimeUnitRevision();
       return [{
@@ -2418,7 +2374,6 @@ const channelWorkerRuntime = createChannelWorkerRuntime({
         }
       }
     },
-    recordPong: input => { contactsWorkerRuntime.current()?.recordVerifiedPong?.(input); },
     routeSignal: (body, opened, seedHashHex) => msfileBitfsRuntime.handleInboxWebRtc(body, opened, seedHashHex),
     hashRequestSeen: request => handleMsfileSellerHashRequest(request),
   },
@@ -2675,7 +2630,7 @@ function performGlobalLock(reason: string): Promise<void> {
         closeCoordinatorUpgradeSession(`Coordinator locked: ${reason}`);
         reconcileCoordinatorSessionExposures();
         lockRevocationPending = false;
-        workerWalletState.publish(); publishCoordinatorContactsPresence();
+        workerWalletState.publish();
         return walletRevocationCleanup;
       } finally { walletRevocationCleanup = undefined; }
     }).catch(error => { revokePending = undefined; throw error; });
@@ -2911,7 +2866,7 @@ function publishTopicEvent(topic: CoordinatorTopic, event: any): CoordinatorTopi
     ...event,
     ...(vaultWorkerKeys.coordinatorActiveKeySummary() ? { networkIdentity: { bsvNetwork: vaultWorkerKeys.coordinatorActiveKeySummary()!.bsvNetwork, publicKeyHex: vaultWorkerKeys.coordinatorActiveKeySummary()!.publicKeyHex } } : {}),
     topic,
-    ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : topic === "chain.fees" ? { chainFeeRevision: ++chainFeeRevision } : topic === "chain.height" ? { chainHeightRevision: ++chainHeightRevision } : topic === "storage.state" ? { storageRevision: event.storageRevision } : topic === "msfile.state" ? { msfileRevision: event.msfileRevision } : topic === "sat.events" ? { satRevision: event.satRevision } : topic === "channel.events" ? { channelRevision: ++channelRevision } : topic === "contacts.presence" ? { presenceRevision: ++contactsPresenceRevision } : topic === "worker.units" ? { workerUnitRevision: event.workerUnitRevision ?? coordinatorRuntimeUnitRevision() } : { assetDataRevision: ++assetDataRevision }),
+    ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : topic === "chain.fees" ? { chainFeeRevision: ++chainFeeRevision } : topic === "chain.height" ? { chainHeightRevision: ++chainHeightRevision } : topic === "storage.state" ? { storageRevision: event.storageRevision } : topic === "msfile.state" ? { msfileRevision: event.msfileRevision } : topic === "sat.events" ? { satRevision: event.satRevision } : topic === "channel.events" ? { channelRevision: ++channelRevision } : topic === "worker.units" ? { workerUnitRevision: event.workerUnitRevision ?? coordinatorRuntimeUnitRevision() } : { assetDataRevision: ++assetDataRevision }),
     sessionEpoch: coordinatorState.sessionEpoch,
     ...(topic === "background.snapshot"
       ? {
@@ -3091,27 +3046,9 @@ function reconcileCoordinatorSessionExposure(state: CoordinatorPeerState): void 
   }
 }
 
-/** Forum has its own exposure group: enabling it must not rotate storage/crypto grants. */
-function reconcileForumSessionExposure(state: CoordinatorPeerState): void {
-  const forum = coordinatorRuntimeApp?.state().units.find(unit => unit.unitId === "forum.coordinator-worker" && unit.state === "enabled");
-  const identity = state.sessionOpen && state.status === "open" && state.peer.scope.state === "active"
-    && coordinatorSessionServicesReady() && forum?.instanceId
-    ? `${coordinatorSessionExposureIdentity()}\u0000${forum.instanceId}` : undefined;
-  if (state.forumExposure && state.forumExposureIdentity === identity) return;
-  state.forumExposure?.revoke();
-  state.forumExposure = undefined;
-  state.forumExposureIdentity = undefined;
-  if (!identity) return;
-  state.forumExposure = state.peer.exposeGroup([FORUM_WORKER_SERVICE_CAPABILITY, FORUM_WORKER_ATTACHMENT_CAPABILITY].map(capability => ({
-    capability, options: { grantId: coordinatorSessionGrantId(state, capability.id) },
-  })));
-  state.forumExposureIdentity = identity;
-}
-
 function reconcileCoordinatorSessionExposures(): void {
   for (const state of coordinatorPeers.values()) {
     reconcileCoordinatorSessionExposure(state);
-    reconcileForumSessionExposure(state);
   }
 }
 
@@ -3195,8 +3132,7 @@ async function openCoordinatorSession(
         state.sessionBinding = { ...attempt.binding };
         state.sessionOpen = true;
         state.status = "open";
-        reconcileForumSessionExposure(state);
-        state.openCommitOrder = ++coordinatorSessionCommitOrder;
+            state.openCommitOrder = ++coordinatorSessionCommitOrder;
         // session.open 的 exposeGroup 已经提交，证明这个 peer 的反向
         // LocalStorage capability 可用。刷新时旧文档可能来不及把物理断线送达
         // SharedWorker；若继续保留旧 peer，后续 hydrate 会请求一个永不响应的
@@ -3361,7 +3297,7 @@ function withCoordinatorWorkerLifecycle(plugin: ReturnType<typeof definePlugin>)
   };
 }
 const coordinatorRequestRoutes = new Map<string, import("@keymaster/contracts").WorkerRequestRoute>();
-for (const route of [vaultWorkerOperations.route, vaultAutoLock.route, storageWorkerRequests.route, msfileWorkerRequests.route, windowP2pWorkerRuntime.route, channelWorkerRuntime.route, p2pkhWorkerOperations.route, p2pkhWorkerSettings.route, chainFeePolicyRoute, contactsPresenceProjection.route, backgroundWorkerRuntime.route,
+for (const route of [vaultWorkerOperations.route, vaultAutoLock.route, storageWorkerRequests.route, msfileWorkerRequests.route, windowP2pWorkerRuntime.route, channelWorkerRuntime.route, p2pkhWorkerOperations.route, p2pkhWorkerSettings.route, chainFeePolicyRoute, backgroundWorkerRuntime.route,
 defineWorkerRequestRoute<Extract<CoordinatorClientRequest, { kind: "lock" }>>({
   kinds: ["lock"], policy: () => ({ scheduling: "parallel", cleanupOnly: true, validateEpoch: false }), execute: (request, call) => handleLock(call.requestId, request, call.peerId),
 }),
@@ -3401,7 +3337,6 @@ const coordinatorRuntimePlugins = [
         async dispose() { revoke(); await cleanup; },
       };
     },
-    presenceChannel: assertActive => channelWorkerRuntime.createCoordinatorChannelRuntime(assertActive),
   }),
   createMsfileWorkerPlugin({
     bindBridge: msfileWorkerLifecycle.bindBridge,
@@ -3424,17 +3359,7 @@ const coordinatorRuntimePlugins = [
     },
   }),
   wocWorkerRuntime.plugin,
-  contactsWorkerRuntime.plugin,
   p2pkhWorkerRuntime.plugin,
-  createForumWorkerPlugin({
-    admission: {
-      authorize(call) {
-        const peer = requireCoordinatorSessionPeer(call);
-        const binding = coordinatorSessionBinding(peer);
-        return () => { if (requireCoordinatorSessionPeer(call) !== peer || !sameCoordinatorSessionBinding(binding, coordinatorSessionBinding(peer))) throw new Error("Forum peer session replaced"); };
-      },
-    }
-  }),
 ].map(withCoordinatorWorkerLifecycle);
 
 // Unit tests import this module in a normal Node realm. The installer above is
@@ -3450,8 +3375,6 @@ export function coordinatorHostOptions() {
       COORDINATOR_TOPIC_STREAM_CAPABILITY,
     ],
     peerExposureAllowlist: [
-      FORUM_WORKER_SERVICE_CAPABILITY,
-      FORUM_WORKER_ATTACHMENT_CAPABILITY,
       STORAGE_PRIVATE_BROWSE_CAPABILITY,
       COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
       COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY,
@@ -3706,10 +3629,6 @@ export function coordinatorTestingPorts(): CoordinatorTestingPorts {
     get closeCoordinatorTopicStreamQueue() { return closeCoordinatorTopicStreamQueue; },
     get closeCoordinatorUpgradeSession() { return closeCoordinatorUpgradeSession; },
     get configureCoordinatorPeer() { return configureCoordinatorPeer; },
-    get contactsPresenceProjection() { return contactsPresenceProjection; },
-    get contactsPresenceRevision() { return contactsPresenceRevision; },
-    set contactsPresenceRevision(value: typeof contactsPresenceRevision) { contactsPresenceRevision = value; },
-    get contactsWorkerRuntime() { return contactsWorkerRuntime; },
     get coordinatorAuthorityInstanceId() { return coordinatorAuthority.coordinatorAuthorityInstanceId; },
     set coordinatorAuthorityInstanceId(value: typeof coordinatorAuthority.coordinatorAuthorityInstanceId) { coordinatorAuthority.coordinatorAuthorityInstanceId = value; },
     get coordinatorAuthorityLock() { return coordinatorAuthority.coordinatorAuthorityLock; },
@@ -3875,9 +3794,6 @@ export interface CoordinatorTestingPorts {
   closeCoordinatorTopicStreamQueue: typeof closeCoordinatorTopicStreamQueue;
   closeCoordinatorUpgradeSession: typeof closeCoordinatorUpgradeSession;
   configureCoordinatorPeer: typeof configureCoordinatorPeer;
-  contactsPresenceProjection: ReturnType<typeof createWorkerPresenceProjection>;
-  contactsPresenceRevision: typeof contactsPresenceRevision;
-  contactsWorkerRuntime: ReturnType<typeof createContactsWorkerRuntime>;
   coordinatorAuthorityInstanceId: typeof coordinatorAuthority.coordinatorAuthorityInstanceId;
   coordinatorAuthorityLock: CoordinatorAuthorityLock | undefined;
   coordinatorAuthorityRecord: CoordinatorAuthorityRecord | undefined;

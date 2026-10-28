@@ -51,8 +51,7 @@ export function createProtectedOutpointRegistry(): IProtectedOutpointRegistry {
   /**
    * 只回收「已经没有任何 provider 保护」的 claim。
    *
-   * 同一个插件可以登记多个 provider（Forum 的专用资金与自有 Forum 输出都属于
-   * `forum`）。按插件粒度清理会让其中一个 provider 刷新或注销时把另一个的
+   * 同一个插件可以登记多个 provider。按插件粒度清理会让其中一个 provider 刷新或注销时把另一个的
    * 在途占用一并删掉，于是第二次 claim 意外成功——占用保护就形同虚设。
    * 因此判据是**所有仍存活的 provider 的输出并集**，而不是某一个 provider 的集合。
    */

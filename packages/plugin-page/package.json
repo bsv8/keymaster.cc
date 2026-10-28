@@ -17,7 +17,6 @@
     "lucide-react": "^0.468.0"
   },
   "devDependencies": {
-    "@keymaster/plugin-webrtc": "*",
     "bsv8-channel-protocol": "0.6.0"
   },
   "scripts": {}

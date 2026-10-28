@@ -33,15 +33,3 @@ export interface P2pkhWorkerTransferBinding {
 /** Lazy Worker transfers; lifecycle, repositories and provider registration stay private. */
 export const P2PKH_WORKER_TRANSFER_CAPABILITY = defineCapability<P2pkhWorkerTransferBinding>({ kind: "local", id: "p2pkh.worker-transfer", version: "1" });
 
-/** Wallet-owned protocol operations share the transfer runtime, funding files and claims. */
-export interface P2pkhWorkerProtocolBinding {
-  getService(): Promise<{
-    readonly identity: Readonly<import("./networkIdentity.js").NetworkIdentity>;
-    spend: import("./protocolSpend.js").ProtocolSpendService;
-    funding: import("./protocolSpend.js").ProtocolFundingService;
-    planFunding(input: import("./protocolSpend.js").ProtocolFundingPlanRequest): Promise<{ selected: import("./protocolSpend.js").ProtocolSpendInput[]; totalInputSatoshis: number }>;
-    observer: import("./protocolSpend.js").ProtocolSubmissionObserver;
-    protectedOutpoints: import("./spendProtection.js").ProtectedOutpointRegistry;
-  }>;
-}
-export const P2PKH_WORKER_PROTOCOL_CAPABILITY = defineCapability<P2pkhWorkerProtocolBinding>({ kind: "local", id: "p2pkh.worker-protocol", version: "1" });

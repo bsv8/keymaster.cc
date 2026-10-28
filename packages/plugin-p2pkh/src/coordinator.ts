@@ -22,3 +22,5 @@ export { createWorkerTransferRuntime } from "./workerTransferRuntime.js";
 export { executeWorkerP2pkhSnapshot, readWorkerP2pkhResource } from "./workerSnapshotExecutor.js";
 
 export { createWorkerProtocolRuntime, readWorkerProtocolProtection } from "./workerProtocolRuntime.js";
+export { purgeRetiredForumProtocolData } from "./retiredForumCleanup.js";
+export type { RetiredForumPurgeResult } from "./retiredForumCleanup.js";

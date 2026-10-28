@@ -2,11 +2,10 @@ import type { JSONValue, SatSubscriptionService } from "@keymaster/contracts";
 import { inboxChannel, parsePublicKey, newMessageID, parseSHA256Hash } from "bsv8-channel-protocol";
 import { sign as signPublic, marshal as marshalPublicMessage, PUBLIC_MESSAGE_MAX_LIFETIME_MS } from "bsv8-channel-protocol/public-message";
 import { sign as signHash, marshal as marshalHashRequest, parseAndVerify as parseHashRequest, HASH_REQUEST_CHANNEL, newWebRTCSDPLocator } from "bsv8-channel-protocol/hash-request";
-import { marshalEnvelope, marshalPrivateMessage, verifySignedPrivateMessage, reviewOfferForHashRequest, validateWebRTCRelation, PING_PRIVATE_MESSAGE_MAX_LIFETIME_MS, type SignedPrivateMessage, type UnsignedPrivateMessage, sealSigned } from "bsv8-channel-protocol/inbox";
-import { PING_PROTOCOL } from "bsv8-channel-protocol/ping";
+import { marshalEnvelope, marshalPrivateMessage, verifySignedPrivateMessage, reviewOfferForHashRequest, validateWebRTCRelation, type SignedPrivateMessage, type UnsignedPrivateMessage, sealSigned } from "bsv8-channel-protocol/inbox";
 import { WEBRTC_SIGNAL_PROTOCOL } from "bsv8-channel-protocol/webrtc-signal";
 import { validateExactChannel } from "./channelSubscriptionMux.js";
-import { privateProtocol, isPingRequestBody, type ChannelPrivateProtocol } from "./channelProtocolPolicy.js";
+import { privateProtocol, type ChannelPrivateProtocol } from "./channelProtocolPolicy.js";
 import type { createChannelProtocolRelations } from "./channelProtocolRelations.js";
 
 export interface ChannelPublicationPort { ownerPublicKeyHex: string; service: Pick<SatSubscriptionService, "publish"> }
@@ -26,11 +25,8 @@ export function publicMessageTimes(now: () => number = Date.now) {
   const issuedAtMs = now();
   return { issuedAtMs, expiresAtMs: issuedAtMs + PUBLIC_MESSAGE_MAX_LIFETIME_MS };
 }
-export function monotonicNow(): number { return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now(); }
-
 /** Owns protocol serialization, outbound relation evidence and publication reconciliation. */
 export function createChannelPublications(deps: ChannelPublicationDependencies) {
-  const channelPendingPings = deps.relations.pendingPings;
   const channelHashRequests = deps.relations.hashRequests;
   const channelWebrtcOffers = deps.relations.webrtcOffers;
   const pruneChannelProtocolRelations = deps.relations.prune;
@@ -38,9 +34,6 @@ export function createChannelPublications(deps: ChannelPublicationDependencies) 
   const channelHashRequestByMessageId = deps.relations.hashRequestByMessageId;
   const channelWebrtcOfferKey = deps.relations.webrtcOfferKey;
   const findChannelWebrtcOffer = deps.relations.findWebrtcOffer;
-  const pruneChannelPendingPings = deps.relations.prunePendingPings;
-  const scheduleChannelPendingPingCleanup = deps.relations.schedulePendingPingCleanup;
-  const CHANNEL_PENDING_PING_TTL_MS = PING_PRIVATE_MESSAGE_MAX_LIFETIME_MS;
   function assertOwner(runtime: ChannelPublicationPort, epoch: string = deps.session().sessionEpoch): void {
     const session = deps.session();
     if (session.vaultStatus !== "unlocked" || session.activePublicKeyHex !== runtime.ownerPublicKeyHex || session.sessionEpoch !== epoch) throw new Error("Channel owner changed before publish");
@@ -130,19 +123,13 @@ async function publishPrivateEnvelopeUnsafe(input: {
     throw new Error("Channel owner changed before private publish");
   }
   const messageId = newMessageID();
-  const now = Date.now();
-  const startedAtMonotonicMs = input.protocol === PING_PROTOCOL && isPingRequestBody(input.body)
-    ? monotonicNow()
-    : undefined;
-  // 过期时间必须由 ChannelProtocol 的子协议上限决定：Ping 60 秒，
-  // WebRTC 120 秒，其它私密消息最多 24 小时。签名构造集中在同一个
-  // helper，测试可以直接走与 Coordinator 相同的真实签名入口。
+  // 过期时间由 ChannelProtocol 子协议上限决定：WebRTC 120 秒，其它私密消息最多 24 小时。
   const signed = await deps.signer.signPrivate({
     recipientPublicKeyHex: recipient,
     protocol: input.protocol,
     body: input.body,
     messageId,
-    nowMs: now
+    nowMs: Date.now()
   }, input.signal);
   let verifiedWebrtc: import("bsv8-channel-protocol/inbox").VerifiedPrivateMessage | undefined;
   if (input.protocol === WEBRTC_SIGNAL_PROTOCOL) {
@@ -158,9 +145,6 @@ async function publishPrivateEnvelopeUnsafe(input: {
       validateWebRTCRelation(offer, verifiedWebrtc);
     }
   }
-  const pingMessage = input.protocol === PING_PROTOCOL && isPingRequestBody(input.body)
-    ? verifySignedPrivateMessage(signed)
-    : undefined;
   const verifiedWebrtcBody = verifiedWebrtc?.body as import("bsv8-channel-protocol/webrtc-signal").WebRTCSignalV1Body | undefined;
   const webrtcOfferKey = verifiedWebrtc && verifiedWebrtcBody?.signal.type === "offer"
     ? channelWebrtcOfferKey(
@@ -184,21 +168,6 @@ async function publishPrivateEnvelopeUnsafe(input: {
     if (webrtcOfferKey) channelWebrtcOffers.delete(webrtcOfferKey);
     throw error;
   }
-  if (input.protocol === PING_PROTOCOL && isPingRequestBody(input.body)) {
-    pruneChannelPendingPings(now);
-    // 必须在网络 Publish 前登记；Pong 可能在 publish Promise settle 前
-    // 经另一个入站 handler 到达。unknown_result 时保留到 TTL，禁止重复发送。
-    channelPendingPings.set({
-      messageId,
-      ownerSessionEpoch,
-      ownerPublicKeyHex: input.runtime.ownerPublicKeyHex,
-      contactPublicKeyHex: recipient,
-      startedAtMonotonicMs: startedAtMonotonicMs!,
-      expiresAtMs: now + CHANNEL_PENDING_PING_TTL_MS,
-      pingMessage: pingMessage!
-    });
-    scheduleChannelPendingPingCleanup();
-  }
   try {
     await input.runtime.service.publish({ channel, contentJson: marshalEnvelope(envelope) }, input.signal);
   } catch (error) {
@@ -206,7 +175,6 @@ async function publishPrivateEnvelopeUnsafe(input: {
       && deps.session().sessionEpoch === ownerSessionEpoch
       && deps.session().activePublicKeyHex === input.runtime.ownerPublicKeyHex;
     if (!deps.unknownPublishFailure(error) || !stillFresh) {
-      channelPendingPings.delete(messageId);
       if (webrtcOfferKey) channelWebrtcOffers.delete(webrtcOfferKey);
     }
     throw error;
@@ -214,7 +182,6 @@ async function publishPrivateEnvelopeUnsafe(input: {
   if (deps.session().vaultStatus !== "unlocked"
     || deps.session().sessionEpoch !== ownerSessionEpoch
     || deps.session().activePublicKeyHex !== input.runtime.ownerPublicKeyHex) {
-    channelPendingPings.delete(messageId);
     if (webrtcOfferKey) channelWebrtcOffers.delete(webrtcOfferKey);
     throw new Error("Channel owner changed while publishing");
   }

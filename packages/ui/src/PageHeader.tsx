@@ -9,7 +9,7 @@
 // —— `.app-shell__paged` 是 AppShell 在 renderNormalShell 里挂在
 // `<Breadcrumbs /> + <RouteRenderer />` 上的 wrapper，正是「面包屑
 // 下方业务页」容器。这样：
-//   - 业务页（assets / contacts / p2pkh / settings 等）在窄屏下自动
+//   - 业务页（assets / p2pkh / settings 等）在窄屏下自动
 //     获得「左上文案 + 右下操作」的斜对角结构。
 //   - OnboardingShell 内的表单 / 向导 step（LockedShell /
 //     FirstTimeImportWizard）不受影响，因为它们在 `.onboarding-shell__main`

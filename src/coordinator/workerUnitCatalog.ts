@@ -109,21 +109,6 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
     finalIoAuditEntries: [],
   },
   {
-    unitId: "contacts.coordinator-worker",
-    taskIds: ["contacts.presence-probe"],
-    serviceIds: ["contacts.service"],
-    storagePurposes: ["address-book"],
-    finalIoAuditEntries: [{ taskId: "contacts.presence-probe", operation: "contacts.presence-probe" }],
-  },
-  {
-    unitId: "forum.coordinator-worker",
-    // Owner-session Forum owns config/cache/tasks and publishing arbitration.
-    taskIds: [],
-    serviceIds: ["forum.network", "forum.service"],
-    storagePurposes: [""],
-    finalIoAuditEntries: [],
-  },
-  {
     unitId: "p2pkh.coordinator-worker",
     taskIds: ["p2pkh.transactions-sync", "p2pkh.utxo-snapshot"],
     serviceIds: ["p2pkh.provider-registry", "p2pkh.asset-service"],

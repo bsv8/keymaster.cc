@@ -1,24 +1,13 @@
 import type { CoordinatorChannelOperation, SessionEpoch } from "@keymaster/contracts";
 import { inboxChannel, parsePublicKey, parseMessageID } from "bsv8-channel-protocol";
 import { APP_MESSAGE_PROTOCOL, newAck, newDeliver } from "bsv8-channel-protocol/app-message";
-import { PING_PROTOCOL, parseBodyValue as parsePingBodyValue } from "bsv8-channel-protocol/ping";
 import { WEBRTC_SIGNAL_PROTOCOL, parseBodyValue as parseWebrtcBodyValue } from "bsv8-channel-protocol/webrtc-signal";
-export type ChannelPrivateProtocol = typeof APP_MESSAGE_PROTOCOL | typeof WEBRTC_SIGNAL_PROTOCOL | typeof PING_PROTOCOL;
+export type ChannelPrivateProtocol = typeof APP_MESSAGE_PROTOCOL | typeof WEBRTC_SIGNAL_PROTOCOL;
 export type ChannelCaller = Extract<CoordinatorChannelOperation, { type: "subscription-set" }>['caller'];
 export type ChannelOperationCaller = Extract<CoordinatorChannelOperation, { type: "private-publish" }>['caller'];
-const CHANNEL_PROTOCOLS = new Set([APP_MESSAGE_PROTOCOL, WEBRTC_SIGNAL_PROTOCOL, PING_PROTOCOL]);
-const TRUSTED_CHANNEL_PLUGIN_IDS = new Set(["bsv-price", "message", "webrtc", "msfile"]);
-const TRUSTED_CHANNEL_SYSTEM_IDS = new Set(["owner-inbox", "contacts-presence"]);
-export function isPingRequestBody(
-  body: import("bsv8-channel-protocol/inbox").UnsignedPrivateMessage["body"]
-): body is import("bsv8-channel-protocol/ping").PingBody {
-  return body !== null
-    && typeof body === "object"
-    && !Array.isArray(body)
-    && "type" in body
-    && body.type === "ping";
-}
-
+const CHANNEL_PROTOCOLS = new Set([APP_MESSAGE_PROTOCOL, WEBRTC_SIGNAL_PROTOCOL]);
+const TRUSTED_CHANNEL_PLUGIN_IDS = new Set(["bsv-price", "message", "msfile"]);
+const TRUSTED_CHANNEL_SYSTEM_IDS = new Set(["owner-inbox"]);
 export function privateProtocol(protocol: string): ChannelPrivateProtocol {
   if (CHANNEL_PROTOCOLS.has(protocol as ChannelPrivateProtocol)) return protocol as ChannelPrivateProtocol;
   throw new Error("Unsupported private Channel protocol");
@@ -28,13 +17,10 @@ export function validatePrivateProtocolCaller(caller: ChannelOperationCaller, pr
   if (caller.kind === "connect") throw new Error("Connect caller cannot publish private inbox messages");
   if (caller.kind === "plugin") {
     if (caller.pluginId === "message" && protocol === APP_MESSAGE_PROTOCOL) return;
-    // WebRTC 通话控制仍走 app-message；BitFS 文件需求走公开 Hash channel；
-    // SDP/ICE 统一走 WEBRTC_SIGNAL_PROTOCOL。
-    if (caller.pluginId === "webrtc" && (protocol === WEBRTC_SIGNAL_PROTOCOL || protocol === APP_MESSAGE_PROTOCOL)) return;
+    // BitFS 文件需求走公开 Hash channel；SDP/ICE 统一走 WEBRTC_SIGNAL_PROTOCOL。
     if (caller.pluginId === "msfile" && protocol === WEBRTC_SIGNAL_PROTOCOL) return;
     throw new Error("Channel plugin is not allowed to publish this private protocol");
   }
-  if (caller.systemId === "contacts-presence" && protocol === PING_PROTOCOL) return;
   throw new Error("Channel system is not allowed to publish this private protocol");
 }
 
@@ -45,9 +31,6 @@ export function privateHistoryContent(opened: import("bsv8-channel-protocol/inbo
     return body.type === "deliver"
       ? body.content as import("@keymaster/contracts").JSONValue
       : { type: "ack", acknowledged_message_id: body.acknowledged_message_id };
-  }
-  if (opened.protocol === PING_PROTOCOL) {
-    return parsePingBodyValue(opened.body as unknown as import("bsv8-channel-protocol").JSONValue) as unknown as import("@keymaster/contracts").JSONValue;
   }
   if (opened.protocol === WEBRTC_SIGNAL_PROTOCOL) {
     return parseWebrtcBodyValue(opened.body as unknown as import("bsv8-channel-protocol").JSONValue) as unknown as import("@keymaster/contracts").JSONValue;
@@ -66,7 +49,6 @@ export function privateBodyForPublish(protocol: string, content: import("@keymas
     return newDeliver(content as import("bsv8-channel-protocol").JSONValue);
   }
   if (supportedProtocol === WEBRTC_SIGNAL_PROTOCOL) return parseWebrtcBodyValue(content as import("bsv8-channel-protocol").JSONValue);
-  if (supportedProtocol === PING_PROTOCOL) return parsePingBodyValue(content as import("bsv8-channel-protocol").JSONValue);
   throw new Error("Unsupported private Channel protocol");
 }
 
@@ -104,13 +86,12 @@ function isActiveOwnerInboxChannel(channel: string): boolean {
 
 function isAllowedOwnerInboxSubscription(caller: ChannelCaller, channel: string): boolean {
   if (!isActiveOwnerInboxChannel(channel)) return false;
-  // owner-inbox / contacts-presence 是 Coordinator 内部系统路由；message /
-  // webrtc 是 Host 绑定身份的内部插件路由。Connect 和其他插件不能订阅
+  // owner-inbox 是 Coordinator 内部系统路由；message / msfile 是 Host 绑定身份的内部插件路由。Connect 和其他插件不能订阅
   // 任意 bsv8.inbox.*，避免把私有收件箱暴露成公共事件流。
   if (caller.kind === "system") {
-    return caller.systemId === "owner-inbox" || caller.systemId === "contacts-presence";
+    return caller.systemId === "owner-inbox";
   }
-  return caller.kind === "plugin" && (caller.pluginId === "message" || caller.pluginId === "webrtc" || caller.pluginId === "msfile");
+  return caller.kind === "plugin" && (caller.pluginId === "message" || caller.pluginId === "msfile");
 }
 
   return { callerId: channelCallerId, allowsOwnerInboxSubscription: isAllowedOwnerInboxSubscription };

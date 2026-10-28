@@ -12,17 +12,13 @@ import type { BorrowedModuleFileStore } from "@keymaster/contracts";
 import {
   P2PKH_SETTING_FILE_NAME,
   parseP2pkhHistoryFile,
-  parseP2pkhProtocolFundingFile,
-  p2pkhProtocolFundingPath,
   parseP2pkhSettingFile,
   p2pkhHistoryPath,
   resolveP2pkhSetting,
   serializeP2pkhHistoryFile,
-  serializeP2pkhProtocolFundingFile,
   serializeP2pkhSettingFile,
   type P2pkhFileNetwork,
   type P2pkhHistoryEntryV1,
-  type P2pkhProtocolFundingEntryV1,
   type P2pkhResolvedSetting,
 } from "./p2pkhFileFormats.js";
 
@@ -66,84 +62,12 @@ export function createP2pkhFileRepository(files: BorrowedModuleFileStore) {
     ] });
   }
 
-  /**
-   * 读一条专用资金记录；不存在返回 undefined，**损坏也返回 undefined**。
-   *
-   * 调用方必须区分「没有记录」与「记录读不出来」：前者可以重新准备，后者说明磁盘上
-   * 有证据但不可用，直接重新拆钱会与原提交冲突。
-   */
-  async function readProtocolFunding(fundingId: string): Promise<P2pkhProtocolFundingEntryV1 | undefined> {
-    const object = await files.get(p2pkhProtocolFundingPath(fundingId));
-    if (!object) return undefined;
-    return parseP2pkhProtocolFundingFile(object.bytes)?.record;
-  }
-
-  /**
-   * 读**全部**专用资金记录，用于启动时恢复保护登记。
-   *
-   * 返回 `{ records, unreadable }`：`unreadable` 非空说明有文件损坏或 id 不安全，
-   * 上层据此拒绝准备新资金，而不是当作「没有历史资金」。
-   */
-  async function listProtocolFunding(): Promise<{
-    records: readonly P2pkhProtocolFundingEntryV1[];
-    readonly unreadable: readonly string[];
-  }> {
-    const records: P2pkhProtocolFundingEntryV1[] = [];
-    const unreadable: string[] = [];
-    let cursor: string | undefined;
-    const seenCursors = new Set<string>();
-    do {
-      const page = await files.list({ prefix: "funding/", ...(cursor ? { cursor } : {}) });
-      for (const file of page.files) {
-        const fundingId = /^funding\/(.+)\.json$/u.exec(file.path)?.[1];
-        if (fundingId === undefined) continue;
-        const parsed = await readProtocolFunding(fundingId);
-        if (parsed === undefined) {
-          // 记录存在但读不出来：必须被上层看见，不能静默当成没有记录。
-          unreadable.push(fundingId);
-          continue;
-        }
-        records.push(parsed);
-      }
-      cursor = page.nextCursor;
-      if (cursor && seenCursors.has(cursor)) throw new Error("Protocol funding pagination did not advance");
-      if (cursor) seenCursors.add(cursor);
-    } while (cursor);
-    return { records, unreadable };
-  }
-
-  /**
-   * 写一条专用资金记录。
-   *
-   * 每条记录一个文件，因此两个标签页处理不同任务时写的是不同文件：一个页面的
-   * 读-改-写不会覆盖另一个页面的写前日志。需要「仅当不存在时创建」时传
-   * `ifNoneMatch`，用于创建竞态。
-   */
-  async function writeProtocolFunding(
-    entry: P2pkhProtocolFundingEntryV1,
-    options?: { ifAbsent?: true },
-  ): Promise<void> {
-    await files.put(
-      p2pkhProtocolFundingPath(entry.fundingId),
-      serializeP2pkhProtocolFundingFile(entry),
-      { contentType: "application/json", ...(options?.ifAbsent === true ? { ifNoneMatch: true as const } : {}) },
-    );
-  }
-
-  async function deleteProtocolFunding(fundingId: string): Promise<void> {
-    await files.delete(p2pkhProtocolFundingPath(fundingId));
-  }
-
   return {
     getStore(): BorrowedModuleFileStore { return files; },
     readSetting,
     writeSetting,
     readHistory,
     writeHistory,
-    readProtocolFunding,
-    listProtocolFunding,
-    writeProtocolFunding,
-    deleteProtocolFunding,
   };
 }
 

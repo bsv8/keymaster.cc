@@ -193,7 +193,4 @@ export { createBitfsWorkerRuntime } from "./bitfs/workerRuntime.js";
 
 export { createPublicMsFileService } from "./publicMsFileService.js";
 
-export { createMsFileContentService } from "./msfileContentService.js";
-export { createMsFileRemoteContentFetcher } from "./msfileRemoteContentFetcher.js";
-export { createMsFileSellerPublicationEvidence } from "./msfilePublicationEvidence.js";
 export { createMsFileWorkerBitfsService } from "./msfileWorkerBitfsService.js";

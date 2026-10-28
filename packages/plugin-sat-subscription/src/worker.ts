@@ -1,8 +1,8 @@
 import { WINDOW_P2P_WORKER_BRIDGE_CAPABILITY, type WindowP2pExecutorBridge } from "@keymaster/contracts/window-p2p";
 import {
   defineBuiltinWorkerPlugin, SAT_SUBSCRIPTION_SERVICE_CAPABILITY, SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY,
-  CONTACTS_PRESENCE_CHANNEL_CAPABILITY, P2PKH_WORKER_TRANSFER_CAPABILITY, STORAGE_FILE_CLIENTS_CAPABILITY,
-  type BorrowedModuleFileStore, type P2pkhWorkerTransfer, type ContactsPresenceChannel,
+  P2PKH_WORKER_TRANSFER_CAPABILITY, STORAGE_FILE_CLIENTS_CAPABILITY,
+  type BorrowedModuleFileStore, type P2pkhWorkerTransfer,
   type SatSubscriptionAdminService, type SatSubscriptionSpiService,
 } from "@keymaster/contracts";
 
@@ -13,9 +13,8 @@ export function createSatSubscriptionWorkerPlugin(ports: {
     admin: SatSubscriptionAdminService; spi: SatSubscriptionSpiService;
     revoke(): void; dispose(): Promise<void>;
   }>;
-  presenceChannel(assertActive: () => void): ContactsPresenceChannel;
 }) {
-  return defineBuiltinWorkerPlugin("sat-subscription", [SAT_SUBSCRIPTION_SERVICE_CAPABILITY, SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY, CONTACTS_PRESENCE_CHANNEL_CAPABILITY], async context => {
+  return defineBuiltinWorkerPlugin("sat-subscription", [SAT_SUBSCRIPTION_SERVICE_CAPABILITY, SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY], async context => {
     const offBridge = ports.bindBridge(() => { context.scope.assertActive(); return context.optionalCapability(WINDOW_P2P_WORKER_BRIDGE_CAPABILITY)?.bind(context.consumer, context.scope); });
     context.scope.onRevoke(offBridge);
     const unbind = ports.bindP2pkh(async () => {
@@ -31,7 +30,6 @@ export function createSatSubscriptionWorkerPlugin(ports: {
     context.scope.assertActive();
     context.provide(SAT_SUBSCRIPTION_SERVICE_CAPABILITY, runtime.admin);
     context.provide(SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY, runtime.spi);
-    context.provide(CONTACTS_PRESENCE_CHANNEL_CAPABILITY, ports.presenceChannel(() => context.scope.assertActive()));
   });
 }
 

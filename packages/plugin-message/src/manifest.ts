@@ -3,7 +3,8 @@ import { URI_ACTION_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import { STORAGE_FILE_CLIENTS_CAPABILITY } from "@keymaster/contracts";
 import { createElement } from "react";
 import { bindMessageUi } from "./MessageResourceContext.js";
-import { subscribeOptionalMessageService } from "./subscribeOptionalMessageService.js";
+import { MessagePage } from "./MessagePage.js";
+import { MessageDetailPage } from "./MessageDetailPage.js";
 import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 // packages/plugin-message/src/manifest.ts
 // 消息业务插件 manifest（施工单 2026-09-02/003）。
@@ -23,11 +24,6 @@ import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 //     **不**注册传输系统管理页或远端消息管理页。
 
 import type {
-  Contact,
-  ContactPresenceMap,
-  WebrtcHistoryItem,
-  WebrtcSessionSnapshot,
-  ContactsService,
   I18nPluginResources,
   MessageRecord,
   PluginContext,
@@ -38,34 +34,24 @@ import {
   BREADCRUMB_REGISTRY_CAPABILITY,
   BUSINESS_REGISTRY_CAPABILITY,
   CHANNEL_RUNTIME_CAPABILITY,
-  CONTACTS_SERVICE_CAPABILITY,
-  CONTACTS_EDITOR_CAPABILITY,
-  CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY,
   VAULT_WALLET_STATE_CAPABILITY,
   MESSAGE_SERVICE_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
   PAGE_UI_REGISTRY_CAPABILITY,
   OWNED_RESOURCE_ACCESS_CAPABILITY,
-  CONTACTS_PRESENCE_READER_CAPABILITY,
-  WEBRTC_SERVICE_CAPABILITY,
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
-import { router } from "@keymaster/runtime";
-import { MessagePage } from "./MessagePage.js";
-import { MessageDetailPage } from "./MessageDetailPage.js";
 import { createMessageService } from "./messageService.js";
 import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
 
 /** 消息会话聚合结果（Resource Store 数据模型） */
 export interface MessageConversationsData {
   messages: MessageRecord[];
-  contactsByPeer: Record<string, Contact>;
 }
 
 /** 消息详情页数据（Resource Store 数据模型） */
 export interface MessageDetailData {
   messages: MessageRecord[];
-  contact: Contact | null;
 }
 
 function messagesEqual(previous: readonly MessageRecord[], next: readonly MessageRecord[]): boolean {
@@ -80,24 +66,6 @@ function messagesEqual(previous: readonly MessageRecord[], next: readonly Messag
       && message.insertedAtMs === candidate.insertedAtMs;
   });
 }
-
-function contactsEqual(previous: Contact | null | undefined, next: Contact | null | undefined): boolean {
-  if (!previous || !next) return previous === next;
-  return previous.publicKeyHex === next.publicKeyHex
-    && previous.name === next.name
-    && previous.updatedAt === next.updatedAt;
-}
-
-function contactsByPeerEqual(
-  previous: Record<string, Contact>,
-  next: Record<string, Contact>
-): boolean {
-  const previousKeys = Object.keys(previous);
-  const nextKeys = Object.keys(next);
-  if (previousKeys.length !== nextKeys.length) return false;
-  return previousKeys.every((key) => contactsEqual(previous[key], next[key]));
-}
-
 /** 插件 id（与 keymaster.message 不一致；plugin manifest 仍唯一）。 */
 export const MESSAGE_PLUGIN_ID = "message";
 
@@ -105,7 +73,7 @@ const messageResources: I18nPluginResources = {
   namespace: "message",
   resources: {
     en: {
-      "message.action.toContact": "Message",
+      "message.action.openConversation": "Open conversation",
       "message.menu": "Messages",
       "message.breadcrumb": "Messages",
       "message.breadcrumb.detail": "Detail",
@@ -123,60 +91,12 @@ const messageResources: I18nPluginResources = {
       "message.page.newChat.cancel": "Cancel",
       "message.page.newChat.error.invalid": "Invalid publicKeyHex. Expected 66 hex characters.",
       "message.page.conversation.count": "{{count}} messages",
-      "message.page.conversation.addContact": "Add contact",
-      "message.page.conversation.editContact": "Edit contact",
       "message.page.detail.title": "Conversation",
       "message.page.detail.body": "Body",
       "message.page.detail.empty": "No messages in this conversation.",
       "message.page.detail.empty.desc": "Send a message below to start the thread.",
       "message.page.detail.noConversation": "Conversation not found.",
-      "message.page.detail.call.title.video": "Video call",
-      "message.page.detail.call.title.audio": "Audio call",
-      "message.page.detail.call.peer": "Peer",
-      "message.page.detail.call.local": "Local",
-      "message.page.detail.call.remote": "Remote",
-      "message.page.detail.call.direction.incoming": "Incoming",
-      "message.page.detail.call.direction.outgoing": "Outgoing",
-      "message.page.detail.call.phase": "Phase",
-      "message.page.detail.call.mode": "Mode",
-      "message.page.detail.call.mode.audio": "Audio",
-      "message.page.detail.call.mode.video": "Video",
-      "message.page.detail.call.swap": "Swap",
-      "message.page.detail.call.fullscreen": "Fullscreen",
-      "message.page.detail.call.exitFullscreen": "Exit fullscreen",
-      "message.page.detail.call.accept": "Accept",
-      "message.page.detail.call.reject": "Decline",
-      "message.page.detail.call.hangup": "Hang up",
-      "message.page.detail.call.waitingRemote": "Waiting for remote video",
-      "message.page.detail.call.waitingLocal": "Waiting for local video",
-      "message.page.detail.call.phase.idle": "idle",
-      "message.page.detail.call.phase.inviting": "calling",
-      "message.page.detail.call.phase.incoming": "incoming",
-      "message.page.detail.call.phase.connecting": "connecting",
-      "message.page.detail.call.phase.connected": "connected",
-      "message.page.detail.call.phase.ended": "ended",
       "message.page.detail.from.me": "Me",
-      "message.page.detail.timeline.call.audio": "Audio",
-      "message.page.detail.timeline.call.video": "Video",
-      "message.page.detail.timeline.call.outgoing": "Outgoing",
-      "message.page.detail.timeline.call.incoming": "Incoming",
-      "message.page.detail.timeline.call.label": "call",
-      "message.page.detail.timeline.call.status.completed": "completed",
-      "message.page.detail.timeline.call.status.missed": "missed",
-      "message.page.detail.timeline.call.status.rejected": "rejected",
-      "message.page.detail.timeline.call.status.failed": "failed",
-      "message.page.detail.timeline.call.status.unknown": "unknown status",
-      "message.page.detail.timeline.attachment.image": "Image",
-      "message.page.detail.timeline.attachment.file": "File",
-      "message.page.detail.timeline.previewUnavailable": "Preview unavailable",
-      "message.page.detail.timeline.download": "Download",
-      "message.page.detail.video": "Video chat",
-      "message.page.detail.audio": "Audio chat",
-      "message.page.detail.image": "Send image",
-      "message.page.detail.file": "Send file",
-      "message.page.detail.online": "Online",
-      "message.page.detail.offline": "Offline",
-      "message.page.detail.unknown": "Unknown",
       "message.page.detail.loadMore": "Load 20 older messages",
       "message.page.noClient": "Channel messaging service is not available.",
       "message.page.back": "Back",
@@ -185,8 +105,6 @@ const messageResources: I18nPluginResources = {
       "message.page.send.empty": "Body is empty",
       "message.page.detail.error.service_not_ready": "Messaging service is not ready. Please try again.",
       "message.page.detail.error.invalid_target": "Target publicKeyHex is invalid.",
-      "message.page.detail.error.target_offline": "Peer is offline (only online contacts can use WebRTC).",
-      "message.page.detail.error.target_unknown": "Peer presence unknown (only online contacts can use WebRTC).",
       "message.page.detail.error.send_timeout": "Sending timed out. Check the connection and try again.",
       "message.page.detail.error.signature_failed": "Message signing failed. Reconnect the active key and try again.",
       "message.page.detail.error.duplicate_message": "This message conflicts with an earlier send. Please send it again.",
@@ -194,23 +112,11 @@ const messageResources: I18nPluginResources = {
       "message.page.detail.error.server_unavailable": "The messaging server is temporarily unavailable.",
       "message.page.detail.error.send_rejected": "The messaging server rejected this message.",
       "message.page.detail.error.send_unknown": "Message sending failed. Check the Channel service and try again.",
-      "message.page.detail.error.device_unavailable": "Local device is unavailable.",
-      "message.page.detail.error.send_invite_failed": "Failed to send call invite.",
-      "message.page.detail.error.create_offer_failed": "Failed to create offer.",
-      "message.page.detail.error.invalid_state": "Invalid session state.",
-      "message.page.detail.error.transfer_too_large": "Attachment is larger than 16 MiB.",
-      "message.page.detail.error.busy_local": "There is already an active session.",
-      "message.page.detail.error.transfer_protocol_unavailable": "Attachment transfer is unavailable.",
-      "message.page.detail.error.transfer_timeout": "Attachment transfer timed out.",
-      "message.page.detail.error.transfer_connection_failed": "Attachment transfer connection failed.",
-      "message.page.detail.error.transfer_invite_failed": "Failed to start attachment transfer.",
-      "message.page.detail.error.local_blob_unavailable": "Attachment blob is unavailable.",
-      "message.page.detail.error.transfer_reject": "Attachment transfer was rejected.",
       "message.page.detail.error.unknown": "Operation failed.",
       "message.page.detail.rawMissing": "Original message data is missing."
     },
     "zh-CN": {
-      "message.action.toContact": "发消息",
+      "message.action.openConversation": "打开会话",
       "message.menu": "消息",
       "message.breadcrumb": "消息",
       "message.breadcrumb.detail": "详情",
@@ -228,60 +134,12 @@ const messageResources: I18nPluginResources = {
       "message.page.newChat.cancel": "取消",
       "message.page.newChat.error.invalid": "publicKeyHex 非法，必须是 66 位 hex。",
       "message.page.conversation.count": "{{count}} 条消息",
-      "message.page.conversation.addContact": "新增联系人",
-      "message.page.conversation.editContact": "编辑联系人",
       "message.page.detail.title": "会话",
       "message.page.detail.body": "正文",
       "message.page.detail.empty": "当前会话暂无消息。",
       "message.page.detail.empty.desc": "在下方发送一条消息即可开始线程。",
       "message.page.detail.noConversation": "会话未找到。",
-      "message.page.detail.call.title.video": "视频通话",
-      "message.page.detail.call.title.audio": "音频通话",
-      "message.page.detail.call.peer": "对端",
-      "message.page.detail.call.local": "本地",
-      "message.page.detail.call.remote": "远端",
-      "message.page.detail.call.direction.incoming": "来电",
-      "message.page.detail.call.direction.outgoing": "呼出",
-      "message.page.detail.call.phase": "阶段",
-      "message.page.detail.call.mode": "模式",
-      "message.page.detail.call.mode.audio": "音频",
-      "message.page.detail.call.mode.video": "视频",
-      "message.page.detail.call.swap": "交换视频",
-      "message.page.detail.call.fullscreen": "全屏",
-      "message.page.detail.call.exitFullscreen": "退出全屏",
-      "message.page.detail.call.accept": "接听",
-      "message.page.detail.call.reject": "拒接",
-      "message.page.detail.call.hangup": "挂断",
-      "message.page.detail.call.waitingRemote": "等待对方画面",
-      "message.page.detail.call.waitingLocal": "等待本地画面",
-      "message.page.detail.call.phase.idle": "空闲",
-      "message.page.detail.call.phase.inviting": "呼叫中",
-      "message.page.detail.call.phase.incoming": "来电",
-      "message.page.detail.call.phase.connecting": "连接中",
-      "message.page.detail.call.phase.connected": "已接通",
-      "message.page.detail.call.phase.ended": "已结束",
       "message.page.detail.from.me": "我",
-      "message.page.detail.timeline.call.audio": "音频",
-      "message.page.detail.timeline.call.video": "视频",
-      "message.page.detail.timeline.call.outgoing": "呼出",
-      "message.page.detail.timeline.call.incoming": "来电",
-      "message.page.detail.timeline.call.label": "通话",
-      "message.page.detail.timeline.call.status.completed": "已完成",
-      "message.page.detail.timeline.call.status.missed": "未接",
-      "message.page.detail.timeline.call.status.rejected": "已拒绝",
-      "message.page.detail.timeline.call.status.failed": "失败",
-      "message.page.detail.timeline.call.status.unknown": "状态未知",
-      "message.page.detail.timeline.attachment.image": "图片",
-      "message.page.detail.timeline.attachment.file": "文件",
-      "message.page.detail.timeline.previewUnavailable": "无法预览",
-      "message.page.detail.timeline.download": "下载",
-      "message.page.detail.video": "视频联系",
-      "message.page.detail.audio": "音频联系",
-      "message.page.detail.image": "发送图片",
-      "message.page.detail.file": "发送文件",
-      "message.page.detail.online": "在线",
-      "message.page.detail.offline": "失联",
-      "message.page.detail.unknown": "状态未知",
       "message.page.detail.loadMore": "再加载 20 条更早消息",
       "message.page.noClient": "Channel 消息服务不可用。",
       "message.page.back": "返回",
@@ -290,8 +148,6 @@ const messageResources: I18nPluginResources = {
       "message.page.send.empty": "正文不能为空",
       "message.page.detail.error.service_not_ready": "消息服务未就绪，请稍后重试。",
       "message.page.detail.error.invalid_target": "目标 publicKeyHex 非法。",
-      "message.page.detail.error.target_offline": "对方离线（仅在线联系人可使用 WebRTC）。",
-      "message.page.detail.error.target_unknown": "对方在线状态未知（仅在线联系人可使用 WebRTC）。",
       "message.page.detail.error.send_timeout": "发送超时，请检查网络后重试。",
       "message.page.detail.error.signature_failed": "消息签名失败，请重新连接当前密钥后重试。",
       "message.page.detail.error.duplicate_message": "本条消息与先前发送记录冲突，请重新发送。",
@@ -299,18 +155,6 @@ const messageResources: I18nPluginResources = {
       "message.page.detail.error.server_unavailable": "消息服务器暂时不可用，请稍后重试。",
       "message.page.detail.error.send_rejected": "消息服务器拒绝了本条消息。",
       "message.page.detail.error.send_unknown": "消息发送失败，请检查 Channel 服务后重试。",
-      "message.page.detail.error.device_unavailable": "本地设备不可用。",
-      "message.page.detail.error.send_invite_failed": "发送通话邀请失败。",
-      "message.page.detail.error.create_offer_failed": "创建 offer 失败。",
-      "message.page.detail.error.invalid_state": "会话状态非法。",
-      "message.page.detail.error.transfer_too_large": "附件超过 16 MiB。",
-      "message.page.detail.error.busy_local": "当前已有活动会话。",
-      "message.page.detail.error.transfer_protocol_unavailable": "附件传输不可用。",
-      "message.page.detail.error.transfer_timeout": "附件传输超时。",
-      "message.page.detail.error.transfer_connection_failed": "附件传输连接失败。",
-      "message.page.detail.error.transfer_invite_failed": "启动附件传输失败。",
-      "message.page.detail.error.local_blob_unavailable": "附件内容不可用。",
-      "message.page.detail.error.transfer_reject": "附件传输已被拒绝。",
       "message.page.detail.error.unknown": "操作失败。",
       "message.page.detail.rawMissing": "原始消息数据缺失。"
     }
@@ -334,32 +178,18 @@ const messagePlatformPluginDefinition = {
     dependencies: defineRuntimeUnitDependencies([
       { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "声明存储客户端及用途授权" },
       { capability: OWNED_RESOURCE_ACCESS_CAPABILITY, reason: "UI 读取本实例消息及服务投影资源" },
-      { capability: CONTACTS_PRESENCE_READER_CAPABILITY, optional: true, reason: "通过只读 Worker 在线投影控制拨号门禁" },
       { capability: RESOURCE_REGISTRY_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
       { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
       { capability: CHANNEL_RUNTIME_CAPABILITY, reason: "通过 Coordinator 使用 Channel" },
       { capability: VAULT_WALLET_STATE_CAPABILITY, reason: "读取 active key 并跟随会话聚合刷新" },
-      { capability: CONTACTS_SERVICE_CAPABILITY, optional: true, reason: "会话资源加载与订阅联系人名称" },
-      { capability: CONTACTS_EDITOR_CAPABILITY, optional: true, reason: "打开 Contacts 自有编辑器" },
-      { capability: WEBRTC_SERVICE_CAPABILITY, optional: true, reason: "读取 WebRTC 历史并发起音视频 / 传输动作" },
       { capability: PAGE_UI_REGISTRY_CAPABILITY, reason: "注册 /message 与 /messages 详情路由" },
       { capability: BUSINESS_REGISTRY_CAPABILITY, reason: "接入首页业务导航" },
       { capability: BREADCRUMB_REGISTRY_CAPABILITY, reason: "为 /message 与 /messages 详情路由提供面包屑" },
       { capability: URI_ACTION_REGISTRY_CAPABILITY, optional: true, reason: "注册公钥 URI 消息入口" },
-      { capability: CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY, optional: true, reason: "注册联系人发消息操作" },
     ]),
   }],
   i18n: messageResources,
   setup(ctx) {
-    const offContactAction = subscribeOptionalMessageService(ctx, CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY, (contactActions) => {
-      contactActions.register({
-        id: "message.to-contact", label: { key: "message.action.toContact", fallback: "发消息" },
-        icon: "MessageCircle", order: 20,
-        run: ({ publicKeyHex }) => router.push(`/message/${encodeURIComponent(publicKeyHex)}`),
-      });
-      return () => { try { contactActions.unregister("message.to-contact"); } catch { /* The provider may already have revoked its registry. */ } };
-    }, () => {});
-    ctx.scope.onRevoke(offContactAction);
     const channel = ctx.capability(CHANNEL_RUNTIME_CAPABILITY).forPlugin(MESSAGE_PLUGIN_ID);
     const walletState = ctx.capability(VAULT_WALLET_STATE_CAPABILITY).bind(ctx.consumer, ctx.scope);
     const service = createMessageService({ channel, walletState, files: ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, "") });
@@ -369,111 +199,39 @@ const messagePlatformPluginDefinition = {
     // 注册资源定义（硬切换 003）
     const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
 
-    // message.conversations：消息列表 + 联系人（MessagePage 用）
+    // message.conversations：消息列表（MessagePage 用，按对端公钥展示）
     resources.register<MessageConversationsData, readonly string[]>({
       id: "message.conversations",
       scope: "active-key",
       key: (_args, context) => ["message.conversations", context.activePublicKeyHex ?? "none"],
-      load: async (_args, context, _signal) => {
-        // 首页只需要每个会话最新一条；正文按需从 raw 解码，避免读取全量历史。
+      load: async () => {
         const messages = await service.listConversationMessages();
-        // contacts 是可选插件，可能晚于 message 完成 setup；不能在 setup
-        // 阶段把缺失状态永久缓存为 null，必须在每次资源加载时动态解析。
-        const contacts = context.optionalCapability(CONTACTS_SERVICE_CAPABILITY);
-        // 从消息中提取 peer publicKeyHex 列表
-        const ownerHex = walletState.snapshot().activePublicKeyHex?.trim().toLowerCase();
-        const peerSet = new Set<string>();
-        for (const msg of messages) {
-          const senderHex = msg.senderPublicKeyHex.trim().toLowerCase();
-          const peer = senderHex === ownerHex
-            ? msg.recipientPublicKeyHex
-            : msg.senderPublicKeyHex;
-          const normalizedPeer = peer?.trim().toLowerCase();
-          if (normalizedPeer) peerSet.add(normalizedPeer);
-        }
-        const peerList = Array.from(peerSet);
-        // 查找联系人
-        let contactsByPeer: Record<string, Contact> = {};
-        if (contacts && peerList.length > 0) {
-          try {
-            const found = await contacts.findByPublicKeyHexes(peerList);
-            for (const c of found) {
-              contactsByPeer[c.publicKeyHex.trim().toLowerCase()] = c;
-            }
-          } catch {
-            // 联系人查找失败不影响消息列表
-          }
-        }
-        return { messages, contactsByPeer };
+        return { messages };
       },
-      subscribe: (_args, context, invalidate) => {
-        const offMessages = service.subscribeChanges(invalidate);
-        const offContacts = subscribeOptionalMessageService(ctx, CONTACTS_SERVICE_CAPABILITY, (contacts, changed) => contacts.onChange(changed), invalidate);
-        return () => { offMessages(); offContacts(); };
-      },
+      subscribe: (_args, _context, invalidate) => service.subscribeChanges(invalidate),
       equals: (prev, next) => {
         if (!prev || !next) return prev === next;
-        return messagesEqual(prev.messages, next.messages)
-          && contactsByPeerEqual(prev.contactsByPeer, next.contactsByPeer);
+        return messagesEqual(prev.messages, next.messages);
       },
       invalidation: "microtask"
     });
 
-    // message.detail：消息详情页数据（消息 + 联系人）
+    // message.detail：消息详情页数据
     resources.register<MessageDetailData, readonly string[]>({
       id: "message.detail",
       scope: "active-key",
       key: (args, context) => ["message.detail", context.activePublicKeyHex ?? "none", args[0] ?? "none"],
-      load: async (args, context, _signal) => {
+      load: async (args) => {
         const peerHex = args[0];
         const messages = await service.listMessages({ peerPublicKeyHex: peerHex, limit: 10_000 });
-        const contacts = context.optionalCapability(CONTACTS_SERVICE_CAPABILITY);
-        let contact: Contact | null = null;
-        if (contacts && peerHex) {
-          try {
-            contact = await contacts.findByPublicKeyHex(peerHex) ?? null;
-          } catch {
-            // 联系人查找失败不影响消息列表
-          }
-        }
-        return { messages, contact };
+        return { messages };
       },
-      subscribe: (args, context, invalidate) => {
-        const offMessages = service.subscribeChanges(invalidate);
-        const offContacts = subscribeOptionalMessageService(ctx, CONTACTS_SERVICE_CAPABILITY, (contacts, changed) => contacts.onChange(changed), invalidate);
-        return () => { offMessages(); offContacts(); };
-      },
+      subscribe: (_args, _context, invalidate) => service.subscribeChanges(invalidate),
       equals: (prev, next) => {
         if (!prev || !next) return prev === next;
-        return messagesEqual(prev.messages, next.messages)
-          && contactsEqual(prev.contact, next.contact);
+        return messagesEqual(prev.messages, next.messages);
       },
       invalidation: "microtask"
-    });
-
-    resources.register<ContactPresenceMap, readonly string[]>({
-      id: "message.contacts-presence", scope: "active-key",
-      key: (_args, context) => ["message.contacts-presence", context.activePublicKeyHex ?? "none"],
-      load: async () => ctx.optionalCapability(CONTACTS_PRESENCE_READER_CAPABILITY)?.snapshot() ?? {},
-      subscribe: (_args, _context, invalidate) => subscribeOptionalMessageService(ctx, CONTACTS_PRESENCE_READER_CAPABILITY,
-        (reader, changed) => reader.subscribe(changed), invalidate),
-      invalidation: "immediate",
-    });
-    resources.register<WebrtcSessionSnapshot | null, readonly string[]>({
-      id: "message.webrtc-session", scope: "active-key",
-      key: (_args, context) => ["message.webrtc-session", context.activePublicKeyHex ?? "none"],
-      load: async () => ctx.optionalCapability(WEBRTC_SERVICE_CAPABILITY)?.snapshot() ?? null,
-      subscribe: (_args, _context, invalidate) => subscribeOptionalMessageService(ctx, WEBRTC_SERVICE_CAPABILITY,
-        (webrtc, changed) => webrtc.subscribe(changed), invalidate),
-      equals: (a, b) => JSON.stringify(a) === JSON.stringify(b), invalidation: "immediate",
-    });
-    resources.register<WebrtcHistoryItem[], readonly string[]>({
-      id: "message.webrtc-history", scope: "active-key",
-      key: (args, context) => ["message.webrtc-history", context.activePublicKeyHex ?? "none", args[0] ?? ""],
-      load: async args => args[0] ? ctx.optionalCapability(WEBRTC_SERVICE_CAPABILITY)?.listHistoryForPeer(args[0]) ?? [] : [],
-      subscribe: (_args, _context, invalidate) => subscribeOptionalMessageService(ctx, WEBRTC_SERVICE_CAPABILITY,
-        (webrtc, changed) => webrtc.subscribe(changed), invalidate),
-      invalidation: "immediate",
     });
     const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope);
     const List = bindMessageUi(ctx, MessagePage);

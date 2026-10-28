@@ -1,6 +1,6 @@
 import { defineWorkerRequestRoute } from "@keymaster/contracts";
 import {
-  MSFILE_MAX_BLOCK_BYTES, MSFILE_MAX_SEED_BYTES, FORUM_WORKER_ROUNDTRIP_KIND, FORUM_WORKER_MAX_FRAME_BYTES, SAT_SUBSCRIPTION_RESOURCE_LIMITS, type CoordinatorClientRequest, type CoordinatorResponse,
+  MSFILE_MAX_BLOCK_BYTES, MSFILE_MAX_SEED_BYTES, SAT_SUBSCRIPTION_RESOURCE_LIMITS, type CoordinatorClientRequest, type CoordinatorResponse,
   type WindowP2pExecutorLease, type WindowP2pExecutorError, type WindowP2pIdentitySignResult,
   type SatWindowLaneOperation, type SatWindowLaneSspRequestEvent, type SessionEpoch,
 } from "@keymaster/contracts";
@@ -560,24 +560,6 @@ export function createWindowP2pWorkerRuntime(ports: WindowP2pWorkerPorts) {
   function windowP2pExecutorBridgeBytesForOperation(operation: WindowP2pExecutorOperation): number {
     if (operation.type !== "lane" || !operation.operation || typeof operation.operation !== "object") return 0;
     const laneOperation = operation.operation as { type?: unknown; kind?: unknown; wire?: unknown; frame?: unknown; requestBytesHex?: unknown };
-    // Forum roundtrip 的负载是 hex 字符串，不是 Wire/frame 字段。
-    //
-    // 不计量等于它在 bridge 上免费：并发几个 1 MiB 的 Forum 请求就能把 bridge 预算
-    // 撑爆，而预算被撑爆时挤掉的是 SSP/SPI 的真实业务流量。
-    //
-    // 计量按**bridge 上的实际表示**算：hex 串在结构化克隆里是 UTF-16，因此每个字节
-    // 占 2 个 code unit；响应同样是 hex，并且要按最大帧一次性预留到结果到达。
-    if (typeof laneOperation.kind === "string" && laneOperation.kind === FORUM_WORKER_ROUNDTRIP_KIND) {
-      const requestHex = typeof laneOperation.requestBytesHex === "string" ? laneOperation.requestBytesHex : "";
-      // 畸形或缺失的 hex 也照样按**最大可能**计费：计量若会因为「形状不合法」而归零，
-      // 那条路径就变成免费通道——而它仍然会被 postMessage 过去。
-      if (requestHex.length === 0) return FORUM_WORKER_MAX_FRAME_BYTES * 2 * 2;
-      // 每个 hex 字符占一个 UTF-16 code unit，即两个预算字节。
-      const requestBytes = requestHex.length * 2;
-      // 响应侧按 Forum 帧上限预留（含 hex 与 UTF-16 两层放大）。
-      const responseBytes = FORUM_WORKER_MAX_FRAME_BYTES * 2 * 2;
-      return requestBytes + responseBytes;
-    }
     if ((laneOperation.type === "requestSsp" || laneOperation.type === "requestSpi") && laneOperation.wire instanceof Uint8Array) {
       return laneOperation.wire.byteLength + MAX_WIRE_BYTES;
     }

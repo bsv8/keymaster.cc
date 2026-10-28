@@ -32,7 +32,7 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
   constructor(
     /** P2PKH 受控预签能力；P2PKH 未启用时专款准备保持不可用。 */
     private readonly protocolSpend?: ProtocolSpendService | (() => ProtocolSpendService | undefined),
-    /** 当前 WebRTC 插件的 STUN 配置；未启用插件时使用项目默认 STUN。 */
+    /** WebRTC DataChannel 的 STUN 配置；当前使用项目默认 STUN。 */
     private readonly stunServers: () => readonly string[] = () => ["stun:stun.l.google.com:19302"],
   ) {}
 

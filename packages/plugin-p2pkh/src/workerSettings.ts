@@ -117,7 +117,11 @@ export function createWorkerP2pkhSettings(deps: WorkerSettingsDependencies) {
 
   const route = defineWorkerRequestRoute<Extract<CoordinatorClientRequest, { kind: "p2pkh.provider-config.get" | "p2pkh.provider-config.update" }>>({
     kinds: ["p2pkh.provider-config.get", "p2pkh.provider-config.update"],
-    policy: () => ({ scheduling: "serial", validateEpoch: true }),
+    // This is a synchronous read of the committed projection/WOC config. WOC
+    // Window setup needs it before React mounts: queuing it behind a long
+    // channel/chain request stalls a refreshed peer. Writes remain serialized;
+    // authority, peer fencing, admission and epoch validation still apply.
+    policy: request => ({ scheduling: request.kind === "p2pkh.provider-config.get" ? "parallel" : "serial", validateEpoch: true }),
     async execute(request, call) {
       const product = "woc";
       if (deps.admission && !deps.admission.available(product)) return deps.admission.blocked(call.requestId, product);

@@ -53,8 +53,6 @@ for (const file of scanDirs.flatMap((dir) => { try { return walk(dir); } catch {
           // allow an explicitly narrow editor safety subscription only.
           const text = source.getFullText();
           const narrowEditorException = (
-            (relative(root, file) === "packages/plugin-contacts/src/ContactsEditor.tsx" &&
-              text.includes("@resource-boundary allow: active-key-editor-safety")) ||
             (relative(root, file) === "packages/plugin-apps/src/AppLaunchModal.tsx" &&
               text.includes("@resource-boundary allow: wallet-session-form-safety"))
           ) && method === "subscribe" && ts.isIdentifier(node.expression.expression)
@@ -88,8 +86,7 @@ function consumerFiles(dir) {
 }
 const consumerSources = [...consumerRoots.flatMap(consumerFiles), ...consumerFiles(join(root, "packages/platform-storage/src")),
   join(root, "packages/plugin-sat-subscription/src/SatSubscriptionSettings.tsx"),
-  join(root, "packages/plugin-webrtc/src/WebrtcSettingsPage.tsx"),
-  ...["plugin-message/src/MessagePage.tsx", "plugin-message/src/MessageDetailPage.tsx", "plugin-contacts/src/ContactPicker.tsx", "plugin-contacts/src/ContactsPage.tsx", "plugin-contacts/src/ContactDetailPage.tsx", "plugin-contacts/src/ContactsEditor.tsx", "plugin-contacts/src/ContactPublicKeyActions.tsx", "plugin-p2pkh/src/widgets/P2pkhTransferWidget.tsx", "plugin-p2pkh/src/pages/P2pkhTransferPage.tsx", "plugin-p2pkh/src/pages/P2pkhSettingsPage.tsx", "plugin-woc/src/pages/WocSettingsPage.tsx", "plugin-p2pkh/src/widgets/P2pkhBalanceWidget.tsx", "plugin-contacts/src/RecentContactsWidget.tsx",
+  ...["plugin-message/src/MessagePage.tsx", "plugin-message/src/MessageDetailPage.tsx", "plugin-p2pkh/src/widgets/P2pkhTransferWidget.tsx", "plugin-p2pkh/src/pages/P2pkhTransferPage.tsx", "plugin-p2pkh/src/pages/P2pkhSettingsPage.tsx", "plugin-woc/src/pages/WocSettingsPage.tsx", "plugin-p2pkh/src/widgets/P2pkhBalanceWidget.tsx",
     "plugin-msfile/src/MsFileHomeFileWidget.tsx", "plugin-msfile/src/MsFileBucketPage.tsx", "plugin-msfile/src/MsFileMediaPlayer.tsx", "plugin-msfile/src/MsFileSettings.tsx"]
     .map(file => join(root, "packages", file))];
 const globalHooks = new Set(["usePluginHost", "useHost", "usePluginRuntime", "useI18n", "useBsvPrice", "useLocale", "useI18nText", "useRegistry", "useRuntimeStatus", "useCapability", "useOptionalCapability", "useHasCapability", "useWebLoomApp", "useAppSubscription", "useRuntimeSelector", "PluginConsumerProvider", "PluginHostContext", "WebLoomContext", "PluginHostProvider", "WebLoomProvider", "createKeymasterPluginHost", "getWebLoomHost", "bindWebLoomHost", "attachKeymasterRemoteRuntime", "registerKeymasterOwnedResource", "createPluginHost", "createWindowApp", "createSharedWorkerRuntime"]);

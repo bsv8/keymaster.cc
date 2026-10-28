@@ -2567,6 +2567,29 @@ export class FundingKernel {
   }
 
   /**
+   * Explicit retired-forum hard deletion, never ordinary cancellation/recovery.
+   * The host must prove forum ownership. Signed/unknown records are deliberately
+   * discarded under that policy; observed spent inputs remain spent.
+   */
+  retireForumProtocolAllocation(allocationId: string): void {
+    this.assertFundsNotFrozen("retire a forum protocol allocation");
+    const id = checkRequestId(allocationId);
+    const record = this.allocations.get(id);
+    if (!record) throw new UtmError("allocation-unknown", "allocation not found");
+    if (!record.protocolBinding) throw new UtmError("allocation-state", "forum retirement requires a protocol allocation");
+    for (const key of record.inputs) {
+      const row = this.utxos.get(key);
+      if (row && row.occupiedBy === id && !row.spentBy) row.occupiedBy = null;
+    }
+    this.outbox = this.outbox.filter((entry) => entry.allocationId !== id);
+    for (const [key, signature] of this.externalSignatures) {
+      if (signature.allocationId === id) this.externalSignatures.delete(key);
+    }
+    this.allocations.delete(id);
+    this.bump();
+  }
+
+  /**
    * Release an allocation only when a trusted execution journal proved that
    * no signature was ever started. The caller owns that proof; this kernel
    * method only clears the pre-signature durable intent and aborts the held

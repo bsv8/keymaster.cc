@@ -5,16 +5,16 @@ export { deriveP2pkhAddress } from "./p2pkhPublicKeyAddress.js";
 /**
  * /transfer 页面当前使用的收款方状态。
  *
- * 地址是签名与广播使用的最终支付真值；identity 只用于派生地址、联系人
- * 反查与页面核对，不得在地址与身份冲突时静默合并。
+ * 地址是签名与广播使用的最终支付真值；identity 只用于派生地址
+ * 与页面核对，不得在地址与身份冲突时静默合并。
  */
 export interface TransferRecipient {
-  /** 收款人身份：压缩公钥 hex；来自联系人、手工输入或地址反查命中。 */
+  /** 收款人身份：压缩公钥 hex；来自手工输入。 */
   identity?: {
     /** 压缩公钥 hex（小写）。 */
     publicKeyHex: string;
-    /** 身份来源：联系人、手工公钥或地址反查命中。 */
-    source: "contact" | "manual" | "resolved";
+    /** 身份来源：手工公钥。 */
+    source: "manual";
   };
   /** 网络：主网 main 或测试网 test。 */
   network: BsvNetwork;
@@ -22,8 +22,6 @@ export interface TransferRecipient {
   address: string;
   /** 地址来源：由公钥派生或手工输入。 */
   addressSource: "derived" | "manual";
-  /** 命中的联系人昵称；未命中时省略。 */
-  contactName?: string;
 }
 
 /**

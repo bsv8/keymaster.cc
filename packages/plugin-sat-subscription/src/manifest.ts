@@ -1,6 +1,5 @@
 import { WINDOW_P2P_WORKER_BRIDGE_CAPABILITY } from "@keymaster/contracts/window-p2p";
 import { VAULT_WORKER_CRYPTO_CAPABILITY, P2PKH_WORKER_TRANSFER_CAPABILITY } from "@keymaster/contracts";
-import { CONTACTS_PRESENCE_CHANNEL_CAPABILITY } from "@keymaster/contracts";
 import { STORAGE_FILE_CLIENTS_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY } from "@keymaster/contracts";
 import { SAT_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
 import { createElement } from "react";
@@ -210,7 +209,7 @@ const satSubscriptionPluginDefinition = {
     runtime: "shared-worker",
     scopeKind: "owner-session",
     storage: CENTRAL_STORAGE_DECLARATIONS.satSubscriptionFiles,
-    provides: [SAT_SUBSCRIPTION_SERVICE_CAPABILITY, SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY, CONTACTS_PRESENCE_CHANNEL_CAPABILITY],
+    provides: [SAT_SUBSCRIPTION_SERVICE_CAPABILITY, SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY],
     dependencies: defineRuntimeUnitDependencies([
       { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "shared-worker", reason: "供应商状态的受限文件客户端" },
       { capability: WINDOW_P2P_WORKER_BRIDGE_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "由公共 Window executor 提供受限网络 lane" },

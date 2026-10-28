@@ -63,7 +63,6 @@ for (const entry of await readdir(resolve("packages"), { withFileTypes: true }))
 }
 
 const productionTaskAuditEntries = [
-  ["contacts.presence-probe", "contacts.presence-probe"],
   ["p2pkh.transactions-sync", "p2pkh.sync"],
   ["p2pkh.utxo-snapshot", "p2pkh.utxo-snapshot"],
 ];

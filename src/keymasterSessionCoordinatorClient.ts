@@ -32,7 +32,6 @@ import type {
   CoordinatorStorageData,
   CoordinatorSatOperation,
   CoordinatorChannelOperation,
-  ContactPresenceMap,
   ChainHeightSnapshot,
   CoordinatorWorkerUnitStateEvent,
   CoordinatorSessionBinding,
@@ -116,7 +115,6 @@ function sameCoordinatorSessionBinding(left: CoordinatorSessionBinding | null | 
 
 function coordinatorKindMayHaveSideEffects(kind: CoordinatorClientRequest["kind"]): boolean {
   switch (kind) {
-    case "contacts.presence.snapshot":
     case "p2pkh.provider-config.get":
       return false;
     default:
@@ -216,7 +214,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private msfileRevisionCache = -1;
   private satRevisionCache = -1;
   private channelRevisionCache = -1;
-  private contactsPresenceRevisionCache = -1;
   /**
    * Worker 单元事件可能先于同一 session.state 到达；先按 sessionEpoch
    * 暂存，避免为了丢弃旧世代而误丢当前世代的合法快照。集合有界，
@@ -224,8 +221,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
    */
   private pendingWorkerUnitEvents = new Map<SessionEpoch, CoordinatorWorkerUnitStateEvent>();
   private chainHeightSnapshotCache: ChainHeightSnapshot = emptyChainHeightSnapshot();
-  private contactsPresenceOwnerPublicKeyHex: string | null = null;
-  private contactsPresenceSnapshotCache: ContactPresenceMap = {};
 
   private isConnected = false;
   private connectionState: CoordinatorConnectionState = "recoverable";
@@ -324,7 +319,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
       this.isConnected = true;
       await this.sendHello();
-      await this.subscribeTopicsAndReadBaselines(["session.state", "background.snapshot", "chain.fees", "chain.height", "asset.data-changed", "storage.state", "msfile.state", "sat.events", "channel.events", "contacts.presence", "worker.units"]);
+      await this.subscribeTopicsAndReadBaselines(["session.state", "background.snapshot", "chain.fees", "chain.height", "asset.data-changed", "storage.state", "msfile.state", "sat.events", "channel.events", "worker.units"]);
       await this.lockSolePageOnFirstConnect();
 
       if (this.shutdownRequested || attempt !== this.connectionAttempt || this.runtimeHandle !== runtime) {
@@ -550,7 +545,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     this.msfileRevisionCache = -1;
     this.satRevisionCache = -1;
     this.channelRevisionCache = -1;
-    this.contactsPresenceRevisionCache = -1;
     this.pendingWorkerUnitEvents.clear();
   }
 
@@ -936,20 +930,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       // 不能因为取消通知自身断线就伪造“已清理”。
       return { status: "error", message: "Channel cancellation transport failed" };
     }
-  }
-
-  /** 联系人 presence 的读取面只查询 Coordinator 内存/本地 K-V，不启动探测。 */
-  async contactsPresenceSnapshot(): Promise<import("@keymaster/contracts").CoordinatorValueResult<ContactPresenceMap>> {
-    const request = { kind: "contacts.presence.snapshot" as const, clientId: this.clientId, requestId: this.generateRequestId(), expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
-    try {
-      const response = await this.sendRequest(request);
-      if (response.ack.status !== "ok") return response.ack;
-      return {
-        status: "ok",
-        value: requiredCoordinatorOperationResult<ContactPresenceMap>(response, request.kind),
-        sessionEpoch: response.sessionEpoch,
-      };
-    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
   }
 
   async msfileGrant(context: import("@keymaster/contracts").MsFileConnectAppContext): Promise<import("@keymaster/contracts").CoordinatorValueResult<string>> {
@@ -1356,11 +1336,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     return this.connectionState;
   }
 
-  /** 返回当前客户端缓存的 presence 快照副本，调用方不能修改 Coordinator 状态。 */
-  getContactsPresenceSnapshot(): ContactPresenceMap {
-    return Object.fromEntries(Object.entries(this.contactsPresenceSnapshotCache).map(([key, value]) => [key, { ...value }])) as ContactPresenceMap;
-  }
-
   /** 读取 Coordinator 广播的最新链高度快照；不会触发网络请求。 */
   getChainFeeSnapshots(): ChainFeeSnapshots { return structuredClone(this.chainFeeSnapshotsCache); }
 
@@ -1455,11 +1430,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
           this.applyTopicEvent(pendingWorkerUnits);
         }
       }
-      const nextOwner = event.vaultStatus === "unlocked" ? event.activePublicKeyHex : null;
-      if (nextOwner !== this.contactsPresenceOwnerPublicKeyHex) {
-        this.contactsPresenceOwnerPublicKeyHex = nextOwner;
-        this.contactsPresenceSnapshotCache = {};
-      }
     } else if (event.type === "background.snapshot.changed") {
       // Background is a separate domain and must not advance Session identity.
       this.bootstrapSnapshotCache = {
@@ -1482,9 +1452,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         coordinatorWorkerUnits: event.units.map((unit) => ({ ...unit, serviceIds: [...unit.serviceIds], taskIds: [...unit.taskIds] })),
         coordinatorWorkerUnitSnapshotRevision: event.workerUnitRevision,
       };
-    } else if (event.topic === "contacts.presence") {
-      this.contactsPresenceOwnerPublicKeyHex = event.activePublicKeyHex;
-      this.contactsPresenceSnapshotCache = Object.fromEntries(Object.entries(event.presence).map(([key, value]) => [key, { ...value }])) as ContactPresenceMap;
     }
     const listeners = this.eventListeners.get(event.topic);
     if (listeners) {
@@ -1504,7 +1471,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     if (topic === "msfile.state") return this.msfileRevisionCache;
     if (topic === "sat.events") return this.satRevisionCache;
     if (topic === "channel.events") return this.channelRevisionCache;
-    if (topic === "contacts.presence") return this.contactsPresenceRevisionCache;
 
     if (topic === "worker.units") return this.bootstrapSnapshotCache.coordinatorWorkerUnitSnapshotRevision ?? -1;
     return this.assetDataRevisionCache;
@@ -1519,7 +1485,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     if (event.topic === "msfile.state") return event.msfileRevision;
     if (event.topic === "sat.events") return event.satRevision;
     if (event.topic === "channel.events") return event.channelRevision;
-    if (event.topic === "contacts.presence") return event.presenceRevision;
 
     if (event.topic === "worker.units") return event.workerUnitRevision;
     return event.assetDataRevision;
@@ -1534,7 +1499,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     else if (event.topic === "msfile.state") this.msfileRevisionCache = event.msfileRevision;
     else if (event.topic === "sat.events") this.satRevisionCache = event.satRevision;
     else if (event.topic === "channel.events") this.channelRevisionCache = event.channelRevision;
-    else if (event.topic === "contacts.presence") this.contactsPresenceRevisionCache = event.presenceRevision;
     else if (event.topic === "worker.units") this.bootstrapSnapshotCache.coordinatorWorkerUnitSnapshotRevision = event.workerUnitRevision;
     else this.assetDataRevisionCache = event.assetDataRevision;
   }
@@ -1627,15 +1591,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         && (!event.publicMessage || typeof event.publicMessage.channel === "string")
         && (!event.privateMessage || typeof event.privateMessage.channel === "string");
     }
-    if (event.topic === "contacts.presence") {
-      return event.type === "contacts.presence.changed"
-        && Number.isSafeInteger(event.presenceRevision)
-        && event.presenceRevision >= 0
-        && (typeof event.activePublicKeyHex === "string" || event.activePublicKeyHex === null)
-        && Boolean(event.presence)
-        && !Array.isArray(event.presence);
-    }
-
     if (event.topic === "worker.units") {
       const unitKeys = new Set<string>();
       return event.type === "coordinator.worker-units.changed"

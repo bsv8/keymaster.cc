@@ -508,11 +508,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             "kind": "local",
             "id": "msfile.bucket.service",
             "version": "1"
-          },
-          {
-            "kind": "local",
-            "id": "msfile.content",
-            "version": "1"
           }
         ],
         "privateProvides": [],
@@ -561,16 +556,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             },
             "sourceRuntime": "window-main",
             "reason": "BitFS 专款交易只通过 P2PKH 受控 signer 预签；P2PKH 未启用时买方准备保持不可用",
-            "optional": true
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "webrtc.service",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "BitFS SDP DataChannel 复用用户当前 WebRTC STUN 配置",
             "optional": true
           },
           {
@@ -665,11 +650,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             "kind": "local",
             "id": "msfile.service",
             "version": "1"
-          },
-          {
-            "kind": "local",
-            "id": "msfile.content",
-            "version": "1"
           }
         ],
         "privateProvides": [],
@@ -752,208 +732,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             "moduleId": "app",
             "purposeId": "app-settings",
             "authority": "platform-only",
-            "model": "files",
-            "schemaVersion": 1
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "id": "forum",
-    "name": "Forum",
-    "units": [
-      {
-        "id": "forum.window",
-        "runtime": "window-main",
-        "scopeKind": "owner-session",
-        "provides": [
-          {
-            "kind": "local",
-            "id": "forum.service",
-            "version": "1"
-          }
-        ],
-        "privateProvides": [],
-        "dependencies": [
-          {
-            "capability": {
-              "kind": "stream",
-              "id": "forum.worker-attachment",
-              "version": "1"
-            },
-            "sourceRuntime": "shared-worker",
-            "reason": "已验证附件分块交付给 Window 展示"
-          },
-          {
-            "capability": {
-              "kind": "rpc",
-              "id": "forum.worker-service",
-              "version": "1"
-            },
-            "sourceRuntime": "shared-worker",
-            "reason": "唯一 owner-session Forum 任务与发布权威；不可用时阻止发布"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "window-p2p.executor",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "注册 Forum lane，共用唯一网络 Host"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "resource.registry",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "注册论坛资源投影"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "resource.owned-access",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "UI 读取所属实例资源"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "page.ui.registry",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "注册论坛页面"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "breadcrumb.registry",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "论坛页面包屑"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "business.registry",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "首页业务导航入口"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "i18n.service",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "界面文案"
-          }
-        ],
-        "permissions": [],
-        "storages": []
-      },
-      {
-        "id": "forum.coordinator-worker",
-        "runtime": "shared-worker",
-        "scopeKind": "owner-session",
-        "provides": [
-          {
-            "kind": "local",
-            "id": "forum.worker-network",
-            "version": "1"
-          },
-          {
-            "kind": "rpc",
-            "id": "forum.worker-service",
-            "version": "1"
-          },
-          {
-            "kind": "stream",
-            "id": "forum.worker-attachment",
-            "version": "1"
-          }
-        ],
-        "privateProvides": [],
-        "dependencies": [
-          {
-            "capability": {
-              "kind": "local",
-              "id": "storage.file-clients",
-              "version": "1"
-            },
-            "sourceRuntime": "shared-worker",
-            "reason": "Forum 配置、缓存与发布任务的唯一仓储"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "window-p2p.worker-bridge",
-              "version": "1"
-            },
-            "sourceRuntime": "shared-worker",
-            "reason": "由公共 Window executor 提供受限网络 lane"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "vault.wallet-state",
-              "version": "1"
-            },
-            "sourceRuntime": "shared-worker",
-            "reason": "owner-session 身份与世代"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "vault.worker-crypto",
-              "version": "1"
-            },
-            "sourceRuntime": "shared-worker",
-            "reason": "Worker 内规范业务签名"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "msfile.content",
-              "version": "1"
-            },
-            "sourceRuntime": "shared-worker",
-            "reason": "正文附件统一由 MSFile 获取与保存"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "p2pkh.worker-protocol",
-              "version": "1"
-            },
-            "sourceRuntime": "shared-worker",
-            "reason": "钱包权威的协议资金、签名、广播与同提交观测"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "woc.service",
-              "version": "1"
-            },
-            "sourceRuntime": "shared-worker",
-            "reason": "根 raw 和链上观测"
-          }
-        ],
-        "permissions": [],
-        "storages": [
-          {
-            "moduleId": "forum",
-            "purposeId": "",
-            "authority": "built-in-module",
             "model": "files",
             "schemaVersion": 1
           }
@@ -1070,11 +848,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "kind": "local",
             "id": "sat-subscription.spi.service",
-            "version": "1"
-          },
-          {
-            "kind": "local",
-            "id": "channel.contacts-presence",
             "version": "1"
           }
         ],
@@ -1328,346 +1101,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
     ]
   },
   {
-    "id": "contacts",
-    "name": "Contacts",
-    "units": [
-      {
-        "id": "contacts.window",
-        "runtime": "window-main",
-        "scopeKind": "owner-session",
-        "provides": [
-          {
-            "kind": "local",
-            "id": "contacts.public-key-action.registry",
-            "version": "1"
-          },
-          {
-            "kind": "local",
-            "id": "contacts.service",
-            "version": "1"
-          },
-          {
-            "kind": "local",
-            "id": "contacts.picker",
-            "version": "1"
-          },
-          {
-            "kind": "local",
-            "id": "contacts.editor",
-            "version": "1"
-          },
-          {
-            "kind": "local",
-            "id": "contacts.presence-reader",
-            "version": "1"
-          },
-          {
-            "kind": "local",
-            "id": "contacts.coordinator-control",
-            "version": "1"
-          }
-        ],
-        "privateProvides": [],
-        "dependencies": [
-          {
-            "capability": {
-              "kind": "local",
-              "id": "storage.file-clients",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "声明存储客户端及用途授权"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "contacts.coordinator-client-binding",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "声明本插件的受限 Coordinator 连接"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "runtime.messageBus",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "本单元的 setup 或 UI 使用"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "resource.owned-access",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "UI 读取所属实例资源"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "resource.registry",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "本单元的 setup 或 UI 使用"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "breadcrumb.registry",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "本单元的 setup 或 UI 使用"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "uri.action.registry",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "注册公钥 URI 内部业务 UI",
-            "optional": true
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "i18n.service",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "本单元的 setup 或 UI 使用"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "vault.wallet-state",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "联系人按 key namespace 隔离"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "page.ui.registry",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "注册联系人页面"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "business.registry",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "接入首页业务导航"
-          }
-        ],
-        "permissions": [],
-        "storages": [
-          {
-            "moduleId": "contacts",
-            "purposeId": "address-book",
-            "authority": "built-in-module",
-            "model": "files",
-            "schemaVersion": 1
-          }
-        ]
-      },
-      {
-        "id": "contacts.coordinator-worker",
-        "runtime": "shared-worker",
-        "scopeKind": "owner-session",
-        "provides": [],
-        "privateProvides": [],
-        "dependencies": [
-          {
-            "capability": {
-              "kind": "local",
-              "id": "channel.contacts-presence",
-              "version": "1"
-            },
-            "sourceRuntime": "shared-worker",
-            "reason": "固定 Ping/Pong 在线探测 Channel"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "storage.file-clients",
-              "version": "1"
-            },
-            "sourceRuntime": "shared-worker",
-            "reason": "联系人地址簿的受限文件客户端"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "vault.wallet-state",
-              "version": "1"
-            },
-            "sourceRuntime": "shared-worker",
-            "reason": "联系人所属钱包身份"
-          }
-        ],
-        "permissions": [],
-        "storages": [
-          {
-            "moduleId": "contacts",
-            "purposeId": "address-book",
-            "authority": "built-in-module",
-            "model": "files",
-            "schemaVersion": 1
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "id": "webrtc",
-    "name": "WebRTC",
-    "units": [
-      {
-        "id": "webrtc.window",
-        "runtime": "window-main",
-        "scopeKind": "owner-session",
-        "provides": [
-          {
-            "kind": "local",
-            "id": "webrtc.service",
-            "version": "1"
-          }
-        ],
-        "privateProvides": [],
-        "dependencies": [
-          {
-            "capability": {
-              "kind": "local",
-              "id": "storage.file-clients",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "声明存储客户端及用途授权"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "storage.kv-clients",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "声明存储客户端及用途授权"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "i18n.service",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "本单元的 setup 或 UI 使用"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "channel.runtime",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "通过 Coordinator 使用 Channel 私信"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "vault.wallet-state",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "打开 key-scoped 历史库"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "contacts.service",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "只允许当前 owner 通讯录中的发送者进入确认"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "contacts.coordinator-control",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "读取 Coordinator 通讯录在线快照做拨号门禁",
-            "optional": true
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "notice.registry",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "投递全局紧急 notice"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "page.ui.registry",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "注册 WebRTC 广播网关模块"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "resource.registry",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "注册 WebRTC session resources"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "breadcrumb.registry",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "注册 WebRTC 设置面包屑"
-          }
-        ],
-        "permissions": [],
-        "storages": [
-          {
-            "moduleId": "p2p",
-            "purposeId": "",
-            "authority": "built-in-module",
-            "model": "files",
-            "schemaVersion": 1
-          },
-          {
-            "moduleId": "webrtc",
-            "purposeId": "history",
-            "authority": "built-in-module",
-            "model": "kv",
-            "schemaVersion": 1
-          }
-        ]
-      }
-    ]
-  },
-  {
     "id": "message",
     "name": "Messages",
     "units": [
@@ -1701,16 +1134,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             },
             "sourceRuntime": "window-main",
             "reason": "UI 读取本实例消息及服务投影资源"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "contacts.presence-reader",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "通过只读 Worker 在线投影控制拨号门禁",
-            "optional": true
           },
           {
             "capability": {
@@ -1751,36 +1174,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "capability": {
               "kind": "local",
-              "id": "contacts.service",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "会话资源加载与订阅联系人名称",
-            "optional": true
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "contacts.editor",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "打开 Contacts 自有编辑器",
-            "optional": true
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "webrtc.service",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "读取 WebRTC 历史并发起音视频 / 传输动作",
-            "optional": true
-          },
-          {
-            "capability": {
-              "kind": "local",
               "id": "page.ui.registry",
               "version": "1"
             },
@@ -1813,16 +1206,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             },
             "sourceRuntime": "window-main",
             "reason": "注册公钥 URI 消息入口",
-            "optional": true
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "contacts.public-key-action.registry",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "注册联系人发消息操作",
             "optional": true
           }
         ],
@@ -2126,11 +1509,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           },
           {
             "kind": "local",
-            "id": "p2pkh.protocol-funding",
-            "version": "1"
-          },
-          {
-            "kind": "local",
             "id": "p2pkh.submission-observer",
             "version": "1"
           },
@@ -2242,32 +1620,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "capability": {
               "kind": "local",
-              "id": "contacts.picker",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "optional": true
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "contacts.service",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "optional": true
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "contacts.public-key-action.registry",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main"
-          },
-          {
-            "capability": {
-              "kind": "local",
               "id": "page.ui.registry",
               "version": "1"
             },
@@ -2348,11 +1700,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "kind": "local",
             "id": "p2pkh.worker-transfer",
-            "version": "1"
-          },
-          {
-            "kind": "local",
-            "id": "p2pkh.worker-protocol",
             "version": "1"
           }
         ],

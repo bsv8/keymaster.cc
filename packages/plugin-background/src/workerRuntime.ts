@@ -307,7 +307,7 @@ export function createWorkerBackgroundRuntime(deps: WorkerBackgroundPorts) {
     for (const runtime of taskRuntimes.values()) {
       // keyScope 可能是随当前 active owner 动态变化的函数；owner 切换后，
       // 运行中的旧任务不能被误认为属于新 owner。以任务启动时捕获的 owner
-      // 为准，确保旧 Contacts/P2PKH 任务及时 abort 并等待 completion。
+      // 为准，确保旧 P2PKH 任务及时 abort 并等待 completion。
       const taskIdentity = runtime.state === "running" ? runtime.startedIdentity : resolveKeyScope(runtime);
       if (!taskIdentity || !sameNetworkIdentity(taskIdentity, identity)) continue;
       runtime.controller?.abort();

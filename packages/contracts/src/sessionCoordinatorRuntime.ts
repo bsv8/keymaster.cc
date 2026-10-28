@@ -16,10 +16,9 @@ import {
   AUTO_LOCK_DEFAULT_TIMEOUT_MS,
   isValidAutoLockTimeoutMs,
 } from "./autolock.js";
-import type { CoordinatorClientRequest, CoordinatorCommandAck, CoordinatorCryptoOperation, CoordinatorCryptoResult, CoordinatorResponse, CoordinatorTopic, CoordinatorTopicEvent, CoordinatorBootstrapSnapshot, CoordinatorSessionOpenResult, CoordinatorSessionBinding, SessionEpoch, CoordinatorAuthorityRecovery, CoordinatorWorkerUnitPublicSnapshot, CoordinatorUnitUnavailableCode, CoordinatorUnitUnavailableReason, P2pkhProviderConfig, CoordinatorTaskSnapshot, SessionStateEvent, BackgroundSnapshotEvent, CoordinatorChainHeightEvent, AssetDataChangedEvent, CoordinatorStorageStateEvent, CoordinatorMsFileStateEvent, CoordinatorWorkerUnitStateEvent, CoordinatorChannelStateEvent, CoordinatorContactsPresenceEvent, CoordinatorChannelOperation, CoordinatorStorageControl, CoordinatorStorageData, CoordinatorMsFileControl, CoordinatorMsFileData, CoordinatorVaultOperation, CoordinatorBackgroundSyncSettings, WindowP2pExecutorLease, WindowP2pExecutorTransferResult, WindowP2pIdentitySignResult } from "./sessionCoordinator.js";
+import type { CoordinatorClientRequest, CoordinatorCommandAck, CoordinatorCryptoOperation, CoordinatorCryptoResult, CoordinatorResponse, CoordinatorTopic, CoordinatorTopicEvent, CoordinatorBootstrapSnapshot, CoordinatorSessionOpenResult, CoordinatorSessionBinding, SessionEpoch, CoordinatorAuthorityRecovery, CoordinatorWorkerUnitPublicSnapshot, CoordinatorUnitUnavailableCode, CoordinatorUnitUnavailableReason, P2pkhProviderConfig, CoordinatorTaskSnapshot, SessionStateEvent, BackgroundSnapshotEvent, CoordinatorChainHeightEvent, AssetDataChangedEvent, CoordinatorStorageStateEvent, CoordinatorMsFileStateEvent, CoordinatorWorkerUnitStateEvent, CoordinatorChannelStateEvent, CoordinatorChannelOperation, CoordinatorStorageControl, CoordinatorStorageData, CoordinatorMsFileControl, CoordinatorMsFileData, CoordinatorVaultOperation, CoordinatorBackgroundSyncSettings, WindowP2pExecutorLease, WindowP2pExecutorTransferResult, WindowP2pIdentitySignResult } from "./sessionCoordinator.js";
 import type { ChannelOperationCaller, ChannelPublishResult, ChannelSubscriptionSetResult, ChannelSubscriptionStatus, JSONValue } from "./channel.js";
 import type { I18nText, I18nValues } from "./i18n.js";
-import type { ContactPresenceMap } from "./contacts.js";
 import type { P2pkhArtifactOccupyInput, P2pkhArtifactOccupyResult, P2pkhBroadcastResult, P2pkhBroadcastSubmission, P2pkhTransferPrepareInput, P2pkhTransferPreviewPayload, P2pkhTransferResultPayload, P2pkhTransferSubmitInput, P2pkhUtxoSnapshotResult } from "./bsvP2pkhProviders.js";
 import type {
   CoordinatorSatEvent,
@@ -157,7 +156,7 @@ const COORDINATOR_REQUEST_KINDS = new Set<string>([
   "msfile.grant", "msfile.data", "msfile.cancel", "msfile.session.abort",
   "window-p2p.executor.acquire", "window-p2p.executor.release", "window-p2p.executor.spike.transfer",
   "window-p2p.executor.identity.sign-noise", "window-p2p.executor.identity.sign-peer-record",
-  "sat.operation", "channel.operation", "channel.cancel", "contacts.presence.snapshot",
+  "sat.operation", "channel.operation", "channel.cancel",
   "chain.fee-policy.update", "p2pkh.provider-config.get", "p2pkh.provider-config.update",
   "p2pkh.utxos.get", "p2pkh.utxos.refresh",
   "p2pkh.broadcast",
@@ -429,7 +428,6 @@ export type CoordinatorRpcResultForRequest<R extends CoordinatorRpcRequest> =
   R extends { kind: "window-p2p.executor.identity.sign-noise" | "window-p2p.executor.identity.sign-peer-record" } ? WindowP2pIdentitySignResult :
   R extends { kind: "sat.operation"; operation: infer O } ? O extends CoordinatorSatOperation ? CoordinatorSatOperationResultFor<O> : never :
   R extends { kind: "channel.operation"; operation: infer O } ? O extends CoordinatorChannelOperation ? CoordinatorChannelOperationResultFor<O> : never :
-  R extends { kind: "contacts.presence.snapshot" } ? ContactPresenceMap :
   R extends { kind: "p2pkh.utxos.get" | "p2pkh.utxos.refresh" } ? P2pkhUtxoSnapshotResult :
   R extends { kind: "p2pkh.provider-config.get" } ? P2pkhProviderConfig :
   R extends { kind: "p2pkh.broadcast" } ? CoordinatorP2pkhBroadcastResult :
@@ -1497,7 +1495,6 @@ function parseCoordinatorRequest(value: unknown): CoordinatorRpcRequest {
     case "sat.operation": return { kind, operation: parseSatOperation(request.operation), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "channel.operation": return { kind, operation: parseChannelOperation(request.operation), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "channel.cancel": return { kind, targetRequestId: target() };
-    case "contacts.presence.snapshot": return { kind, expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "unlock": return { kind, password: text(request.password, "unlock.password", 4_096), expectedSessionEpoch: epoch("expectedSessionEpoch") };
     case "lock": {
       let cleanup: Extract<CoordinatorRpcRequest, { kind: "lock" }>["cleanup"];
@@ -3255,7 +3252,6 @@ function parseCoordinatorResultForRequest(request: CoordinatorRpcRequest, value:
     case "window-p2p.executor.identity.sign-peer-record": return parseWindowIdentitySignResult(value, field);
     case "sat.operation": return parseSatOperationResultFor(request.operation, value, field);
     case "channel.operation": return parseChannelOperationResultFor(request.operation, value, field);
-    case "contacts.presence.snapshot": return parsePresenceMap(value, field);
     case "p2pkh.utxos.get":
     case "p2pkh.utxos.refresh": return parseP2pkhUtxoSnapshotResult(value, field);
     case "p2pkh.provider-config.get": return parseP2pkhProviderConfigResult(value, field);
@@ -3377,7 +3373,7 @@ function parseCoordinatorTopic(value: unknown, field: string): CoordinatorTopic 
   switch (topic) {
     case "session.state": case "background.snapshot": case "asset.data-changed":
     case "storage.state": case "msfile.state":
-    case "sat.events": case "channel.events": case "contacts.presence":
+    case "sat.events": case "channel.events":
     case "worker.units": case "chain.fees": case "chain.height":
       return topic;
     default:
@@ -3724,24 +3720,6 @@ function parseChannelStateEvent(value: unknown): CoordinatorChannelStateEvent {
   };
 }
 
-function parsePresenceMap(value: unknown, field: string): ContactPresenceMap {
-  const presence = expectRecord(value, field);
-  const result: Record<string, { publicKeyHex: string; state: "online" | "offline"; lastPongAtMs?: number }> = {};
-  const entries = Object.entries(presence);
-  if (entries.length > 4_096) throw new TypeError(`Coordinator ${field} is too large`);
-  for (const [key, value] of entries) {
-    const item = expectRecord(value, `${field}.${key}`);
-    const lastPongAtMs = item.lastPongAtMs === undefined ? undefined : boundedNumber(item.lastPongAtMs, `${field}.${key}.lastPongAtMs`);
-    const publicKeyHex = text(item.publicKeyHex, `${field}.${key}.publicKeyHex`, 256);
-    result[key] = {
-      publicKeyHex,
-      state: enumValue(item.state, ["online", "offline"] as const, `${field}.${key}.state`),
-      ...(lastPongAtMs === undefined ? {} : { lastPongAtMs }),
-    };
-  }
-  return result;
-}
-
 function parseChainHeightEvent(value: unknown): CoordinatorChainHeightEvent {
   const event = topicEnvelope(value, "chain.height", "chain.height.changed");
   const chainHeight = expectRecord(event.chainHeight, "event.chainHeight");
@@ -3767,18 +3745,6 @@ function parseChainHeightEvent(value: unknown): CoordinatorChainHeightEvent {
       ...(updatedAtMs === undefined ? {} : { updatedAtMs }),
       revision: boundedNumber(chainHeight.revision, "event.chainHeight.revision"),
     },
-  };
-}
-
-function parseContactsPresenceEvent(value: unknown): CoordinatorContactsPresenceEvent {
-  const event = topicEnvelope(value, "contacts.presence", "contacts.presence.changed");
-  return {
-    topic: "contacts.presence",
-    type: "contacts.presence.changed",
-    presenceRevision: boundedNumber(event.presenceRevision, "event.presenceRevision"),
-    sessionEpoch: text(event.sessionEpoch, "event.sessionEpoch", 256),
-    activePublicKeyHex: nullableText(event.activePublicKeyHex, "event.activePublicKeyHex", 256),
-    presence: parsePresenceMap(event.presence, "event.presence"),
   };
 }
 
@@ -3899,7 +3865,6 @@ function parseTopicEventBody(value: unknown): CoordinatorTopicEvent {
     case "msfile.state": return parseMsFileStateEvent(value);
     case "sat.events": return parseSatStateEvent(value);
     case "channel.events": return parseChannelStateEvent(value);
-    case "contacts.presence": return parseContactsPresenceEvent(value);
     case "worker.units": return parseWorkerUnitStateEvent(value);
   }
 }

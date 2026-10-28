@@ -42,13 +42,7 @@ export const homeResources: I18nPluginResources = {
       "home.scan.invalid": "The QR code does not contain a valid compressed public key.",
       "home.scan.unsupported": "This browser cannot scan QR codes. Enter the public key manually.",
       "home.scan.cameraError": "Unable to open the camera. Check browser permissions.",
-      "home.scan.contactError": "Unable to load the contact information.",
       "home.scan.publicKey": "Their public key",
-      "home.scan.contactLoading": "Looking up contact…",
-      "home.scan.createContact": "Create contact",
-      "home.scan.contactName": "Contact name",
-      "home.scan.saveContact": "Save contact",
-      "home.scan.createError": "Unable to create contact.",
       "home.scan.actionError": "Action failed. Please try again."
     },
     "zh-CN": {
@@ -91,13 +85,7 @@ export const homeResources: I18nPluginResources = {
       "home.scan.invalid": "二维码中没有有效的压缩公钥。",
       "home.scan.unsupported": "当前浏览器不支持二维码扫描，请手动输入公钥。",
       "home.scan.cameraError": "无法打开相机，请检查浏览器授权。",
-      "home.scan.contactError": "无法读取联系人信息。",
       "home.scan.publicKey": "对方公钥",
-      "home.scan.contactLoading": "正在查询联系人…",
-      "home.scan.createContact": "创建联系人",
-      "home.scan.contactName": "联系人名称",
-      "home.scan.saveContact": "保存联系人",
-      "home.scan.createError": "创建联系人失败。",
       "home.scan.actionError": "操作失败，请重试。"
     }
   }

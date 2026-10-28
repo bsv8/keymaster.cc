@@ -23,9 +23,6 @@
       "path": "./packages/plugin-p2pkh"
     },
     {
-      "path": "./packages/plugin-contacts"
-    },
-    {
       "path": "./packages/plugin-woc"
     },
     {
@@ -39,9 +36,6 @@
     },
     {
       "path": "./packages/plugin-msfile"
-    },
-    {
-      "path": "./packages/plugin-forum"
     },
     {
       "path": "./packages/plugin-sat-subscription"

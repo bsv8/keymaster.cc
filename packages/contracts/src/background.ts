@@ -31,8 +31,7 @@ export const BACKGROUND_MANAGED_SYNC_TASK_IDS = [
   "chain.fee-sync",
   "p2pkh.transactions-sync",
   "token-bsv21.sync",
-  "collectible-1satordinals.sync",
-  "contacts.presence-probe"
+  "collectible-1satordinals.sync"
 ] as const;
 
 /**
@@ -186,7 +185,7 @@ export interface BackgroundTaskDefinition {
   /** 所属 plugin id。 */
   pluginId: string;
   /**
-   * 实际运行单元标识；例如 `contacts.coordinator-worker`。
+   * 实际运行单元标识；例如 `p2pkh.coordinator-worker`。
    * 产品 id 只表示用户启停对象，不能代替 Worker / Window 单元身份。
    */
   unitId?: string;

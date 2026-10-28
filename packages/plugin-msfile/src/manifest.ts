@@ -25,11 +25,9 @@ import {
   type VaultWalletState,
   VAULT_WALLET_STATE_CAPABILITY,
   MSFILE_READ_CONCURRENCY_RECOMMENDED,
-  MSFILE_CONTENT_CAPABILITY,
   MSFILE_SERVICE_CAPABILITY,
   MSFILE_COORDINATOR_CONTROL_CAPABILITY,
   P2PKH_PROTOCOL_SPEND_CAPABILITY,
-  WEBRTC_SERVICE_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
   type MsFileCoordinatorControl,
   WINDOW_P2P_EXECUTOR_CAPABILITY,
@@ -42,9 +40,6 @@ import { MsFileHomeFileWidget } from "./MsFileHomeFileWidget.js";
 import { MsFileSettings } from "./MsFileSettings.js";
 import { MsFileBucketHomeWidget, MsFileBucketPage } from "./MsFileBucketPage.js";
 import { MSFILE_BUCKET_SERVICE_CAPABILITY, createMsFileBucketService } from "./msfileBucketService.js";
-import { createMsFileSellerPublicationEvidence } from "./msfilePublicationEvidence.js";
-import { createMsFileContentService } from "./msfileContentService.js";
-import { createMsFileRemoteContentFetcher } from "./msfileRemoteContentFetcher.js";
 import { disposeAllMsFileMediaSessions, registerMsFileMediaResource } from "./msfileMediaResource.js";
 import { MsFileP2pLane } from "./msfileLane.js";
 
@@ -999,7 +994,7 @@ const msfilePluginDefinition = {
     runtime: "window-main",
     connect: { providerMethods: ["msfile.stat", "msfile.seed.read", "msfile.block.read"] },
     scopeKind: "owner-session",
-    provides: [MSFILE_SERVICE_CAPABILITY, MSFILE_COORDINATOR_CONTROL_CAPABILITY, MSFILE_BUCKET_SERVICE_CAPABILITY, MSFILE_CONTENT_CAPABILITY],
+    provides: [MSFILE_SERVICE_CAPABILITY, MSFILE_COORDINATOR_CONTROL_CAPABILITY, MSFILE_BUCKET_SERVICE_CAPABILITY],
     // 桶存储页面直接读写 `<owner>/msfiles/` 文件根（seeds/storage/meta）；
     // 句柄由 Host 绑定、真实 I/O 仍由 Coordinator Worker 执行。
     storages: [CENTRAL_STORAGE_DECLARATIONS.msfilesFiles],
@@ -1009,7 +1004,6 @@ const msfilePluginDefinition = {
       { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
       { capability: WINDOW_P2P_EXECUTOR_CAPABILITY, reason: "MSFile 数据面挂载到唯一 Window P2P Host 的 msfile lane" },
       { capability: P2PKH_PROTOCOL_SPEND_CAPABILITY, optional: true, reason: "BitFS 专款交易只通过 P2PKH 受控 signer 预签；P2PKH 未启用时买方准备保持不可用" },
-      { capability: WEBRTC_SERVICE_CAPABILITY, optional: true, reason: "BitFS SDP DataChannel 复用用户当前 WebRTC STUN 配置" },
       { capability: BREADCRUMB_REGISTRY_CAPABILITY, reason: "注册本地文件设置页面包屑" },
       { capability: BUSINESS_REGISTRY_CAPABILITY, reason: "注册首页文件获取投影和本地文件设置入口" },
       { capability: VAULT_WALLET_STATE_CAPABILITY, reason: "active key 变化时取消首页文件任务" },
@@ -1028,7 +1022,7 @@ const msfilePluginDefinition = {
       CENTRAL_STORAGE_DECLARATIONS.bitfsJournalFiles,
       CENTRAL_STORAGE_DECLARATIONS.appSettingsFiles,
     ],
-    provides: [MSFILE_SERVICE_CAPABILITY, MSFILE_CONTENT_CAPABILITY],
+    provides: [MSFILE_SERVICE_CAPABILITY],
     dependencies: defineRuntimeUnitDependencies([
       { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "shared-worker", reason: "文件设置、协议证据与 App 管理设置的受限句柄" },
       { capability: WINDOW_P2P_WORKER_BRIDGE_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "由公共 Window executor 提供受限网络 lane" },
@@ -1047,10 +1041,9 @@ const msfilePluginDefinition = {
     // MSFile 只注册自己的业务 lane；公共 Host 与 executor 由 Window P2P
     // 系统插件拥有，避免两个插件各自建立网络实例。
     const protocolSpend = () => ctx.optionalCapability(P2PKH_PROTOCOL_SPEND_CAPABILITY);
-    const webRtcService = ctx.optionalCapability(WEBRTC_SERVICE_CAPABILITY);
     const offLane = laneRegistry.register(new MsFileP2pLane(
       protocolSpend,
-      () => webRtcService?.getStunServers?.() ?? ["stun:stun.l.google.com:19302"],
+      () => ["stun:stun.l.google.com:19302"],
     ));
     const service = new MsFileServiceProxy(coordinator);
     ctx.provide(MSFILE_SERVICE_CAPABILITY, createPublicMsFileService(service, () => ctx.scope.assertActive()));
@@ -1058,20 +1051,6 @@ const msfilePluginDefinition = {
     // 块写入经 Coordinator 直写，避免页面 storage 数据面的端口并发上限。
     const bucketService = createMsFileBucketService({ store: ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, ""), coordinator });
     ctx.provide(MSFILE_BUCKET_SERVICE_CAPABILITY, bucketService);
-    // 跨插件内容能力：复用同一 owner 文件根，因此 Forum 之类的阅读型插件拿到的
-    // 是已验证内容而不是仓储句柄；正文真值仍然只有 MSFile 一份。
-    const contentService = createMsFileContentService({
-      store: ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, ""),
-      service,
-      // 远程获取复用既有 BitFS 买方通道：stat → 发布需求 → 已验签报价 → 购买。
-      // 不注入这个 fetcher 时本地缺失的内容永远无法取得，只能报「无可用渠道」。
-      remote: createMsFileRemoteContentFetcher({ service }),
-      // 发布渠道：判据在 msfilePublicationEvidence 里，manifest 只是装配它。
-      // 卖方运行单元就绪时本地内容才真的能被读者取到，与上面的下载来源无关。
-      publication: createMsFileSellerPublicationEvidence(service),
-    });
-    ctx.provide(MSFILE_CONTENT_CAPABILITY, contentService);
-
     const resources_ = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
     const walletStateForUi = ctx.capability(VAULT_WALLET_STATE_CAPABILITY).bind(ctx.consumer, ctx.scope);
     resources_.register({ id: "msfile.ui.vault-status", scope: "global", key: () => ["msfile.ui.vault-status"],

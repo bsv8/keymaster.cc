@@ -13,7 +13,6 @@ import type { P2pkhConclusionInput, P2pkhConclusionResult, P2pkhPaymentLookupInp
 
 import type { EcdsaSignatureFormat } from "./activeKeyCrypto.js";
 import type { JSONValue, ChannelPrivateMessageEvent, ChannelOperationCaller, ChannelSubscriptionStatus } from "./channel.js";
-import type { ContactPresenceMap } from "./contacts.js";
 import type { I18nText } from "./i18n.js";
 import type { BackgroundSyncSettings, BackgroundTaskProgress } from "./background.js";
 import type { ChainFeePolicy, ChainFeeSnapshots } from "./chainFees.js";
@@ -390,7 +389,6 @@ export type CoordinatorClientRequest =
   | { kind: "channel.operation"; clientId: string; requestId: string; operation: CoordinatorChannelOperation; expectedSessionEpoch: SessionEpoch }
   /** 取消当前端口发起的 Channel 请求；服务端按真实端口身份定位目标。 */
   | { kind: "channel.cancel"; clientId: string; requestId: string; targetRequestId: string }
-  | { kind: "contacts.presence.snapshot"; clientId: string; requestId: string; expectedSessionEpoch: SessionEpoch }
   | ({ kind: "hello"; clientId: string; requestId: string; /** Coordinator 服务桥的专用双工端口。 */ servicePort?: MessagePort }
     | { kind: "subscribe"; clientId: string; requestId: string; topics: CoordinatorTopic[] }
     | { kind: "unlock"; clientId: string; requestId: string; password: string; expectedSessionEpoch: SessionEpoch }
@@ -418,7 +416,7 @@ export type CoordinatorClientRequest =
     | { kind: "activity"; clientId: string });
 
 /** Coordinator 订阅主题。 */
-export type CoordinatorTopic = "session.state" | "background.snapshot" | "chain.height" | "chain.fees" | "asset.data-changed" | "storage.state" | "msfile.state" | "sat.events" | "channel.events" | "contacts.presence" | "worker.units";
+export type CoordinatorTopic = "session.state" | "background.snapshot" | "chain.height" | "chain.fees" | "asset.data-changed" | "storage.state" | "msfile.state" | "sat.events" | "channel.events" | "worker.units";
 
 /** MSFile 状态事件：状态、设置摘要与未决超额确认（脱敏视图）。 */
 export interface CoordinatorMsFileStateEvent {
@@ -542,7 +540,6 @@ export type CoordinatorTopicEvent = { networkIdentity?: import("./networkIdentit
   | CoordinatorMsFileStateEvent
   | CoordinatorSatStateEvent
   | CoordinatorChannelStateEvent
-  | CoordinatorContactsPresenceEvent
   | CoordinatorWorkerUnitStateEvent);
 
 /** Coordinator 已验签并完成固定 inbox 分派的 Channel 事件。 */
@@ -586,18 +583,6 @@ export interface CoordinatorChainHeightEvent {
   sessionEpoch: SessionEpoch;
   /** 产生该快照的网络读数；`available=false` 表示还没有成功读取过。 */
   chainHeight: ChainHeightSnapshot;
-}
-
-/** Coordinator 唯一联系人在线状态快照；页面只消费该脱敏投影。 */
-export interface CoordinatorContactsPresenceEvent {
-  topic: "contacts.presence";
-  type: "contacts.presence.changed";
-  /** 事件序号，用于跨 Tab 去重和乱序防护。 */
-  presenceRevision: number;
-  sessionEpoch: SessionEpoch;
-  /** 快照所属的当前 owner；锁定或无 active key 时为 null。 */
-  activePublicKeyHex: string | null;
-  presence: ContactPresenceMap;
 }
 
 export interface CoordinatorStorageStateEvent {
@@ -694,7 +679,7 @@ export interface AssetDataChangedEvent {
 export interface CoordinatorTopicBaseline {
   topic: CoordinatorTopic;
   baselineRevision: number;
-  snapshot: SessionStateEvent | BackgroundSnapshotEvent | CoordinatorChainFeeEvent | CoordinatorChainHeightEvent | AssetDataChangedEvent | CoordinatorStorageStateEvent | CoordinatorMsFileStateEvent | CoordinatorSatStateEvent | CoordinatorChannelStateEvent | CoordinatorContactsPresenceEvent | CoordinatorWorkerUnitStateEvent;
+  snapshot: SessionStateEvent | BackgroundSnapshotEvent | CoordinatorChainFeeEvent | CoordinatorChainHeightEvent | AssetDataChangedEvent | CoordinatorStorageStateEvent | CoordinatorMsFileStateEvent | CoordinatorSatStateEvent | CoordinatorChannelStateEvent | CoordinatorWorkerUnitStateEvent;
   sessionEpoch: SessionEpoch;
 }
 
@@ -843,8 +828,6 @@ export interface SessionCoordinatorClient {
   satOperation(operation: CoordinatorSatOperation, signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
   /** 调用 SharedWorker 唯一 Channel runtime；页面不直接持有 Sat K-V/连接或私钥。 */
   channelOperation(operation: CoordinatorChannelOperation, signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
-  /** 读取 Coordinator 内唯一联系人在线状态快照；不会触发新的网络探测。 */
-  contactsPresenceSnapshot(): Promise<CoordinatorValueResult<ContactPresenceMap>>;
   /** Persist the current wallet network's fee policy in the Coordinator Worker. */
   chainFeePolicyUpdate(policy: ChainFeePolicy): Promise<CoordinatorCommandResult>;
   p2pkhProviderConfigGet(providerId: string): Promise<CoordinatorValueResult<P2pkhProviderConfig>>;
@@ -955,11 +938,6 @@ export type WindowP2pCoordinatorControl = CoordinatorSessionControl & Pick<Sessi
 /** Protocol 插件只需要 Connect Channel 面。 */
 export type ProtocolCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient, "channelOperation">;
 
-/** Contacts 插件只读取 Coordinator 维护的 presence 快照。 */
-export type ContactsCoordinatorControl = Pick<SessionCoordinatorClient,
-  "getIsConnected" | "getConnectionState" | "getBootstrapSnapshot" | "subscribeTopic" | "contactsPresenceSnapshot"
->;
-
 // ============================================================
 // 6. Capability Keys
 // ============================================================
@@ -983,4 +961,3 @@ export const MSFILE_COORDINATOR_CONTROL_CAPABILITY = defineCapability<MsFileCoor
 export const SAT_COORDINATOR_CONTROL_CAPABILITY = defineCapability<SatCoordinatorControl>({ kind: "local", id: "sat.coordinator-control", version: "1" });
 export const WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY = defineCapability<WindowP2pCoordinatorControl>({ kind: "local", id: "window-p2p.coordinator-control", version: "1" });
 export const PROTOCOL_COORDINATOR_CONTROL_CAPABILITY = defineCapability<ProtocolCoordinatorControl>({ kind: "local", id: "protocol.coordinator-control", version: "1" });
-export const CONTACTS_COORDINATOR_CONTROL_CAPABILITY = defineCapability<ContactsCoordinatorControl>({ kind: "local", id: "contacts.coordinator-control", version: "1" });

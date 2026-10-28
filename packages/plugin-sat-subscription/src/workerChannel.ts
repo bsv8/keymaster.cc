@@ -1,11 +1,10 @@
 import { defineWorkerRequestRoute } from "@keymaster/contracts";
-import { type CoordinatorClientRequest, type CoordinatorResponse, type ContactsPresenceChannel, type ChannelSubscriptionStatus, type ChannelPrivateMessageEvent } from "@keymaster/contracts";
+import { type CoordinatorClientRequest, type CoordinatorResponse, type ChannelSubscriptionStatus, type ChannelPrivateMessageEvent } from "@keymaster/contracts";
 import { inboxChannel, parsePublicKey } from "bsv8-channel-protocol";
 import { HASH_REQUEST_CHANNEL } from "bsv8-channel-protocol/hash-request";
-import { PING_PRIVATE_MESSAGE_MAX_LIFETIME_MS } from "bsv8-channel-protocol/inbox";
 import {
   ChannelSubscriptionMux, validateExactChannel, createChannelProtocolRelations, createChannelPublications,
-  createChannelCallerPolicy, createOwnerChannelMux, createContactsPresenceChannel, createChannelInbound,
+  createChannelCallerPolicy, createOwnerChannelMux, createChannelInbound,
   createChannelOperationExecutor, executeSatOperation, privateProtocol, validatePrivateProtocolCaller,
   privateBodyForPublish, publicMessageTimes, isUnknownChannelPublishFailure, type ChannelPrivateProtocol,
 } from "./coordinator.js";
@@ -22,7 +21,7 @@ export interface ChannelWorkerPorts {
   events(event: Record<string, unknown>): void;
   connectSession: ChannelOperationDependencies<SatWorkerRuntimeState>["connectSession"];
   crypto: { signer: Parameters<typeof createChannelPublications>[0]["signer"]; open(channel: string, envelope: string | Uint8Array, signal?: AbortSignal): ReturnType<ChannelInboundDependencies<SatWorkerRuntimeState>["openPrivate"]> };
-  related: Pick<ChannelInboundDependencies<SatWorkerRuntimeState>, "recordPong" | "routeSignal" | "hashRequestSeen"> & { prune(now: number): void };
+  related: Pick<ChannelInboundDependencies<SatWorkerRuntimeState>, "routeSignal" | "hashRequestSeen"> & { prune(now: number): void };
 }
 
 /** Channel mux、协议关系、caller 订阅与业务分发由 SatSubscription 实例持有。 */
@@ -54,8 +53,6 @@ export function createChannelWorkerRuntime(ports: ChannelWorkerPorts) {
     pruneRelated: ports.related.prune,
   });
 
-  const channelPendingPings = channelProtocolRelations.pendingPings;
-
   const channelHashRequests = channelProtocolRelations.hashRequests;
 
   const channelWebrtcOffers = channelProtocolRelations.webrtcOffers;
@@ -70,15 +67,7 @@ export function createChannelWorkerRuntime(ports: ChannelWorkerPorts) {
 
   const findChannelWebrtcOffer = channelProtocolRelations.findWebrtcOffer;
 
-  const pruneChannelPendingPings = channelProtocolRelations.prunePendingPings;
-
-  const scheduleChannelPendingPingCleanup = channelProtocolRelations.schedulePendingPingCleanup;
-
-  const allowAutomaticPong = channelProtocolRelations.allowAutomaticPong;
-
   const rememberChannelMessage = channelProtocolRelations.rememberMessage;
-
-  const CHANNEL_PENDING_PING_TTL_MS = PING_PRIVATE_MESSAGE_MAX_LIFETIME_MS;
 
   const channelCallersByClient = new Map<string, Set<string>>();
 
@@ -259,55 +248,6 @@ export function createChannelWorkerRuntime(ports: ChannelWorkerPorts) {
     }, { auditOperation: "channel.public-publish" });
   }
 
-  function createCoordinatorChannelRuntime(assertActive: () => void = () => undefined): ContactsPresenceChannel {
-    const contactsCaller = { kind: "system" as const, systemId: "contacts-presence" };
-    const assertContactsEnabled = (): void => {
-      if (!ports.products.available("contacts")) {
-        throw new Error("Plugin unavailable: contacts");
-      }
-    };
-    return createContactsPresenceChannel({
-      assertActive,
-      owner: () => ports.session().activePublicKeyHex,
-      isReady: () => ports.products.available("contacts")
-        && ports.session().vaultStatus === "unlocked"
-        && Boolean(ports.session().activePublicKeyHex),
-      async publishPrivate(input, signal) {
-        assertContactsEnabled();
-        const runtime = await ports.runtime.ensure();
-        const protocol = privateProtocol(input.protocol);
-        validatePrivateProtocolCaller(contactsCaller, protocol);
-        const published = await publishPrivateEnvelope({
-          runtime,
-          recipientPublicKeyHex: input.recipientPublicKeyHex,
-          protocol,
-          body: privateBodyForPublish(protocol, input.content),
-          signal: signal ?? runtime.signal
-        });
-        return { messageId: published.messageId, signedMessage: published.signedMessage };
-      },
-      async subscriptionSet(channels, signal) {
-        assertContactsEnabled();
-        const runtime = await ports.runtime.ensure();
-        const ownerSessionEpoch = ports.session().sessionEpoch;
-        const mux = await ensureChannelSubscriptionMux(runtime);
-        const result = await mux.set(channelCallerId(contactsCaller), channels, signal ?? runtime.signal);
-        if (ports.session().vaultStatus !== "unlocked"
-          || ports.session().sessionEpoch !== ownerSessionEpoch
-          || ports.session().activePublicKeyHex !== runtime.ownerPublicKeyHex) {
-          throw new Error("Channel subscription became stale");
-        }
-        return {
-          channels: [...result],
-          // `channels` is only the logical caller result. Include the current
-          // Mux status in the same response so a newly-created caller does not
-          // have to win a race with the global status event stream.
-          statuses: result.map((channel) => mux.subscriptionStatus(channel)),
-        };
-      },
-    });
-  }
-
   function idleChannelSubscriptionStatus(channel: string): ChannelSubscriptionStatus {
     validateExactChannel(channel);
     return { channel, phase: "idle", errorCode: null, errorMessage: null, updatedAtMs: 0 };
@@ -383,7 +323,6 @@ export function createChannelWorkerRuntime(ports: ChannelWorkerPorts) {
       { allowLocalLock: true, allowLocalOwnerTransition: true, auditOperation: "channel.incoming-decrypt" },
     ),
     publishPrivate: publishPrivateEnvelope,
-    recordPong: ports.related.recordPong,
     emitPrivate: emitChannelPrivateMessage,
     emitPublic: emitChannelPublicMessage,
     routeSignal: ports.related.routeSignal,
@@ -425,7 +364,7 @@ export function createChannelWorkerRuntime(ports: ChannelWorkerPorts) {
     const callerProductId = operation.caller.kind === "plugin"
       ? operation.caller.pluginId
       : operation.caller.kind === "system"
-        ? operation.caller.systemId === "contacts-presence" ? "contacts" : "sat-subscription"
+        ? "sat-subscription"
         : undefined;
     // 拒绝不在发行版目录中的产品身份。登记不授予调用权限：Channel 还要
     // 复核会话、owner 与 caller。Connect caller 属于独立授权链，不在此处
@@ -511,7 +450,6 @@ export function createChannelWorkerRuntime(ports: ChannelWorkerPorts) {
     channelPublicSubscribers,
     channelPrivateSubscribers,
     channelProtocolRelations,
-    channelPendingPings,
     channelHashRequests,
     channelWebrtcOffers,
     pruneChannelProtocolRelations,
@@ -519,11 +457,7 @@ export function createChannelWorkerRuntime(ports: ChannelWorkerPorts) {
     channelHashRequestByMessageId,
     channelWebrtcOfferKey,
     findChannelWebrtcOffer,
-    pruneChannelPendingPings,
-    scheduleChannelPendingPingCleanup,
-    allowAutomaticPong,
     rememberChannelMessage,
-    CHANNEL_PENDING_PING_TTL_MS,
     channelCallersByClient,
     executeSatRequest,
     executeSatRequestUnsafe,
@@ -541,7 +475,6 @@ export function createChannelWorkerRuntime(ports: ChannelWorkerPorts) {
     publishChannelHashRequest,
     publishChannelHashRequestUnsafe,
     publishChannelPublicMessage,
-    createCoordinatorChannelRuntime,
     idleChannelSubscriptionStatus,
     channelSubscriptionStatusBaseline,
     emitChannelSubscriptionStatus,

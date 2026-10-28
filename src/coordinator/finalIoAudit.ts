@@ -36,7 +36,6 @@ export type FinalIoAuditOperation =
   | "channel.history-open"
   | "window-p2p.identity.sign"
   | "window-p2p.spike-transfer"
-  | "contacts.presence-probe"
   | "chain.height-sync"
   | "chain.fee-sync"
   | "p2pkh.sync"

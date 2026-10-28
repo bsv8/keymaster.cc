@@ -170,6 +170,8 @@ export interface P2pkhUtxoManager {
   observe(input: { ownerPublicKeyHex: string; resource: Pick<P2pkhKeyResource, "resourceId" | "network" | "address">; utxos: readonly P2pkhUtxo[] }): Promise<void>;
   /** Cancel dispatch without assuming signatures are releasable. */
   cancelProtocolSubmission(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; allocationId?: string; txid?: string; reason?: "cancelled" | "execution-failed"; proof?: ProtocolExecutionProof | null }): Promise<void>;
+  /** 退役硬删除（仅限已确认的论坛范围清理调用）。按 submission 精确删除协议责任及索引，不改变普通取消/unknown/BitFS 语义，不放宽公共取消条件。 */
+  retireForumProtocolSubmission(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string }): Promise<{ deleted: boolean; allocationId?: string }>;
   recoverProtocolExecution(input: { ownerPublicKeyHex: string; network: "main" | "test"; proof: ProtocolExecutionProof }): Promise<boolean>;
   protocolExecutionIdentity(input: { ownerPublicKeyHex: string; network: "main" | "test"; allocationId: string }): Promise<{ executionId: string; submissionId: string } | null>;
   ownsWalletExact(input: { ownerPublicKeyHex: string; network: "main" | "test"; txid: string; rawTxHex: string }): Promise<boolean>;
@@ -805,6 +807,50 @@ export function createP2pkhUtxoManager(input: {
         }
       }
       await persist(input.files, { ...state, value: { ...state.value, protocolExecutions: executions, cancelledDispatch: request.reason === "execution-failed" && request.proof?.state !== "cancelled_before_sign" ? state.value.cancelledDispatch : { ...state.value.cancelledDispatch, [id]: "cancelled" } } }, candidate);
+    },
+    async retireForumProtocolSubmission(request) {
+      let state: LoadedState;
+      try { state = await readStateForScope(input.files, request.ownerPublicKeyHex, request.network); }
+      catch (error) { if (error instanceof P2pkhManagerStateMissingError) return { deleted: false }; throw error; }
+      const ids = Object.keys(state.value.allocationKinds ?? {}).filter(id => state.value.allocationKinds![id] === "protocol" && (state.value.protocolExecutions?.[id]?.submissionId === request.submissionId || state.kernel.protocolIntentView(id)?.binding?.poolId === request.submissionId));
+      if (ids.length === 0) return { deleted: false };
+      if (ids.length !== 1) throw new Error("Forum retirement identity is ambiguous");
+      const id = ids[0]!;
+      const binding = state.kernel.protocolIntentView(id)?.binding;
+      const execution = state.value.protocolExecutions?.[id];
+      if ((binding && binding.poolId !== request.submissionId) || (execution && execution.submissionId !== request.submissionId)) {
+        throw new Error("Forum retirement identity is inconsistent");
+      }
+      const commandIds = new Set(state.kernel.outboxView().filter(row => row.allocationId === id).map(row => row.commandId));
+      // The allocation command identity remains stable even if its outbox is already gone.
+      commandIds.add(`${id}:broadcast`);
+      const allocationKinds = { ...state.value.allocationKinds };
+      delete allocationKinds[id];
+      const intents = { ...state.value.intents };
+      delete intents[id];
+      const results = { ...state.value.results };
+      for (const [key, value] of Object.entries(results)) {
+        if (commandIds.has(key)) { delete results[key]; continue; }
+        if (!key.startsWith("attempt#")) continue;
+        // A corrupt attempt prevents proving its ownership: retain all evidence and fail.
+        const attempt = JSON.parse(value) as { commandId?: unknown };
+        if (typeof attempt?.commandId !== "string") throw new Error("Manager result attempt identity is malformed");
+        if (commandIds.has(attempt.commandId)) delete results[key];
+      }
+      const candidate = state.kernel.clone();
+      candidate.retireForumProtocolAllocation(id);
+      const protocolExecutions = { ...(state.value.protocolExecutions ?? {}) };
+      delete protocolExecutions[id];
+      const artifacts = { ...(state.value.artifacts ?? {}) };
+      for (const [artifactId, artifact] of Object.entries(artifacts)) {
+        if ((artifact as { allocationId?: unknown }).allocationId === id) delete artifacts[artifactId];
+      }
+      const cancelledDispatch = { ...(state.value.cancelledDispatch ?? {}) };
+      delete cancelledDispatch[id];
+      const businessDispatch = { ...(state.value.businessDispatch ?? {}) };
+      delete businessDispatch[id];
+      await persist(input.files, { ...state, value: { ...state.value, allocationKinds, intents, results, protocolExecutions, artifacts, cancelledDispatch, businessDispatch } }, candidate);
+      return { deleted: true, allocationId: id };
     },
     async recoverProtocolExecution(request) {
       const state = await readStateForScope(input.files, request.ownerPublicKeyHex, request.network), proof = request.proof;

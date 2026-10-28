@@ -1,13 +1,10 @@
 import { requireWocNetwork } from "@keymaster/contracts";
 import type { ActiveKeyCrypto, BorrowedModuleFileStore, CentralBroadcastService, P2pkhUtxoSnapshotResult, ProtectedOutpoint, ProtocolSubmissionObservation, WocService } from "@keymaster/contracts";
 import { createP2pkhProtocolSpendService, type P2pkhProtocolManagerPort } from "./p2pkhProtocolSpend.js";
-import { createProtocolFundingService } from "./p2pkhProtocolFunding.js";
 import { createProtectedOutpointRegistry } from "./registries/protectedOutpointRegistry.js";
-import { createP2pkhFileRepository } from "./storage/p2pkhFileRepository.js";
-import { openP2pkhStateRepository } from "./storage/p2pkhStateRepository.js";
-import { createWorkerProtocolEvidence } from "./workerProtocolEvidence.js";
 import { createWalletProtectedOutpoints } from "./registries/walletProtectedOutpoints.js";
 import type { P2pkhService } from "./p2pkhContracts.js";
+import { createWorkerProtocolEvidence } from "./workerProtocolEvidence.js";
 
 export interface WorkerProtocolDependencies {
   assertActive(): void;
@@ -23,28 +20,22 @@ export interface WorkerProtocolDependencies {
   protocolManager?: P2pkhProtocolManagerPort;
 }
 
-/** A disposable projection of the existing wallet funding files, never a second ledger. */
+/** Claims protection for UTXO manager; retired forum responsibility excluded (decision B). */
 export async function readWorkerProtocolProtection(storage: BorrowedModuleFileStore, owner: string, network: "main" | "test"): Promise<ProtectedOutpoint[]> {
-  const { records, unreadable } = await createP2pkhFileRepository((await openP2pkhStateRepository(storage)).files).listProtocolFunding();
-  if (unreadable.length) throw new Error("Unreadable protocol funding records; wallet spending is blocked");
   const state = createWorkerProtocolEvidence(storage);
   const submissions = await state.listProtocolSubmissions();
-  const ids = new Set(submissions.filter(row => row.publicKeyHex.toLowerCase() === owner.toLowerCase() && row.network === network).map(row => row.id));
+  // 已退役论坛提交不再形成占用：protectedClaimIds 含 `:forum` 后缀的直接排除。
+  // 文件级删除由 purgeRetiredForumProtocolData 落实；此处过滤保证删除前/残留同样不恢复占用。
+  const live = submissions.filter((row) => !(Array.isArray(row.protectedClaimIds) && row.protectedClaimIds.some((id) => typeof id === "string" && id.endsWith(":forum"))));
+  const ids = new Set(live.filter(row => row.publicKeyHex.toLowerCase() === owner.toLowerCase() && row.network === network).map(row => row.id));
   const claims = await state.listLocalInputClaims();
   const claimed = claims.filter(row => ids.has(row.submissionId) && row.publicKeyHex.toLowerCase() === owner.toLowerCase() && row.network === network && (row.state === "active" || row.state === "isolated"))
     .map(row => ({
       txid: row.txid, vout: row.vout, network: row.network, publicKeyHex: row.publicKeyHex,
       ownerPluginId: "p2pkh", kind: "protocol-claim",
-      // The source identifies the occupation: the manager may take over THIS
-      // submission's claim, but never somebody else's.
       source: `occupation:${row.submissionId}`, submissionId: row.submissionId,
     }));
-  return [...claimed, ...records.filter(row => row.ownerPublicKeyHex.toLowerCase() === owner.toLowerCase() && row.network === network)
-    .map(row => ({
-      txid: row.txid, vout: row.vout, network: row.network, publicKeyHex: row.ownerPublicKeyHex,
-      ownerPluginId: row.ownerPluginId ?? "p2pkh", kind: "protocol-funding",
-      source: `fund:${row.fundingId}`,
-    }))];
+  return claimed;
 }
 
 
@@ -53,7 +44,6 @@ export async function createWorkerProtocolRuntime(deps: WorkerProtocolDependenci
   const check = (owner = deps.owner) => { deps.assertActive(); if (owner.toLowerCase() !== deps.owner.toLowerCase()) throw new Error("Protocol wallet owner mismatch"); };
   const protectionView = createWalletProtectedOutpoints(registry, { identity: { publicKeyHex: deps.owner, bsvNetwork: deps.network }, assertActive: () => check() });
   const state = async () => { check(); const store = createWorkerProtocolEvidence(deps.storage); check(); return store; };
-  const files = async () => { check(); const store = createP2pkhFileRepository((await openP2pkhStateRepository(deps.storage)).files); check(); return store; };
   const observeProtocolSubmission = async (input: { ownerPublicKeyHex: string; network: "main" | "test"; txid: string; submissionId: string }): Promise<ProtocolSubmissionObservation> => {
     check(input.ownerPublicKeyHex);
     const row = await (await state()).getProtocolSubmission(input.submissionId);
@@ -112,32 +102,9 @@ export async function createWorkerProtocolRuntime(deps: WorkerProtocolDependenci
     check();
     return result;
   };
-  const funding = createProtocolFundingService({
-    binding: { identity: { publicKeyHex: deps.owner, bsvNetwork: deps.network }, assertActive: check },
-    protocolSpend: () => { check(); return spend; }, protectedOutpoints: registry,
-    store: {
-      async get(id, owner) { check(owner); return (await files()).readProtocolFunding(id); },
-      async put(record, options) { check(record.ownerPublicKeyHex); await (await files()).writeProtocolFunding({ ...record, updatedAtMs: record.updatedAtMs ?? Date.now() }, options); check(); },
-      async delete(id) { await (await files()).deleteProtocolFunding(id); check(); },
-      async list(owner) { check(owner); const result = await (await files()).listProtocolFunding(); check(); return { ...result, records: result.records.filter(row => row.ownerPublicKeyHex.toLowerCase() === owner.toLowerCase()) }; },
-    },
-    async allocate(input) {
-      check();
-      const result = await planFunding({
-        ownerPublicKeyHex: deps.owner, network: input.assetId === "bsvtest" ? "test" : "main",
-        amountSatoshis: input.amountSatoshis, feeRateSatoshisPerKb: input.feeRateSatoshisPerKb,
-      });
-      check();
-      return result;
-    },
-    async deriveChangeAddress(owner, network) { check(owner); const crypto = await deps.crypto(owner); try { const result = await crypto.deriveP2pkhAddress(); check(); return result.address; } finally { crypto.dispose("protocol-address-derived"); } },
-    async observeChain(network, txid) { const query = deps.query(); if (!query) return "unknown"; const result = await requireWocNetwork(query, network).getTransactionObservation(txid); check(); return result.observation === "confirmed" ? "confirmed" : result.observation === "unconfirmed" ? "mempool" : "unknown"; },
-    async observeOutpoint({ network, txid, vout }) { const query = deps.query(); if (!query) return "unknown"; try { const spent = await requireWocNetwork(query, network).getSpentOutput(txid, vout); check(); return spent === null ? "unspent" : "spent"; } catch { check(); return "unknown"; } },
-    observeSubmission: observeProtocolSubmission,
-  });
-  await funding.restoreProtections!();
   check();
-  return Object.freeze({ identity: Object.freeze({ publicKeyHex: deps.owner, bsvNetwork: deps.network }), spend, executor, funding, planFundingCommand: planFunding,
+  return Object.freeze({ identity: Object.freeze({ publicKeyHex: deps.owner, bsvNetwork: deps.network }), spend, executor,
+    planFundingCommand: planFunding,
     planFunding: (input: import("@keymaster/contracts").ProtocolFundingPlanRequest) => planFunding(scoped(input)), observer: { observeProtocolSubmission: (input: { txid: string; submissionId: string }) => observeProtocolSubmission(scoped(input)) }, protectedOutpoints: registry, protectionView,
     dispose() { for (const id of registry._ids()) registry.unregister(id); },
   });

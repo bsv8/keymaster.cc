@@ -53,14 +53,6 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
     model: "kv",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
-  contactsAddressBook: Object.freeze({
-    moduleId: "contacts",
-    purposeId: "address-book",
-    authority: "built-in-module",
-    // 一联系人一文件，文件名使用稳定业务 ID，不依赖可修改的姓名或列表顺序。
-    model: "files",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
   messageHistory: Object.freeze({
     moduleId: "message",
     purposeId: "history",
@@ -107,34 +99,6 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
   tokenBsv21MintHistory: Object.freeze({
     moduleId: "token-bsv21",
     purposeId: "mint-history",
-    authority: "built-in-module",
-    model: "kv",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
-  /**
-   * Forum 配置、根验证证据、索引缓存、阅读位置、展示投影与发布任务。
-   * 文件模型；正文本体不在这里，只存已冻结内容的 seed hash。
-   */
-  forumFiles: Object.freeze({
-    moduleId: "forum",
-    purposeId: "",
-    authority: "built-in-module",
-    model: "files",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
-  /**
-   * P2P（WebRTC）文件根（空 purpose = 模块根）：setting.json 与 attachments/。
-   */
-  p2pFiles: Object.freeze({
-    moduleId: "p2p",
-    purposeId: "",
-    authority: "built-in-module",
-    model: "files",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
-  webrtcHistory: Object.freeze({
-    moduleId: "webrtc",
-    purposeId: "history",
     authority: "built-in-module",
     model: "kv",
     schemaVersion: 1,
@@ -192,8 +156,6 @@ export const SYSTEM_STORAGE_DECLARATIONS: Readonly<Record<string, readonly Plugi
   vault: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.vaultPayments]),
   "bsv-price": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.bsvPrice]),
   "collectible-1satordinals": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.ordinalsMintHistory]),
-  contacts: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.contactsAddressBook]),
-  forum: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.forumFiles]),
   message: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.messageHistory, CENTRAL_STORAGE_DECLARATIONS.messagesFiles]),
   p2pkh: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.p2pkhFiles, CENTRAL_STORAGE_DECLARATIONS.p2pkhState]),
   protocol: Object.freeze([
@@ -203,7 +165,6 @@ export const SYSTEM_STORAGE_DECLARATIONS: Readonly<Record<string, readonly Plugi
   ]),
   "sat-subscription": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.satSubscriptionFiles]),
   "token-bsv21": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.tokenBsv21State, CENTRAL_STORAGE_DECLARATIONS.tokenBsv21MintHistory]),
-  webrtc: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.p2pFiles, CENTRAL_STORAGE_DECLARATIONS.webrtcHistory]),
   msfile: Object.freeze([
     CENTRAL_STORAGE_DECLARATIONS.msfilesFiles,
     CENTRAL_STORAGE_DECLARATIONS.bitfsJournalFiles,

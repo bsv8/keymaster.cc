@@ -16,11 +16,8 @@ import {
   messagePlatformPlugin,
   messageSetup,
 } from "@keymaster/plugin-message";
-import { webrtcPlugin, webrtcSetup } from "@keymaster/plugin-webrtc";
 import { backgroundPlugin, backgroundSetup } from "@keymaster/plugin-background";
-import { contactsPlugin, contactsSetup } from "@keymaster/plugin-contacts";
 import { msfilePlugin, msfileSetup } from "@keymaster/plugin-msfile";
-import { forumPlugin, forumSetup } from "@keymaster/plugin-forum";
 import { satSubscriptionPlugin, satSubscriptionSetup } from "@keymaster/plugin-sat-subscription";
 import { windowP2pPlugin, windowP2pSetup } from "@keymaster/plugin-window-p2p";
 import { p2pkhPlugin, p2pkhSetup } from "@keymaster/plugin-p2pkh";
@@ -41,11 +38,8 @@ export const WEB_PLUGIN_IMPLEMENTATIONS: readonly { manifest: PluginManifest; se
   { manifest: vaultPlugin, setup: vaultSetup },
   { manifest: windowP2pPlugin, setup: windowP2pSetup },
   { manifest: msfilePlugin, setup: msfileSetup },
-  { manifest: forumPlugin, setup: forumSetup },
   { manifest: satSubscriptionPlugin, setup: satSubscriptionSetup },
   { manifest: protocolPlugin, setup: protocolSetup },
-  { manifest: contactsPlugin, setup: contactsSetup },
-  { manifest: webrtcPlugin, setup: webrtcSetup },
   { manifest: messagePlatformPlugin, setup: messageSetup },
   { manifest: backgroundPlugin, setup: backgroundSetup },
   { manifest: wocPlugin, setup: wocSetup },

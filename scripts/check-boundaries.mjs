@@ -34,9 +34,7 @@ function recordViolation(file, detail) {
 
 // These integration fixtures exercise public package entry points together.
 // Private subpaths and all production imports remain forbidden.
-const publicIntegrationImports = new Map([
-  ["packages/plugin-page/src/shell/AppShell.notice.test.tsx", new Set(["@keymaster/plugin-webrtc"])],
-]);
+const publicIntegrationImports = new Map();
 /** 所有插件（包括 Storage）通过契约协作，禁止实现互导与私有装配入口。 */
 for (const plugin of pluginNames) {
   const src = join(packagesDir, plugin, "src");
@@ -61,7 +59,7 @@ for (const plugin of pluginNames) {
   }
 }
 
-/** 检查 plugin-transfer 禁止 import 任何具体资产插件、vault、contacts。 */
+/** 检查 plugin-transfer 禁止 import 任何具体资产插件、vault。 */
 const transferSrc = join(packagesDir, "plugin-transfer", "src");
 if (existsSync(transferSrc)) {
   for (const file of walk(transferSrc)) {

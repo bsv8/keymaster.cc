@@ -1,7 +1,7 @@
 import {
   defineBuiltinWorkerPlugin, STORAGE_FILE_CLIENTS_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY,
   VAULT_WORKER_CRYPTO_CAPABILITY, WOC_CAPABILITY, WOC_WORKER_BROADCAST_CAPABILITY,
-  P2PKH_WORKER_TRANSFER_CAPABILITY, P2PKH_WORKER_PROTOCOL_CAPABILITY,
+  P2PKH_WORKER_TRANSFER_CAPABILITY,
   requireUnlockedWalletIdentity,
   type BorrowedModuleFileStore, type VaultWalletState, type VaultWorkerCrypto, type WocService,
   type WocWorkerBroadcastService, type P2pkhProviderRegistry, type WorkerTaskRegistrar,
@@ -11,6 +11,7 @@ import { createWorkerTransferRuntime, type WorkerTransferDependencies } from "./
 import { createP2pkhWorkerTaskDefinitions } from "./p2pkhWorkerTasks.js";
 import { createP2pkhUtxoManager } from "./p2pkhUtxoManager.js";
 import { readWorkerProtocolProtection } from "./workerProtocolRuntime.js";
+import { purgeRetiredForumProtocolData } from "./retiredForumCleanup.js";
 
 interface InstanceBinding {
   storage: BorrowedModuleFileStore;
@@ -59,7 +60,7 @@ export function createP2pkhWorkerRuntime(ports: P2pkhWorkerPorts) {
   let binding: InstanceBinding | undefined;
   let query: WocService | undefined;
   const transfer = createWorkerTransferRuntime(ports.transfer);
-  function initialize(source: WocService, broadcast: WocWorkerBroadcastService) {
+  async function initialize(source: WocService, broadcast: WocWorkerBroadcastService) {
     registry = createP2pkhProviderRegistry();
     ports.registerProviders(registry, broadcast);
     const own = binding;
@@ -73,9 +74,11 @@ export function createP2pkhWorkerRuntime(ports: P2pkhWorkerPorts) {
       const registry = transfer.protectedOutpoints()?.list({ publicKeyHex: owner, network }) ?? [];
       return [...persisted, ...business, ...registry];
     } });
+    // 退役论坛统一清理：文件+内存+manager 同一次受控清理，普通转账/协议业务激活前完成；失败抛错阻断，不静默。
+    await purgeRetiredForumProtocolData(own.storage, manager);
     snapshots = createP2pkhUtxoSnapshotStore({ woc: ports.snapshotSource(source), manager, assertActive });
   }
-  const plugin = defineBuiltinWorkerPlugin("p2pkh", [P2PKH_WORKER_TRANSFER_CAPABILITY, P2PKH_WORKER_PROTOCOL_CAPABILITY], async context => {
+  const plugin = defineBuiltinWorkerPlugin("p2pkh", [P2PKH_WORKER_TRANSFER_CAPABILITY], async context => {
     const own: InstanceBinding = {
       storage: context.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(context.consumer, context.scope, ""),
       walletState: context.capability(VAULT_WALLET_STATE_CAPABILITY).bind(context.consumer, context.scope),
@@ -83,7 +86,7 @@ export function createP2pkhWorkerRuntime(ports: P2pkhWorkerPorts) {
     };
     binding = own;
     query = context.capability(WOC_CAPABILITY);
-    initialize(query, context.capability(WOC_WORKER_BROADCAST_CAPABILITY));
+    await initialize(query, context.capability(WOC_WORKER_BROADCAST_CAPABILITY));
     const ownedRegistry = registry;
     const ownedSnapshots = snapshots;
     let released: ReturnType<typeof transfer.release> | undefined;
@@ -108,16 +111,6 @@ export function createP2pkhWorkerRuntime(ports: P2pkhWorkerPorts) {
           async prepareTransfer(input: Parameters<typeof service.prepareTransfer>[0]) { context.scope.assertActive(); const result = await service.prepareTransfer(input); context.scope.assertActive(); return result; },
           async submitTransfer(preview: unknown) { context.scope.assertActive(); const result = await service.submitTransfer(preview as Parameters<typeof service.submitTransfer>[0]); context.scope.assertActive(); return result; },
         });
-      },
-    }));
-    context.provide(P2PKH_WORKER_PROTOCOL_CAPABILITY, Object.freeze({
-      async getService() {
-        context.scope.assertActive();
-        const service = await transfer.ensureProtocol();
-        context.scope.assertActive();
-        // Executor/RPC evidence ports stay private to wallet assembly.
-        return Object.freeze({ identity: service.identity, spend: service.spend, funding: service.funding,
-          planFunding: service.planFunding, observer: service.observer, protectedOutpoints: service.protectionView });
       },
     }));
     const network = () => {

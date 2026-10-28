@@ -44,7 +44,7 @@ export type StoragePreviewFormat =
 
 /** 单个对象的只读元数据；永远不含字节。 */
 export interface StorageBrowseEntry {
-  /** 完整逻辑路径，例如 `contacts/address-book/<公钥>.json`。 */
+  /** 完整逻辑路径，例如 `message/history/<对端公钥>.json`。 */
   path: string;
   /** 字节数。 */
   size: number;
