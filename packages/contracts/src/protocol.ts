@@ -54,13 +54,6 @@ import type {
   ChannelSubscriptionSetParams,
   ChannelSubscriptionSetResult
 } from "./channel.js";
-import type {
-  PriceChangedEventData,
-  PriceGetParams,
-  PriceGetResult,
-  PriceSubscribeParams,
-  PriceSubscriptionResult
-} from "./price.js";
 //   - **命令流展示投影**（施工单 2026-06-27 002 硬切换）：
 //       `ProtocolCommandFeedState.commands` **不**再承诺
 //       "全局按 updatedAt desc"，而是 service 派生的"活请求区 +
@@ -160,7 +153,10 @@ export type BinaryField = ConnectPublic.BinaryField;
 
 /** 协议方法名常量集合。 */
 // 费用池只保留钱包内部历史处理类型，不进入独立 Connect 的公开方法表。
-export const PROTOCOL_METHODS = [...CONNECT_PUBLIC_METHODS, "feepool.prepare", "feepool.commit"] as const;
+export const PROTOCOL_METHODS = [
+  ...CONNECT_PUBLIC_METHODS.filter((method): method is Exclude<typeof method, `price.${string}`> => !method.startsWith("price.")),
+  "feepool.prepare", "feepool.commit",
+] as const;
 
 /** 协议方法名联合类型。 */
 export type ProtocolMethod = (typeof PROTOCOL_METHODS)[number];
@@ -303,10 +299,8 @@ export interface ProtocolCancelMessage {
  * 设计缘由：
  *   - `channel.message_received` 是已验签的 Channel 公开消息，只发送给
  *     当前 session 已精确订阅的频道；
- *   - `price.changed` 是 Keymaster 当前 BSV 价格展示值变化，向所有活跃
- *     session 推送；未就绪时也可能推送 amount "0"。
  */
-export type ProtocolEventName = "channel.message_received" | "price.changed";
+export type ProtocolEventName = "channel.message_received";
 
 /**
  * 顶层 `event` 报文（server-pushed）。
@@ -320,13 +314,6 @@ export type ProtocolEventMessage =
       event: "channel.message_received";
       /** 已验签的 Channel 事件数据。 */
       data: ChannelMessageReceivedEventData;
-    }
-  | {
-      v: typeof PROTOCOL_VERSION;
-      type: "event";
-      event: "price.changed";
-      /** 当前展示价格（金额 + 单位）；未就绪时为 amount "0"。 */
-      data: PriceChangedEventData;
     };
 
 /** 顶层 request 报文。 */
@@ -1850,9 +1837,6 @@ export interface MethodParamsMap {
   "connect.launch": ConnectLaunchParams;
   "channel.publish": ChannelPublishParams;
   "channel.subscription_set": ChannelSubscriptionSetParams;
-  "price.get": PriceGetParams;
-  "price.subscribe": PriceSubscribeParams;
-  "price.unsubscribe": PriceSubscribeParams;
   "storage.list": StorageListParams;
   "storage.directory.create": StorageDirectoryParams;
   "storage.directory.delete": StorageDirectoryParams;
@@ -1885,9 +1869,6 @@ export interface MethodResultMap {
   "connect.launch": ConnectLaunchResult;
   "channel.publish": ChannelPublishResult;
   "channel.subscription_set": ChannelSubscriptionSetResult;
-  "price.get": PriceGetResult;
-  "price.subscribe": PriceSubscriptionResult;
-  "price.unsubscribe": PriceSubscriptionResult;
   "storage.list": StorageListResult;
   "storage.directory.create": StorageDirectoryResult;
   "storage.directory.delete": StorageDirectoryResult;

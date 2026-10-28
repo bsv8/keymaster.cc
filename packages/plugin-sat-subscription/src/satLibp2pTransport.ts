@@ -503,8 +503,8 @@ export class SatLibp2pConnection {
       return;
     } catch { /* 继续尝试入站 Publish */ }
     // 合法入站 Publish 才算活动信号；解析失败说明这是未知帧，直接升级成
-    // 传输错误。已经解析过的 Publish 正文不再逐条打印：bsvprice 这类
-    // 高频通道每 tick 一行 warn 会把正常流噪声成故障。
+    // 传输错误。已经解析过的 Publish 正文不再逐条打印，避免高频
+    // 通道的正常流量产生大量告警噪声。
     try {
       parsePublish(wire);
     } catch (error) {

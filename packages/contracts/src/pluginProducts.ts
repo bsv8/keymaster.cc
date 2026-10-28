@@ -23,11 +23,9 @@ export const BUILTIN_PLUGIN_PRODUCT_IDS = [
   "msfile",
   "sat-subscription",
   "protocol",
-  "message",
   "background",
   "woc",
   "p2pkh",
-  "bsv-price",
   "apps",
 ] as const;
 
@@ -74,13 +72,11 @@ export const BUILTIN_PLUGIN_RUNTIME_UNIT_CATALOG = [
   { productId: "sat-subscription", unitId: "sat-subscription.window", runtime: "window-main", scopeKind: "owner-session" },
   { productId: "sat-subscription", unitId: "sat-subscription.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
   { productId: "protocol", unitId: "protocol.window", runtime: "window-main", scopeKind: "storage" },
-  { productId: "message", unitId: "message.window", runtime: "window-main", scopeKind: "owner-session" },
   { productId: "background", unitId: "background.window", runtime: "window-main", scopeKind: "owner-session" },
   { productId: "woc", unitId: "woc.window", runtime: "window-main", scopeKind: "owner-session" },
   { productId: "woc", unitId: "woc.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
   { productId: "p2pkh", unitId: "p2pkh.window", runtime: "window-main", scopeKind: "owner-session" },
   { productId: "p2pkh", unitId: "p2pkh.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
-  { productId: "bsv-price", unitId: "bsv-price.window", runtime: "window-main", scopeKind: "owner-session" },
   { productId: "apps", unitId: "apps.window", runtime: "window-main", scopeKind: "root" },
 ] as const satisfies readonly BuiltinPluginRuntimeUnitDeclaration[];
 

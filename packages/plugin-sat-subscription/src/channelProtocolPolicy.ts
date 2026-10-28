@@ -6,7 +6,7 @@ export type ChannelPrivateProtocol = typeof APP_MESSAGE_PROTOCOL | typeof WEBRTC
 export type ChannelCaller = Extract<CoordinatorChannelOperation, { type: "subscription-set" }>['caller'];
 export type ChannelOperationCaller = Extract<CoordinatorChannelOperation, { type: "private-publish" }>['caller'];
 const CHANNEL_PROTOCOLS = new Set([APP_MESSAGE_PROTOCOL, WEBRTC_SIGNAL_PROTOCOL]);
-const TRUSTED_CHANNEL_PLUGIN_IDS = new Set(["bsv-price", "message", "msfile"]);
+const TRUSTED_CHANNEL_PLUGIN_IDS = new Set(["msfile"]);
 const TRUSTED_CHANNEL_SYSTEM_IDS = new Set(["owner-inbox"]);
 export function privateProtocol(protocol: string): ChannelPrivateProtocol {
   if (CHANNEL_PROTOCOLS.has(protocol as ChannelPrivateProtocol)) return protocol as ChannelPrivateProtocol;
@@ -16,7 +16,6 @@ export function privateProtocol(protocol: string): ChannelPrivateProtocol {
 export function validatePrivateProtocolCaller(caller: ChannelOperationCaller, protocol: ChannelPrivateProtocol): void {
   if (caller.kind === "connect") throw new Error("Connect caller cannot publish private inbox messages");
   if (caller.kind === "plugin") {
-    if (caller.pluginId === "message" && protocol === APP_MESSAGE_PROTOCOL) return;
     // BitFS 文件需求走公开 Hash channel；SDP/ICE 统一走 WEBRTC_SIGNAL_PROTOCOL。
     if (caller.pluginId === "msfile" && protocol === WEBRTC_SIGNAL_PROTOCOL) return;
     throw new Error("Channel plugin is not allowed to publish this private protocol");
@@ -86,12 +85,12 @@ function isActiveOwnerInboxChannel(channel: string): boolean {
 
 function isAllowedOwnerInboxSubscription(caller: ChannelCaller, channel: string): boolean {
   if (!isActiveOwnerInboxChannel(channel)) return false;
-  // owner-inbox 是 Coordinator 内部系统路由；message / msfile 是 Host 绑定身份的内部插件路由。Connect 和其他插件不能订阅
+  // owner-inbox 是 Coordinator 内部系统路由；msfile 是 Host 绑定身份的内部插件路由。Connect 和其他插件不能订阅
   // 任意 bsv8.inbox.*，避免把私有收件箱暴露成公共事件流。
   if (caller.kind === "system") {
     return caller.systemId === "owner-inbox";
   }
-  return caller.kind === "plugin" && (caller.pluginId === "message" || caller.pluginId === "msfile");
+  return caller.kind === "plugin" && caller.pluginId === "msfile";
 }
 
   return { callerId: channelCallerId, allowsOwnerInboxSubscription: isAllowedOwnerInboxSubscription };

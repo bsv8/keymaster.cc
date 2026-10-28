@@ -86,10 +86,10 @@ function consumerFiles(dir) {
 }
 const consumerSources = [...consumerRoots.flatMap(consumerFiles), ...consumerFiles(join(root, "packages/platform-storage/src")),
   join(root, "packages/plugin-sat-subscription/src/SatSubscriptionSettings.tsx"),
-  ...["plugin-message/src/MessagePage.tsx", "plugin-message/src/MessageDetailPage.tsx", "plugin-p2pkh/src/widgets/P2pkhTransferWidget.tsx", "plugin-p2pkh/src/pages/P2pkhTransferPage.tsx", "plugin-p2pkh/src/pages/P2pkhSettingsPage.tsx", "plugin-woc/src/pages/WocSettingsPage.tsx", "plugin-p2pkh/src/widgets/P2pkhBalanceWidget.tsx",
+  ...["plugin-p2pkh/src/widgets/P2pkhTransferWidget.tsx", "plugin-p2pkh/src/pages/P2pkhTransferPage.tsx", "plugin-p2pkh/src/pages/P2pkhSettingsPage.tsx", "plugin-woc/src/pages/WocSettingsPage.tsx", "plugin-p2pkh/src/widgets/P2pkhBalanceWidget.tsx",
     "plugin-msfile/src/MsFileHomeFileWidget.tsx", "plugin-msfile/src/MsFileBucketPage.tsx", "plugin-msfile/src/MsFileMediaPlayer.tsx", "plugin-msfile/src/MsFileSettings.tsx"]
     .map(file => join(root, "packages", file))];
-const globalHooks = new Set(["usePluginHost", "useHost", "usePluginRuntime", "useI18n", "useBsvPrice", "useLocale", "useI18nText", "useRegistry", "useRuntimeStatus", "useCapability", "useOptionalCapability", "useHasCapability", "useWebLoomApp", "useAppSubscription", "useRuntimeSelector", "PluginConsumerProvider", "PluginHostContext", "WebLoomContext", "PluginHostProvider", "WebLoomProvider", "createKeymasterPluginHost", "getWebLoomHost", "bindWebLoomHost", "attachKeymasterRemoteRuntime", "registerKeymasterOwnedResource", "createPluginHost", "createWindowApp", "createSharedWorkerRuntime"]);
+const globalHooks = new Set(["usePluginHost", "useHost", "usePluginRuntime", "useI18n", "useLocale", "useI18nText", "useRegistry", "useRuntimeStatus", "useCapability", "useOptionalCapability", "useHasCapability", "useWebLoomApp", "useAppSubscription", "useRuntimeSelector", "PluginConsumerProvider", "PluginHostContext", "WebLoomContext", "PluginHostProvider", "WebLoomProvider", "createKeymasterPluginHost", "getWebLoomHost", "bindWebLoomHost", "attachKeymasterRemoteRuntime", "registerKeymasterOwnedResource", "createPluginHost", "createWindowApp", "createSharedWorkerRuntime"]);
 for (const file of consumerSources) {
   const source = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true,
     file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);

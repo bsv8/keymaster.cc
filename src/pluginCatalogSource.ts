@@ -11,11 +11,6 @@ import type {
 } from "@keymaster/contracts";
 import { pagePlugin, pageSetup } from "@keymaster/plugin-page";
 import { appsPlugin, appsSetup } from "@keymaster/plugin-apps";
-import { bsvPricePlugin, bsvPriceSetup } from "@keymaster/plugin-bsv-price";
-import {
-  messagePlatformPlugin,
-  messageSetup,
-} from "@keymaster/plugin-message";
 import { backgroundPlugin, backgroundSetup } from "@keymaster/plugin-background";
 import { msfilePlugin, msfileSetup } from "@keymaster/plugin-msfile";
 import { satSubscriptionPlugin, satSubscriptionSetup } from "@keymaster/plugin-sat-subscription";
@@ -40,11 +35,9 @@ export const WEB_PLUGIN_IMPLEMENTATIONS: readonly { manifest: PluginManifest; se
   { manifest: msfilePlugin, setup: msfileSetup },
   { manifest: satSubscriptionPlugin, setup: satSubscriptionSetup },
   { manifest: protocolPlugin, setup: protocolSetup },
-  { manifest: messagePlatformPlugin, setup: messageSetup },
   { manifest: backgroundPlugin, setup: backgroundSetup },
   { manifest: wocPlugin, setup: wocSetup },
   { manifest: p2pkhPlugin, setup: p2pkhSetup },
-  { manifest: bsvPricePlugin, setup: bsvPriceSetup },
   { manifest: appsPlugin, setup: appsSetup },
 ] as const;
 export const WEB_PLUGIN_CATALOG_SOURCE: readonly PluginManifest[] = WEB_PLUGIN_IMPLEMENTATIONS.map(entry => entry.manifest);

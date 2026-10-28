@@ -1,7 +1,7 @@
 import { useP2pkhResources } from "../P2pkhResourceContext.js";
-import { formatSats, formatSatsWithPrice } from "@keymaster/ui";
+import { formatSats } from "@keymaster/ui";
 import { countRender } from "webloom-framework/react";
-import { usePluginBsvPrice, usePluginI18n, usePluginLocale, useResourceViewSelector } from "@keymaster/runtime";
+import { usePluginI18n, usePluginLocale, useResourceViewSelector } from "@keymaster/runtime";
 import { emptyGlobalBalanceSnapshot, type GlobalBalanceSnapshot } from "@keymaster/contracts";
 import type { P2pkhSyncSnapshot } from "../p2pkhContracts.js";
 
@@ -13,7 +13,6 @@ export function P2pkhBalanceWidget() {
   countRender("plugin-p2pkh/P2pkhBalanceWidget");
   const { t } = usePluginI18n();
   const locale = usePluginLocale();
-  const price = usePluginBsvPrice();
   const store = useP2pkhResources();
   const readiness = useResourceViewSelector<ReadinessState, ReadinessState>(
     store, "p2pkh.readiness", [], snapshot => snapshot.data ?? "initializing",
@@ -36,7 +35,7 @@ export function P2pkhBalanceWidget() {
       <header className="home-widget__head"><h3>{t("p2pkh.balanceWidget.title", { defaultValue: "P2PKH 余额" })}</h3></header>
       <section className="home-widget__row"><div>
         <p className="home-widget__label">{network ? t(network === "main" ? "p2pkh.balanceWidget.bsvMain" : "p2pkh.balanceWidget.bsvTest", { defaultValue: network === "main" ? "BSV (main)" : "BSV Testnet (test)" }) : "BSV"}</p>
-        <p className="home-widget__amount">{known ? formatSatsWithPrice(balance.total, price, { locale, network }) : "—"}</p>
+        <p className="home-widget__amount">{known ? formatSats(balance.total, locale) : "—"}</p>
         {known && balance.breakdown ? <dl className="home-widget__breakdown">
           <dt>{t("p2pkh.balance.confirmed", { defaultValue: "已确认（可花费）" })}</dt><dd>{formatSats(balance.breakdown.confirmed)}</dd>
           <dt>{t("p2pkh.balance.localSpendable", { defaultValue: "可花费" })}</dt><dd>{formatSats(balance.breakdown.spendable)}</dd>

@@ -32,12 +32,6 @@ importers:
       '@keymaster/plugin-background':
         specifier: '*'
         version: link:packages/plugin-background
-      '@keymaster/plugin-bsv-price':
-        specifier: '*'
-        version: link:packages/plugin-bsv-price
-      '@keymaster/plugin-message':
-        specifier: '*'
-        version: link:packages/plugin-message
       '@keymaster/plugin-msfile':
         specifier: '*'
         version: link:packages/plugin-msfile
@@ -267,42 +261,6 @@ importers:
       lucide-react:
         specifier: ^0.468.0
         version: 0.468.0(react@18.3.1)
-      webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
-
-  packages/plugin-bsv-price:
-    dependencies:
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../contracts
-      '@keymaster/runtime':
-        specifier: '*'
-        version: link:../runtime
-      '@keymaster/ui':
-        specifier: '*'
-        version: link:../ui
-      bsv8-channel-protocol:
-        specifier: 0.6.0
-        version: 0.6.0
-      webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
-
-  packages/plugin-message:
-    dependencies:
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../contracts
-      '@keymaster/runtime':
-        specifier: '*'
-        version: link:../runtime
-      '@keymaster/ui':
-        specifier: '*'
-        version: link:../ui
-      '@noble/hashes':
-        specifier: 1.8.0
-        version: 1.8.0
       webloom-framework:
         specifier: 0.6.0
         version: 0.6.0(react@18.3.1)

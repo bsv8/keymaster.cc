@@ -15,7 +15,6 @@ import type { CoordinatorPlatformStorageData, StorageBindingCoordinatorClient } 
 import { type PluginHost } from "@keymaster/runtime";
 import { attachKeymasterRemoteRuntime, createKeymasterPluginHost as createPluginHost, getWebLoomHost } from "@keymaster/runtime/assembly";
 import { createStorageBindingAuthority } from "@keymaster/platform-storage/coordinator/authority";
-import { bsvPriceConfig } from "./pluginConfigs.js";
 import { WEB_PLUGIN_CATALOG } from "./pluginCatalog.js";
 import { createWebRuntimeUnitImplementationRegistry } from "./runtimeUnitImplementations.js";
 import { SHELL_RESOURCES } from "./i18n/resources.js";
@@ -701,30 +700,6 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   }, () => registerApplicationBootstrapResource(host.capabilities.get(RESOURCE_REGISTRY_CAPABILITY), bootstrapStatus.service));
 
   const fullCatalog = [...WEB_PLUGIN_CATALOG];
-  // 施工单 2026-07-08 001 硬切换：装配层对 plugin-bsv-price 的 Window
-  // runtime unit 显式注入 `pricePublisherPublicKeyHex` seed；它只在本地配置缺失时作为首次
-  // 默认值，运行时真值由 BSV Price owner/App K-V 接管。
-  //
-  // 关键约束：
-  //   - 装配层只替换 Window unit 的 `config`，不把配置放回产品级 manifest；
-  //     plugin 用 `ctx.config[BSV_PRICE_CONFIG_KEY]`
-  //     读来决定首次 seed；
-  //   - 配置来源集中：`pluginConfigs.ts`；
-  //   - plugin 自己**不**走 `globalThis.__XXX__` 隐式注入路径。
-  //
-  // 这里用临时的 Window unit 描述挂上 config，避免对其它 plugin 的
-  // manifest 顺序造成影响。
-  const fullCatalogWithConfig: PluginManifest[] = fullCatalog.map((p) => {
-    if (p.id === "bsv-price") {
-      return {
-        ...p,
-        units: p.units?.map((unit) => unit.runtime === "window-main"
-          ? { ...unit, config: { ...bsvPriceConfig } }
-          : unit),
-      };
-    }
-    return p;
-  });
 
   let vaultSelectionPromise: Promise<void> | undefined;
   let ownerAppsPromise: Promise<void> | undefined;
@@ -793,7 +768,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   // Phases below are UI projections; registration and startup belong to the dependency graph.
   const refreshRuntime = async (stage: BootstrapErrorStage, retryFailed = false): Promise<void> => {
     if (retryFailed) {
-      for (const plugin of fullCatalogWithConfig) {
+      for (const plugin of fullCatalog) {
         if (host.state(plugin.id).kind === "failed") {
           await withBootstrapErrorContext({ stage, pluginId: plugin.id, operation: "retry-plugin" }, () => host.retry(plugin.id));
         }
@@ -861,7 +836,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       runWithBootstrapErrorContext({
         stage: "vault-selection",
         operation: "validate-plugin-catalog"
-      }, () => host.validateManifestSet(fullCatalogWithConfig));
+      }, () => host.validateManifestSet(fullCatalog));
       await refreshRuntime("vault-selection", retryFailed);
       runWithBootstrapErrorContext({
         stage: "vault-selection",
@@ -910,9 +885,9 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   runWithBootstrapErrorContext({
     stage: "storage-onboarding",
     operation: "validate-plugin-catalog"
-  }, () => host.validateManifestSet(fullCatalogWithConfig));
+  }, () => host.validateManifestSet(fullCatalog));
   await withBootstrapErrorContext({ stage: "bootstrap", operation: "register-all-plugins" },
-    () => host.registerAll(fullCatalogWithConfig));
+    () => host.registerAll(fullCatalog));
   if (!storageReady) {
     const storageService = runWithBootstrapErrorContext({
       stage: "storage-onboarding",

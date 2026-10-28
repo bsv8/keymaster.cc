@@ -197,8 +197,6 @@ export interface PluginManifest extends Omit<
    *   - 缺省 `{}`：插件必须对每个字段做"缺值时降级到无害空态"处理。
    *
    * 用途示例：
-   *   - `plugin-bsv-price` 的 `pricePublisherPublicKeyHex` —— PriceCast
-   *     publisher 公钥 hex 强配置注入；
    *   - 任何"装配层硬编码的部署侧真值"都走这里。
    */
   config?: KeymasterPluginConfig;

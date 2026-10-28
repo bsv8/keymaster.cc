@@ -1,5 +1,5 @@
-import { projectNetworkIdentity, type NetworkIdentity, type ProtocolMethod, type MethodParams } from "@keymaster/contracts";
-import { parseRequestMessage as parseWireRequest } from "keymaster-connect/server";
+import { PROTOCOL_METHODS, projectNetworkIdentity, type NetworkIdentity, type ProtocolMethod, type MethodParams } from "@keymaster/contracts";
+import { ProtocolValidationError, parseRequestMessage as parseWireRequest } from "keymaster-connect/server";
 
 // 这里只做钱包内部执行 DTO 的适配；消息、字段、金额、路径、proof 的校验均归独立 Receiver。
 export {
@@ -20,6 +20,8 @@ export function internalExecutionParams(method: ProtocolMethod, params: object, 
 /** 纯业务适配入口供内部调用和边界测试使用，不持有第二套 schema。 */
 export function parseRequestMessage(raw: unknown, receiverIdentity: NetworkIdentity) {
   const parsed = parseWireRequest(raw, receiverIdentity);
+  const method = PROTOCOL_METHODS.find(method => method === parsed.method);
+  if (!method) throw new ProtocolValidationError("invalid_request", "Method is not available in this wallet");
   const networkIdentity = projectNetworkIdentity(receiverIdentity);
-  return { ...parsed, networkIdentity, params: internalExecutionParams(parsed.method, parsed.params, networkIdentity) };
+  return { ...parsed, method, networkIdentity, params: internalExecutionParams(method, parsed.params, networkIdentity) };
 }

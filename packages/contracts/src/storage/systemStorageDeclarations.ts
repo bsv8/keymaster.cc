@@ -39,23 +39,9 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
     model: "kv",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
-  bsvPrice: Object.freeze({
-    moduleId: "bsv-price",
-    purposeId: "settings",
-    authority: "built-in-module",
-    model: "kv",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
   ordinalsMintHistory: Object.freeze({
     moduleId: "collectible-1satordinals",
     purposeId: "mint-history",
-    authority: "built-in-module",
-    model: "kv",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
-  messageHistory: Object.freeze({
-    moduleId: "message",
-    purposeId: "history",
     authority: "built-in-module",
     model: "kv",
     schemaVersion: 1,
@@ -104,17 +90,6 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
   /**
-   * 私密消息的原始证据根：`messages/<对端公钥>/{sent,received,timeindex}/…`。
-   * 只存 raw 与本地时间索引，不存解析投影；见 KeymasterFormats 的 messages 规范。
-   */
-  messagesFiles: Object.freeze({
-    moduleId: "messages",
-    purposeId: "",
-    authority: "built-in-module",
-    model: "files",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
-  /**
    * MSFile 设置与供应商：`msfiles/setting.json`，整文件替换。
    */
   msfilesFiles: Object.freeze({
@@ -154,9 +129,7 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
 /** manifest pluginId 到中央声明的绑定目录。 */
 export const SYSTEM_STORAGE_DECLARATIONS: Readonly<Record<string, readonly PluginStorageDeclaration[]>> = Object.freeze({
   vault: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.vaultPayments]),
-  "bsv-price": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.bsvPrice]),
   "collectible-1satordinals": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.ordinalsMintHistory]),
-  message: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.messageHistory, CENTRAL_STORAGE_DECLARATIONS.messagesFiles]),
   p2pkh: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.p2pkhFiles, CENTRAL_STORAGE_DECLARATIONS.p2pkhState]),
   protocol: Object.freeze([
     CENTRAL_STORAGE_DECLARATIONS.protocolDurablePolicy,

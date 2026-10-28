@@ -62,7 +62,6 @@ for (const file of program.getSourceFiles()) {
 }
 const packageCatalog = new Map(catalog.map(plugin => [plugin.id === "storage" ? "platform-storage" : "plugin-" + plugin.id, plugin]));
 // 两个产品目录沿用其领域包名。
-packageCatalog.set("plugin-message", catalog.find(plugin => plugin.id === "message"));
 function caller(node, file) {
   for (let parent = node.parent; parent; parent = parent.parent) {
     if (ts.isFunctionLike(parent)) {

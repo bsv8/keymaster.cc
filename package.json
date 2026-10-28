@@ -60,8 +60,6 @@
     "@keymaster/platform-storage": "*",
     "@keymaster/plugin-apps": "*",
     "@keymaster/plugin-background": "*",
-    "@keymaster/plugin-bsv-price": "*",
-    "@keymaster/plugin-message": "*",
     "@keymaster/plugin-msfile": "*",
     "@keymaster/plugin-p2pkh": "*",
     "@keymaster/plugin-protocol": "*",

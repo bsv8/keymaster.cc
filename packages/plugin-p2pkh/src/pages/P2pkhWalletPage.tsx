@@ -1,8 +1,8 @@
 import { useP2pkhResources } from "../P2pkhResourceContext.js";
 import { useEffect, useMemo, useState } from "react";
-import { Button, DataTable, EmptyState, PageHeader, formatSats, formatSatsWithPrice, type DataTableColumn } from "@keymaster/ui";
+import { Button, DataTable, EmptyState, PageHeader, formatSats, type DataTableColumn } from "@keymaster/ui";
 import { useOptionalPluginCapability } from "webloom-framework/react";
-import { router, usePluginBsvPrice, usePluginI18n, usePluginLocale, useOptionalResourceSelector } from "@keymaster/runtime";
+import { router, usePluginI18n, usePluginLocale, useOptionalResourceSelector } from "@keymaster/runtime";
 import { emptyGlobalBalanceSnapshot, P2PKH_COORDINATOR_CONTROL_CAPABILITY, type GlobalBalanceSnapshot, type P2pkhCoordinatorControl } from "@keymaster/contracts";
 import type { KeyIdentity } from "@keymaster/contracts";
 import type { P2pkhBalanceBreakdown, P2pkhHistoryRecord, P2pkhKeyResource, P2pkhLocalTransaction, P2pkhService, P2pkhSyncSnapshot, P2pkhTransactionSyncState, P2pkhAvailableUtxos } from "../p2pkhContracts.js";
@@ -76,7 +76,6 @@ function P2pkhWalletPageInner({
   const resources = useP2pkhResources();
   const { t } = usePluginI18n();
   const locale = usePluginLocale();
-  const price = usePluginBsvPrice();
   const [page, setPage] = useState(() => readPage());
   const [actionError, setActionError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -268,7 +267,7 @@ function P2pkhWalletPageInner({
       <section className="p2pkh-wallet__balances" aria-label={t("p2pkh.wallet.balances", { defaultValue: "BSV balances" })}>
         <article>
           <h2>{networkTitle}</h2>
-          <strong>{balanceKnown ? formatSatsWithPrice(balance!.total, price, { locale, network }) : t("p2pkh.balance.unknown", { defaultValue: "未知（尚未取得 UTXO 结果）" })}</strong>
+          <strong>{balanceKnown ? formatSats(balance!.total, locale) : t("p2pkh.balance.unknown", { defaultValue: "未知（尚未取得 UTXO 结果）" })}</strong>
           <BalanceBreakdown breakdown={balanceKnown ? balance?.breakdown : undefined} />
           <Button variant="ghost" disabled={refreshing} onClick={() => void refreshUtxos()}>{refreshing ? t("p2pkh.action.inProgress", { defaultValue: "处理中…" }) : t("p2pkh.action.refreshUtxos", { defaultValue: "刷新 UTXO" })}</Button>
         </article>

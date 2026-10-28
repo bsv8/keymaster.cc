@@ -62,7 +62,6 @@ import {
   WOC_CAPABILITY,
   P2PKH_COORDINATOR_CONTROL_CAPABILITY,
   P2PKH_ADDRESS_CODEC_CAPABILITY,
-  BSV_PRICE_READER_CAPABILITY,
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
 import type { P2pkhSyncSnapshot, P2pkhKeyResource, P2pkhHistoryRecord, P2pkhLocalTransaction, P2pkhTransactionSyncState, P2pkhAvailableUtxos } from "./p2pkhContracts.js";
@@ -639,7 +638,6 @@ const p2pkhPluginDefinition = {
         { capability: WOC_CAPABILITY, reason: "读取历史与详情；广播只能走中心服务" },
             { capability: BUSINESS_REGISTRY_CAPABILITY, reason: "接入资产业务导航" },
         { capability: BREADCRUMB_REGISTRY_CAPABILITY, reason: "注册 P2PKH 面包屑" },
-        { capability: BSV_PRICE_READER_CAPABILITY, optional: true, reason: "余额卡片展示参考价格" },
       { capability: PAGE_UI_REGISTRY_CAPABILITY, reason: "贡献本实例内部设置 UI" },
       { capability: OWNED_RESOURCE_ACCESS_CAPABILITY, reason: "UI 读取所属实例资源" },
       { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "注册 P2PKH resources" },

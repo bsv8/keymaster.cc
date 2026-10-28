@@ -53,7 +53,6 @@ import type {
 import { defineCapability } from "webloom-framework";
 import {
   APP_CATALOG_CAPABILITY,
-  BSV_PRICE_READER_CAPABILITY,
   MSFILE_SERVICE_CAPABILITY,
   PROTOCOL_SERVICE_CAPABILITY,
   PROTOCOL_STORAGE_REPOSITORY_CAPABILITY,
@@ -499,7 +498,6 @@ const protocolPluginDefinition = {
       { capability: APP_STORAGE_CLIENTS_CAPABILITY, optional: true, reason: "Connect App 会话受限文件客户端" },
       { capability: STORAGE_RUNTIME_CONTROLLER_CAPABILITY, optional: true, reason: "可选 Storage 方法" },
       { capability: MSFILE_SERVICE_CAPABILITY, optional: true, reason: "可选 MSFile 方法" },
-      { capability: BSV_PRICE_READER_CAPABILITY, optional: true, reason: "可选 BSV 价格展示方法 price.*" },
       { capability: P2PKH_SERVICE_CAPABILITY, optional: true, reason: "可选 P2PKH 方法" },
       { capability: APP_CATALOG_CAPABILITY, optional: true, reason: "可选 app catalog" },
     ]),
@@ -561,15 +559,6 @@ const protocolPluginDefinition = {
         getMsfileService: () => {
           try {
             return ctx.optionalCapability(MSFILE_SERVICE_CAPABILITY);
-          } catch {
-            return undefined;
-          }
-        },
-        // BSV 价格能力随 owner-session 装配；每次 price.* 请求重新取，
-        // 保证 owner 切换后能看到新实例。
-        getPriceReader: () => {
-          try {
-            return ctx.optionalCapability(BSV_PRICE_READER_CAPABILITY);
           } catch {
             return undefined;
           }

@@ -44,12 +44,6 @@
       "path": "./packages/plugin-apps"
     },
     {
-      "path": "./packages/plugin-message"
-    },
-    {
-      "path": "./packages/plugin-bsv-price"
-    },
-    {
       "path": "./packages/msfile-media"
     },
     {
