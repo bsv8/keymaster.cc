@@ -292,23 +292,20 @@ export interface ExternalSignatureRecord {
  * The trusted, structured fact that retires an external signature
  * responsibility. There is no evidence-free settlement.
  */
-export interface ExternalSignatureEvidence {
-  kind: "input-consumed" | "signature-invalidated";
-  /** The observed transaction (required for "input-consumed"). */
-  txid?: string;
-  /**
-   * The exact observed transaction bytes (required for "input-consumed").
-   *
-   * The settlement projects the money from these exact bytes: the self
-   * outputs, the parent relation and the spent inputs. A txid alone cannot
-   * produce a spendable change output.
-   */
-  rawTxHex?: string;
-  /** The inputs the observed transaction consumed (required for "input-consumed"). */
-  inputs?: string[];
-  /** Why the signature became unusable (required for "signature-invalidated"). */
-  reason?: string;
-}
+export type ExternalSignatureEvidence =
+  | {
+      kind: "input-consumed";
+      txid: string;
+      /** Exact observed bytes provide self outputs, parent relation and spent inputs. */
+      rawTxHex: string;
+      inputs: string[];
+    }
+  | {
+      kind: "signature-invalidated";
+      /** Why the signature became unusable without consuming an input. */
+      reason: string;
+      txid?: string;
+    };
 
 /** Human-readable responsibility report (E04 traceability). */
 export interface ResponsibilityView {
@@ -358,14 +355,14 @@ interface SerializedState {
 }
 
 function outpointKey(txid: string, vout: number): string {
-  return `${checkTxid(txid)}:${vout}`;
+  return `${txid.toLowerCase()}:${vout}`;
 }
 
 function checkedOutpoint(value: string): string {
   const parts = value.toLowerCase().split(":");
   if (parts.length !== 2) throw new UtmError("tx-invalid", "bad outpoint");
   if (!/^(0|[1-9][0-9]*)$/.test(parts[1]!)) throw new UtmError("tx-invalid", "bad vout");
-  return outpointKey(parts[0]!, checkVout(Number(parts[1])));
+  return outpointKey(checkTxid(parts[0]!), checkVout(Number(parts[1])));
 }
 
 /**
@@ -421,7 +418,11 @@ function checkScriptHex(scriptHex: unknown, what = "script"): string {
   if (clean.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(clean) || clean.length / 2 > 10000) {
     throw new UtmError("tx-invalid", `${what} is not valid script hex`);
   }
-  return clean.toLowerCase();
+  return canonicalScriptHex(scriptHex);
+}
+
+function canonicalScriptHex(scriptHex: string): string {
+  return scriptHex.replace(/^0x/i, "").toLowerCase();
 }
 
 export function unsignedSkeleton(rawTxHex: string): string {
@@ -432,13 +433,6 @@ export function unsignedSkeleton(rawTxHex: string): string {
     inputs: parsed.inputs.map((input) => ({ txid: input.txid, vout: input.vout, sequence: input.sequence })),
     outputs: parsed.outputs.map((output) => ({ value: output.value.toString(10), scriptHex: output.scriptHex })),
   });
-}
-
-function checkRequestId(id: unknown): string {
-  if (typeof id !== "string" || id.length === 0 || id.length > 128 || !/^[A-Za-z0-9:_.-]+$/.test(id)) {
-    throw new UtmError("policy-denied", "bad request/allocation id");
-  }
-  return id;
 }
 
 /**
@@ -508,19 +502,10 @@ export class FundingKernel {
     scope: Scope,
     config: ManagerConfig,
   ) {
-    if (!scope || typeof scope.owner !== "string" || scope.owner.length === 0) {
-      throw new UtmError("scope-mismatch", "scope owner is required");
-    }
-    if (scope.network !== "main" && scope.network !== "test") throw new UtmError("scope-mismatch", "bad network");
+    // The wallet supplies its initialized identity and configuration. Disk
+    // recovery validates serialized data separately in restore().
     this.scopeValue = { ...scope };
-    this.configValue = {
-      walletScriptHex: checkScriptHex(config.walletScriptHex, "wallet script").toLowerCase(),
-      dustThresholdSats: formatAmount(parseAmount(config.dustThresholdSats, "dust threshold")),
-      maxUnconfirmedAncestors: config.maxUnconfirmedAncestors,
-    };
-    if (!Number.isInteger(config.maxUnconfirmedAncestors) || config.maxUnconfirmedAncestors < 0) {
-      throw new UtmError("policy-denied", "bad maxUnconfirmedAncestors");
-    }
+    this.configValue = { ...config };
   }
 
   private bump(): void {
@@ -571,30 +556,36 @@ export class FundingKernel {
 
   /** Work on a detached state candidate before durable commit. */
   clone(): FundingKernel {
-    return FundingKernel.restore(this.serialize(), { ...this.scope });
+    const candidate = new FundingKernel(this.scopeValue, this.configValue);
+    candidate.replaceFrom(this);
+    return candidate;
   }
 
-  /** Publish a previously validated and durably persisted candidate state. */
+  /** Publish a durably persisted internal candidate without reparsing disk data. */
   replaceFrom(candidate: FundingKernel): void {
-    if (candidate.scope.owner !== this.scope.owner || candidate.scope.network !== this.scope.network ||
-        JSON.stringify(candidate.config) !== JSON.stringify(this.config)) {
-      throw new UtmError("scope-mismatch", "candidate manager scope/config does not match");
-    }
-    const restored = FundingKernel.restore(candidate.serialize(), { ...this.scope });
-    this.utxos = restored.utxos;
-    this.allocations = restored.allocations;
-    this.outbox = restored.outbox;
-    this.externalSignatures = restored.externalSignatures;
-    this.fundsFrozen = restored.fundsFrozen;
-    this.generation = restored.generation;
-    this.wocRevision = restored.wocRevision;
-    this.localRevision = restored.localRevision;
+    // Copy rather than share: failed writes and later candidate mutations must
+    // never publish into the live state. Validation belongs to disk recovery,
+    // not to a round trip through serialize/restore on every internal call.
+    const state = structuredClone({
+      utxos: candidate.utxos,
+      allocations: candidate.allocations,
+      outbox: candidate.outbox,
+      externalSignatures: candidate.externalSignatures,
+    });
+    this.utxos = state.utxos;
+    this.allocations = state.allocations;
+    this.outbox = state.outbox;
+    this.externalSignatures = state.externalSignatures;
+    this.fundsFrozen = candidate.fundsFrozen;
+    this.generation = candidate.generation;
+    this.wocRevision = candidate.wocRevision;
+    this.localRevision = candidate.localRevision;
   }
 
   /** Mark the validated template as durably recorded before signing. */
   markSigningIntentDurable(allocationId: string): void {
     this.assertFundsNotFrozen("mark a signing intent durable");
-    const id = checkRequestId(allocationId);
+    const id = allocationId;
     const record = this.allocations.get(id);
     if (!record || !record.signingIntentHex) throw new UtmError("allocation-state", "signing intent was not prepared");
     record.signingIntentDurable = true;
@@ -602,7 +593,7 @@ export class FundingKernel {
   }
 
   signingIntent(allocationId: string): { unsignedTxHex: string; durable: boolean } {
-    const record = this.allocations.get(checkRequestId(allocationId));
+    const record = this.allocations.get(allocationId);
     if (!record) throw new UtmError("allocation-unknown", "allocation not found");
     return { unsignedTxHex: record.signingIntentHex, durable: record.signingIntentDurable };
   }
@@ -610,21 +601,16 @@ export class FundingKernel {
   // ---- snapshots ---------------------------------------------------------
 
   applySnapshot(input: SnapshotInput): { added: number; removed: number; isolated: string[] } {
-    if (!Number.isInteger(input.generation) || input.generation <= 0) throw new UtmError("policy-denied", "bad generation");
-    if (!Number.isInteger(input.revision) || input.revision <= 0) throw new UtmError("policy-denied", "bad revision");
-    if (!Array.isArray(input.utxos)) throw new UtmError("policy-denied", "utxos must be an array");
     if (input.generation < this.generation) throw new UtmError("snapshot-stale", "older generation");
     if (input.generation === this.generation && input.revision <= this.wocRevision) {
       throw new UtmError("snapshot-stale", "revision did not advance");
     }
-    // Validate everything before mutating.
+    // Convert the trusted observation batch before merging any state.
     const incoming = new Map<string, SnapshotUtxo>();
     for (const row of input.utxos) {
-      const key = outpointKey(row.txid, checkVout(row.vout));
+      const key = outpointKey(row.txid, row.vout);
       const value = parseAmount(row.value, "utxo value");
-      const scriptHex = checkScriptHex(row.scriptHex, "utxo script");
-      if (row.status !== "confirmed" && row.status !== "unconfirmed") throw new UtmError("policy-denied", "bad utxo status");
-      if (!Number.isInteger(row.height) || row.height < 0) throw new UtmError("policy-denied", "bad utxo height");
+      const scriptHex = canonicalScriptHex(row.scriptHex);
       const prev = incoming.get(key);
       if (prev) {
         if (prev.value !== row.value || prev.scriptHex !== scriptHex) {
@@ -709,8 +695,7 @@ export class FundingKernel {
    * never a caller error. The first-seen spend stays canonical.
    */
   reportExternalSpend(outpoint: string, spendingTxid: string): void {
-    const key = checkedOutpoint(outpoint);
-    checkTxid(spendingTxid);
+    const key = outpoint.toLowerCase();
     const spending = spendingTxid.toLowerCase();
     const existing = this.utxos.get(key);
     if (existing) {
@@ -783,7 +768,7 @@ export class FundingKernel {
    */
   setProtected(outpoints: readonly string[], protect: boolean, source = ""): void {
     for (const raw of outpoints) {
-      const key = checkedOutpoint(raw);
+      const key = raw.toLowerCase();
       const existing = this.utxos.get(key);
       if (existing) {
         if (!protect) {
@@ -836,16 +821,13 @@ export class FundingKernel {
 
   request(input: RequestInput): AllocationView {
     this.assertFundsNotFrozen("request funds");
-    const requestId = checkRequestId(input.requestId);
+    const requestId = input.requestId;
     const business = parseAmount(input.businessAmountSats, "business amount");
     if (business <= 0n) throw new UtmError("policy-denied", "business amount must be positive");
     const feeRate = parseFeeRate(input.feeRateSatPerKb);
     const version = input.version ?? 1;
     const locktime = input.locktime ?? 0;
-    if (!Number.isInteger(version) || !Number.isInteger(locktime) || locktime < 0) {
-      throw new UtmError("policy-denied", "bad version/locktime");
-    }
-    const outputs = input.outputs.map((o) => ({ scriptHex: checkScriptHex(o.scriptHex, "output script"), value: parseAmount(o.value, "output value") }));
+    const outputs = input.outputs.map((o) => ({ scriptHex: canonicalScriptHex(o.scriptHex), value: parseAmount(o.value, "output value") }));
     if (outputs.length === 0) throw new UtmError("policy-denied", "at least one business output is required");
     const businessSum = sumChecked(outputs.map((o) => o.value), "business outputs");
     if (businessSum > business) throw new UtmError("policy-denied", "business outputs exceed authorized amount");
@@ -903,7 +885,7 @@ export class FundingKernel {
 
   replace(allocationId: string, input: RequestInput): AllocationView {
     this.assertFundsNotFrozen("replace an allocation");
-    const id = checkRequestId(allocationId);
+    const id = allocationId;
     const current = this.allocations.get(id);
     if (!current) throw new UtmError("allocation-unknown", "allocation not found");
     if (current.state !== "held") throw new UtmError("allocation-state", `cannot replace from ${current.state}`);
@@ -930,7 +912,7 @@ export class FundingKernel {
   /** Release only an unsigned, undispatched, unexposed held allocation. */
   release(allocationId: string): void {
     this.assertFundsNotFrozen("release an allocation");
-    const id = checkRequestId(allocationId);
+    const id = allocationId;
     const current = this.allocations.get(id);
     if (!current) throw new UtmError("allocation-unknown", "allocation not found");
     if (current.state !== "held") throw new UtmError("allocation-state", `cannot release from ${current.state}`);
@@ -966,15 +948,12 @@ export class FundingKernel {
    */
   requestProtocol(input: RequestInput): AllocationView {
     this.assertFundsNotFrozen("request protocol funds");
-    const requestId = checkRequestId(input.requestId);
+    const requestId = input.requestId;
     const business = parseAmount(input.businessAmountSats, "business amount");
     const feeRate = parseFeeRate(input.feeRateSatPerKb);
     const version = input.version ?? 1;
     const locktime = input.locktime ?? 0;
-    if (!Number.isInteger(version) || !Number.isInteger(locktime) || locktime < 0) {
-      throw new UtmError("policy-denied", "bad version/locktime");
-    }
-    const outputs = input.outputs.map((o) => ({ scriptHex: checkScriptHex(o.scriptHex, "output script"), value: parseAmount(o.value, "output value") }));
+    const outputs = input.outputs.map((o) => ({ scriptHex: canonicalScriptHex(o.scriptHex), value: parseAmount(o.value, "output value") }));
     // No business-sum gate here: declared outputs are an exact-match binding
     // list (often funded by external pool inputs); the wallet's net outflow
     // is capped at spend time by business + fee share.
@@ -1005,11 +984,10 @@ export class FundingKernel {
    */
   prepare(input: PrepareInput): { allocationId: string; unsignedTxHex: string; estimatedFeeSats: string } {
     this.assertFundsNotFrozen("prepare a signing intent");
-    const id = checkRequestId(input.allocationId);
+    const id = input.allocationId;
     const record = this.allocations.get(id);
     if (!record) throw new UtmError("allocation-unknown", "allocation not found");
     if (record.state !== "held") throw new UtmError("allocation-state", `cannot prepare from ${record.state}`);
-    if (typeof input.unsignedTxHex !== "string") throw new UtmError("tx-invalid", "unsignedTxHex is required");
     const parsed = parseTx(input.unsignedTxHex);
     const inputKeys = parsed.inputs.map((i) => `${i.txid}:${i.vout}`);
     if (inputKeys.length !== record.inputs.length || ![...record.inputs].sort().every((k, i) => k === [...inputKeys].sort()[i])) {
@@ -1194,7 +1172,7 @@ export class FundingKernel {
    */
   completePrepare(input: CompletePrepareInput): { allocationId: string; txid: string; feeSats: string } {
     this.assertFundsNotFrozen("complete a wallet spend");
-    const id = checkRequestId(input.allocationId);
+    const id = input.allocationId;
     const record = this.allocations.get(id);
     if (!record) throw new UtmError("allocation-unknown", "allocation not found");
     if (record.state !== "held") throw new UtmError("allocation-state", `cannot complete from ${record.state}`);
@@ -1249,13 +1227,9 @@ export class FundingKernel {
     const keys = parsed.inputs.map(i => `${i.txid}:${i.vout}`);
     if (keys.length !== allocation.inputs.length || keys.some(key => !allocation.inputs.includes(key))) throw new UtmError("policy-denied", "exact inputs do not match allocation responsibility");
     const supplied = new Map<string, InputObservation>();
-    if (observations !== null && !Array.isArray(observations)) throw new UtmError("policy-denied", "invalid input observation set");
     for (const fact of observations ?? []) {
-      if (!fact || !keys.includes(fact.outpoint) || supplied.has(fact.outpoint) || !["spent", "unspent", "unknown"].includes(fact.status)) throw new UtmError("policy-denied", "invalid input observation set");
-      if (fact.status === "spent") {
-        if (!fact.txid || !/^[0-9a-f]{64}$/.test(fact.txid) || !Number.isInteger(fact.vin) || fact.vin! < 0 || fact.vin! > 0xffffffff || typeof fact.confirmed !== "boolean") throw new UtmError("policy-denied", "invalid spender observation");
-        if (fact.txid === entry.txid && fact.vin !== keys.indexOf(fact.outpoint)) throw new UtmError("policy-denied", "self spender vin mismatch");
-      } else if (fact.txid !== undefined || fact.vin !== undefined || fact.confirmed !== undefined) throw new UtmError("policy-denied", "non-spent observation carries spender");
+      if (!keys.includes(fact.outpoint) || supplied.has(fact.outpoint)) throw new UtmError("policy-denied", "input observation does not match the responsible inputs");
+      if (fact.status === "spent" && fact.txid === entry.txid && fact.vin !== keys.indexOf(fact.outpoint)) throw new UtmError("policy-denied", "self spender vin mismatch");
       supplied.set(fact.outpoint, fact);
     }
     const priorSpent = new Map((entry.conclusion?.spentInputs ?? []).map(f => [f.outpoint, f]));
@@ -1575,13 +1549,12 @@ export class FundingKernel {
   /** Validate protocol inputs, attribution, fee authorization and outputs. */
   validateProtocolSpend(input: PrepareInput & { signedTxHex: string }): { txid: string; feeSats: string } {
     this.assertFundsNotFrozen("validate a protocol spend");
-    const id = checkRequestId(input.allocationId);
+    const id = input.allocationId;
     const record = this.allocations.get(id);
     if (!record) throw new UtmError("allocation-unknown", "allocation not found");
     if (record.state !== "held") throw new UtmError("allocation-state", `cannot spend from ${record.state}`);
     const binding = input.protocolBinding;
-    if (!binding || (binding.kind !== "refund" && binding.kind !== "close") ||
-        typeof binding.poolId !== "string" || binding.poolId.length === 0) {
+    if (!binding || (binding.kind !== "refund" && binding.kind !== "close")) {
       throw new UtmError("policy-denied", "valid protocol binding is required");
     }
     const parsed = parseTx(input.signedTxHex);
@@ -1601,7 +1574,7 @@ export class FundingKernel {
       const rawProof = input.externalProofs?.[key];
       const proof = rawProof === undefined ? undefined : {
         value: parseAmount(rawProof.value, "proof value"),
-        scriptHex: checkScriptHex(rawProof.scriptHex, "proof script"),
+        scriptHex: canonicalScriptHex(rawProof.scriptHex),
       };
       if (row && (row.spentBy || row.isolated || row.protected || row.pendingParent)) {
         throw new UtmError("snapshot-input-invalid", `input ${key} is spent, protected, isolated or has an unknown parent`);
@@ -1721,40 +1694,27 @@ export class FundingKernel {
    */
   prepareProtocolIntent(input: ProtocolIntentInput): { allocationId: string; unsignedTxHex: string; feeCapSats: string } {
     this.assertFundsNotFrozen("prepare a protocol intent");
-    const id = checkRequestId(input.allocationId);
+    const id = input.allocationId;
     const record = this.allocations.get(id);
     if (!record) throw new UtmError("allocation-unknown", "allocation not found");
     if (record.state !== "held") throw new UtmError("allocation-state", `cannot prepare from ${record.state}`);
-    const kind = input.binding?.kind;
-    if (kind !== "refund" && kind !== "close" && kind !== "fund" && kind !== "state") {
-      throw new UtmError("policy-denied", "valid protocol binding is required");
-    }
-    if (typeof input.binding.poolId !== "string" || input.binding.poolId.length === 0) {
-      throw new UtmError("policy-denied", "protocol binding needs a pool id");
-    }
+    const kind = input.binding.kind;
     const feeCap = parseAmount(input.feeCapSats, "fee cap");
     if (feeCap <= 0n) throw new UtmError("fee-invalid", "fee cap must be positive");
-    if (input.feePolicy !== "rate" && input.feePolicy !== "exact") {
-      throw new UtmError("policy-denied", "protocol intent needs a valid fee policy");
-    }
     if (record.feeRate <= 0n) throw new UtmError("fee-invalid", "protocol allocation needs a fee rate");
     const parsed = parseTx(input.unsignedTxHex);
     if (parsed.inputs.length === 0) throw new UtmError("tx-invalid", "protocol intent needs at least one input");
 
     const factsByKey = new Map<string, ProtocolInputFact>();
     for (const raw of input.inputs) {
-      if (!raw || typeof raw.outpoint !== "string") throw new UtmError("tx-invalid", "protocol input needs an outpoint");
-      const key = checkedOutpoint(raw.outpoint);
+      const key = raw.outpoint.toLowerCase();
       if (factsByKey.has(key)) throw new UtmError("tx-invalid", `duplicate protocol input ${key}`);
-      if (raw.class !== "wallet" && raw.class !== "protected" && raw.class !== "external") {
-        throw new UtmError("policy-denied", `unknown protocol input class for ${key}`);
-      }
       factsByKey.set(key, {
         outpoint: key,
         class: raw.class,
         value: formatAmount(parseAmount(raw.value, "input value")),
-        scriptHex: checkScriptHex(raw.scriptHex, "input script"),
-        claimId: raw.class === "protected" ? (typeof raw.claimId === "string" && raw.claimId.length > 0 ? raw.claimId : null) : null,
+        scriptHex: raw.scriptHex.toLowerCase(),
+        claimId: raw.class === "protected" ? raw.claimId : null,
       });
     }
     if (factsByKey.size !== parsed.inputs.length) {
@@ -1802,7 +1762,7 @@ export class FundingKernel {
         const proof = input.externalProofs?.[key];
         if (!proof) throw new UtmError("unknown-input", `input ${key} has no trusted proof`);
         const proofValue = parseAmount(proof.value, "proof value");
-        const proofScript = checkScriptHex(proof.scriptHex, "proof script");
+        const proofScript = proof.scriptHex.toLowerCase();
         if (proofScript === this.config.walletScriptHex) {
           throw new UtmError("policy-denied", `input ${key} claims the wallet script without kernel proof`);
         }
@@ -1944,30 +1904,26 @@ export class FundingKernel {
    */
   completeProtocol(input: { allocationId: string; signedTxHex: string; delivery?: "wallet" | "external" }): { allocationId: string; txid: string; feeSats: string } {
     this.assertFundsNotFrozen("complete a protocol spend");
-    const id = checkRequestId(input.allocationId);
+    const id = input.allocationId;
     const record = this.allocations.get(id);
     if (!record) throw new UtmError("allocation-unknown", "allocation not found");
     if (record.state !== "held") throw new UtmError("allocation-state", `cannot complete from ${record.state}`);
-    if (record.protocolInputs.length === 0) throw new UtmError("allocation-state", "protocol intent was not prepared");
+    if (record.protocolInputs.length === 0 || !record.signingIntentHex) throw new UtmError("allocation-state", "protocol intent was not prepared");
     const parsed = parseTx(input.signedTxHex);
     if (record.signedTxid && record.signedTxid !== parsed.canonicalTxid) {
       throw new UtmError("state-conflict", "protocol allocation already binds another transaction");
     }
     const skeleton = unsignedSkeleton(input.signedTxHex);
-    if (record.signingIntentHex && record.signingIntentHex !== skeleton) {
+    if (record.signingIntentHex !== skeleton) {
       throw new UtmError("state-conflict", "transaction differs from frozen signing intent");
     }
-    const signedKeys = parsed.inputs.map((i) => `${i.txid}:${i.vout}`);
-    const intentKeys = record.protocolInputs.map((f) => f.outpoint);
-    if (signedKeys.length !== intentKeys.length || !signedKeys.every((k, index) => k === intentKeys[index])) {
-      throw new UtmError("snapshot-input-invalid", "signed inputs do not match the protocol intent");
-    }
 
-    // The same manifest rules apply to the exact bytes: a declared output
-    // (including a protocol-earmarked self output) is consumed by script and
-    // value; at most one undeclared self output is ordinary change.
-    const manifest = this.matchProtocolOutputs(record.outputs, parsed.outputs);
-    const ownOut = sumChecked(manifest.ownOut, "own outputs");
+    // The frozen skeleton already binds the ordered inputs and output layout
+    // accepted before signing. Do not revalidate that internal manifest here;
+    // actual signature size and current prevout amounts still determine fees.
+    const ownOut = sumChecked(parsed.outputs
+      .filter(output => output.scriptHex === this.config.walletScriptHex)
+      .map(output => output.value), "own outputs");
 
     let walletIn = 0n;
     let externalIn = 0n;
@@ -2029,20 +1985,11 @@ export class FundingKernel {
     relatedInputs: string[]; reason: string; binding?: { kind: string; poolId: string };
   }): string {
     this.assertFundsNotFrozen("record an external signature");
-    const id = checkRequestId(input.id);
-    if (typeof input.allocationId !== "string" || input.allocationId.length === 0) {
-      throw new UtmError("policy-denied", "external signature needs an allocation");
-    }
+    const id = input.id;
     const allocation = this.allocations.get(input.allocationId);
     if (!allocation) throw new UtmError("allocation-unknown", "external signature allocation not found");
     if (allocation.state !== "held") {
       throw new UtmError("allocation-state", `external signature cannot attach to a ${allocation.state} allocation`);
-    }
-    if (typeof input.draftTxHex !== "string" || input.draftTxHex.length === 0) {
-      throw new UtmError("tx-invalid", "external signature needs the exact draft bytes");
-    }
-    if (typeof input.signatureHex !== "string" || input.signatureHex.length === 0) {
-      throw new UtmError("tx-invalid", "external signature needs the signature bytes");
     }
     // The exact draft is parsed: the responsibility follows the artifact,
     // not the caller's metadata. A signature only ever affects inputs the
@@ -2173,24 +2120,16 @@ export class FundingKernel {
    * isolation is the safety action, not an optional side effect.
    */
   settleExternalSignature(id: string, evidence: ExternalSignatureEvidence): void {
-    const key = checkRequestId(id);
+    const key = id;
     const record = this.externalSignatures.get(key);
     if (!record) throw new UtmError("allocation-unknown", "external signature not found");
     if (record.state === "settled") return;
-    if (!evidence || typeof evidence !== "object") {
-      throw new UtmError("policy-denied", "settling an external signature needs a trusted fact");
-    }
     if (evidence.kind === "input-consumed") {
-      let txid: string;
-      try { txid = checkTxid(evidence.txid).toLowerCase(); }
-      catch { throw new UtmError("policy-denied", "settlement evidence needs a valid txid"); }
-      if (typeof evidence.rawTxHex !== "string" || evidence.rawTxHex.length === 0) {
-        throw new UtmError("policy-denied", "settlement evidence needs the observed exact transaction");
-      }
+      const txid = evidence.txid.toLowerCase();
       let exact: ParsedTx;
       try { exact = parseTx(evidence.rawTxHex, txid); }
       catch { throw new UtmError("policy-denied", "settlement evidence does not carry the observed exact transaction"); }
-      const consumed = [...new Set((evidence.inputs ?? []).map((key) => key.toLowerCase()))].sort();
+      const consumed = [...new Set(evidence.inputs.map((key) => key.toLowerCase()))].sort();
       if (consumed.length === 0) {
         throw new UtmError("policy-denied", "settlement evidence must name the consumed inputs");
       }
@@ -2281,12 +2220,6 @@ export class FundingKernel {
       return;
     }
     if (evidence.kind === "signature-invalidated") {
-      if (typeof evidence.reason !== "string" || evidence.reason.length === 0) {
-        throw new UtmError("policy-denied", "an invalidated signature needs a reason");
-      }
-      if (evidence.txid !== undefined) {
-        try { checkTxid(evidence.txid); } catch { throw new UtmError("policy-denied", "settlement evidence needs a valid txid"); }
-      }
       record.settledTxid = evidence.txid ? evidence.txid.toLowerCase() : undefined;
       record.state = "settled";
       this.refreshFundsFrozen();
@@ -2340,8 +2273,7 @@ export class FundingKernel {
    * A superseded record still counts: the old artifact is still valid.
    */
   externalResponsibilityFor(allocationId: string): ExternalSignatureRecord | null {
-    let id: string;
-    try { id = checkRequestId(allocationId); } catch { return null; }
+    const id = allocationId;
     // Canonical id order is stable across languages and serialize/restore.
     for (const record of this.externalSignatureView()) {
       if (record.allocationId !== id) continue;
@@ -2364,8 +2296,8 @@ export class FundingKernel {
    * (pool); a different pool or scope can never supersede this one.
    */
   supersedeExternalSignature(oldId: string, newId: string): void {
-    const oldKey = checkRequestId(oldId);
-    const newKey = checkRequestId(newId);
+    const oldKey = oldId;
+    const newKey = newId;
     if (oldKey === newKey) throw new UtmError("id-conflict", "a signature cannot supersede itself");
     const older = this.externalSignatures.get(oldKey);
     const newer = this.externalSignatures.get(newKey);
@@ -2410,8 +2342,7 @@ export class FundingKernel {
     binding: { kind: ProtocolBindingKind; poolId: string } | null;
     signedTxid: string | null;
   } | null {
-    let id: string;
-    try { id = checkRequestId(allocationId); } catch { return null; }
+    const id = allocationId;
     const record = this.allocations.get(id);
     if (!record || record.protocolInputs.length === 0) return null;
     return {
@@ -2542,7 +2473,7 @@ export class FundingKernel {
    */
   abortUnbroadcast(allocationId: string): void {
     this.assertFundsNotFrozen("abort an allocation");
-    const id = checkRequestId(allocationId);
+    const id = allocationId;
     const record = this.allocations.get(id);
     if (!record) throw new UtmError("allocation-unknown", "allocation not found");
     if (record.state !== "held") throw new UtmError("allocation-state", `cannot abort from ${record.state}`);
@@ -2573,7 +2504,7 @@ export class FundingKernel {
    */
   retireForumProtocolAllocation(allocationId: string): void {
     this.assertFundsNotFrozen("retire a forum protocol allocation");
-    const id = checkRequestId(allocationId);
+    const id = allocationId;
     const record = this.allocations.get(id);
     if (!record) throw new UtmError("allocation-unknown", "allocation not found");
     if (!record.protocolBinding) throw new UtmError("allocation-state", "forum retirement requires a protocol allocation");
@@ -2597,7 +2528,7 @@ export class FundingKernel {
    */
   cancelUnstarted(allocationId: string): void {
     this.assertFundsNotFrozen("cancel an unstarted allocation");
-    const id = checkRequestId(allocationId);
+    const id = allocationId;
     const record = this.allocations.get(id);
     if (!record) throw new UtmError("allocation-unknown", "allocation not found");
     if (record.state !== "held") throw new UtmError("allocation-state", `cannot cancel from ${record.state}`);
@@ -2635,7 +2566,7 @@ export class FundingKernel {
     occupiedBy: string | null; protected: boolean; isolated: string | null;
     pendingParent: string | null; parentInputs: string[] | null; confirmed: boolean;
   } {
-    const key = checkedOutpoint(outpoint);
+    const key = outpoint.toLowerCase();
     const row = this.utxos.get(key);
     if (!row) throw new UtmError("unknown-input", `outpoint ${outpoint} is unknown`);
     return {
@@ -2667,7 +2598,7 @@ export class FundingKernel {
   }
 
   allocationView(allocationId: string): AllocationView {
-    const record = this.allocations.get(checkRequestId(allocationId));
+    const record = this.allocations.get(allocationId);
     if (!record) throw new UtmError("allocation-unknown", "allocation not found");
     return this.view(allocationId, record);
   }
@@ -2751,9 +2682,12 @@ export class FundingKernel {
     if (state.scope.owner !== scope.owner || state.scope.network !== scope.network) {
       throw new UtmError("scope-mismatch", "snapshot scope does not match");
     }
+    if (!Number.isInteger(state.config.maxUnconfirmedAncestors) || state.config.maxUnconfirmedAncestors < 0) {
+      throw new UtmError("state-conflict", "invalid stored maxUnconfirmedAncestors");
+    }
     const kernel = new FundingKernel(scope, {
-      walletScriptHex: state.config.walletScriptHex,
-      dustThresholdSats: state.config.dustThresholdSats,
+      walletScriptHex: checkScriptHex(state.config.walletScriptHex, "stored wallet script"),
+      dustThresholdSats: formatAmount(parseAmount(state.config.dustThresholdSats, "stored dust threshold")),
       maxUnconfirmedAncestors: state.config.maxUnconfirmedAncestors,
     });
     for (const [key, row] of Object.entries(state.utxos)) {

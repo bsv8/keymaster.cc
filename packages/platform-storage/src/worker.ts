@@ -3,7 +3,7 @@ import {
   COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY, COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY,
 } from "@keymaster/contracts";
 import type { LocalServiceOf, RpcHandler } from "webloom-framework";
-import { STORAGE_PRIVATE_BROWSE_CAPABILITY, parseStorageBrowsePrivateResponse, type StorageBrowsePrivateCommand } from "./assembly.js";
+import { STORAGE_PRIVATE_BROWSE_CAPABILITY, projectStorageBrowseResponse, type StorageBrowsePrivateCommand } from "./assembly.js";
 
 export function createStorageWorkerPlugin(ports: {
   files: LocalServiceOf<typeof STORAGE_FILE_CLIENTS_CAPABILITY>;
@@ -25,7 +25,7 @@ export function createStorageWorkerPlugin(ports: {
         const peerId = ports.authorize(call);
         const response = await ports.browse({ ...request, clientId: peerId, requestId: call.operationId ?? crypto.randomUUID() }, peerId, call.signal);
         const { requestId: _requestId, ...result } = response;
-        return parseStorageBrowsePrivateResponse(request, result);
+        return projectStorageBrowseResponse(request, result);
       });
     });
 }

@@ -762,9 +762,8 @@ export function createWindowP2pWorkerRuntime(ports: WindowP2pWorkerPorts) {
   }
 
   function parseUint64Decimal(value: string): bigint {
-    if (!/^(0|[1-9][0-9]*)$/.test(value)) throw new Error("Peer Record sequence must be canonical uint64 decimal");
     const sequence = BigInt(value);
-    if (sequence > UINT64_MAX) throw new Error("Peer Record sequence exceeds uint64");
+    if (sequence < 0n || sequence > UINT64_MAX) throw new Error("Peer Record sequence exceeds uint64");
     return sequence;
   }
 
@@ -813,7 +812,7 @@ export function createWindowP2pWorkerRuntime(ports: WindowP2pWorkerPorts) {
       if (staticKey.byteLength !== 32) throw new Error("Noise static public key must be exactly 32 bytes");
       digest = sha256Bytes(noiseSigningPayload(staticKey));
     } else {
-      if (!Array.isArray(request.addresses) || request.addresses.length !== 0) {
+      if (request.addresses.length !== 0) {
         throw new Error("Signed Peer Record addresses must be empty in the Window P2P executor spike");
       }
       const sequence = parseUint64Decimal(request.sequence);
@@ -840,8 +839,7 @@ export function createWindowP2pWorkerRuntime(ports: WindowP2pWorkerPorts) {
     assertExecutorIdentityStillCurrent(lease, actualClientId, request.expectedSessionEpoch, publicKeyHex);
     if (signal.aborted) throw new Error("Window P2P identity signing was cancelled");
     if (request.kind === "window-p2p.executor.identity.sign-peer-record") {
-      if (peerRecordSequence === undefined) throw new Error("Peer Record sequence was not retained");
-      lease.lastPeerRecordSequence = peerRecordSequence;
+      lease.lastPeerRecordSequence = peerRecordSequence!;
     }
     lease.acquiredAt = Date.now();
     scheduleWindowP2pExecutorLeaseExpiry(lease.leaseId, lease.acquiredAt);

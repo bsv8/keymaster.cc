@@ -1,15 +1,5 @@
 import type { PageUiLocation } from "@keymaster/contracts";
 
-export function validatePagePath(path: string): void {
-  if (!path.startsWith("/") || /[?#]/.test(path)) throw new TypeError("Invalid page path");
-  const names = new Set<string>();
-  for (const segment of path.split("/").slice(1)) {
-    if (!segment.startsWith(":")) continue;
-    const name = segment.slice(1);
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || names.has(name)) throw new TypeError("Invalid page parameter");
-    names.add(name);
-  }
-}
 export function pagePathShape(path: string): string {
   return path.split("/").map(segment => segment.startsWith(":") ? ":" : segment).join("/");
 }

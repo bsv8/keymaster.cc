@@ -1,18 +1,15 @@
-import { validateNetworkIdentity, APP_STORAGE_CLIENTS_CAPABILITY, deriveAppStorageName, deriveThirdPartyStorageModuleId, type AppStorageClients, type AppStorageClient, type OwnerAppStorageGrant, type StorageRuntimeController } from "@keymaster/contracts";
-import { isIssuedKeymasterConsumer } from "@keymaster/runtime/storage";
+import { APP_STORAGE_CLIENTS_CAPABILITY, deriveAppStorageName, deriveThirdPartyStorageModuleId, type AppStorageClients, type AppStorageClient, type OwnerAppStorageGrant, type StorageRuntimeController } from "@keymaster/contracts";
 import type { LifecycleScope } from "webloom-framework";
 
 /** Storage derives the App namespace; the Worker revalidates the authoritative session at each I/O. */
 export function createAppStorageClients(controller: StorageRuntimeController, providerScope?: LifecycleScope): AppStorageClients {
   return Object.freeze({
     bind(consumer, scope, binding) {
-      if (!isIssuedKeymasterConsumer(consumer, scope) || consumer.status !== "active" || consumer.pluginId !== "protocol") throw new Error("App storage requires the issued Connect gateway consumer");
       consumer.capability(APP_STORAGE_CLIENTS_CAPABILITY);
       const assert = () => { scope.assertActive(); providerScope?.assertActive(); if (consumer.status !== "active") throw new Error("App storage gateway revoked"); };
       assert();
-      if (!binding.walletPublicKeyHex || !binding.transportOrigin || !binding.walletGeneration || !binding.sessionEpoch || !binding.runGeneration || !binding.appIdentity?.publisherPublicKeyHex || !binding.appIdentity.appId || !binding.appIdentity.identityDigestHex) throw new Error("App storage requires a verified session binding");
       const appIdentity = Object.freeze({ ...binding.appIdentity });
-      const grant: OwnerAppStorageGrant = Object.freeze({ ...validateNetworkIdentity(binding), walletPublicKeyHex: binding.walletPublicKeyHex, transportOrigin: binding.transportOrigin,
+      const grant: OwnerAppStorageGrant = Object.freeze({ bsvNetwork: binding.bsvNetwork, publicKeyHex: binding.publicKeyHex, walletPublicKeyHex: binding.walletPublicKeyHex, transportOrigin: binding.transportOrigin,
         sessionEpoch: binding.sessionEpoch, walletGeneration: binding.walletGeneration, runGeneration: binding.runGeneration, appIdentity,
         appStorageName: deriveAppStorageName(appIdentity),
         moduleId: deriveThirdPartyStorageModuleId(appIdentity.publisherPublicKeyHex, appIdentity.appId), purposeId: "files",

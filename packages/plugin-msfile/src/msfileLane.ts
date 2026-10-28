@@ -157,16 +157,14 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
     if (value.type === "bitfs-seller-open") {
       const bitfs = this.bitfs;
       if (!bitfs) throw new Error("MSFile lane is not attached");
-      this.assertBitfsOpen(value, signal);
+      if (signal.aborted) throw new DOMException("The operation was aborted", "AbortError");
       if (value.transport === "webrtc-sdp") {
         const bitfsWebRtc = this.bitfsWebRtc;
-        if (!bitfsWebRtc || !value.requestMessageId || !value.webrtcSessionId) {
-          throw new Error("MSFile lane WebRTC request relation is incomplete");
-        }
+        if (!bitfsWebRtc) throw new Error("MSFile lane WebRTC runtime is not attached");
         return bitfsWebRtc.createOffer({
           sessionId: value.sessionId,
-          requestMessageId: value.requestMessageId,
-          webrtcSessionId: value.webrtcSessionId,
+          requestMessageId: value.requestMessageId!,
+          webrtcSessionId: value.webrtcSessionId!,
           peerPublicKeyHex: value.publicKeyHex,
           firstFrame: value.firstFrame,
           ownerSessionEpoch: this.bitfsOwnerSessionEpoch(),
@@ -186,9 +184,6 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
     if (value.type === "bitfs-webrtc-buyer-offer") {
       const bitfsWebRtc = this.bitfsWebRtc;
       if (!bitfsWebRtc) throw new Error("MSFile lane WebRTC runtime is not attached");
-      if (typeof value.sessionId !== "string" || typeof value.requestMessageId !== "string"
-        || typeof value.webrtcSessionId !== "string" || typeof value.publicKeyHex !== "string"
-        || typeof value.offerSdp !== "string") throw new Error("MSFile lane WebRTC buyer offer is invalid");
       return bitfsWebRtc.acceptOffer({
         sessionId: value.sessionId,
         requestMessageId: value.requestMessageId,
@@ -202,9 +197,6 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
     if (value.type === "bitfs-webrtc-signal") {
       const bitfsWebRtc = this.bitfsWebRtc;
       if (!bitfsWebRtc) throw new Error("MSFile lane WebRTC runtime is not attached");
-      if (typeof value.sessionId !== "string" || typeof value.requestMessageId !== "string"
-        || typeof value.webrtcSessionId !== "string" || typeof value.publicKeyHex !== "string"
-        || !value.signal || typeof value.signal !== "object") throw new Error("MSFile lane WebRTC signal is invalid");
       await bitfsWebRtc.applySignal({
         sessionId: value.sessionId,
         requestMessageId: value.requestMessageId,
@@ -219,9 +211,6 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
       const bitfs = this.bitfs;
       const bitfsWebRtc = this.bitfsWebRtc;
       if (!bitfs && !bitfsWebRtc) throw new Error("MSFile lane is not attached");
-      if (typeof value.sessionId !== "string" || !(value.frame instanceof Uint8Array)) {
-        throw new Error("MSFile lane BitFS send operation is invalid");
-      }
       if (bitfsWebRtc?.has(value.sessionId)) await bitfsWebRtc.send(value.sessionId, value.frame);
       else if (bitfs) await bitfs.send(value.sessionId, value.frame);
       else throw new Error("MSFile lane BitFS session is not open");
@@ -231,11 +220,8 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
       const bitfs = this.bitfs;
       const bitfsWebRtc = this.bitfsWebRtc;
       if (!bitfs && !bitfsWebRtc) throw new Error("MSFile lane is not attached");
-      if (typeof value.sessionId !== "string" || value.sessionId.length === 0) {
-        throw new Error("MSFile lane BitFS close operation is invalid");
-      }
-      if (bitfsWebRtc?.has(value.sessionId)) await bitfsWebRtc.close(value.sessionId, typeof value.reason === "string" ? value.reason : "worker_closed");
-      else await bitfs?.close(value.sessionId, typeof value.reason === "string" ? value.reason : "worker_closed");
+      if (bitfsWebRtc?.has(value.sessionId)) await bitfsWebRtc.close(value.sessionId, value.reason ?? "worker_closed");
+      else await bitfs?.close(value.sessionId, value.reason ?? "worker_closed");
       return null;
     }
     if (!runtime) throw new Error("MSFile lane is not attached");
@@ -246,34 +232,6 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
       case "invalidate": await runtime.invalidate(value.supplierPublicKeyHex); return null;
       default: throw new Error("MSFile lane operation is invalid");
     }
-  }
-
-  /** BitFS open 的输入形状门禁；字节内容仍由 stream runtime 严格解析。 */
-  private assertBitfsOpen(
-    value: Extract<MsFileP2pLaneOperation, { type: "bitfs-seller-open" }>,
-    signal: AbortSignal,
-  ): void {
-    if (typeof value.sessionId !== "string" || value.sessionId.length === 0 || value.sessionId.length > 128) {
-      throw new Error("MSFile lane BitFS session id is invalid");
-    }
-    if (value.transport === "webrtc-sdp") {
-      if (!value.requestMessageId || value.requestMessageId.length > 128 || !value.webrtcSessionId || value.webrtcSessionId.length > 128) {
-        throw new Error("MSFile lane BitFS WebRTC request relation is invalid");
-      }
-    } else if (!Array.isArray(value.addresses) || value.addresses.length === 0 || value.addresses.length > 16
-      || value.addresses.some((address) => typeof address !== "string" || address.length === 0 || address.length > 512)) {
-      throw new Error("MSFile lane BitFS locator list is invalid");
-    }
-    if (typeof value.publicKeyHex !== "string" || !/^(02|03)[0-9a-f]{64}$/u.test(value.publicKeyHex)) {
-      throw new Error("MSFile lane BitFS public key is invalid");
-    }
-    if (typeof value.expectedPeerId !== "string" || value.expectedPeerId.length === 0 || value.expectedPeerId.length > 128) {
-      throw new Error("MSFile lane BitFS PeerId is invalid");
-    }
-    if (!(value.firstFrame instanceof Uint8Array) || value.firstFrame.byteLength === 0) {
-      throw new Error("MSFile lane BitFS first frame is invalid");
-    }
-    if (signal.aborted) throw new DOMException("The operation was aborted", "AbortError");
   }
 
   private getProtocolSpend(): ProtocolSpendService | undefined {

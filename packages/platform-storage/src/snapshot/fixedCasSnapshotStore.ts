@@ -100,9 +100,8 @@ function parseEnvelope<T>(bytes: Uint8Array, expected: PluginStorageDeclaration)
 
 /** 构造中央系统固定 CAS snapshot。 */
 export function createFixedCasSnapshotStore<T>(options: FixedCasSnapshotStoreOptions<T>): SnapshotStore<T> {
-  const declaration = validatePluginStorageDeclaration(options.binding);
-  if (declaration.model !== "snapshot") throw new StorageRuntimeError("storage_forbidden", "Snapshot store requires snapshot model");
-  if (declaration.authority === "third-party-app") throw new StorageRuntimeError("storage_forbidden", "Snapshot store is not available to third-party apps");
+  const { moduleId, purposeId, authority, model, schemaVersion } = options.binding;
+  const declaration: PluginStorageDeclaration = { moduleId, purposeId, authority, model, schemaVersion };
   const path = buildStorageSnapshotPath(options.binding);
   let closed = false;
   const validate = options.validate;
@@ -135,7 +134,7 @@ export function createFixedCasSnapshotStore<T>(options: FixedCasSnapshotStoreOpt
   return {
     read: () => withLease(async () => (await readInternal()).snapshot),
     write: (input: T, condition: StorageSnapshotWriteCondition = {}): Promise<StorageSnapshotWriteResult> => withLease(async () => {
-      const value = validate(input);
+      const value = input as StorageSnapshotJsonCompatible<T>;
       const fingerprint = keyValueSemanticFingerprint(value);
       const current = await readInternal();
       const currentRevision = current.snapshot?.revision ?? 0;

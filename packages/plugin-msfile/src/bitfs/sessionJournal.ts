@@ -181,8 +181,8 @@ export interface BitfsSessionJournal {
 }
 
 export function createBitfsSessionJournal(store: BorrowedModuleFileStore): BitfsSessionJournal {
-  const recordPath = (id: string) => `sessions/${assertSessionId(id)}.json`;
-  const evidencePath = (id: string, name: BitfsEvidenceName) => `evidence/${assertSessionId(id)}/${name}.bin`;
+  const recordPath = (id: string) => `sessions/${id}.json`;
+  const evidencePath = (id: string, name: BitfsEvidenceName) => `evidence/${id}/${name}.bin`;
   const read = async (id: string): Promise<{ record: BitfsSessionRecord; revision?: string } | undefined> => {
     const object = await store.get(recordPath(id));
     if (!object) return undefined;
@@ -206,37 +206,36 @@ export function createBitfsSessionJournal(store: BorrowedModuleFileStore): Bitfs
   };
   return {
     async create(input, nowMs) {
-      const record = validateRecord({ ...input, evidence: uniqueEvidence(input.evidence ?? []), revision: 1, createdAt: iso(nowMs), updatedAt: iso(nowMs) });
+      const record = { ...input, evidence: uniqueEvidence(input.evidence ?? []), revision: 1, createdAt: iso(nowMs), updatedAt: iso(nowMs) };
       await write(record, { ifNoneMatch: true });
       return (await read(record.sessionId))!.record;
     },
     async get(sessionId) { return (await read(sessionId))?.record; },
     async update(sessionId, expectedRevision, patch, nowMs) {
-      return mutate(sessionId, expectedRevision, (current) => validateRecord({
+      return mutate(sessionId, expectedRevision, current => ({
         ...current,
         ...patch,
-        revision: current.revision + 1,
+        revision: nextRevision(current.revision),
         updatedAt: iso(nowMs),
       }));
     },
     async putEvidence(sessionId, expectedRevision, name, bytes, nowMs) {
-      assertEvidenceName(name);
-      if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) throw new TypeError("BitFS 证据字节不能为空");
+      if (bytes.byteLength === 0) throw new TypeError("BitFS 证据字节不能为空");
       const path = evidencePath(sessionId, name);
       const prior = await store.get(path);
       if (prior && !equal(prior.bytes, bytes)) throw new Error("BitFS 证据名已绑定不同 exact bytes");
       if (!prior) await store.put(path, bytes.slice(), { ifNoneMatch: true });
       const committed = await store.get(path);
       if (!committed || !equal(committed.bytes, bytes)) throw new Error("BitFS 证据持久化校验失败");
-      return mutate(sessionId, expectedRevision, (current) => validateRecord({
+      return mutate(sessionId, expectedRevision, current => ({
         ...current,
         evidence: uniqueEvidence([...current.evidence, name]),
-        revision: current.revision + 1,
+        revision: nextRevision(current.revision),
         updatedAt: iso(nowMs),
       }));
     },
     async getEvidence(sessionId, name) {
-      const object = await store.get(evidencePath(sessionId, assertEvidenceName(name)));
+      const object = await store.get(evidencePath(sessionId, name));
       return object?.bytes.slice();
     },
     async list() {
@@ -261,10 +260,11 @@ function parseRecord(value: unknown, expectedId: string): BitfsSessionRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("BitFS 会话索引格式错误");
   const row = value as Record<string, unknown>;
   if (row.format !== SESSION_FORMAT || row.version !== SESSION_VERSION || row.sessionId !== expectedId) throw new Error("BitFS 会话索引版本错误");
-  return validateRecord(row as unknown as BitfsSessionRecord);
+  return parseRecoveredFields(row as unknown as BitfsSessionRecord);
 }
 
-function validateRecord(record: BitfsSessionRecord): BitfsSessionRecord {
+/** Disk ingress only; internal updates use the typed record directly. */
+function parseRecoveredFields(record: BitfsSessionRecord): BitfsSessionRecord {
   assertSessionId(record.sessionId);
   if (record.role !== "buyer" && record.role !== "seller") throw new Error("BitFS 会话角色错误");
   if (!PUBLIC_KEY_HEX.test(record.ownerPublicKeyHex) || !PUBLIC_KEY_HEX.test(record.counterpartyPublicKeyHex)) throw new Error("BitFS 会话公钥错误");
@@ -284,7 +284,7 @@ function validateRecord(record: BitfsSessionRecord): BitfsSessionRecord {
   if (record.failureCode !== undefined && !/^[a-z0-9._-]{1,64}$/u.test(record.failureCode)) throw new Error("BitFS 会话失败码错误");
   return {
     ...record,
-    evidence: uniqueEvidence(record.evidence),
+    evidence: uniqueEvidence(record.evidence.map(assertEvidenceName)),
   };
 }
 
@@ -315,6 +315,11 @@ function assertEvidenceName(value: BitfsEvidenceName): BitfsEvidenceName {
     || /^(kind2-sign-digest|kind2-signature|kind5-sign-digest|kind5-signature|kind5-content-request|kind6-content-delivery|kind7-payment-update|kind7-payment-sign-digest|kind7-payment-signature|kind12-close-sign-digest|kind12-close-signature|latest-payment-transaction|seller-speed-sample|kind10-retrieval-request|kind11-retrieval-response)-[0-9a-f]{64}$/u.test(value)) return value;
   throw new TypeError("BitFS 证据名不合法");
 }
-function uniqueEvidence(values: readonly BitfsEvidenceName[]): BitfsEvidenceName[] { return [...new Set(values.map(assertEvidenceName))].sort(); }
-function iso(nowMs: number): string { if (!Number.isSafeInteger(nowMs) || nowMs < 0) throw new TypeError("BitFS 会话时间不合法"); return new Date(nowMs).toISOString(); }
+function uniqueEvidence(values: readonly BitfsEvidenceName[]): BitfsEvidenceName[] { return [...new Set(values)].sort(); }
+function nextRevision(current: number): number {
+  const next = current + 1;
+  if (!Number.isSafeInteger(next)) throw new Error("BitFS 会话修订号耗尽");
+  return next;
+}
+function iso(nowMs: number): string { return new Date(nowMs).toISOString(); }
 function equal(left: Uint8Array, right: Uint8Array): boolean { return left.byteLength === right.byteLength && left.every((value, index) => value === right[index]); }

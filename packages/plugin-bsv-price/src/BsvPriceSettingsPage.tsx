@@ -16,7 +16,7 @@ import { useOptionalPluginCapability } from "webloom-framework/react";
 import type { I18nValues } from "@keymaster/contracts";
 import { useResourceView, usePluginI18n, usePluginLocale } from "@keymaster/runtime";
 import type { BsvPriceService, BsvPriceServiceSnapshot } from "./bsvPriceService.js";
-import { deriveUnitFromPair } from "./bsvPriceSettings.js";
+import { deriveUnitFromPair, normalizeServerName, normalizePublisherPublicKeyHex, normalizeMarketIdentifier } from "./bsvPriceSettings.js";
 import { DEFAULT_PRICE_PUBLISHER_PUBLIC_KEY_HEX } from "./constants.js";
 
 import { BSV_PRICE_SERVICE_CAPABILITY } from "./manifest.js";
@@ -110,18 +110,26 @@ function BsvPriceSettingsPageInner({ service }: { service: BsvPriceService }): R
 
   async function onApplyOption(): Promise<void> {
     await run(
-      () => service.setActiveOption({
-        publisherPublicKeyHex: serverDraft,
-        market: marketDraft,
-        pair: pairDraft
-      }),
+      () => {
+        const key = normalizePublisherPublicKeyHex(serverDraft);
+        const market = normalizeMarketIdentifier(marketDraft);
+        const pair = normalizeMarketIdentifier(pairDraft);
+        if (!key.ok || key.value === undefined) throw new Error(key.error ?? "invalid_publisher_public_key_hex");
+        if (!market.ok || market.value === undefined) throw new Error(market.error ?? "invalid_market");
+        if (!pair.ok || pair.value === undefined) throw new Error(pair.error ?? "invalid_pair");
+        return service.setActiveOption({ publisherPublicKeyHex: key.value, market: market.value, pair: pair.value });
+      },
       t("bsv-price.settings.activeSaved", { defaultValue: "已保存激活选项" })
     );
   }
 
   async function onAddServer(): Promise<void> {
     await run(async () => {
-      await service.addServer({ name: nameDraft, publisherPublicKeyHex: keyDraft });
+      const name = normalizeServerName(nameDraft);
+      const key = normalizePublisherPublicKeyHex(keyDraft);
+      if (!name.ok || name.value === undefined) throw new Error(name.error ?? "invalid_server_name");
+      if (!key.ok || key.value === undefined) throw new Error(key.error ?? "invalid_publisher_public_key_hex");
+      await service.addServer({ name: name.value, publisherPublicKeyHex: key.value });
       setNameDraft("");
       setKeyDraft("");
     }, t("bsv-price.settings.serverAdded", { defaultValue: "已添加服务器" }));

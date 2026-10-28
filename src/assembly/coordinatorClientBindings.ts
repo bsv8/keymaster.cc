@@ -15,6 +15,6 @@ const contracts = [
 ] as const;
 export function coordinatorClientBindings(clientForPlugin: (pluginId: string) => unknown): HostCapabilityRegistration[] {
   return contracts.map(([pluginId, capability]) => ({ capability, value: createScopedClientBinding(
-    capability as LocalCapability<CoordinatorClientBinding<object>>, pluginId, () => clientForPlugin(pluginId) as object,
+    capability as LocalCapability<CoordinatorClientBinding<object>>, () => clientForPlugin(pluginId) as object,
   ) }));
 }

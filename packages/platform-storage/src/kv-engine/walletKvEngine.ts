@@ -25,7 +25,7 @@ import type {
   StorageErrorCode,
   StorageNamespaceBinding,
 } from "@keymaster/contracts";
-import { buildStorageNamespaceRoot, validatePluginStorageDeclaration } from "@keymaster/contracts";
+import { buildStorageNamespaceRoot } from "@keymaster/contracts";
 import { sha256 } from "@noble/hashes/sha2.js";
 import type { WalletStore } from "../local/indexedDbWalletStore.js";
 import { StorageRuntimeError, storageErrorCode } from "../runtime/storageError.js";
@@ -120,9 +120,7 @@ function decodeCursor(value: string | undefined): CursorRecord | undefined {
  * 不会出现值已写但 head 未更新的中间态。
  */
 export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStore & KeyValueMaintenanceCapable {
-  const declaration: PluginStorageDeclaration = validatePluginStorageDeclaration(options.binding);
-  if (declaration.model !== "kv") throw fail("storage_forbidden", "K-V store requires the kv model");
-  if (declaration.authority === "third-party-app") throw fail("storage_forbidden", "Third-party app storage cannot use the K-V model");
+  const declaration: PluginStorageDeclaration = options.binding;
   const root = buildStorageNamespaceRoot(options.binding);
   const now = options.now ?? (() => Date.now());
   const generateId = options.generateId ?? (() => crypto.randomUUID());

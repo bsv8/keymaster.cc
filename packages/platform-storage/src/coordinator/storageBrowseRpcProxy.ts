@@ -1,5 +1,5 @@
 import type { CapabilityClient } from "webloom-framework";
-import { STORAGE_PRIVATE_BROWSE_CAPABILITY, parseStorageBrowsePrivateResponse, type StorageBrowsePrivateData, type StorageBrowsePrivateRequest } from "./storageBrowsePrivateCapability.js";
+import { STORAGE_PRIVATE_BROWSE_CAPABILITY, type StorageBrowsePrivateData, type StorageBrowsePrivateRequest } from "./storageBrowsePrivateCapability.js";
 import type { StorageBrowseService } from "../runtime/storageBrowsePrivate.js";
 // 页面侧只读存储浏览代理。
 //
@@ -57,7 +57,7 @@ export class StorageBrowseRpcProxy implements StorageBrowseService {
   }
 
   private async rpc(request: StorageBrowsePrivateRequest, signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>> {
-    const response = parseStorageBrowsePrivateResponse(request, await this.client().call(request, { ...(signal ? { signal } : {}) }));
+    const response = await this.client().call(request, { ...(signal ? { signal } : {}) });
     if (response.ack.status !== "ok") return response.ack;
     return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
   }

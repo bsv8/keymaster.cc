@@ -82,36 +82,19 @@ export function buildWindowP2pConcurrencyConfig(
   };
 }
 
-function asStat(value: unknown): MsFileSupplierStat {
-  if (!value || typeof value !== "object") throw new Error("executor returned an invalid Stat result");
-  return value as MsFileSupplierStat;
-}
-
-function asRead(value: unknown): MsFileTransportReadOutcome {
-  if (!value || typeof value !== "object" || !( ["ok", "integrity-failed", "price-limit-exceeded", "supplier-error", "cancelled", "transport-failed"] as unknown[]).includes((value as { type?: unknown }).type)) throw new Error("executor returned an invalid Read result");
-  if ((value as { type: string }).type === "ok" && !((value as { content?: unknown }).content instanceof Uint8Array)) throw new Error("executor returned invalid Read content");
-  if ((value as { type: string }).type === "supplier-error" && !/^[a-z0-9_]{1,64}$/.test(String((value as { errorCode?: unknown }).errorCode ?? ""))) throw new Error("executor returned invalid supplier error code");
-  return value as MsFileTransportReadOutcome;
-}
-
-function asProbe(value: unknown): MsFileSupplierProbeResult {
-  if (!value || typeof value !== "object") throw new Error("executor returned an invalid probe result");
-  return value as MsFileSupplierProbeResult;
-}
-
 /** 将公共 Window P2P bridge 适配为既有 MsFileTransport 契约。 */
 export function createWindowP2pMsFileTransport(bridge: WindowP2pExecutorBridge): MsFileTransport {
-  const request = (operation: MsFileP2pLaneOperation, signal?: AbortSignal): Promise<unknown> => bridge.request({ type: "lane", laneId: "msfile", operation }, signal);
+  const request = <T>(operation: MsFileP2pLaneOperation, signal?: AbortSignal): Promise<T> => bridge.request({ type: "lane", laneId: "msfile", operation }, signal) as Promise<T>;
   return {
     get available() { return bridge.available; },
     async stat(input: MsFileTransportStatInput): Promise<MsFileSupplierStat> {
-      return asStat(await request({ type: "stat", supplier: input.supplier, seedHashHex: input.seedHashHex, supplierGeneration: input.supplierGeneration }, input.signal));
+      return request<MsFileSupplierStat>({ type: "stat", supplier: input.supplier, seedHashHex: input.seedHashHex, supplierGeneration: input.supplierGeneration }, input.signal);
     },
     async read(input: MsFileTransportReadInput): Promise<MsFileTransportReadOutcome> {
-      return asRead(await request({ type: "read", supplier: input.supplier, kind: input.kind, hashHex: input.hashHex, maxPriceSatoshis: input.maxPriceSatoshis.toString(10), supplierGeneration: input.supplierGeneration }, input.signal));
+      return request<MsFileTransportReadOutcome>({ type: "read", supplier: input.supplier, kind: input.kind, hashHex: input.hashHex, maxPriceSatoshis: input.maxPriceSatoshis.toString(10), supplierGeneration: input.supplierGeneration }, input.signal);
     },
     async probe(input: MsFileTransportProbeInput): Promise<MsFileSupplierProbeResult> {
-      return asProbe(await request({ type: "probe", supplier: input.supplier, supplierGeneration: input.supplierGeneration }, input.signal));
+      return request<MsFileSupplierProbeResult>({ type: "probe", supplier: input.supplier, supplierGeneration: input.supplierGeneration }, input.signal);
     },
     dispose: () => bridge.dispose?.(),
     invalidateSupplier: async (supplierPublicKeyHex, generation) => {

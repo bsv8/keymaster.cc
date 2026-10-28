@@ -1,16 +1,14 @@
-import { validateNetworkIdentity, sameNetworkIdentity, type NetworkIdentity } from "@keymaster/contracts";
-import { requireUnlockedWalletIdentity, parseP2pkhPaymentLookupResult } from "@keymaster/contracts";
+import { projectNetworkIdentity, sameNetworkIdentity, type NetworkIdentity } from "@keymaster/contracts";
+import { requireUnlockedWalletIdentity } from "@keymaster/contracts";
 async function appPaymentChannelId(owner: string, name: string, paymentType: string, network: string): Promise<string> {
   const bytes = new TextEncoder().encode(JSON.stringify(["keymaster.app-payment-channel.v1", owner, name, paymentType, network]));
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
   return "pay." + Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 function publisherPaymentOwner(publisher: string): string {
-  if (!/^0[23][0-9a-f]{64}$/i.test(publisher)) throw Error("invalid-publisher");
   return "publisher." + publisher.toLowerCase();
 }
-async function publisherPaymentChannelId(publisher: string, paymentType: string, network: string): Promise<string> {
-  if (!["p2pkh", "p2pk"].includes(paymentType) || !["main", "test"].includes(network)) throw Error("unsupported");
+async function publisherPaymentChannelId(publisher: string, paymentType: PaymentChannelRegisterParams["paymentType"], network: NetworkIdentity["bsvNetwork"]): Promise<string> {
   return appPaymentChannelId(publisherPaymentOwner(publisher), "publisher-single.v1", paymentType, network);
 }
 async function publisherPaymentSessionId(sessionId: string): Promise<string> {
@@ -854,7 +852,11 @@ export class ProtocolServiceImpl implements ProtocolService {
         ? { mode: "appView", origin: this.currentAppViewContext?.appOrigin ?? "", source: this.currentAppClientSource }
         : { mode: "popup", source: this.getOpener() },
       lifecycle: () => { const snapshot = deps.walletState.snapshot(); return { walletGeneration: snapshot.walletGeneration, runGeneration: snapshot.runGeneration }; },
-      identity: async () => validateNetworkIdentity(await deps.vault.getCurrentKey()),
+      identity: async () => {
+        const key = await deps.vault.getCurrentKey();
+        if (!key) throw new Error("Wallet identity is not ready");
+        return projectNetworkIdentity(key);
+      },
       send: (target, origin, message) => this.postMessage(target as Window, origin, message),
       control: (target, message) => {
         if (message.type === "ready" && deps.postReady) deps.postReady(target as Window, message);
@@ -2108,7 +2110,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const sessionRecord: ConnectSessionRecord = {
       sessionId,
       origin: input.appOrigin,
-      networkIdentity: validateNetworkIdentity(key),
+      networkIdentity: projectNetworkIdentity(key),
       ownerPublicKeyHex: key.publicKeyHex,
       ownerLabel: key.label,
       claimsSnapshot: resolvedClaims,
@@ -2127,12 +2129,11 @@ export class ProtocolServiceImpl implements ProtocolService {
       stagedAppViewSessionId = sessionId;
       try { wallet.assertActive(); } catch (error) { crypto.dispose("launch-authority-revoked"); throw error; }
       const identity = crypto.getIdentity();
-      if (!sameNetworkIdentity(identity, key)) { crypto.dispose("launch-identity-mismatch"); throw new Error("AppView crypto identity mismatch"); }
       sessionRuntimeBootstrap = {
-        networkIdentity: validateNetworkIdentity(identity),
+        networkIdentity: projectNetworkIdentity(identity),
         ownerPublicKeyHex: identity.publicKeyHex,
         ownerLabel: key.label,
-        capabilities: Array.isArray(key.capabilities) ? key.capabilities : [],
+        capabilities: [...key.capabilities],
         createdAt: now,
         crypto
       };
@@ -2170,7 +2171,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       appOrigin: input.appOrigin,
       appUrl: appUrlWithLaunchToken,
       walletPublicKeyHex: key.publicKeyHex,
-      networkIdentity: validateNetworkIdentity(key),
+      networkIdentity: projectNetworkIdentity(key),
       ownerPublicKeyHex: key.publicKeyHex,
       resolvedClaims: resolvedClaims as Record<string, unknown>,
       resolvedAt: now,
@@ -2215,7 +2216,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     sessionWindowNavigated = true;
     return {
       sessionWindowOpened: true,
-      networkIdentity: validateNetworkIdentity(key),
+      networkIdentity: projectNetworkIdentity(key),
       walletPublicKeyHex: key.publicKeyHex,
       launchToken,
       appUrl: appUrlWithLaunchToken
@@ -3022,7 +3023,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const now = Date.now();
     const record: ConnectSessionRecord = {
       sessionId: await this.connectBindingKey(key, origin),
-      origin, networkIdentity: validateNetworkIdentity(key), ownerPublicKeyHex: key.publicKeyHex,
+      origin, networkIdentity: projectNetworkIdentity(key), ownerPublicKeyHex: key.publicKeyHex,
       ownerLabel: key.label, claimsSnapshot: {}, createdAt: now, lastUsedAt: now, revokedAt: null,
     };
     await this.deps.storageRepository.putConnectSession(record);
@@ -4465,7 +4466,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const record: ConnectSessionRecord = {
       sessionId,
       origin: rec.origin,
-      networkIdentity: validateNetworkIdentity(key),
+      networkIdentity: projectNetworkIdentity(key),
       ownerPublicKeyHex: key.publicKeyHex,
       ownerLabel: key.label,
       claimsSnapshot: resolvedClaims,
@@ -4481,7 +4482,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     await this.deps.storageRepository.putConnectSessionAndRevokeOriginPeers(record);
     return {
       walletPublicKeyHex: key.publicKeyHex,
-      networkIdentity: validateNetworkIdentity(key),
+      networkIdentity: projectNetworkIdentity(key),
       ownerPublicKeyHex: key.publicKeyHex,
       resolvedClaims: resolvedClaims,
       resolvedAt: now,
@@ -5153,7 +5154,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!service?.getPaymentStatus) return record;
     const value = await service.getPaymentStatus({ paymentId: record.paymentId });
     await assertAuthorized();
-    const manager = parseP2pkhPaymentLookupResult(value);
+    const manager = value;
     if (manager.status === "not_found") return record;
     if (manager.status === "pending" && record.txid) throw protocolError("id_conflict", "Signed payment lost its manager exact");
     if (manager.status === "not_signed" && (record.txid || record.status === "signed_not_dispatched" || record.release)) throw protocolError("id_conflict", "Unsigned release contradicts signed payment facts");

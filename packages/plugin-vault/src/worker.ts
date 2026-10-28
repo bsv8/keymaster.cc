@@ -9,7 +9,6 @@ import { createWorkerCryptoRpc, type WorkerCryptoRpcDependencies } from "./worke
 export function createVaultWorkerRuntime(ports: {
   walletState: VaultWalletState;
   walletControl: VaultWorkerWalletControl;
-  isIssued(consumer: PluginConsumer, scope: LifecycleScope): boolean;
   cryptoRpc: WorkerCryptoRpcDependencies;
   activeCrypto(owner: string, providerScope?: LifecycleScope): Promise<ActiveKeyCrypto>;
 }) {
@@ -20,7 +19,7 @@ export function createVaultWorkerRuntime(ports: {
     context.provide(VAULT_WORKER_WALLET_CONTROL_CAPABILITY, Object.freeze({
       bind(consumer: PluginConsumer, scope: LifecycleScope): VaultWorkerWalletControl {
         context.scope.assertActive(); scope.assertActive();
-        if (!ports.isIssued(consumer, scope)) throw new Error("Unissued wallet control consumer");
+        if (consumer.status !== "active") throw new Error("Wallet control consumer has been revoked");
         const invoke = async <T>(operation: () => Promise<T>): Promise<T> => {
           context.scope.assertActive(); scope.assertActive();
           const result = await operation();
@@ -35,11 +34,10 @@ export function createVaultWorkerRuntime(ports: {
       },
     }));
     context.handle(COORDINATOR_CRYPTO_RPC_CAPABILITY, createWorkerCryptoRpc(ports.cryptoRpc));
-    context.provide(VAULT_WALLET_STATE_CAPABILITY, createWalletStateAccess(ports.walletState, context.scope, ports.isIssued));
+    context.provide(VAULT_WALLET_STATE_CAPABILITY, createWalletStateAccess(ports.walletState, context.scope));
     context.provide(VAULT_WORKER_CRYPTO_CAPABILITY, Object.freeze({
-      async createActiveKeyCrypto(...args: []) {
+      async createActiveKeyCrypto() {
         context.scope.assertActive();
-        if (args.length) throw new TypeError("Worker crypto cannot select a wallet");
         const wallet = bindWalletIdentity(ports.walletState, context.scope.signal);
         const crypto = await ports.activeCrypto(wallet.identity.publicKeyHex, context.scope);
         try { context.scope.assertActive(); wallet.assertActive(); } catch (error) { crypto.dispose("vault-provider-revoked"); throw error; }

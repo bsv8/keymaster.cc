@@ -28,6 +28,10 @@ Keymaster 是本地优先的 BSV 浏览器钱包。它提供钱包身份、普�
 
 边测和集成测试由同级 `BSV8_Engineering` 仓库维护，测试专用页面钩子、夹具和构建配置也位于该仓库。
 
+下载调度器的 TypeScript 源码唯一位于 `packages/download-scheduler/`，包名为 `keymaster.cc-download-scheduler`，作为本仓 workspace 包使用，不依赖 CLI 仓库。CLI 的 Go 实现保留在 `keymaster.cc-cli/internal/scheduler/`。
+
+UTXO manager 的 TypeScript 源码唯一位于 `packages/utxo-manager/src/`，作为钱包内部 workspace 包使用，不依赖独立 manager 仓库或源码同步。
+
 ## 自行部署
 
 使用 Node.js 22 和 pnpm 11.5.1，在项目目录执行：

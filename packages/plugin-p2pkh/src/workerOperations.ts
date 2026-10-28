@@ -1,5 +1,5 @@
 import { requireWocNetwork } from "@keymaster/contracts";
-import { defineWorkerRequestRoute, parseP2pkhProtocolCommand } from "@keymaster/contracts";
+import { defineWorkerRequestRoute } from "@keymaster/contracts";
 import type { P2pkhProtocolCommandResult } from "@keymaster/contracts";
 import type {
   BorrowedModuleFileStore, CoordinatorClientRequest, CoordinatorResponse, P2pkhUtxoSnapshotResult,
@@ -152,7 +152,7 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
           }, {
             assertFresh, recoveringExact: true, signal,
             provider: ports.provider() ?? ports.domain.registry()?.getBroadcastProvider("woc", input.network),
-            walletState: ports.walletState, storage: () => storage, sessionEpoch: epoch, snapshots: ports.domain.snapshots(), resource,
+            storage: () => storage, sessionEpoch: epoch,
             listProtectedOutpoints: ports.funding.protected, listProtocolProtectedOutpoints: protocolProtection,
             managerProtocolIntent: request => manager.protocolIntentProof(request),
             abortNotDispatched: async () => { /* Signed recovery NEVER releases an original responsibility. */ },
@@ -203,10 +203,10 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
         const captured = capture(request.ownerPublicKeyHex);
         const manager = createP2pkhUtxoManager({ files: ports.storage() });
         const dependencies = {
-          assertFresh: captured.assertFresh, snapshots: captured.snapshots,
+          assertFresh: captured.assertFresh,
           provider: ports.provider() ?? ports.domain.registry()?.getBroadcastProvider("woc", request.network),
-          walletState: ports.walletState, storage: ports.storage, sessionEpoch: epoch,
-          resource, listProtectedOutpoints: ports.funding.protected, listProtocolProtectedOutpoints: protocolProtection,
+          storage: ports.storage, sessionEpoch: epoch,
+          listProtectedOutpoints: ports.funding.protected, listProtocolProtectedOutpoints: protocolProtection,
           async managerProtocolIntent(input: { ownerPublicKeyHex: string; network: "main" | "test"; allocationId: string; txid: string; inputOutpointKeys: readonly string[] }) {
             return manager.protocolIntentProof(input);
           },
@@ -244,9 +244,10 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
           const settled = await manager.submitSigned({
             ownerPublicKeyHex: request.ownerPublicKeyHex, resource: managerResource,
             allocationId, signedTxHex: request.submission.rawTxHex,
-            async broadcast(rawTxHex) {
-              if (rawTxHex.toLowerCase() !== request.submission!.rawTxHex.toLowerCase()) throw new Error("UTXO manager broadcast bytes changed");
-              workerResponse = await executeWorkerP2pkhBroadcast(requestId, request, { ...dependencies, recoveringExact });
+            async broadcast(rawTxHex, txid) {
+              workerResponse = await executeWorkerP2pkhBroadcast(requestId, {
+                ...request, submission: { ...request.submission!, managerAllocationId: allocationId, rawTxHex, txid },
+              }, { ...dependencies, recoveringExact });
               captured.assertFresh();
               const outcome = workerResponse.operationResult as { status?: string; txid?: string; canonicalTxid?: string; reason?: string } | undefined;
               if (outcome?.status === "local-confirmed") return { status: "accepted", txid: outcome.canonicalTxid ?? outcome.txid ?? "" };
@@ -279,7 +280,7 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
   async function protocolCommand(requestId: string, request: Extract<CoordinatorClientRequest, { kind: "p2pkh.protocol.command" }>): Promise<CoordinatorResponse> {
     if (!ports.available()) return ports.blocked(requestId);
     try {
-      const command = parseP2pkhProtocolCommand(request.input);
+      const command = request.input;
       const input = command.input;
       if (request.expectedSessionEpoch !== epoch() || input.network !== ports.network()) throw new Error("Protocol RPC scope changed");
       const captured = capture(input.ownerPublicKeyHex);

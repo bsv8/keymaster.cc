@@ -11,7 +11,6 @@ import type {
 } from "@keymaster/contracts";
 import {
   assertSupplierId,
-  normalizeOwnerSettings,
   normalizeSupplierConfig,
 } from "../satValidation.js";
 import {
@@ -148,7 +147,8 @@ function emptySnapshot(ownerPublicKeyHex: string): SatSubscriptionStateSnapshot 
 }
 
 function cloneSupplier(config: SatSupplierConfigV1): SatSupplierConfigV1 {
-  return { ...config, multiaddrs: [...config.multiaddrs] };
+  // Persist declared settings only, never runtime metadata carried alongside them.
+  return { supplierId: config.supplierId, name: config.name, supplierPublicKeyHex: config.supplierPublicKeyHex, multiaddrs: [...config.multiaddrs], enabled: config.enabled };
 }
 
 function settingFromSnapshot(
@@ -158,7 +158,7 @@ function settingFromSnapshot(
   if (snapshot.ownerPublicKeyHex !== ownerPublicKeyHex) throw new Error("SatSubscription owner mismatch on save");
   const suppliers = snapshot.suppliers.filter((supplier) => supplier.supplierId !== SAT_DEFAULT_SUPPLIER_ID);
   const normalizedSuppliers = suppliers.map((supplier, index) => {
-    const normalized = normalizeSupplierConfig(supplier);
+    const normalized = cloneSupplier(supplier);
     assertCustomSupplier(normalized, `snapshot.suppliers[${index}]`);
     return normalized;
   });
@@ -167,7 +167,8 @@ function settingFromSnapshot(
 
   const settings = snapshot.ownerSettings;
   if (settings && settings.ownerPublicKeyHex !== ownerPublicKeyHex) throw new Error("SatSubscription owner settings mismatch on save");
-  const normalizedSettings: SatOwnerSupplierSettingsV1 | null = settings ? normalizeOwnerSettings(settings) : null;
+  const normalizedSettings: SatOwnerSupplierSettingsV1 | null = settings;
+  if (settings && new Set(settings.receiveSupplierIds).size !== settings.receiveSupplierIds.length) throw new Error("receive supplier selection contains duplicates");
   const defaultPublishSupplierId = normalizedSettings?.defaultPublishSupplierId ?? null;
   const customDefault = defaultPublishSupplierId === SAT_DEFAULT_SUPPLIER_ID ? null : defaultPublishSupplierId;
   if (customDefault !== null) {
@@ -189,7 +190,7 @@ function settingFromSnapshot(
   return {
     format: SAT_SUBSCRIPTION_SETTING_FORMAT,
     version: SAT_SUBSCRIPTION_SETTING_VERSION,
-    ...(normalizedSuppliers.length === 0 ? {} : { suppliers: normalizedSuppliers.map(cloneSupplier) }),
+    ...(normalizedSuppliers.length === 0 ? {} : { suppliers: normalizedSuppliers }),
     ...(customDefault === null ? {} : { defaultPublishSupplierId: customDefault }),
     ...(receiveSupplierIds.length === 0 ? {} : { receiveSupplierIds }),
   };

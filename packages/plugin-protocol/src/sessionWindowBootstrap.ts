@@ -1,4 +1,4 @@
-import { validateNetworkIdentity, sameNetworkIdentity } from "@keymaster/contracts";
+import { projectNetworkIdentity } from "@keymaster/contracts";
 // packages/plugin-protocol/src/sessionWindowBootstrap.ts
 // Session Window 启动模式 + launcher 一次性 bootstrap consume（direct call）。
 //
@@ -253,8 +253,8 @@ export async function consumeLauncherBootstrap(
  * launcher 用于构造一次性 bootstrap payload 的依赖（施工单 2026-06-30 002）。
  *
  * 设计缘由：
- *   - launcher 已经借到"这次 session 绑定 owner 的私钥材料"（用
- *     `createAppViewSession()` 取 capability）；本接口只声明
+ *   - launcher 已经通过 `createAppViewSession()` 取得本次 owner-session
+ *     绑定的受限 crypto capability；本接口只声明
  *     它需要传入哪些已就绪数据，**不**替代 launcher 自己决定"是否
  *     允许启动 appView"的策略。
  *   - `appUrl` 必须已经拼好 launchToken；Session Window bootstrap 完成后
@@ -262,8 +262,8 @@ export async function consumeLauncherBootstrap(
  *     （保留 `window.opener` 让 client app 能 `postMessage` 回
  *     Session Window，走现有 popup transport）。
  *   - **不**包含 `unlockRuntime`：appView mode 不导入整套 vault
- *     unlock runtime，改为只把"owner 私钥材料"塞进
- *     `sessionRuntimeBootstrap`。
+ *     unlock runtime；`sessionRuntimeBootstrap` 只交接受限 capability，
+ *     不交接私钥或 raw 材料。
  */
 export interface LauncherHandoffInput {
   networkIdentity: import("@keymaster/contracts").NetworkIdentity;
@@ -292,27 +292,11 @@ export interface LauncherHandoffInput {
  * 隐式依赖。
  */
 export function buildAppBootstrapPayload(input: LauncherHandoffInput): AppBootstrapPayload {
-  if (!input.appId || !input.appOrigin || !input.appUrl) {
-    throw new Error("Launcher handoff missing app fields");
-  }
-  if (!input.walletPublicKeyHex || !input.ownerPublicKeyHex) {
-    throw new Error("Launcher handoff missing connect session fields");
-  }
-  if (!input.launchToken) {
-    throw new Error("Launcher handoff missing launchToken");
-  }
-  if (!input.sessionRuntimeBootstrap) {
-    throw new Error("Launcher handoff missing sessionRuntimeBootstrap");
-  }
-  if (input.sessionRuntimeBootstrap.ownerPublicKeyHex !== input.ownerPublicKeyHex) {
-    throw new Error("Launcher handoff sessionRuntimeBootstrap.ownerPublicKeyHex mismatch");
-  }
-  const identity = input.sessionRuntimeBootstrap.crypto?.getIdentity?.();
-  if (!identity || identity.publicKeyHex !== input.ownerPublicKeyHex || !sameNetworkIdentity(validateNetworkIdentity(identity), validateNetworkIdentity(input.networkIdentity)) || !sameNetworkIdentity(input.networkIdentity, input.sessionRuntimeBootstrap.networkIdentity)) {
-    throw new Error("Launcher handoff sessionRuntimeBootstrap.crypto identity invalid");
-  }
+  // The capability remains responsible for its captured session/generation;
+  // using a trusted internal DTO must not make a revoked capability live.
+  input.sessionRuntimeBootstrap.crypto.getIdentity();
   return {
-    networkIdentity: validateNetworkIdentity(input.networkIdentity),
+    networkIdentity: projectNetworkIdentity(input.networkIdentity),
     app: {
       appId: input.appId,
       appOrigin: input.appOrigin,

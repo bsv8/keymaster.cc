@@ -1,18 +1,15 @@
 import { VAULT_WALLET_STATE_CAPABILITY, type VaultWalletState, type VaultWalletStateAccess, type VaultLifecycleSnapshot } from "@keymaster/contracts";
-import { isIssuedKeymasterConsumer } from "@keymaster/runtime/storage";
 import type { LifecycleScope, PluginConsumer } from "webloom-framework";
 
 /** A provider instance owns every view and subscription; no view can rebind. */
 export function createWalletStateAccess(
   source: VaultWalletState,
   providerScope: LifecycleScope,
-  // The trusted assembly supplies its realm's issuer; public callers cannot choose it.
-  isIssuedConsumer: (consumer: PluginConsumer, scope: LifecycleScope) => boolean = isIssuedKeymasterConsumer,
 ): VaultWalletStateAccess {
   const views = new WeakMap<PluginConsumer, VaultWalletState>();
   const check = (consumer: PluginConsumer, scope: LifecycleScope) => {
     providerScope.assertActive(); scope.assertActive();
-    if (!isIssuedConsumer(consumer, scope) || consumer.status !== "active") throw new Error("Wallet state requires its live issued consumer and Scope");
+    if (consumer.status !== "active") throw new Error("Wallet state consumer has been revoked");
     if (consumer.capability(VAULT_WALLET_STATE_CAPABILITY) !== access) throw new Error("Wallet state provider instance has changed");
   };
   const access: VaultWalletStateAccess = Object.freeze({ bind(consumer: PluginConsumer, scope: LifecycleScope) {

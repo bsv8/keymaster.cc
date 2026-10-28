@@ -8,11 +8,7 @@ import { newCollectRequest, newInformationRequest, parseResponse } from "satoshi
 import { parse } from "satoshi-payment-interface/wire";
 import type { Information, Response } from "satoshi-payment-interface/protocol";
 import { WireKind } from "satoshi-payment-interface/protocol";
-import {
-  assertCompressedPublicKeyHex,
-  assertSupplierId,
-  bytesToHex
-} from "./satValidation.js";
+import { bytesToHex } from "./satValidation.js";
 import {
   SatSubscriptionError,
   SatTransportError,
@@ -73,19 +69,8 @@ export function mapSpiBsvNetwork(network: string): {
   throw new SatSubscriptionError("unavailable", `供应商 BSV 网络不受支持：${network}`);
 }
 
-function asRecord(value: unknown, field: string): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new SatSubscriptionError("validation", `${field} must be an object`);
-  return value as Record<string, unknown>;
-}
-
-function assertSpiText(value: unknown, field: string, maxLength: number): asserts value is string {
-  if (typeof value !== "string" || value.length === 0 || value.length > maxLength || /[\u0000-\u001f\u007f]/.test(value)) {
-    throw new SatSubscriptionError("validation", `${field} is invalid`);
-  }
-}
-
-function assertPositiveAmount(value: unknown, field: string): asserts value is bigint {
-  if (typeof value !== "bigint" || value <= 0n || value > 0xffffffffffffffffn) {
+function assertPositiveAmount(value: bigint, field: string): void {
+  if (value <= 0n || value > 0xffffffffffffffffn) {
     throw new SatSubscriptionError("validation", `${field} must be a positive uint64 bigint`);
   }
 }
@@ -144,12 +129,6 @@ function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
   return true;
 }
 
-function assertGeneration(value: number | null | undefined, field: string): number | undefined {
-  if (value === null || value === undefined) return undefined;
-  if (!Number.isSafeInteger(value) || value < 1) throw new SatSubscriptionError("validation", `${field} is invalid`);
-  return value;
-}
-
 function sameCollectContent(
   value: SatCollectResult,
   input: { supplierId: string; currency: string; network: string; amount: bigint; paymentAddress: string }
@@ -179,10 +158,7 @@ type SatTopUpInput =
   | { supplierId: string; currency: string; network: string; amountSatoshis: bigint };
 
 function hasExplicitTopUpAccount(input: SatTopUpInput): input is Extract<SatTopUpInput, { currency: string; network: string }> {
-  const hasCurrency = "currency" in input;
-  const hasNetwork = "network" in input;
-  if (hasCurrency !== hasNetwork) throw new SatSubscriptionError("validation", "充值账户必须同时指定 currency 和 network");
-  return hasCurrency && hasNetwork;
+  return "currency" in input;
 }
 
 function selectBsvAccount(
@@ -215,26 +191,6 @@ function assertP2pkhNetworkEnabled(p2pkh: SatP2pkhService, mapping: ReturnType<t
   }
 }
 
-function validateP2pkhPreview(input: {
-  preview: unknown;
-  ownerPublicKeyHex: string;
-  recipientAddress: string;
-  amountSatoshis: bigint;
-  expectedAssetId: "bsv" | "bsvtest";
-  expectedNetwork: "main" | "test";
-}): Record<string, unknown> {
-  const value = asRecord(input.preview, "p2pkhPreview");
-  if (value.assetId !== input.expectedAssetId || value.network !== input.expectedNetwork) {
-    throw new SatSubscriptionError("validation", `P2PKH preview network/asset does not match ${input.expectedAssetId}/${input.expectedNetwork}`);
-  }
-  if (value.ownerPublicKeyHex !== input.ownerPublicKeyHex) throw new SatSubscriptionError("identity", "P2PKH preview owner does not match current owner");
-  if (value.recipientAddress !== input.recipientAddress) throw new SatSubscriptionError("conflict", "P2PKH preview recipient no longer matches SPI payment address");
-  if (value.amountSatoshis !== safeNumber(input.amountSatoshis, "amountSatoshis")) throw new SatSubscriptionError("conflict", "P2PKH preview amount no longer matches");
-  if (!Number.isSafeInteger(value.feeRateSatoshisPerKb) || Number(value.feeRateSatoshisPerKb) <= 0) throw new SatSubscriptionError("validation", "P2PKH preview fee rate is invalid");
-  if (typeof value.rawTxHex !== "string" || !/^[0-9a-f]+$/.test(value.rawTxHex) || value.rawTxHex.length % 2 !== 0) throw new SatSubscriptionError("validation", "P2PKH preview raw transaction is invalid");
-  return value;
-}
-
 /** SPI trusted service 实现。 */
 export class SatSpiService implements SatSubscriptionSpiService {
   private readonly now: () => number;
@@ -253,17 +209,29 @@ export class SatSpiService implements SatSubscriptionSpiService {
     const runtime = this.cfg.getRuntime();
     const ownerPublicKeyHex = runtime?.ownerPublicKeyHex ?? this.cfg.getOwnerPublicKeyHex();
     if (!ownerPublicKeyHex) throw new SatSubscriptionError("identity", "SPI requires an active owner");
-    assertCompressedPublicKeyHex(ownerPublicKeyHex, "ownerPublicKeyHex");
-    if (runtime && runtime.ownerPublicKeyHex !== ownerPublicKeyHex) throw new SatSubscriptionError("identity", "SPI runtime owner changed");
     const stateStore = runtime?.stateStore ?? await this.cfg.stateForOwner(ownerPublicKeyHex);
-    const ownerGeneration = assertGeneration(runtime?.ownerGeneration ?? this.cfg.getOwnerGeneration?.(), "ownerGeneration");
-    const supplierGeneration = assertGeneration(runtime?.supplierGeneration ?? stateStore.supplierGeneration(), "supplierGeneration");
+    const ownerGeneration = runtime?.ownerGeneration ?? this.cfg.getOwnerGeneration?.() ?? undefined;
+    const supplierGeneration = runtime?.supplierGeneration ?? stateStore.supplierGeneration();
     if (supplierGeneration === undefined) throw new SatSubscriptionError("validation", "supplierGeneration is unavailable");
-    return { ownerPublicKeyHex, stateStore, runtime, ...(ownerGeneration === undefined ? {} : { ownerGeneration }), supplierGeneration };
+    const context = { ownerPublicKeyHex, stateStore, runtime, ...(ownerGeneration === undefined ? {} : { ownerGeneration }), supplierGeneration };
+    this.assertContext(context);
+    return context;
+  }
+
+  private assertContext(context: Awaited<ReturnType<SatSpiService["context"]>>): void {
+    const runtime = this.cfg.getRuntime();
+    const ownerGeneration = runtime?.ownerGeneration ?? this.cfg.getOwnerGeneration?.() ?? undefined;
+    const supplierGeneration = runtime?.supplierGeneration ?? context.stateStore.supplierGeneration();
+    if (this.cfg.getOwnerPublicKeyHex() !== context.ownerPublicKeyHex
+      || runtime?.ownerPublicKeyHex !== (context.runtime ? context.ownerPublicKeyHex : undefined)
+      || runtime?.stateStore !== (context.runtime ? context.stateStore : undefined)
+      || ownerGeneration !== context.ownerGeneration || supplierGeneration !== context.supplierGeneration
+      || (this.cfg.getOwnerGeneration && this.cfg.getOwnerGeneration() !== context.ownerGeneration)) {
+      throw new SatSubscriptionError("identity", "SPI operation owner or runtime generation changed");
+    }
   }
 
   private supplier(stateStore: SatSubscriptionStateStore, supplierId: string): SatSupplierConfigV1 {
-    assertSupplierId(supplierId);
     const supplier = stateStore.getSupplier(supplierId);
     if (!supplier) throw new SatSubscriptionError("config", "Supplier is not configured");
     if (!supplier.enabled) throw new SatSubscriptionError("config", "Supplier is disabled");
@@ -278,15 +246,17 @@ export class SatSpiService implements SatSubscriptionSpiService {
     const mapping = mapSpiBsvNetwork(spiNetwork);
     if (checkTestnetEnabled && mapping.p2pkhNetwork === "test") {
       const p2pkh = await this.cfg.getP2pkh();
+      this.assertContext(context);
       if (!p2pkh) throw new SatSubscriptionError("unavailable", "P2PKH service is unavailable");
       assertP2pkhNetworkEnabled(p2pkh, mapping);
     }
     const paymentAddress = await this.cfg.deriveP2pkhAddress(context.ownerPublicKeyHex, mapping.p2pkhNetwork);
-    assertSpiText(paymentAddress, "paymentAddress", 128);
+    this.assertContext(context);
     return paymentAddress;
   }
 
-  private async queryInformation(input: { ownerPublicKeyHex: string; stateStore: SatSubscriptionStateStore; runtime: SatSubscriptionSpiRuntime | null }, supplierId: string): Promise<SatSpiInformation> {
+  private async queryInformation(input: Awaited<ReturnType<SatSpiService["context"]>>, supplierId: string): Promise<SatSpiInformation> {
+    this.assertContext(input);
     this.supplier(input.stateStore, supplierId);
     if (!input.runtime) throw new SatSubscriptionError("unavailable", "SPI provider is not bound to a live connection");
     const request = newInformationRequest();
@@ -297,6 +267,7 @@ export class SatSpiService implements SatSubscriptionSpiService {
       const code = errorCodeFromFailure(error);
       throw new SatSubscriptionError(code, messageFromFailure(error));
     }
+    this.assertContext(input);
     let response: Response;
     try {
       response = parseResponse(responseWire, request.requestId);
@@ -317,6 +288,7 @@ export class SatSpiService implements SatSubscriptionSpiService {
       observedAtMs: this.now()
     };
     await input.stateStore.putSpiInformation(result);
+    this.assertContext(input);
     return result;
   }
 
@@ -329,8 +301,6 @@ export class SatSpiService implements SatSubscriptionSpiService {
     assertPositiveAmount(input.amountSatoshis, "amountSatoshis");
     const explicitAccount = hasExplicitTopUpAccount(input);
     if (explicitAccount) {
-      assertSpiText(input.currency, "currency", 32);
-      assertSpiText(input.network, "network", 32);
       // 先映射请求值，未知网络不得进入 Information 后的交易创建路径。
       mapSpiBsvNetwork(input.network);
     }
@@ -340,8 +310,8 @@ export class SatSpiService implements SatSubscriptionSpiService {
       information.currencies,
       explicitAccount ? { currency: input.currency, network: input.network } : undefined
     );
-    assertSpiText(account.paymentAddress, "paymentAddress", 128);
     const p2pkh = await this.cfg.getP2pkh();
+    this.assertContext(context);
     if (!p2pkh) throw new SatSubscriptionError("unavailable", "P2PKH service is unavailable");
     assertP2pkhNetworkEnabled(p2pkh, mapping);
     const amountNumber = safeNumber(input.amountSatoshis, "amountSatoshis");
@@ -354,14 +324,7 @@ export class SatSpiService implements SatSubscriptionSpiService {
     } catch (error) {
       throw new SatSubscriptionError("balance", messageFromFailure(error));
     }
-    validateP2pkhPreview({
-      preview: p2pkhPreview,
-      ownerPublicKeyHex: context.ownerPublicKeyHex,
-      recipientAddress: account.paymentAddress,
-      amountSatoshis: input.amountSatoshis,
-      expectedAssetId: mapping.assetId,
-      expectedNetwork: mapping.p2pkhNetwork
-    });
+    this.assertContext(context);
     return {
       supplierId: input.supplierId,
       paymentAddress: account.paymentAddress,
@@ -372,32 +335,23 @@ export class SatSpiService implements SatSubscriptionSpiService {
   }
 
   async submitTopUp(preview: SatTopUpPreview): Promise<SatTopUpResult> {
-    if (!preview) throw new SatSubscriptionError("validation", "充值预览不能为空");
     const mapping = mapSpiBsvNetwork(preview.network);
     assertPositiveAmount(preview.amountSatoshis, "amountSatoshis");
-    assertSpiText(preview.paymentAddress, "paymentAddress", 128);
     const context = await this.context();
     const information = await this.queryInformation(context, preview.supplierId);
     const { account } = selectBsvAccount(information.currencies, { currency: "BSV", network: mapping.spiNetwork });
     if (!account || account.paymentAddress !== preview.paymentAddress) throw new SatSubscriptionError("conflict", "Top-up preview payment address is stale");
     const p2pkh = await this.cfg.getP2pkh();
+    this.assertContext(context);
     if (!p2pkh) throw new SatSubscriptionError("unavailable", "P2PKH service is unavailable");
     assertP2pkhNetworkEnabled(p2pkh, mapping);
-    validateP2pkhPreview({
-      preview: preview.p2pkhPreview,
-      ownerPublicKeyHex: context.ownerPublicKeyHex,
-      recipientAddress: preview.paymentAddress,
-      amountSatoshis: preview.amountSatoshis,
-      expectedAssetId: mapping.assetId,
-      expectedNetwork: mapping.p2pkhNetwork
-    });
     let result: { status: string; txid?: string; error?: string; rawTxHex?: string };
     try {
       result = await p2pkh.submitTransfer(preview.p2pkhPreview);
     } catch (error) {
       throw new SatSubscriptionError(errorCodeFromFailure(error), messageFromFailure(error));
     }
-    if (!result || typeof result.status !== "string" || result.status.length === 0) throw new SatSubscriptionError("protocol", "P2PKH submit returned an invalid result");
+    this.assertContext(context);
     return { status: result.status, ...(result.txid ? { txid: result.txid } : {}) };
   }
 
@@ -462,8 +416,6 @@ export class SatSpiService implements SatSubscriptionSpiService {
   }
 
   async collectNew(input: { supplierId: string; currency: string; network: string; amount: bigint }): Promise<SatCollectResult> {
-    assertSpiText(input.currency, "currency", 32);
-    assertSpiText(input.network, "network", 32);
     assertPositiveAmount(input.amount, "amount");
     // 当前 P2PKH 资金能力只支持 BSV；网络值必须先通过 SPI 正式契约映射。
     if (input.currency !== "BSV") throw new SatSubscriptionError("unavailable", "SatSubscription 回收目前只支持 BSV SPI 账户");
@@ -499,7 +451,6 @@ export class SatSpiService implements SatSubscriptionSpiService {
   }
 
   async retryCollect(input: { requestIdHex: string; requestWire?: Uint8Array }): Promise<SatCollectResult> {
-    if (!/^[0-9a-f]{64}$/.test(input.requestIdHex)) throw new SatSubscriptionError("validation", "Collect request_id is not canonical hex");
     const context = await this.context();
     const saved = context.stateStore.getCollectResult(input.requestIdHex);
     if (!saved) throw new SatSubscriptionError("validation", "Collect request is not stored");

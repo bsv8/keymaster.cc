@@ -4,7 +4,6 @@ import { defineBuiltinWorkerPlugin, VAULT_WALLET_STATE_CAPABILITY } from "@keyma
 
 export function createWindowP2pWorkerPlugin(ports: {
   bridge: WindowP2pExecutorBridge;
-  isIssued(consumer: PluginConsumer, scope: LifecycleScope): boolean;
   revokeLease(identity: { ownerPublicKeyHex: string; sessionEpoch: string; instanceId: string }): void;
 }) {
   return defineBuiltinWorkerPlugin("window-p2p", [WINDOW_P2P_WORKER_BRIDGE_CAPABILITY], context => {
@@ -14,7 +13,7 @@ export function createWindowP2pWorkerPlugin(ports: {
     const identity = { ownerPublicKeyHex: wallet.activePublicKeyHex, sessionEpoch: wallet.sessionEpoch, instanceId: context.instanceId };
     context.provide(WINDOW_P2P_WORKER_BRIDGE_CAPABILITY, Object.freeze({
       bind(consumer: PluginConsumer, scope: LifecycleScope): WindowP2pExecutorBridge {
-        const assertActive = () => { context.scope.assertActive(); scope.assertActive(); const current = walletState.snapshot(); if (current.status !== "unlocked" || current.activePublicKeyHex !== identity.ownerPublicKeyHex || current.sessionEpoch !== identity.sessionEpoch) throw new Error("Worker bridge owner session replaced"); if (!ports.isIssued(consumer, scope)) throw new Error("Unissued Worker bridge consumer"); };
+        const assertActive = () => { context.scope.assertActive(); scope.assertActive(); const current = walletState.snapshot(); if (current.status !== "unlocked" || current.activePublicKeyHex !== identity.ownerPublicKeyHex || current.sessionEpoch !== identity.sessionEpoch) throw new Error("Worker bridge owner session replaced"); if (consumer.status !== "active") throw new Error("Worker bridge consumer has been revoked"); };
         assertActive();
         return Object.freeze({ get available() { assertActive(); return ports.bridge.available; },
           async request(operation: Parameters<WindowP2pExecutorBridge["request"]>[0], signal?: AbortSignal) {

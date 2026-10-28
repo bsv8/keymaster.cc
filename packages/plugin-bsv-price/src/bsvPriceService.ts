@@ -31,9 +31,7 @@ import {
   createDefaultBsvPriceConfig,
   createKeyValueBsvPriceSettingsStore,
   deriveUnitFromPair,
-  normalizeMarketIdentifier,
   normalizePublisherPublicKeyHex,
-  normalizeServerName,
   type BsvPriceActiveOption,
   type BsvPriceGlobalConfig,
   type BsvPriceServerConfig,
@@ -372,34 +370,21 @@ export function createBsvPriceService(
     }),
     getConfig: () => cloneConfig(currentConfig),
     async addServer(input) {
-      const name = normalizeServerName(input.name);
-      if (!name.ok || name.value === undefined) throw new Error(name.error ?? "invalid_server_name");
-      const key = normalizePublisherPublicKeyHex(input.publisherPublicKeyHex);
-      if (!key.ok || key.value === undefined) {
-        throw new Error(key.error ?? "invalid_publisher_public_key_hex");
-      }
       await ready;
-      if (currentConfig.servers.some((server) => server.publisherPublicKeyHex === key.value)) {
-        throw new Error("server_exists");
-      }
       return save(candidate({
         servers: [...currentConfig.servers.map((server) => ({ ...server })), {
-          name: name.value,
-          publisherPublicKeyHex: key.value
+          name: input.name,
+          publisherPublicKeyHex: input.publisherPublicKeyHex
         }]
       }));
     },
     async removeServer(publisherPublicKeyHex) {
-      const key = normalizePublisherPublicKeyHex(publisherPublicKeyHex);
-      if (!key.ok || key.value === undefined) {
-        throw new Error(key.error ?? "invalid_publisher_public_key_hex");
-      }
       await ready;
-      if (key.value === DEFAULT_PRICE_PUBLISHER_PUBLIC_KEY_HEX) {
+      if (publisherPublicKeyHex === DEFAULT_PRICE_PUBLISHER_PUBLIC_KEY_HEX) {
         throw new Error("default_server_required");
       }
       const servers = currentConfig.servers
-        .filter((server) => server.publisherPublicKeyHex !== key.value)
+        .filter((server) => server.publisherPublicKeyHex !== publisherPublicKeyHex)
         .map((server) => ({ ...server }));
       if (servers.length === currentConfig.servers.length) throw new Error("server_not_found");
       if (servers.length === 0) throw new Error("last_server_required");
@@ -415,25 +400,8 @@ export function createBsvPriceService(
       return save({ servers, active, savedAtMs: 0 });
     },
     async setActiveOption(input) {
-      const key = normalizePublisherPublicKeyHex(input.publisherPublicKeyHex);
-      if (!key.ok || key.value === undefined) {
-        throw new Error(key.error ?? "invalid_publisher_public_key_hex");
-      }
-      const market = normalizeMarketIdentifier(input.market);
-      if (!market.ok || market.value === undefined) {
-        throw new Error(market.error ?? "invalid_market");
-      }
-      const pair = normalizeMarketIdentifier(input.pair);
-      if (!pair.ok || pair.value === undefined) {
-        throw new Error(pair.error ?? "invalid_pair");
-      }
       await ready;
-      if (!currentConfig.servers.some((server) => server.publisherPublicKeyHex === key.value)) {
-        throw new Error("server_not_found");
-      }
-      return save(candidate({
-        active: { publisherPublicKeyHex: key.value, market: market.value, pair: pair.value }
-      }));
+      return save(candidate({ active: { ...input } }));
     },
     async restoreOriginalSettings() {
       await ready;

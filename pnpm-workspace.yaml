@@ -1,7 +1,6 @@
 packages:
   - "packages/*"
   - "coding/keymaster/p2p-host"
-  - "../keymaster.cc-download-scheduler"
 
 linkWorkspacePackages: true
 

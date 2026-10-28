@@ -44,21 +44,8 @@ function laneError(code: string, message: string): Error & WindowP2pExecutorErro
   return error;
 }
 
-function asOperation(value: unknown): SatWindowLaneOperation {
-  if (!value || typeof value !== "object" || typeof (value as { type?: unknown }).type !== "string") throw laneError("ERR_INVALID_OPERATION", "Sat Window lane operation is invalid");
-  const operation = value as Partial<SatWindowLaneOperation>;
-  const supplierGeneration = operation.supplierGeneration;
-  if (typeof operation.supplierId !== "string" || operation.supplierId.length === 0
-    || typeof operation.connectionId !== "string" || operation.connectionId.length === 0
-    || typeof operation.ownerSessionEpoch !== "string" || operation.ownerSessionEpoch.length === 0
-    || typeof supplierGeneration !== "number" || !Number.isSafeInteger(supplierGeneration) || supplierGeneration < 1) {
-    throw laneError("ERR_INVALID_CONNECTION", "Sat operation connection fence is invalid");
-  }
-  return operation as SatWindowLaneOperation;
-}
-
-function asWire(value: unknown, field: string): Uint8Array {
-  if (!(value instanceof Uint8Array) || value.byteLength === 0 || value.byteLength > MAX_WIRE_BYTES) throw laneError("ERR_INVALID_WIRE", `${field} must be a non-empty SSP Wire`);
+function copyBoundedWire(value: Uint8Array, field: string): Uint8Array {
+  if (value.byteLength === 0 || value.byteLength > MAX_WIRE_BYTES) throw laneError("ERR_INVALID_WIRE", `${field} must be a non-empty SSP Wire`);
   return value.slice();
 }
 
@@ -109,12 +96,12 @@ export class SatWindowP2pLane implements WindowP2pExecutorLane {
   }
 
   async handle(rawOperation: unknown, signal: AbortSignal): Promise<unknown> {
-    const operation = asOperation(rawOperation);
+    const operation = rawOperation as SatWindowLaneOperation;
     if (signal.aborted) throw new DOMException("The operation was aborted", "AbortError");
     switch (operation.type) {
       case "connect": return this.connect(operation, signal);
-      case "requestSsp": return this.getConnection(operation).requestSsp(asWire(operation.wire, "requestSsp.wire"), signal);
-      case "requestSpi": return this.getConnection(operation).requestSpi(asWire(operation.wire, "requestSpi.wire"), signal);
+      case "requestSsp": return this.getConnection(operation).requestSsp(copyBoundedWire(operation.wire, "requestSsp.wire"), signal);
+      case "requestSpi": return this.getConnection(operation).requestSpi(copyBoundedWire(operation.wire, "requestSpi.wire"), signal);
       case "respondSsp": return this.respond(operation);
       case "close": this.closeSupplier(operation); return null;
       default: throw laneError("ERR_INVALID_OPERATION", "Sat Window lane operation type is unsupported");
@@ -122,15 +109,10 @@ export class SatWindowP2pLane implements WindowP2pExecutorLane {
   }
 
   async rejectEvent(rawEvent: unknown, error: WindowP2pExecutorError): Promise<void> {
-    if (!rawEvent || typeof rawEvent !== "object" || (rawEvent as { type?: unknown }).type !== "ssp.request") return;
-    const event = rawEvent as Partial<SatWindowLaneSspRequestEvent>;
-    if (typeof event.eventId !== "string"
-      || typeof event.supplierId !== "string"
-      || typeof event.connectionId !== "string"
-      || typeof event.ownerSessionEpoch !== "string"
-      || !Number.isSafeInteger(event.supplierGeneration)) return;
+    const event = rawEvent as SatWindowLaneSspRequestEvent;
+    if (event.type !== "ssp.request") return;
     const pending = this.pendingIncoming.get(event.eventId);
-    if (!pending || !sameFence(pending, event as SatWindowConnectionFence)) return;
+    if (!pending || !sameFence(pending, event)) return;
     const rejected = laneError(error.code || "ERR_INCOMING_REJECTED", error.message || "Sat inbound Publish was rejected");
     if (error.sentBoundary) rejected.sentBoundary = error.sentBoundary;
     this.rejectPendingEvent(pending, rejected);
@@ -237,7 +219,7 @@ export class SatWindowP2pLane implements WindowP2pExecutorLane {
     const pending = this.pendingIncoming.get(operation.eventId);
     if (!pending) throw laneError("ERR_INCOMING_NOT_PENDING", "Sat inbound Publish event is no longer pending");
     if (!sameFence(pending, operation)) throw laneError("ERR_STALE_CONNECTION", "Sat inbound response connection fence does not match the request");
-    const responseWire = asWire(operation.wire, "respondSsp.wire");
+    const responseWire = copyBoundedWire(operation.wire, "respondSsp.wire");
     this.resolvePendingEvent(pending, responseWire);
     return null;
   }

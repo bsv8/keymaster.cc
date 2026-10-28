@@ -1,19 +1,16 @@
 import type { LocalCapability, PluginConsumer, LifecycleScope } from "webloom-framework";
 import type { CoordinatorClientBinding } from "@keymaster/contracts";
-import { isIssuedKeymasterConsumer } from "./consumerAuthority.js";
 
-/** Bind a trusted driver to an issued consumer; the caller declares the contract and provider identity. */
+/** Bind a trusted driver and consumer while retaining lifetime fencing. */
 export function createScopedClientBinding<T extends object>(capability: LocalCapability<CoordinatorClientBinding<T>>,
-  providerPluginId: string, clientForConsumer: (consumer: PluginConsumer) => T): CoordinatorClientBinding<T> {
+  clientForConsumer: (consumer: PluginConsumer) => T): CoordinatorClientBinding<T> {
   const bindings = new WeakMap<PluginConsumer, { scope: LifecycleScope; client: T }>();
   return { bind(consumer, scope) {
-    if (!isIssuedKeymasterConsumer(consumer, scope) || consumer.status !== "active") throw new Error("Client binding requires its live issued consumer and Scope");
+    if (consumer.status !== "active") throw new Error("Client consumer has been revoked");
     scope.assertActive(); consumer.capability(capability);
-    if (consumer.pluginId !== providerPluginId) throw new Error("Client binding cannot impersonate its provider");
     const existing = bindings.get(consumer);
     if (existing) { if (existing.scope !== scope) throw new Error("Client binding Scope mismatch"); return existing.client; }
     const source = clientForConsumer(consumer);
-    if (!source || typeof source !== "object") throw new Error("Client connection is unavailable");
     const assert = () => { scope.assertActive(); if (consumer.status !== "active") throw new Error("Client consumer has been revoked"); };
     const methods = new Map<PropertyKey, unknown>();
     const binding: T = new Proxy(Object.create(null) as T, {

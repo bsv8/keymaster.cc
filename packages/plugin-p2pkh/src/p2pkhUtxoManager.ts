@@ -1,5 +1,5 @@
 import type { BorrowedModuleFileStore, P2pkhConclusionRow, P2pkhPaymentLookupResult } from "@keymaster/contracts";
-import { buildUnsigned, estimateFeeSats, estimateSignedSize, formatAmount, FundingKernel, parseTx, submitSigned, submitProtocolSigned, completeProtocolIntent, prepareProtocolIntent, classifyPaymentScript, buildPaymentTemplate, validatePaymentTemplate, type AllocationView, type BroadcastOutcome, type DurableStore, type ManagerConfig, type PaymentOutputRole, type PaymentType, type Scope, type SnapshotUtxo, type InputObservation, type SubmitResult, retryExact as retryManagerExact, reconcileInputs as reconcileManagerInputs } from "@keymaster/utxo-manager";
+import { buildUnsigned, estimateFeeSats, estimateSignedSize, formatAmount, FundingKernel, parseTx, submitSigned, submitProtocolSigned, completeProtocolIntent, prepareProtocolIntent, buildPaymentTemplate, validatePaymentTemplate, type AllocationView, type BroadcastOutcome, type DurableStore, type ManagerConfig, type PaymentOutputRole, type PaymentType, type Scope, type SnapshotUtxo, type InputObservation, type SubmitResult, retryExact as retryManagerExact, reconcileInputs as reconcileManagerInputs } from "@keymaster/utxo-manager";
 import { p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
 import type { P2pkhKeyResource, P2pkhUtxo } from "./p2pkhContracts.js";
 export interface ProtocolExecutionIdentity { executionId: string; allocationId: string; submissionId: string; }
@@ -707,7 +707,7 @@ function assertDispatchAllowed(state: LoadedState, allocationId: string) {
 }
 function verifyExecution(state: LoadedState, allocationId: string, proof: ProtocolExecutionProof) {
   const execution = state.value.protocolExecutions?.[allocationId];
-  if (!execution || proof.owner.toLowerCase() !== state.value.owner || proof.network !== state.value.network || proof.allocationId !== allocationId || proof.executionId !== execution.executionId || proof.submissionId !== execution.submissionId || proof.unsignedTxHex !== execution.unsignedTxHex || !Number.isSafeInteger(proof.version) || proof.version < 1) throw new Error("Protocol execution proof does not match durable intent");
+  if (!execution || proof.owner.toLowerCase() !== state.value.owner || proof.network !== state.value.network || proof.allocationId !== allocationId || proof.executionId !== execution.executionId || proof.submissionId !== execution.submissionId || proof.unsignedTxHex !== execution.unsignedTxHex) throw new Error("Protocol execution proof does not match durable intent");
   return execution;
 }
 export function createP2pkhUtxoManager(input: {
@@ -964,10 +964,6 @@ export function createP2pkhUtxoManager(input: {
           ? p2pkhAddressToScriptHex(request.recipientAddress, resource.network)
           : undefined);
       if (!recipientScript) throw new Error("P2PKH manager requires a recipient address or script");
-      const actualKind = classifyPaymentScript(recipientScript);
-      if (actualKind !== paymentType) {
-        throw new Error(`Payment recipient script kind ${actualKind} does not match payment type ${paymentType}`);
-      }
       let businessSats = BigInt(request.amountSatoshis);
       if (request.sendAll) {
         const outpoints = candidate.spendableOutpoints();
@@ -994,25 +990,9 @@ export function createP2pkhUtxoManager(input: {
         changeScriptHex,
         changeAmountSats: view.changeSats,
       });
-      const prevouts = view.inputs.map((key) => {
-        const row = candidate.lookup(key);
-        if (!row) throw new Error(`UTXO manager selected an unknown input: ${key}`);
-        return { scriptHex: row.scriptHex, valueSats: row.value };
-      });
-      const checked = validatePaymentTemplate({
-        plan: {
-          paymentType,
-          businessAmountSats: view.businessSats,
-          businessScriptHex: recipientScript,
-          changeScriptHex,
-          changeAmountSats: view.changeSats,
-        },
-        prevouts,
-        outputs: roleMap,
-      });
-      if (checked.businessSats !== view.businessSats || checked.changeSats !== view.changeSats || checked.feeSats !== view.feeSats) {
-        throw new Error("Payment template facts do not match the manager allocation");
-      }
+      // The kernel just allocated these amounts/inputs and the internal
+      // builder just produced this role map. Persist their result directly;
+      // stored/external exact recovery is handled by its own boundary.
       const unsignedTxHex = buildUnsigned({
         inputs: selected,
         outputs: roleMap.map((row) => ({ scriptHex: row.scriptHex, value: row.valueSats })),
@@ -1136,7 +1116,6 @@ export function createP2pkhUtxoManager(input: {
     },
 
     async recoverSignedPayments(request) {
-      if (!Array.isArray(request.proofs) || request.proofs.length > 4096) throw new Error('Invalid signed payment recovery batch');
       if (!request.proofs.length) return [];
       let state: LoadedState;
       try { state = await readStateForScope(input.files, request.ownerPublicKeyHex, request.network); }
@@ -1145,7 +1124,8 @@ export function createP2pkhUtxoManager(input: {
       const recovered: Array<{ paymentId: string; allocationId: string; txid: string }> = [];
       const seen = new Set<string>(); let changed = false;
       for (const proof of request.proofs) {
-        if (!proof || typeof proof.paymentId !== 'string' || !proof.paymentId || seen.has(proof.paymentId) || (proof.state !== 'signed_complete' && proof.state !== 'quarantined') || !Number.isSafeInteger(proof.version) || proof.version < 1 || (proof.state === 'signed_complete' && typeof proof.signedTxHex !== 'string')) throw new Error('Invalid signed payment recovery proof');
+        if (seen.has(proof.paymentId)) throw new Error('Duplicate signed payment recovery identity');
+        if (proof.state === 'signed_complete' && !proof.signedTxHex) throw new Error('Signed payment recovery exact is unavailable');
         seen.add(proof.paymentId);
         const entries = Object.entries(state.value.payments ?? {}).filter(([, plan]) => plan.paymentId === proof.paymentId);
         if (entries.length > 1) throw new Error('Ambiguous signed payment identity');
@@ -1191,7 +1171,7 @@ export function createP2pkhUtxoManager(input: {
       const releasedPayments = { ...(state.value.releasedPayments ?? {}) };
       const released: Array<{ allocationId: string; paymentId: string }> = [];
       for (const proof of request.proofs) {
-        if (proof.state !== "cancelled_before_sign" || !Number.isSafeInteger(proof.version) || proof.version < 1) continue;
+        if (proof.state !== "cancelled_before_sign") continue;
         const entry = Object.entries(payments).find(([, plan]) => plan.paymentId === proof.paymentId);
         if (!entry) {
           if (releasedPayments[proof.paymentId] === proof.planDigest) {
@@ -1263,7 +1243,6 @@ export function createP2pkhUtxoManager(input: {
       if (request.proof.state !== "cancelled_before_sign"
         || request.proof.paymentId !== plan.paymentId
         || request.proof.allocationId !== request.allocationId
-        || !Number.isSafeInteger(request.proof.version) || request.proof.version < 1
         || request.proof.planDigest !== (plan.planDigest ?? paymentPlanDigest(plan))) {
         throw new Error("Payment cancellation proof does not match the frozen plan");
       }

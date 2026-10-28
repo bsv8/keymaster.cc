@@ -59,7 +59,7 @@ import type {
   StorageBindingGrant,
   StoragePlatformGrant
 } from "@keymaster/contracts/storage-internal";
-import { parseCoordinatorResponseFor, toCoordinatorRpcRequest } from "@keymaster/contracts";
+import { toCoordinatorRpcRequest } from "@keymaster/contracts";
 import { connectSharedWorker, definePlugin, type HandlerCallContext, type RuntimeDrainResult, type RuntimeHandle, type RuntimePluginDefinition, type WindowApp } from "webloom-framework";
 import coordinatorWorkerUrl from "./keymasterSessionCoordinator.worker.ts?sharedworker&url";
 
@@ -98,7 +98,6 @@ type CoordinatorDispatchStatus = "not-dispatched" | "unknown";
 type CoordinatorSendError = Error & {
   dispatchStatus?: CoordinatorDispatchStatus;
   /** 请求在本页面 DTO 校验阶段失败，尚未进入 Runtime。 */
-  requestValidation?: boolean;
   /** 捕获发起请求的物理连接世代；迟到失败不能撤销后继连接。 */
   connectionAttempt?: number;
   connectionUnavailable?: boolean;
@@ -1165,11 +1164,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   // ============================================================
 
   private normalizeTransportFailure(kind: CoordinatorClientRequest["kind"], cause: unknown): CoordinatorTransportFailure {
-    if (cause && typeof cause === "object" && (cause as CoordinatorSendError).requestValidation === true) {
-      const message = cause instanceof Error ? cause.message : "Coordinator request validation failed";
-      this.reportRecoverableCoordinatorFailure(kind, cause);
-      return { status: "transport-error", message, retryable: false, dispatchStatus: "not-dispatched" };
-    }
     const dispatchStatus = (cause as { dispatchStatus?: CoordinatorDispatchStatus } | undefined)?.dispatchStatus ?? "unknown";
     const code = cause && typeof cause === "object" && typeof (cause as { code?: unknown }).code === "string"
       ? (cause as { code: string }).code
@@ -1186,7 +1180,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     // endpoint loss; rejecting this operation never authorizes a new spend.
     // Likewise, a late error from an old request cannot close a new connection.
     if (belongsToPreviousConnection || (cause as CoordinatorSendError | undefined)?.connectionUnavailable === true
-      || code === "service_revoked" || code === "service_reference_stale") {
+      || code === "service_revoked" || code === "service_reference_stale" || code === "request_validation_failed") {
       this.reportRecoverableCoordinatorFailure(kind, cause);
       return { status: "transport-error", message: cause instanceof Error ? cause.message : "Coordinator request scope is stale", retryable: false, dispatchStatus };
     }
@@ -1259,16 +1253,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     request: R,
     timeoutMs?: number,
   ): Promise<CoordinatorRpcResponseForRequest<CoordinatorRpcRequestFromClient<R>>> {
-    let rpcRequest: CoordinatorRpcRequestFromClient<R>;
-    try {
-      rpcRequest = toCoordinatorRpcRequest(request);
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      const failure = coordinatorSendError(`Coordinator request validation failed: ${message}`, "not-dispatched");
-      failure.requestValidation = true;
-      throw failure;
-    }
-    return this.sendTypedRequest(rpcRequest, request.requestId, timeoutMs);
+    return this.sendTypedRequest(toCoordinatorRpcRequest(request), request.requestId, timeoutMs);
   }
 
   private async sendTypedRequest<R extends CoordinatorRpcRequest>(
@@ -1289,12 +1274,15 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       if (this.runtimeHandle !== runtime || !this.isConnected || this.connectionAttempt !== attempt) {
         throw Object.assign(coordinatorSendError("Coordinator response belongs to a stale Runtime", "unknown"), { code: "service_reference_stale" });
       }
-      const parsed = parseCoordinatorResponseFor(request, response);
-      this.applyCoordinatorResponse(parsed);
-      return parsed;
+      // The Worker already projects the public response. The receiver uses
+      // its typed result directly; transport/session freshness is separate.
+      this.applyCoordinatorResponse(response);
+      return response as CoordinatorRpcResponseForRequest<R>;
     } catch (error) {
       const failure = error instanceof Error ? error as CoordinatorSendError : coordinatorSendError(String(error), "unknown");
-      failure.dispatchStatus ??= "unknown";
+      // WebLoom's request parser can fail before it dispatches. This is a
+      // concrete transport result, not a second local DTO validation pass.
+      failure.dispatchStatus ??= (failure as Error & { code?: string }).code === "request_validation_failed" ? "not-dispatched" : "unknown";
       failure.connectionAttempt = attempt;
       throw failure;
     }

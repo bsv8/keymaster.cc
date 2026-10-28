@@ -12,66 +12,17 @@ import type {
   SatSupplierConfigV1,
   SatSupplierRuntimeView
 } from "@keymaster/contracts";
-import {
-  normalizeOwnerSettings,
-  normalizeSupplierConfig,
-  assertSupplierId,
-  assertCanonicalAmount,
-  assertCompressedPublicKeyHex,
-  assertExactChannel
-} from "./satValidation.js";
 
 const MAX_AUDIT_ENTRIES = 256;
 const MAX_DEDUP_ENTRIES = 2048;
 const MAX_ACK_SUPPLIERS_PER_MESSAGE = 16;
-const MAX_STATE_TEXT_LENGTH = 512;
 const MAX_STATE_WIRE_BYTES = 1024 * 1024;
 const MAX_UINT64 = 0xffffffffffffffffn;
 
-const SAT_ERROR_CODES = new Set<SatErrorCode>([
-  "config",
-  "connect",
-  "identity",
-  "protocol",
-  "balance",
-  "unknown_result",
-  "validation",
-  "unavailable",
-  "conflict"
-]);
-
-function assertErrorCode(value: unknown, field: string): asserts value is SatErrorCode {
-  if (value !== undefined && (typeof value !== "string" || !SAT_ERROR_CODES.has(value as SatErrorCode))) {
-    throw new Error(`${field} is invalid`);
-  }
-}
-
-function assertSafeTimestamp(value: unknown, field: string): asserts value is number {
-  if (!Number.isSafeInteger(value) || Number(value) < 0) throw new Error(`${field} is invalid`);
-}
-
-function assertStateText(value: unknown, field: string, maxLength = MAX_STATE_TEXT_LENGTH): asserts value is string {
-  if (typeof value !== "string" || value.length === 0 || value.length > maxLength || /[\u0000-\u001f\u007f]/.test(value)) {
-    throw new Error(`${field} is invalid`);
-  }
-}
-
-function assertStateKey(value: unknown, field: string, maxLength = MAX_STATE_TEXT_LENGTH): asserts value is string {
-  // dedupKey 使用 NUL 分隔 protocol、sender 和 message_id；它不是可展示文本。
-  if (typeof value !== "string" || value.length === 0 || value.length > maxLength) throw new Error(`${field} is invalid`);
-}
-
-function assertSubscriptionState(value: unknown, field: string): asserts value is SatSubscriptionState {
-  if (value !== "unknown" && value !== "subscribing" && value !== "subscribed" && value !== "unsubscribing" && value !== "unsubscribed" && value !== "unknown_result") {
-    throw new Error(`${field} is invalid`);
-  }
-}
-
-function assertCanonicalChannelMessageId(value: unknown, field: string): asserts value is string {
-  // Channel V1 的 32-byte message_id 编码为固定 43 字符的 base64url。
-  if (typeof value !== "string" || value.length !== 43 || !/^[A-Za-z0-9_-]{43}$/.test(value)) {
-    throw new Error(`${field} is invalid`);
-  }
+function nextSupplierGeneration(current: number): number {
+  const next = current + 1;
+  if (!Number.isSafeInteger(next)) throw new Error("supplierGeneration exhausted");
+  return next;
 }
 
 function assertBoundedWire(value: Uint8Array, field: string): void {
@@ -210,8 +161,7 @@ export interface SatSubscriptionStateStore {
 }
 
 function clone<T>(value: T): T {
-  if (typeof structuredClone === "function") return structuredClone(value);
-  return JSON.parse(JSON.stringify(value)) as T;
+  return structuredClone(value);
 }
 
 function subscriptionKey(supplierId: string, channel: string): string {
@@ -226,26 +176,20 @@ function lastMatching<T>(items: T[], predicate: (item: T) => boolean): T | undef
   return undefined;
 }
 
-function normalizeSnapshot(input: SatSubscriptionStateSnapshot, ownerPublicKeyHex: string | null): SatSubscriptionStateSnapshot {
-  if (!Array.isArray(input.suppliers) || !Array.isArray(input.subscriptions) || !Array.isArray(input.feeAudit) || !Array.isArray(input.channelDedup) || !Array.isArray(input.spiInformation) || !Array.isArray(input.collectResults)) throw new Error("SatSubscription snapshot collections are invalid");
-  const supplierGeneration = input.supplierGeneration ?? 1;
-  if (!Number.isSafeInteger(supplierGeneration) || supplierGeneration < 1) throw new Error("supplierGeneration is invalid");
-  const suppliers = input.suppliers.map(normalizeSupplierConfig);
+/** Bound retention, recovery readiness and cross-record business relationships. */
+function applyStatePolicies(input: SatSubscriptionStateSnapshot, ownerPublicKeyHex: string | null): SatSubscriptionStateSnapshot {
+  const supplierGeneration = input.supplierGeneration;
+  const suppliers = input.suppliers.map(item => clone(item));
   const supplierIds = new Set(suppliers.map((item) => item.supplierId));
   if (supplierIds.size !== suppliers.length) throw new Error("supplier catalog contains duplicate ids");
-  const ownerSettings = input.ownerSettings ? normalizeOwnerSettings(input.ownerSettings) : null;
+  const ownerSettings = input.ownerSettings ? clone(input.ownerSettings) : null;
   if (ownerSettings && ownerSettings.ownerPublicKeyHex !== ownerPublicKeyHex) throw new Error("owner supplier settings do not match active owner");
   if (ownerSettings?.defaultPublishSupplierId && !supplierIds.has(ownerSettings.defaultPublishSupplierId)) throw new Error("default publish supplier is not configured");
-  for (const supplierId of ownerSettings?.receiveSupplierIds ?? []) if (!supplierIds.has(supplierId)) throw new Error("receive supplier is not configured");
+  const receiveIds = ownerSettings?.receiveSupplierIds ?? [];
+  if (new Set(receiveIds).size !== receiveIds.length) throw new Error("receive supplier selection contains duplicates");
+  for (const supplierId of receiveIds) if (!supplierIds.has(supplierId)) throw new Error("receive supplier is not configured");
   const subscriptions = input.subscriptions.slice(-2048).map((item) => {
-    assertSupplierId(item.supplierId);
     if (!supplierIds.has(item.supplierId)) throw new Error("subscription supplier is not configured");
-    assertExactChannel(item.channel, true);
-    assertSubscriptionState(item.desired, "subscription desired");
-    assertSubscriptionState(item.observed, "subscription observed");
-    assertSafeTimestamp(item.observedAtMs, "subscription observedAtMs");
-    if (item.observedSource !== "action" && item.observedSource !== "refresh" && item.observedSource !== "none") throw new Error("subscription observedSource is invalid");
-    if (item.errorCode !== null) assertErrorCode(item.errorCode, "subscription errorCode");
     return { ...item };
   });
   const uniqueSubscriptions = new Map<string, SatSubscriptionRecord>();
@@ -255,42 +199,13 @@ function normalizeSnapshot(input: SatSubscriptionStateSnapshot, ownerPublicKeyHe
     uniqueSubscriptions.set(key, item);
   }
   const feeAudit = input.feeAudit.slice(-MAX_AUDIT_ENTRIES).map((item) => {
-    assertSupplierId(item.supplierId);
-    assertStateText(item.auditId, "fee audit auditId");
-    if (item.action !== "publish" && item.action !== "subscribe" && item.action !== "unsubscribe" && item.action !== "subscriptions" && item.action !== "ack") throw new Error("fee audit action is invalid");
-    if (item.action === "subscriptions") {
-      if (item.channel !== "") throw new Error("subscriptions audit channel must be empty");
-    } else {
-      assertExactChannel(item.channel, item.action === "subscribe" || item.action === "unsubscribe");
-    }
-    if (typeof item.requestIdHex !== "string" || !/^[0-9a-f]{64}$/.test(item.requestIdHex)) throw new Error("fee audit request id is invalid");
-    if (item.chargedAmount !== "") assertCanonicalAmount(item.chargedAmount);
-    else if (typeof item.chargedAmount !== "string") throw new Error("fee audit charged amount is invalid");
-    if (item.result !== "ok" && item.result !== "error" && item.result !== "unknown_result") throw new Error("fee audit result is invalid");
-    assertErrorCode(item.errorCode, "fee audit errorCode");
-    assertSafeTimestamp(item.createdAtMs, "fee audit timestamp");
+    if (item.action === "subscriptions" && item.channel !== "") throw new Error("subscriptions audit channel must be empty");
     return { ...item };
   });
   const channelDedup = input.channelDedup.slice(-MAX_DEDUP_ENTRIES).map((item) => {
-    assertCompressedPublicKeyHex(item.fromPublicKeyHex, "channel dedup fromPublicKeyHex");
-    assertCompressedPublicKeyHex(item.recipientPublicKeyHex, "channel dedup recipientPublicKeyHex");
-    assertSupplierId(item.ingressSupplierId);
-    if (item.direction !== "inbound" && item.direction !== "outbound") throw new Error("channel dedup direction is invalid");
-    assertStateKey(item.dedupKey, "channel dedup key");
-    if (typeof item.contentDigestHex !== "string" || !/^[0-9a-f]{64}$/.test(item.contentDigestHex)) throw new Error("channel dedup content digest is invalid");
-    assertCanonicalChannelMessageId(item.messageIdBase64Url, "channel dedup message id");
-    assertSafeTimestamp(item.firstPersistedAtMs, "channel dedup timestamp");
-    if (!(item.ackState === "pending" || item.ackState === "acknowledged" || item.ackState === "failed" || item.ackState === "conflict")) throw new Error("channel dedup ACK state is invalid");
-    assertErrorCode(item.ackErrorCode, "channel dedup ACK errorCode");
     const rawAckBySupplier = item.ackBySupplier ?? [{ supplierId: item.ingressSupplierId, state: item.ackState, errorCode: item.ackErrorCode, updatedAtMs: item.firstPersistedAtMs }];
-    if (!Array.isArray(rawAckBySupplier) || rawAckBySupplier.length === 0 || rawAckBySupplier.length > MAX_ACK_SUPPLIERS_PER_MESSAGE) throw new Error("channel dedup ackBySupplier is invalid");
-    const ackBySupplier = rawAckBySupplier.map((ack) => {
-      assertSupplierId(ack.supplierId);
-      if (!(ack.state === "pending" || ack.state === "acknowledged" || ack.state === "failed" || ack.state === "conflict")) throw new Error("channel dedup per-supplier ACK state is invalid");
-      assertErrorCode(ack.errorCode, "channel dedup per-supplier ackErrorCode");
-      assertSafeTimestamp(ack.updatedAtMs, "channel dedup per-supplier timestamp");
-      return { ...ack };
-    });
+    if (rawAckBySupplier.length === 0 || rawAckBySupplier.length > MAX_ACK_SUPPLIERS_PER_MESSAGE) throw new Error("channel dedup ACK supplier capacity exceeded");
+    const ackBySupplier = rawAckBySupplier.map(ack => ({ ...ack }));
     const ackSupplierIds = new Set(ackBySupplier.map((ack) => ack.supplierId));
     if (ackSupplierIds.size !== ackBySupplier.length) throw new Error("channel dedup ackBySupplier contains duplicate suppliers");
     if (!ackSupplierIds.has(item.ingressSupplierId)) throw new Error("channel dedup ackBySupplier misses primary ingress");
@@ -302,17 +217,10 @@ function normalizeSnapshot(input: SatSubscriptionStateSnapshot, ownerPublicKeyHe
     channelKeys.add(item.dedupKey);
   }
   const spiInformation = input.spiInformation.slice(-64).map((item) => {
-    assertSupplierId(item.supplierId);
-    assertCompressedPublicKeyHex(item.ownerPublicKeyHex, "SPI ownerPublicKeyHex");
-    if (item.ownerPublicKeyHex !== ownerPublicKeyHex || !supplierIds.has(item.supplierId) || !Array.isArray(item.currencies) || typeof item.projectType !== "string" || !(item.projectInfoCbor instanceof Uint8Array)) throw new Error("SPI information is invalid");
-    assertStateText(item.projectType, "SPI projectType");
+    if (item.ownerPublicKeyHex !== ownerPublicKeyHex || !supplierIds.has(item.supplierId)) throw new Error("SPI information owner or supplier is unavailable");
     assertBoundedWire(item.projectInfoCbor, "SPI projectInfoCbor");
-    assertSafeTimestamp(item.observedAtMs, "SPI observedAtMs");
     for (const currency of item.currencies) {
-      assertStateText(currency.currency, "SPI currency");
-      assertStateText(currency.network, "SPI network");
-      assertStateText(currency.paymentAddress, "SPI paymentAddress");
-      if (typeof currency.balance !== "bigint" || currency.balance < 0n || currency.balance > MAX_UINT64) throw new Error("SPI currency balance is invalid");
+      if (currency.balance < 0n || currency.balance > MAX_UINT64) throw new Error("SPI currency balance is out of range");
     }
     return { ...item, currencies: item.currencies.map((currency) => ({ ...currency })), projectInfoCbor: item.projectInfoCbor.slice() };
   });
@@ -322,20 +230,10 @@ function normalizeSnapshot(input: SatSubscriptionStateSnapshot, ownerPublicKeyHe
     spiSupplierIds.add(item.supplierId);
   }
   const collectResults = input.collectResults.slice(-64).map((item) => {
-    assertSupplierId(item.supplierId);
-    if (!/^[0-9a-f]{64}$/.test(item.requestIdHex)) throw new Error("Collect request id is invalid");
-    if (item.ownerPublicKeyHex !== undefined) assertCompressedPublicKeyHex(item.ownerPublicKeyHex, "Collect ownerPublicKeyHex");
     if (item.ownerPublicKeyHex !== undefined && item.ownerPublicKeyHex !== ownerPublicKeyHex) throw new Error("Collect owner does not match active owner");
-    if (item.ownerGeneration !== undefined && (!Number.isSafeInteger(item.ownerGeneration) || item.ownerGeneration < 1)) throw new Error("Collect ownerGeneration is invalid");
-    if (item.supplierGeneration !== undefined && (!Number.isSafeInteger(item.supplierGeneration) || item.supplierGeneration < 1)) throw new Error("Collect supplierGeneration is invalid");
-    if (item.recoveryBlocked !== undefined && typeof item.recoveryBlocked !== "boolean") throw new Error("Collect recoveryBlocked is invalid");
-    assertStateText(item.currency, "Collect currency");
-    assertStateText(item.network, "Collect network");
-    assertStateText(item.paymentAddress, "Collect paymentAddress");
-    if (typeof item.amount !== "bigint" || item.amount <= 0n || item.amount > MAX_UINT64) throw new Error("Collect amount is invalid");
-    if (item.requestWire !== undefined && (!(item.requestWire instanceof Uint8Array) || item.requestWire.byteLength === 0)) throw new Error("Collect request wire is invalid");
+    if (item.amount <= 0n || item.amount > MAX_UINT64) throw new Error("Collect amount is out of range");
+    if (item.requestWire !== undefined && item.requestWire.byteLength === 0) throw new Error("Collect request wire is unavailable");
     if (item.requestWire) assertBoundedWire(item.requestWire, "Collect request wire");
-    if (item.state !== "pending" && item.state !== "unknown_result" && item.state !== "succeeded" && item.state !== "failed") throw new Error("Collect state is invalid");
     const unresolved = item.state === "pending" || item.state === "unknown_result";
     const hasRecoveryFields = item.ownerPublicKeyHex !== undefined
       && item.ownerGeneration !== undefined
@@ -344,7 +242,6 @@ function normalizeSnapshot(input: SatSubscriptionStateSnapshot, ownerPublicKeyHe
     // 不完整的运行态恢复字段只能封存为 unknown_result；不能用当前会话值
     // 补齐，否则可能把未知扣费请求发给错误的 owner。
     const recoveryBlocked = unresolved && (!hasRecoveryFields || item.recoveryBlocked === true);
-    assertErrorCode(item.errorCode, "Collect errorCode");
     return {
       ...item,
       ...(item.ownerPublicKeyHex ? { ownerPublicKeyHex: item.ownerPublicKeyHex } : {}),
@@ -378,7 +275,7 @@ export function createSatSubscriptionState(input: {
   initial?: Partial<SatSubscriptionStateSnapshot>;
   persistence?: SatSubscriptionStatePersistence;
 }): SatSubscriptionStateStore {
-  let state = normalizeSnapshot({
+  let state = applyStatePolicies({
     ownerPublicKeyHex: input.ownerPublicKeyHex,
     supplierGeneration: input.initial?.supplierGeneration ?? 1,
     suppliers: input.initial?.suppliers ?? [],
@@ -390,24 +287,16 @@ export function createSatSubscriptionState(input: {
     collectResults: input.initial?.collectResults ?? []
   }, input.ownerPublicKeyHex);
 
-  const persist = async (): Promise<void> => {
-    await input.persistence?.save(clone(state));
-  };
-
   let mutationTail: Promise<void> = Promise.resolve();
-  const mutate = <T>(fn: () => T | Promise<T>): Promise<T> => {
+  const mutate = <T>(fn: (candidate: SatSubscriptionStateSnapshot) => T | Promise<T>): Promise<T> => {
     const run = mutationTail.then(async () => {
-      const previous = state;
-      try {
-        state = clone(state);
-        const result = await fn();
-        state = normalizeSnapshot(state, input.ownerPublicKeyHex);
-        await persist();
-        return result;
-      } catch (error) {
-        state = previous;
-        throw error;
-      }
+      const candidate = clone(state);
+      const result = await fn(candidate);
+      const committed = applyStatePolicies(candidate, input.ownerPublicKeyHex);
+      await input.persistence?.save(clone(committed));
+      // Readers continue to see the previous committed state while I/O runs.
+      state = committed;
+      return result;
     });
     mutationTail = run.then(() => undefined, () => undefined);
     return run;
@@ -422,29 +311,27 @@ export function createSatSubscriptionState(input: {
       const item = state.suppliers.find((value) => value.supplierId === supplierId);
       return item ? { ...item, multiaddrs: [...item.multiaddrs] } : undefined;
     },
-    upsertSupplier: async (config) => mutate(() => {
-      const normalized = normalizeSupplierConfig(config);
-      const index = state.suppliers.findIndex((item) => item.supplierId === normalized.supplierId);
-      if (index < 0) state.suppliers.push(normalized); else state.suppliers[index] = normalized;
-      // disabled Supplier 不能继续被当前 active 值引用；否则 setting.json
-      // 的引用完整性会在写盘阶段失败，页面会看到“停用”但内存没有提交。
-      if (!normalized.enabled && state.ownerSettings) {
+    upsertSupplier: async (config) => mutate(state => {
+      const nextSupplier = clone(config);
+      const index = state.suppliers.findIndex((item) => item.supplierId === nextSupplier.supplierId);
+      if (index < 0) state.suppliers.push(nextSupplier); else state.suppliers[index] = nextSupplier;
+      // A disabled supplier cannot remain selected as an active ingress.
+      if (!nextSupplier.enabled && state.ownerSettings) {
         state.ownerSettings = {
           ...state.ownerSettings,
-          defaultPublishSupplierId: state.ownerSettings.defaultPublishSupplierId === normalized.supplierId
+          defaultPublishSupplierId: state.ownerSettings.defaultPublishSupplierId === nextSupplier.supplierId
             ? null
             : state.ownerSettings.defaultPublishSupplierId,
-          receiveSupplierIds: state.ownerSettings.receiveSupplierIds.filter((supplierId) => supplierId !== normalized.supplierId)
+          receiveSupplierIds: state.ownerSettings.receiveSupplierIds.filter((supplierId) => supplierId !== nextSupplier.supplierId)
         };
       }
-      state.supplierGeneration += 1;
+      state.supplierGeneration = nextSupplierGeneration(state.supplierGeneration);
     }),
-    deleteSupplier: async (supplierId) => mutate(() => {
-      assertSupplierId(supplierId);
+    deleteSupplier: async (supplierId) => mutate(state => {
       state.suppliers = state.suppliers.filter((item) => item.supplierId !== supplierId);
       state.subscriptions = state.subscriptions.filter((item) => item.supplierId !== supplierId);
       state.spiInformation = state.spiInformation.filter((item) => item.supplierId !== supplierId);
-      state.supplierGeneration += 1;
+      state.supplierGeneration = nextSupplierGeneration(state.supplierGeneration);
       if (state.ownerSettings) {
         state.ownerSettings = {
           ...state.ownerSettings,
@@ -454,11 +341,10 @@ export function createSatSubscriptionState(input: {
       }
     }),
     getOwnerSettings: () => state.ownerSettings ? clone(state.ownerSettings) : null,
-    setOwnerSettings: async (settings) => mutate(() => {
-      state.ownerSettings = normalizeOwnerSettings(settings);
+    setOwnerSettings: async (settings) => mutate(state => {
+      state.ownerSettings = clone(settings);
     }),
-    setDesiredSubscription: async (value) => mutate(() => {
-      assertSupplierId(value.supplierId);
+    setDesiredSubscription: async (value) => mutate(state => {
       const key = subscriptionKey(value.supplierId, value.channel);
       const existing = state.subscriptions.find((item) => subscriptionKey(item.supplierId, item.channel) === key);
       if (existing) {
@@ -468,7 +354,7 @@ export function createSatSubscriptionState(input: {
         state.subscriptions.push({ supplierId: value.supplierId, channel: value.channel, desired: value.state, observed: "unknown", observedAtMs: 0, observedSource: "none", errorCode: value.errorCode ?? null });
       }
     }),
-    setObservedSubscription: async (value) => mutate(() => {
+    setObservedSubscription: async (value) => mutate(state => {
       const key = subscriptionKey(value.supplierId, value.channel);
       const existing = state.subscriptions.find((item) => subscriptionKey(item.supplierId, item.channel) === key);
       if (!existing) {
@@ -481,21 +367,15 @@ export function createSatSubscriptionState(input: {
       }
     }),
     listSubscriptions: (supplierId) => state.subscriptions.filter((item) => supplierId === undefined || item.supplierId === supplierId).map((item) => ({ ...item })),
-    recordFee: async (value) => mutate(() => {
+    recordFee: async (value) => mutate(state => {
       state.feeAudit.push({ ...value, auditId: `fee-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, createdAtMs: value.createdAtMs ?? Date.now() });
       state.feeAudit = state.feeAudit.slice(-MAX_AUDIT_ENTRIES);
     }),
     listFeeAudit: (limit = MAX_AUDIT_ENTRIES) => state.feeAudit.slice(-Math.max(0, Math.min(MAX_AUDIT_ENTRIES, limit))).map((item) => ({ ...item })),
-    rememberChannel: (value) => mutate(() => {
-      assertSupplierId(value.ingressSupplierId);
+    rememberChannel: (value) => mutate(state => {
       const existing = state.channelDedup.find((item) => item.dedupKey === value.dedupKey);
       if (existing) {
-        const ackBySupplier = existing.ackBySupplier ?? (existing.ackBySupplier = [{
-          supplierId: existing.ingressSupplierId,
-          state: existing.ackState,
-          errorCode: existing.ackErrorCode,
-          updatedAtMs: existing.firstPersistedAtMs
-        }]);
+        const ackBySupplier = existing.ackBySupplier!;
         if (existing.contentDigestHex !== value.contentDigestHex) {
           existing.ackState = "conflict";
           existing.ackErrorCode = "conflict";
@@ -512,7 +392,6 @@ export function createSatSubscriptionState(input: {
         }
         // 首次 ingress 是稳定的主关系，绝不能被重复 Deliver 改写。
         // 每个实际 ingress 单独记录 ACK，发送时使用调用方明确传入的 Supplier。
-        const firstPersistedAtMs = existing.firstPersistedAtMs;
         if (!ackBySupplier.some((item) => item.supplierId === value.ingressSupplierId) && ackBySupplier.length < MAX_ACK_SUPPLIERS_PER_MESSAGE) {
           ackBySupplier.push({ supplierId: value.ingressSupplierId, state: "pending", updatedAtMs: Date.now() });
         }
@@ -528,17 +407,11 @@ export function createSatSubscriptionState(input: {
       state.channelDedup = state.channelDedup.slice(-MAX_DEDUP_ENTRIES);
       return "new" as const;
     }),
-    updateChannelAck: async (value) => mutate(() => {
+    updateChannelAck: async (value) => mutate(state => {
       const existing = state.channelDedup.find((item) => item.dedupKey === value.dedupKey);
       if (!existing) return;
       const supplierId = value.supplierId ?? existing.ingressSupplierId;
-      assertSupplierId(supplierId);
-      const ackBySupplier = existing.ackBySupplier ?? (existing.ackBySupplier = [{
-        supplierId: existing.ingressSupplierId,
-        state: existing.ackState,
-        errorCode: existing.ackErrorCode,
-        updatedAtMs: existing.firstPersistedAtMs
-      }]);
+      const ackBySupplier = existing.ackBySupplier!;
       let delivery = ackBySupplier.find((item) => item.supplierId === supplierId);
       if (!delivery) {
         if (ackBySupplier.length >= MAX_ACK_SUPPLIERS_PER_MESSAGE) return;
@@ -549,7 +422,7 @@ export function createSatSubscriptionState(input: {
         delivery.errorCode = value.errorCode;
         delivery.updatedAtMs = Date.now();
       }
-      // 兼容旧调用方/设置页：聚合字段只代表首次 ingress 的 ACK。
+      // The aggregate fields describe the primary ingress only.
       if (supplierId === existing.ingressSupplierId) {
         existing.ackState = value.state;
         existing.ackErrorCode = value.errorCode;
@@ -559,7 +432,7 @@ export function createSatSubscriptionState(input: {
       const item = state.channelDedup.find((value) => value.dedupKey === dedupKey);
       return item ? clone(item) : undefined;
     },
-    putSpiInformation: async (value) => mutate(() => {
+    putSpiInformation: async (value) => mutate(state => {
       const index = state.spiInformation.findIndex((item) => item.supplierId === value.supplierId);
       if (index < 0) state.spiInformation.push(clone(value)); else state.spiInformation[index] = clone(value);
     }),
@@ -567,7 +440,7 @@ export function createSatSubscriptionState(input: {
       const item = state.spiInformation.find((value) => value.supplierId === supplierId);
       return item ? clone(item) : undefined;
     },
-    putCollectResult: async (value) => mutate(() => {
+    putCollectResult: async (value) => mutate(state => {
       const index = state.collectResults.findIndex((item) => item.requestIdHex === value.requestIdHex);
       if (index < 0) state.collectResults.push(clone(value)); else state.collectResults[index] = clone(value);
     }),

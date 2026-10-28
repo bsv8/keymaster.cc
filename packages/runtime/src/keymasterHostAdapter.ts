@@ -1,5 +1,5 @@
 import { INSTANCE_REGISTRY_BINDING } from "./instanceRegistry.js";
-import { isIssuedKeymasterConsumer, rememberIssuedConsumer } from "./consumerAuthority.js";
+import { rememberIssuedConsumer } from "./consumerAuthority.js";
 // Keymaster Host Adapter。
 //
 // WebLoom 负责通用的产品、运行单元、依赖、Scope、权限租约和清理状态机；
@@ -12,7 +12,6 @@ import type {
   PluginManifest,
   PluginPermission,
   PluginSetup,
-  PluginStorageDeclaration,
   ResourceDefinition as KeymasterResourceDefinition,
   ResourceRegistry as KeymasterResourceRegistry,
   RuntimeIdentityTransition,
@@ -26,8 +25,6 @@ import {
   OWNED_RESOURCE_ACCESS_CAPABILITY,
   RUNTIME_DIAGNOSTICS_CAPABILITY,
   RUNTIME_MESSAGE_BUS,
-  validatePluginStorageDeclaration,
-  assertSystemStorageDeclaration,
 } from "@keymaster/contracts";
 import type {
   CreatePluginHostOptions as LegacyCreatePluginHostOptions,
@@ -507,33 +504,29 @@ export function createKeymasterPluginHost(
     { capability: RESOURCE_REGISTRY_CAPABILITY, value: legacyResourceRegistry },
     { capability: OWNED_RESOURCE_ACCESS_CAPABILITY, value: {
       bind(consumer: import("webloom-framework").PluginConsumer, scope: LifecycleScope) {
-        if (!isIssuedKeymasterConsumer(consumer, scope)) throw new Error("Resource access requires an issued consumer and its Scope");
         scope.assertActive();
         if (consumer.status !== "active") throw new Error("Resource consumer has been revoked");
         consumer.capability(OWNED_RESOURCE_ACCESS_CAPABILITY);
-        const owns = (id: string) => (legacyResourceRegistry as KeymasterResourceRegistry & { _owns(owner: string, id: string): boolean })._owns(consumer.instanceId, id);
-        const assert = (id: string) => {
+        const assert = () => {
           scope.assertActive();
-          if (consumer.status !== "active" || !owns(id)) {
-            throw new Error(`Resource "${id}" is not owned by the live consuming instance`);
-          }
+          if (consumer.status !== "active") throw new Error("Resource consumer has been revoked");
         };
         return Object.freeze({
           isActive: () => scope.state === "active" && consumer.status === "active",
-          ensure<T>(id: string, args: readonly string[]) { assert(id); return coreHost!.resourceStore.ensure<T>(id, args); },
-          read<T>(id: string, args: readonly string[]) { assert(id); return coreHost!.resourceStore.read<T>(id, args); },
-          invalidate(id: string, args: readonly string[]) { assert(id); coreHost!.resourceStore.invalidate(id, args); },
+          ensure<T>(id: string, args: readonly string[]) { assert(); return coreHost!.resourceStore.ensure<T>(id, args); },
+          read<T>(id: string, args: readonly string[]) { assert(); return coreHost!.resourceStore.read<T>(id, args); },
+          invalidate(id: string, args: readonly string[]) { assert(); coreHost!.resourceStore.invalidate(id, args); },
           subscribe(id: string, args: readonly string[], listener: () => void) {
-            assert(id);
+            assert();
             const changed = () => {
-              if (consumer.status === "active" && owns(id)) listener();
+              if (consumer.status === "active") listener();
             };
             let offRecord = coreHost!.resourceStore.subscribe(id, args, changed);
             // 框架刷新运行时绑定或身份会清除资源记录。受限视图必须重新
             // 订阅新记录，否则可选提供方退出后仍挂载的 UI 会永久保留旧数据。
             const offContext = legacyResourceRegistry.get(id)?.scope === "global" ? coreHost!.resourceStore.subscribeContext(() => {
               offRecord();
-              if (consumer.status !== "active" || !owns(id)) return;
+              if (consumer.status !== "active") return;
               offRecord = coreHost!.resourceStore.subscribe(id, args, changed);
               changed();
             }) : () => {};
@@ -546,7 +539,6 @@ export function createKeymasterPluginHost(
     } satisfies import("@keymaster/contracts").OwnedResourceAccess },
     { capability: RUNTIME_DIAGNOSTICS_CAPABILITY, value: {
       bind(consumer: import("webloom-framework").PluginConsumer, scope: LifecycleScope) {
-        if (!isIssuedKeymasterConsumer(consumer, scope)) throw new Error("Diagnostics requires an issued consumer and its Scope");
         const assert = () => { scope.assertActive(); if (consumer.status !== "active") throw new Error("Diagnostics consumer has been revoked"); };
         assert();
         consumer.capability(RUNTIME_DIAGNOSTICS_CAPABILITY);
@@ -603,10 +595,6 @@ export function createKeymasterPluginHost(
     },
     messageBus,
     contextExtension: () => ({}),
-    manifestValidator: (manifest) => {
-      const source = manifests.get(manifest.id);
-      if (source) validateKeymasterManifest(source, options.runtime, manifests.values());
-    },
     permissionPolicy: ({ pluginId, unitId, requested, identity }) => {
       const requestedPermissions = requested as readonly PluginPermission[];
       const approved = options.approvedPermissionsForPlugin?.(pluginId, requestedPermissions) ?? [];
@@ -823,20 +811,17 @@ export function createKeymasterPluginHost(
       capabilities: value.capabilities.map((capability) => capability.id),
     })),
     validateManifestSet(plugins) {
-      for (const plugin of plugins) validateKeymasterManifest(plugin, options.runtime, plugins);
       coreHost!.validateManifestSet(plugins.map(convertManifest));
     },
     provide(key, value) {
       coreHost!.provide(key, value);
     },
     async register(plugin) {
-      validateKeymasterManifest(plugin, options.runtime, manifests.values());
       updateManifestMap([plugin]);
       if (coreHost!.getManifest(plugin.id)) return;
       await coreHost!.register(convertManifest(plugin));
     },
     async registerAll(plugins) {
-      for (const plugin of plugins) validateKeymasterManifest(plugin, options.runtime, plugins);
       updateManifestMap(plugins);
       await coreHost!.registerAll(plugins.map(convertManifest));
     },
@@ -964,37 +949,4 @@ export function createKeymasterPluginHost(
 function runtimeIdentityKey(identity: RuntimeIdentityTransition | undefined): string {
   if (!identity) return "none";
   return `${identity.vaultStatus}|${identity.ownerPublicKeyHex ?? ""}|${identity.sessionEpoch}|${identity.walletGeneration ?? "unknown"}|${identity.runGeneration ?? "unknown"}`;
-}
-
-function validateKeymasterManifest(
-  manifest: PluginManifest,
-  runtime: RuntimeKind | undefined,
-  manifestSet: Iterable<PluginManifest>,
-): void {
-  if (!manifest || typeof manifest.id !== "string" || manifest.id.trim() === "") {
-    throw new Error("Plugin id must be a non-empty string");
-  }
-  const units = manifest.units ?? [];
-  if (units.length > 1 && runtime === undefined) {
-    throw new Error(`Plugin "${manifest.id}" execution must be explicit for multi-unit manifests`);
-  }
-  if (runtime !== undefined && units.filter(unit => unit.runtime === runtime).length > 1) throw new Error(`Plugin "${manifest.id}" has ambiguous runtime units for "${runtime}"`);
-  const unitIds = new Set<string>();
-  for (const unit of units) {
-    if (!unit.id || unitIds.has(unit.id)) throw new Error(`Plugin "${manifest.id}" has duplicate or empty runtime unit id`);
-    unitIds.add(unit.id);
-    if (!unit.runtime || !unit.scopeKind) throw new Error(`Plugin "${manifest.id}" runtime unit "${unit.id}" is incomplete`);
-  }
-  const declarations = [manifest.storage, ...(manifest.storages ?? []), ...units.flatMap((unit) => [unit.storage, ...(unit.storages ?? [])])].filter(
-    (value): value is PluginStorageDeclaration => value !== undefined,
-  );
-  for (const declaration of declarations) {
-    validatePluginStorageDeclaration(declaration);
-    assertSystemStorageDeclaration(manifest.id, declaration);
-  }
-  for (const unit of units) {
-    if (unit.storage && unit.storages) throw new Error(`Plugin "${manifest.id}" runtime unit "${unit.id}" cannot declare both storage and storages`);
-    const purposes = (unit.storages ?? []).map((declaration) => declaration.purposeId);
-    if (new Set(purposes).size !== purposes.length) throw new Error(`Plugin "${manifest.id}" runtime unit "${unit.id}" has duplicate storage purposes`);
-  }
 }

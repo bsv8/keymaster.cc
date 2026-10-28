@@ -21,6 +21,7 @@ import { useOptionalPluginCapability } from "webloom-framework/react";
 import { usePluginI18n, useOptionalResourceSelector } from "@keymaster/runtime";
 import { Button, Modal } from "@keymaster/ui";
 import { SAT_DEFAULT_SUPPLIER_ID } from "./defaults.js";
+import { normalizeSupplierConfig } from "./satValidation.js";
 
 function emptyDraft(): SatSupplierConfigV1 {
   return { supplierId: "", name: "", supplierPublicKeyHex: "", multiaddrs: [""], enabled: true };
@@ -180,7 +181,9 @@ function SatSubscriptionSettingsInner({
     setMessage(null);
     setError(null);
     try {
-      await service.upsertSupplier({ ...draft, multiaddrs: draft.multiaddrs.filter((value) => value.length > 0) });
+      // Decode user-entered fields here; the trusted admin service uses the result directly.
+      const config = normalizeSupplierConfig({ ...draft, multiaddrs: draft.multiaddrs.filter((value) => value.length > 0) });
+      await service.upsertSupplier(config);
       setSupplierEditorOpen(false);
       setSupplierEditorMode("create");
       setDraft(emptyDraft());

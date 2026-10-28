@@ -3,27 +3,11 @@ import { Fragment, createElement, useSyncExternalStore, type ComponentType, type
 import { ScopedPluginConsumerProvider as PluginConsumerProvider } from "@keymaster/runtime";
 import { createScopedRegistryView } from "webloom-framework/advanced";
 import type { PluginConsumer } from "webloom-framework";
-import { isIssuedKeymasterConsumer } from "@keymaster/runtime";
 import { PAGE_UI_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import type { PageUiContribution, PageUiRegistry, PageUiRenderer, PageUiLocation, I18nText } from "@keymaster/contracts";
-import { comparePagePaths, matchPagePath, pagePathShape, validatePagePath } from "./pagePath.js";
+import { comparePagePaths, matchPagePath, pagePathShape } from "./pagePath.js";
 
 interface OwnedEntry { entry: PageUiContribution; consumer: PluginConsumer; ownerInstanceId: string; component: ComponentType<{ location: PageUiLocation }> }
-function validate(entry: PageUiContribution): void {
-  if (!entry || typeof entry.id !== "string" || !entry.id || typeof entry.render !== "function") throw new TypeError("Invalid page contribution");
-  if (entry.order !== undefined && !Number.isFinite(entry.order)) throw new TypeError("Invalid contribution order");
-  if (!entry.label || (typeof entry.label !== "string" && typeof entry.label.key !== "string")) throw new TypeError("Invalid contribution label");
-  if (entry.kind === "page" || entry.kind === "settings-block") {
-    if (entry.kind === "page" && entry.settingsPlacement !== undefined && entry.settingsPlacement !== "after" && entry.settingsPlacement !== "embedded") throw new TypeError("Invalid settings placement");
-    if (typeof entry.path !== "string") throw new TypeError("Invalid page path");
-    validatePagePath(entry.path);
-  } else if (entry.kind === "home") {
-    if (entry.slot !== "main" && entry.slot !== "aside") throw new TypeError("Invalid home slot");
-    if (entry.space && (!entry.space.id || !Number.isFinite(entry.space.order) || !entry.space.label)) throw new TypeError("Invalid home space");
-  } else if (entry.kind === "frame") {
-    if (!["unlocked-shell", "wallet-entry", "wallet-recovery", "wallet-guard", "storage-guard", "protocol-popup", "onboarding", "uri-action"].includes(entry.slot)) throw new TypeError("Invalid frame slot");
-  } else if (entry.kind !== "header" || (entry.slot !== "topbar" && entry.slot !== "above-header")) throw new TypeError("Invalid contribution kind or slot");
-}
 function Contents({ entry, location }: { entry: PageUiContribution; location: PageUiLocation }) { return <>{entry.render(location)}</>; }
 
 /** 注册表、可执行条目与 renderer 都由 page 实例拥有，外界不能枚举原始条目。 */
@@ -52,16 +36,14 @@ export function createPageRegistry(resolveText: (label: I18nText) => string = la
   const registry: PageUiRegistry = {
     bind(consumer, scope) {
       active();
-      if (!isIssuedKeymasterConsumer(consumer, scope) || consumer.status !== "active"
-        || scope.identity.instanceId !== consumer.instanceId || scope.identity.pluginId !== consumer.pluginId) throw new Error("Page contribution requires its own issued consumer and Scope");
+      if (consumer.status !== "active") throw new Error("Page consumer has been revoked");
       scope.assertActive();
       consumer.capability(PAGE_UI_REGISTRY_CAPABILITY);
       const existing = bindings.get(consumer);
       if (existing) return existing;
       const target = {
         register(entry: PageUiContribution & { ownerInstanceId?: string }) {
-          active(); scope.assertActive(); validate(entry);
-          if (entry.ownerInstanceId !== consumer.instanceId) throw new Error("Page contribution owner mismatch");
+          active(); scope.assertActive();
           if (entries.has(entry.id)) throw new Error(`Page contribution id already registered: ${entry.id}`);
           if (entry.kind === "page" && matching(candidate => candidate.kind === "page" && pagePathShape(candidate.path) === pagePathShape(entry.path)).length) {
             throw new Error(`Page contribution path already registered: ${entry.path}`);

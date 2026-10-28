@@ -105,18 +105,6 @@ export interface WalletColdStartState {
 
 const STORAGE_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,62}$/u;
 
-/** 校验稳定模块身份。 */
-function assertStorageModuleId(moduleId: string): string {
-  if (typeof moduleId !== "string" || !STORAGE_ID_PATTERN.test(moduleId)) throw new Error("moduleId is invalid");
-  return moduleId;
-}
-
-/** 校验稳定用途身份。 */
-function assertStoragePurposeId(purposeId: string): string {
-  if (typeof purposeId !== "string" || !STORAGE_ID_PATTERN.test(purposeId)) throw new Error("purposeId is invalid");
-  return purposeId;
-}
-
 /**
  * 规范化第三方 App 的平台登记存储名称。
  *
@@ -188,18 +176,14 @@ export function buildWalletStorageRoot(input: {
   /** 仅 third-party-app 需要:平台登记并规范化后的存储名称。 */
   appStorageName?: string;
 }): string {
-  const moduleId = assertStorageModuleId(input.moduleId);
-  const purposeId = input.purposeId === "" ? "" : assertStoragePurposeId(input.purposeId);
+  const { moduleId, purposeId } = input;
   if (input.authority === "platform-only") {
     return WALLET_SYSTEM_ROOT + moduleId + "/" + purposeId + "/";
   }
   if (input.authority === "built-in-module") {
     return purposeId === "" ? moduleId + "/" : moduleId + "/" + purposeId + "/";
   }
-  if (input.appStorageName === undefined) throw new Error("third-party-app storage requires a registered appStorageName");
-  const name = normalizeAppStorageName(input.appStorageName);
-  if (purposeId !== "") throw new Error("third-party-app storage cannot use a purpose segment");
-  return WALLET_APPS_ROOT + name + "/";
+  return WALLET_APPS_ROOT + input.appStorageName + "/";
 }
 
 /**

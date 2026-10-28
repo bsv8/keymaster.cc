@@ -1,6 +1,5 @@
 import { createScopedRegistryView } from "webloom-framework/advanced";
 import type { Capability, PluginConsumer, LifecycleScope } from "webloom-framework";
-import { isIssuedKeymasterConsumer } from "./consumerAuthority.js";
 
 export const INSTANCE_REGISTRY_BINDING = Symbol.for("keymaster.registry.consumer-binding");
 
@@ -43,7 +42,7 @@ export function createInstanceRegistry<T extends object>(target: T, capability: 
   };
   const bind = (consumer: PluginConsumer, scope: LifecycleScope) => {
     providerScope?.assertActive();
-    if (!isIssuedKeymasterConsumer(consumer, scope) || consumer.status !== "active") throw new Error("Registry requires its live issued consumer and Scope");
+    if (consumer.status !== "active") throw new Error("Registry consumer has been revoked");
     scope.assertActive(); consumer.capability(capability);
     const view = createScopedRegistryView(registrationTarget, scope, { ...options, registrations }).view;
     return new Proxy(view, {

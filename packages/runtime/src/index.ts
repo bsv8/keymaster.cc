@@ -34,7 +34,6 @@ export {
   type FatalSource
 } from "./fatalErrorStore.js";
 
-export { isIssuedKeymasterConsumer } from "./consumerAuthority.js";
 
 export { INSTANCE_REGISTRY_BINDING, createInstanceRegistry, createInstanceRegistryService } from "./instanceRegistry.js";
 export { createScopedClientBinding } from "./scopedClientBinding.js";

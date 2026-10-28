@@ -11,7 +11,6 @@ import type {
   P2pkhProtocolExecutor,
   ProtectedOutpointStore,
   CentralBroadcastService,
-  P2pkhUtxoBinding,
   VaultService
 } from "@keymaster/contracts";
 import { isDefinitelyNotDispatchedBroadcastError } from "@keymaster/contracts";
@@ -24,7 +23,7 @@ import {
   type UnsignedTx,
 } from "./p2pkhSigner.js";
 import { resourceIdFor } from "./storage/p2pkhStateRepository.js";
-import { parseP2pkhTransaction } from "./p2pkhTransactionParser.js";
+import { parseP2pkhTransaction, p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
 
 // value 必须随协议 claim 一起写入，供协议资产自身的审计与恢复使用；
 // 普通 P2PKH 余额不读取这些 claim，避免把协议资产保护混入 P2PKH 选币。
@@ -100,8 +99,6 @@ export interface P2pkhProtocolSpendDeps {
   assertInputsUnspent?(network:BsvNetwork,inputs:readonly ProtocolSpendInput[]):Promise<void>;
   /** 生产广播入口；协议 spend 不直接依赖 WOC 或其它 Provider。 */
   centralBroadcastService?: CentralBroadcastService;
-  /** 从当前快照取得协议输入对应的序号绑定。 */
-  getUtxoBinding?: (input: { ownerPublicKeyHex: string; network: BsvNetwork }) => Promise<P2pkhUtxoBinding | undefined>;
   getKeyForOwner: (ownerPublicKeyHex: string) => Promise<{ publicKeyHex: string }>;
   claimStore: P2pkhProtocolSpendClaimStore;
   submissionStore?: P2pkhProtocolSpendSubmissionStore;
@@ -112,9 +109,6 @@ export interface P2pkhProtocolSpendDeps {
 
 function hexToBytes(hex: string): Uint8Array {
   const clean = hex.replace(/^0x/, "");
-  if (clean.length % 2 !== 0) {
-    throw new Error("Invalid hex length");
-  }
   const out = new Uint8Array(clean.length / 2);
   for (let i = 0; i < out.length; i++) {
     out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
@@ -127,22 +121,13 @@ function p2pkhScriptForPublicKey(publicKeyHex: string): string {
   return `76a914${pubKeyHash160Hex(publicKeyHex).toLowerCase()}88ac`;
 }
 
-function hexToSigningBytes(hex: string): Uint8Array {
-  const clean = hex.replace(/^0x/, "");
-  if (clean.length % 2 !== 0 || !/^[0-9a-f]*$/i.test(clean)) throw new Error("Invalid locking script hex");
-  const out = new Uint8Array(clean.length / 2);
-  for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
-  return out;
-}
-
 function isP2pkhLockingScript(script: Uint8Array): boolean {
   return script.length === 25 && script[0] === 0x76 && script[1] === 0xa9 && script[2] === 0x14 && script[23] === 0x88 && script[24] === 0xac;
 }
 
 function isOwnerBarePubkeyLockingScript(script: Uint8Array, ownerPublicKeyHex: string): boolean {
   if (script.length !== 35 || script[0] !== 33 || script[34] !== 0xac) return false;
-  const owner = hexToSigningBytes(ownerPublicKeyHex);
-  if (owner.length !== 33) return false;
+  const owner = hexToBytes(ownerPublicKeyHex);
   for (let i = 0; i < 33; i++) if (script[1 + i] !== owner[i]) return false;
   return true;
 }
@@ -161,59 +146,10 @@ function buildUnsignedTx(
   const txOutputs = [
     ...outputs.map((o) => ({ value: o.value, script: hexToBytes(o.scriptHex) })),
     ...(changeAddress && changeSatoshis > 0
-      ? [{ value: changeSatoshis, script: addressToP2pkhScript(changeAddress) }]
+      ? [{ value: changeSatoshis, script: hexToBytes(p2pkhAddressToScriptHex(changeAddress)) }]
       : [])
   ];
   return { version: 1, inputs: txInputs, outputs: txOutputs, lockTime: 0 };
-}
-
-function addressToP2pkhScript(address: string): Uint8Array {
-  const decoded = base58Decode(address);
-  if (decoded.length !== 25) {
-    throw new Error("Invalid P2PKH address");
-  }
-  const version = decoded[0]!;
-  if (version !== 0x00 && version !== 0x6f) {
-    throw new Error("Unsupported P2PKH address network");
-  }
-  const hash160 = decoded.slice(1, 21);
-  return Uint8Array.from([
-    0x76,
-    0xa9,
-    0x14,
-    ...hash160,
-    0x88,
-    0xac
-  ]);
-}
-
-const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-function base58Decode(input: string): Uint8Array {
-  if (input.length === 0) return new Uint8Array(0);
-  const bytes = [0];
-  for (const ch of input) {
-    let carry = BASE58_ALPHABET.indexOf(ch);
-    if (carry < 0) throw new Error("Invalid base58 character");
-    for (let i = 0; i < bytes.length; i++) {
-      const v = bytes[i]! * 58 + carry;
-      bytes[i] = v & 0xff;
-      carry = (v / 256) | 0;
-    }
-    while (carry > 0) {
-      bytes.push(carry & 0xff);
-      carry = (carry / 256) | 0;
-    }
-  }
-  let leadingZeros = 0;
-  for (const ch of input) {
-    if (ch === "1") leadingZeros++;
-    else break;
-  }
-  const out = new Uint8Array(leadingZeros + bytes.length);
-  for (let i = 0; i < bytes.length; i++) {
-    out[out.length - 1 - i] = bytes[i]!;
-  }
-  return out;
 }
 
 async function resolveOwnerKeyIdentity(
@@ -228,51 +164,6 @@ async function resolveOwnerKeyIdentity(
     throw new Error(`P2PKH protocol spend: resolved key ${key.publicKeyHex} != ${ownerPublicKeyHex}`);
   }
   return key;
-}
-
-function normalizePositiveInteger(value: number, label: string): number {
-  if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
-    throw new Error(`${label} must be a positive integer`);
-  }
-  return value;
-}
-
-/**
- * 输出金额闸门。
- *
- * 无找零模式允许零值输出：固定位置的协议输出里，索引费为零时 vout 0 的值就是 0，
- * 位置本身是协议的一部分。零值只在调用方显式声明后才允许，其余路径继续 fail closed。
- */
-function normalizeOutputValue(value: number, label: string, allowZeroValueOutputs: boolean): number {
-  if (allowZeroValueOutputs) {
-    if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
-      throw new Error(`${label} must be a non-negative integer`);
-    }
-    return value;
-  }
-  return normalizePositiveInteger(value, label);
-}
-
-/** 无找零模式的预算闸门：必须是正的安全整数。 */
-function normalizeMinerFeeBudget(value: number): number {
-  return normalizePositiveInteger(value, "noChangeRule.maxMinerFeeSatoshis");
-}
-
-function assertUnprotectedInputs(
-  registry: ProtectedOutpointStore | undefined,
-  input: ProtocolSpendExecutionInput
-): void {
-  if (!registry) return;
-  for (const utxo of input.inputs) {
-    if (!input.requestingPluginId && registry.isProtected({
-      txid: utxo.txid,
-      vout: utxo.vout,
-      network: input.network,
-      publicKeyHex: input.ownerPublicKeyHex
-    })) {
-      throw new Error(`Protocol spend blocked by protected outpoint: ${utxo.txid}:${utxo.vout}`);
-    }
-  }
 }
 
 function buildProtocolSubmissionRecord(input: {
@@ -324,17 +215,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
     }
   }
 
-  const tickets=new Map<string,{preview:ProtocolSpendPreview;input:ProtocolSpendExecutionInput;expires:number}>();
-  /**
-   * Freeze the manager intent before the signer runs. Without a manager port
-   * the protocol service keeps its historic behaviour; hosts that wire the
-   * manager get the durable intent and the exclusive input responsibility.
-   */
-  const beginManagerIntent = async (intent: Parameters<P2pkhProtocolManagerPort["beginProtocolIntent"]>[0]):
-    Promise<{ allocationId: string } | undefined> => {
-    if (!deps.protocolManager) throw new Error("Protocol signing requires the durable UTXO manager");
-    return deps.protocolManager.beginProtocolIntent(intent);
-  };
+  const tickets=new Map<string,{input:ProtocolSpendExecutionInput;expires:number}>();
   const build=async(input:ProtocolSpendExecutionInput,sign:boolean):Promise<ProtocolSpendPreview>=>{
       if (!deps.protocolManager) throw new Error("Protocol spend requires the durable UTXO manager");
       let protectedClaimIds: string[] = [];
@@ -364,7 +245,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
         /** 裸公钥单签输入的锁定脚本；按输入顺序给出，缺省项按 P2PKH 处理。 */
         lockingScripts?: readonly (string | undefined)[];
       }): Promise<ProtocolSpendPreview> => {
-        if (input.maxFeeSatoshis !== undefined && (!Number.isSafeInteger(input.maxFeeSatoshis) || input.maxFeeSatoshis < 0 || plan.feeSatoshis > input.maxFeeSatoshis)) throw new Error("Protocol miner fee exceeds business cap");
+        if (input.maxFeeSatoshis !== undefined && plan.feeSatoshis > input.maxFeeSatoshis) throw new Error("Protocol miner fee exceeds business cap");
         const unsigned = buildUnsignedTx(plan.inputs, plan.outputs, plan.changeAddress, plan.changeSatoshis);
         if(!sign){
           const now=Date.now();for(const [id,t] of tickets)if(t.expires<=now)tickets.delete(id);
@@ -373,35 +254,23 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           const preview:ProtocolSpendPreview={previewId:crypto.randomUUID(),ownerPublicKeyHex:resolvedOwner.publicKeyHex,requestingPluginId:input.requestingPluginId,network:input.network,
             inputs:structuredClone(input.inputs),outputs:structuredClone(plan.outputs),...(plan.changeAddress===undefined?{}:{changeAddress:plan.changeAddress}),changeSatoshis:plan.changeSatoshis,
             estimatedFeeSatoshis:plan.feeSatoshis,serializedSizeBytes:serializeTx(unsigned).length+input.inputs.reduce((n,u)=>n+(u.lockingScriptHex===undefined?108:74),0),txid:"",rawTxHex};
-          tickets.set(preview.previewId!,{preview:structuredClone(preview),input:structuredClone(input),expires:now+120000});return preview;
+          tickets.set(preview.previewId!,{input:structuredClone(input),expires:now+120000});return preview;
         }
         await deps.assertInputsUnspent?.(input.network,input.inputs);
         // 输入占用先于额度批准/签名，竞争失败不产生第二份可花费签名。
         // New wallet occupations belong exclusively to the manager. The
         // claim store remains readable only for historical signed records.
-        const previousTransactions = await Promise.all(input.inputs.map(async item => {
-          if (item.previousTransactionHex !== undefined) {
-            const previous = parseP2pkhTransaction(item.previousTransactionHex, item.txid);
-            const output = previous.outputs[item.vout];
-            if (!output || output.value !== item.value) throw new Error("Protocol previous transaction output does not match input");
-            return item.previousTransactionHex;
-          }
-          const [raw] = await deps.previousTransactions(input.network, [item]);
+        // Decode external parent evidence exactly once. Whether cached or
+        // fetched, its txid/vout/value must match the intended chain input.
+        // The manager's script/value facts come from these bytes.
+        const prevoutFacts = await Promise.all(input.inputs.map(async item => {
+          const raw = item.previousTransactionHex ?? (await deps.previousTransactions(input.network, [item]))[0];
           if (!raw) throw new Error("Complete previous transaction reader unavailable");
-          return raw;
-        }));
-        // The manager needs trusted prevout facts: the value and script come
-        // from the exact previous transaction, never from the caller's claim.
-        const prevoutFacts = input.inputs.map((item, index) => {
-          const previous = parseP2pkhTransaction(previousTransactions[index]!, item.txid);
+          const previous = parseP2pkhTransaction(raw, item.txid);
           const output = previous.outputs[item.vout];
-          if (!output) throw new Error("Protocol previous transaction output is missing");
-          return {
-            outpoint: `${item.txid.toLowerCase()}:${item.vout}`,
-            value: String(output.value),
-            scriptHex: output.scriptHex.toLowerCase(),
-          };
-        });
+          if (!output || output.value !== item.value) throw new Error("Protocol previous transaction output does not match input");
+          return { outpoint: `${item.txid.toLowerCase()}:${item.vout}`, value: String(output.value), scriptHex: output.scriptHex.toLowerCase() };
+        }));
         // Classification is by trusted script, never by the caller's label:
         // the wallet's own P2PKH is a wallet input, a protocol-protected
         // wallet output is a protected input, everything else is external and
@@ -428,7 +297,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           }
           return { ...fact, class: "wallet" as const, claimId: null };
         });
-        const managerIntent = await beginManagerIntent({
+        const managerIntent = await deps.protocolManager!.beginProtocolIntent({
           ownerPublicKeyHex: resolvedOwner.publicKeyHex,
           network: input.network,
           binding: { kind: input.protocolKind ?? "refund", poolId: submissionId },
@@ -450,7 +319,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
               .map((fact) => [fact.outpoint, { value: fact.value, scriptHex: fact.scriptHex }]),
           ),
         });
-        managerAllocationId = managerIntent!.allocationId;
+        managerAllocationId = managerIntent.allocationId;
         const unsignedTxHex = Array.from(serializeTx(unsigned), b => b.toString(16).padStart(2, "0")).join("");
         signingUnsignedTxHex = unsignedTxHex;
         // 无审批直签：按实际输入锁定脚本选择 scriptCode/解锁结构（P2PKH 缺省，裸公钥按脚本本身）。
@@ -458,9 +327,9 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
         const signingInputs = plan.inputs.map((utxo, index) => {
           const lockingHex = plan.lockingScripts?.[index];
           if (lockingHex === undefined) {
-            return { scriptCode: hexToSigningBytes(p2pkhScriptForPublicKey(resolvedOwner.publicKeyHex)), value: utxo.value, pushPublicKeyInUnlock: true };
+            return { scriptCode: hexToBytes(p2pkhScriptForPublicKey(resolvedOwner.publicKeyHex)), value: utxo.value, pushPublicKeyInUnlock: true };
           }
-          const script = hexToSigningBytes(lockingHex);
+          const script = hexToBytes(lockingHex);
           if (isP2pkhLockingScript(script)) return { scriptCode: script, value: utxo.value, pushPublicKeyInUnlock: true };
           if (isOwnerBarePubkeyLockingScript(script, resolvedOwner.publicKeyHex)) return { scriptCode: script, value: utxo.value, pushPublicKeyInUnlock: false };
           throw new Error("Unsupported protocol input locking script");
@@ -469,21 +338,21 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           unsigned,
           signingInputs,
           async (digest) => {
-            const result = await activeCrypto.signDigest({ digest: new Uint8Array(digest).buffer as ArrayBuffer, format: "der" });
+            // Entering the signer is already an uncertain private-key attempt;
+            // a lost/rejected result is not proof that no signature was made.
             signingStarted = true;
+            const result = await activeCrypto.signDigest({ digest: new Uint8Array(digest).buffer as ArrayBuffer, format: "der" });
             return new Uint8Array(result.signature);
           },
           { publicKey: Uint8Array.from(Buffer.from(resolvedOwner.publicKeyHex, "hex")) },
         );
-        if (managerIntent) {
-          await deps.protocolManager!.completeProtocolIntent({
-            ownerPublicKeyHex: resolvedOwner.publicKeyHex,
-            network: input.network,
-            allocationId: managerIntent.allocationId,
-            signedTxHex: rawTxHex,
-            delivery: "wallet",
-          });
-        }
+        await deps.protocolManager!.completeProtocolIntent({
+          ownerPublicKeyHex: resolvedOwner.publicKeyHex,
+          network: input.network,
+          allocationId: managerIntent.allocationId,
+          signedTxHex: rawTxHex,
+          delivery: "wallet",
+        });
         const serializedSizeBytes = rawTxHexByteLength(rawTxHex);
 
         if (deps.submissionStore) {
@@ -514,13 +383,12 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           protectedClaimIds,
           inputClaimIds,
           submissionId,
-          ...(managerIntent ? { managerAllocationId: managerIntent.allocationId } : {}),
+          managerAllocationId: managerIntent.allocationId,
 
         };
       };
 
       try {
-        assertUnprotectedInputs(deps.protectedOutpoints, input);
         if (deps.protectedOutpoints) {
           const hasProtectedInputs = input.inputs.some((u) => deps.protectedOutpoints?.isProtected({
             txid: u.txid,
@@ -547,7 +415,6 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           throw new Error("Protocol spend accepts either changeAddress or noChangeRule, not both");
         }
         const allowZeroValueOutputs = noChangeRule?.allowZeroValueOutputs === true;
-        if (noChangeRule !== undefined) normalizeMinerFeeBudget(noChangeRule.maxMinerFeeSatoshis);
         const inputs = input.inputs.map((u) => ({
           id: `${u.txid}:${u.vout}`,
           resourceId: "protocol-spend",
@@ -558,14 +425,17 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           syncedAt: new Date().toISOString(),
           txid: u.txid,
           vout: u.vout,
-          value: normalizePositiveInteger(u.value, "Input value"),
+          value: u.value,
           address: u.address
         }));
         const outputs = input.outputs.map((o) => ({
-          value: normalizeOutputValue(o.value, "Output value", allowZeroValueOutputs),
+          value: o.value,
           scriptHex: o.scriptHex,
           label: o.label
         }));
+        // Output position/zero-value policy is a protocol rule, not a DTO
+        // shape check. Internal numeric fields are used directly.
+        if (outputs.some(output => output.value < 0 || (!allowZeroValueOutputs && output.value === 0))) throw new Error("Output value violates protocol zero-value policy");
         const totalInput = inputs.reduce((sum, u) => sum + u.value, 0);
         const fixedOutput = outputs.reduce((sum, o) => sum + o.value, 0);
         if (noChangeRule !== undefined) {
@@ -665,10 +535,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
       const submissionId = preview.submissionId;
       if (!submissionId || !deps.submissionStore) throw new Error("Prepared protocol spend has no durable submission record");
       await serializeSubmissionOperation(submissionId, async () => {
-        const owner = await resolveOwnerKeyIdentity(deps, preview.ownerPublicKeyHex);
-        if (owner.publicKeyHex.toLowerCase() !== preview.ownerPublicKeyHex.toLowerCase()) {
-          throw new Error("Prepared protocol spend owner is not active");
-        }
+        await resolveOwnerKeyIdentity(deps, preview.ownerPublicKeyHex);
         if (calcTxidFromRawTxHex(preview.rawTxHex) !== preview.txid) throw new Error("Prepared protocol spend txid does not match its raw bytes");
         const existing = await deps.submissionStore!.getProtocolSubmission({ publicKeyHex: preview.ownerPublicKeyHex, id: submissionId });
         if (!existing
@@ -712,10 +579,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
       const submissionId = input.submissionId;
       if (!submissionId || !deps.submissionStore) throw new Error("Prepared protocol submission has no durable record");
       await serializeSubmissionOperation(submissionId, async () => {
-        const owner = await resolveOwnerKeyIdentity(deps, input.ownerPublicKeyHex);
-        if (owner.publicKeyHex.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) {
-          throw new Error("Prepared protocol submission owner is not active");
-        }
+        await resolveOwnerKeyIdentity(deps, input.ownerPublicKeyHex);
         const existing = await deps.submissionStore!.getProtocolSubmission({ publicKeyHex: input.ownerPublicKeyHex, id: submissionId });
         if (!existing
           || (existing.status !== "prepared" && !(existing.status === "rejected" && existing.droppedReason === "prepared-spend-released"))
@@ -756,9 +620,9 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
       if(preview.previewId){
         const ticket=tickets.get(preview.previewId);
         if(!ticket||ticket.expires<=Date.now()){tickets.delete(preview.previewId);throw Error("Protocol preview expired or already submitted");}
-        if(JSON.stringify(ticket.preview)!==JSON.stringify(preview))throw Error("Protocol preview changed");
         tickets.delete(preview.previewId);
-        // Rebuild and revalidate owner/protection/prevouts at actual authorization.
+        // The ticket owns the original plan. Re-evaluate current protection
+        // and external prevouts at signing; display metadata is not a plan.
         preview=await build(ticket.input,true);
       }
       if (!preview.managerAllocationId) throw new Error("Protocol submission requires a manager allocation; legacy exacts must use manager recovery");

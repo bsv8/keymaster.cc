@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { ScopedPluginConsumerProvider as PluginConsumerProvider } from "@keymaster/runtime";
 import { createScopedRegistryView } from "webloom-framework/advanced";
-import { isIssuedKeymasterConsumer, useInstanceActive } from "@keymaster/runtime";
+import { useInstanceActive } from "@keymaster/runtime";
 import { URI_ACTION_REGISTRY_CAPABILITY, URI_ACTION_RESOLVER_CAPABILITY, SCAN_UI_CAPABILITY,
   type UriActionHandler, type UriActionRegistry, type UriActionResolver, type UriActionResolution, type UriActionCandidate, type UriActionView, type ScanUiAccess } from "@keymaster/contracts";
 import type { LifecycleScope, PluginConsumer } from "webloom-framework";
@@ -20,7 +20,7 @@ export function createUriRouter(providerScope: LifecycleScope) {
   const changed = () => { revision++; for (const listener of [...listeners]) { try { listener(); } catch { /* 观察方不影响注册提交。 */ } } };
   const check = (consumer: PluginConsumer, scope: LifecycleScope, capability: typeof URI_ACTION_REGISTRY_CAPABILITY | typeof URI_ACTION_RESOLVER_CAPABILITY | typeof SCAN_UI_CAPABILITY) => {
     providerScope.assertActive(); scope.assertActive();
-    if (!isIssuedKeymasterConsumer(consumer, scope) || consumer.status !== "active") throw new Error("URI access requires its issued consumer and Scope");
+    if (consumer.status !== "active") throw new Error("URI consumer has been revoked");
     consumer.capability(capability);
   };
   const registry: UriActionRegistry = {
@@ -29,7 +29,6 @@ export function createUriRouter(providerScope: LifecycleScope) {
       const target = {
         register(handler: UriActionHandler & { ownerInstanceId?: string }) {
           check(consumer, scope, URI_ACTION_REGISTRY_CAPABILITY);
-          if (handler.ownerInstanceId !== consumer.instanceId || !handler.id || typeof handler.resolve !== "function" || typeof handler.render !== "function" || (handler.order !== undefined && !Number.isFinite(handler.order))) throw new Error("Invalid URI handler ownership or definition");
           if (handlers.has(handler.id)) throw new Error("URI handler already registered");
           handlers.set(handler.id, { handler: Object.freeze({ ...handler }), consumer, scope }); changed();
         },
@@ -69,11 +68,8 @@ export function createUriRouter(providerScope: LifecycleScope) {
             if (!live(entry)) continue;
             try {
               const descriptions = entry.handler.resolve(session.input);
-              if (!live(entry) || !Array.isArray(descriptions)) continue;
-              const actionIds = new Set<string>();
+              if (!live(entry)) continue;
               for (const descriptor of descriptions.slice(0, 32)) {
-                if (!descriptor?.id || actionIds.has(descriptor.id) || !descriptor.label) continue;
-                actionIds.add(descriptor.id);
                 const id = crypto.randomUUID();
                 const metadata = (label: typeof descriptor.label) => typeof label === "string" ? label : Object.freeze({ key: label.key, fallback: label.fallback });
                 const description = Object.freeze({ id, pluginId: entry.consumer.pluginId, label: metadata(descriptor.label), ...(descriptor.description ? { description: metadata(descriptor.description) } : {}) });

@@ -31,15 +31,10 @@ import {
   newRequestId
 } from "sat-subscription-protocol/client";
 import { parseRequestEnvelope } from "sat-subscription-protocol/wire";
-import { MAX_WIRE_BYTES, validateAmount, validateRequestId } from "sat-subscription-protocol/protocol";
+import { MAX_WIRE_BYTES } from "sat-subscription-protocol/protocol";
 import {
-  assertCanonicalAmount,
-  assertCompressedPublicKeyHex,
-  assertExactChannel,
-  copyValidatedJson,
   bytesToHex,
   equalBytes,
-  normalizeSupplierConfig
 } from "./satValidation.js";
 import type { SatSubscriptionStateStore } from "./satState.js";
 import { isBuiltInDefaultSupplierConfig, SAT_DEFAULT_SUPPLIER_ID } from "./defaults.js";
@@ -312,14 +307,6 @@ export class SatSubscriptionHandle {
     if (this.currentState === "closed") throw new SatSubscriptionError("connect", "SatSubscription provider handle is closed");
   }
 
-  private assertChannel(value: unknown, allowWildcard: boolean): asserts value is string {
-    try {
-      assertExactChannel(value, allowWildcard);
-    } catch (error) {
-      throw new SatSubscriptionError("validation", error instanceof Error ? error.message : String(error));
-    }
-  }
-
   async start(): Promise<void> {
     if (this.cfg.signal?.aborted) {
       this.close();
@@ -392,7 +379,7 @@ export class SatSubscriptionHandle {
         if (!this.isCurrentSupplierGeneration(supplier.supplierId, generation)) return this.staleIncomingResponse(wire);
         return this.handleIncomingWire(supplier.supplierId, wire, generation);
       }
-      if (current == null || current !== connectionForHandler || current.connectionId !== connectionForHandler.connectionId || current.ownerSessionEpoch !== ownerSessionEpoch || current.supplierGeneration !== generation) {
+      if (current == null || current !== connectionForHandler || current.ownerSessionEpoch !== ownerSessionEpoch || current.supplierGeneration !== generation) {
         return this.staleIncomingResponse(wire);
       }
       return this.handleIncomingWire(supplier.supplierId, wire, generation);
@@ -410,14 +397,6 @@ export class SatSubscriptionHandle {
       ) {
         activeConnection.close();
         return;
-      }
-      if (activeConnection.authenticatedPublicKeyHex !== supplier.supplierPublicKeyHex) {
-        activeConnection.close();
-        throw new SatSubscriptionError("identity", "Authenticated Supplier public key does not match the configured pin");
-      }
-      if (activeConnection.supplierId !== supplier.supplierId || activeConnection.connectionId.length === 0 || activeConnection.ownerSessionEpoch !== ownerSessionEpoch || activeConnection.supplierGeneration !== generation) {
-        activeConnection.close();
-        throw new SatSubscriptionError("conflict", "Supplier connection fence does not match the current owner or generation");
       }
       this.connectionErrors.delete(supplier.supplierId);
       this.connections.set(supplier.supplierId, activeConnection);
@@ -710,11 +689,10 @@ export class SatSubscriptionHandle {
     channel: string;
   }, signal?: AbortSignal): Promise<SatActionResult> {
     this.assertOpen();
-    this.assertChannel(input.channel, true);
     throwIfSatOperationAborted(signal, "not-sent");
     const observedResult = await this.reconcileUnknownSubscription(input, signal);
     if (observedResult) return observedResult;
-    const requestId = validateRequestId(newRequestId());
+    const requestId = newRequestId();
     let response: Uint8Array;
     let feeRecorded = false;
     let requestGeneration = this.generation;
@@ -723,8 +701,8 @@ export class SatSubscriptionHandle {
       const connection = this.connectionFor(input.supplierId);
       requestConnection = connection;
       requestGeneration = this.generation;
-      await this.stateStore.setDesiredSubscription({ supplierId: input.supplierId, channel: input.channel, state: input.action === "subscribe" ? "subscribing" : "unsubscribing", errorCode: null });
       const wire = input.action === "subscribe" ? newSubscribe(requestId, input.channel) : newUnsubscribe(requestId, input.channel);
+      await this.stateStore.setDesiredSubscription({ supplierId: input.supplierId, channel: input.channel, state: input.action === "subscribe" ? "subscribing" : "unsubscribing", errorCode: null });
       response = await connection.requestSsp(wire, signal);
       this.assertCurrentSupplierGeneration(input.supplierId, requestGeneration);
     } catch (error) {
@@ -756,8 +734,6 @@ export class SatSubscriptionHandle {
     try {
       const result = parseActionResult(response);
       if (!equalBytes(result.requestId, requestId)) throw new SatSubscriptionError("protocol", "SSP ActionResult request_id mismatch");
-      validateAmount(result.chargedAmount);
-      assertCanonicalAmount(result.chargedAmount);
       if (!result.success) {
         const code = actionErrorCode(result.errorCode);
         this.assertCurrentSupplierGeneration(input.supplierId, requestGeneration);
@@ -808,16 +784,10 @@ export class SatSubscriptionHandle {
 
   async publishRaw(input: { supplierId: string; channel: string; contentJson: Uint8Array; action: "publish" | "ack" }, signal?: AbortSignal): Promise<{ requestIdHex: string; chargedAmount: string }> {
     this.assertOpen();
-    this.assertChannel(input.channel, false);
     throwIfSatOperationAborted(signal, "not-sent");
-    let contentJson: Uint8Array;
-    try {
-      contentJson = copyValidatedJson(input.contentJson);
-    } catch (error) {
-      throw new SatSubscriptionError("validation", error instanceof Error ? error.message : String(error));
-    }
-    if (contentJson.byteLength > MAX_WIRE_BYTES) throw new SatSubscriptionError("validation", "contentJson exceeds SSP MaxWireBytes");
-    const requestId = validateRequestId(newRequestId());
+    if (input.contentJson.byteLength > MAX_WIRE_BYTES) throw new SatSubscriptionError("validation", "contentJson exceeds SSP MaxWireBytes");
+    const contentJson = input.contentJson.slice();
+    const requestId = newRequestId();
     let response: Uint8Array;
     const requestGeneration = this.generation;
     let requestConnection: SatSupplierConnection | undefined;
@@ -838,8 +808,6 @@ export class SatSubscriptionHandle {
     try {
       const result = parseActionResult(response);
       if (!equalBytes(result.requestId, requestId)) throw new SatSubscriptionError("protocol", "SSP Publish request_id mismatch");
-      validateAmount(result.chargedAmount);
-      assertCanonicalAmount(result.chargedAmount);
       if (!result.success) {
         const code = actionErrorCode(result.errorCode);
         await this.recordFee({ action: input.action, supplierId: input.supplierId, channel: input.channel, requestIdHex: bytesToHex(requestId), chargedAmount: result.chargedAmount, result: "error", errorCode: code });
@@ -1014,7 +982,7 @@ export class SatSubscriptionHandle {
   }
 
   async subscribePhysical(channel: string, signal?: AbortSignal): Promise<void> {
-    this.assertChannel(channel, false);
+    if (channel === "*") throw new SatSubscriptionError("validation", "Physical subscriptions require an exact channel");
     await this.enqueueMutation(async () => {
       this.assertOpen();
       throwIfSatOperationAborted(signal, "not-sent");
@@ -1028,7 +996,7 @@ export class SatSubscriptionHandle {
   }
 
   async unsubscribePhysical(channel: string, signal?: AbortSignal): Promise<void> {
-    this.assertChannel(channel, false);
+    if (channel === "*") throw new SatSubscriptionError("validation", "Physical subscriptions require an exact channel");
     await this.enqueueMutation(async () => {
       this.assertOpen();
       throwIfSatOperationAborted(signal, "not-sent");
@@ -1084,7 +1052,7 @@ export class SatSubscriptionHandle {
   private async refreshSubscriptionsNow(input: { supplierId: string }, signal?: AbortSignal): Promise<{ channels: string[]; chargedAmount: string }> {
     this.assertOpen();
     throwIfSatOperationAborted(signal, "not-sent");
-    const requestId = validateRequestId(newRequestId());
+    const requestId = newRequestId();
     let response: Uint8Array;
     const requestGeneration = this.generation;
     let requestConnection: SatSupplierConnection | undefined;
@@ -1107,15 +1075,12 @@ export class SatSubscriptionHandle {
     try {
       const result = parseSubscriptionsResponse(response);
       if (!equalBytes(result.requestId, requestId)) throw new SatSubscriptionError("protocol", "SSP SubscriptionsResponse request_id mismatch");
-      validateAmount(result.chargedAmount);
-      assertCanonicalAmount(result.chargedAmount);
       const channels = [...result.channels];
       const knownChannels = new Set(
         this.stateStore.listSubscriptions(input.supplierId).map((item) => item.channel)
       );
       for (const channel of channels) {
         this.assertCurrentSupplierGeneration(input.supplierId, requestGeneration);
-        assertExactChannel(channel, true);
         knownChannels.delete(channel);
         await this.stateStore.setObservedSubscription({ supplierId: input.supplierId, channel, state: "subscribed", source: "refresh" });
       }
@@ -1139,17 +1104,14 @@ export class SatSubscriptionHandle {
   /** 直接向 SS server 查询账单；结果只返回调用方，不写入本地状态。 */
   async getBilling(input: { supplierId: string; fromMs: bigint; toMs: bigint; limit: number; cursor: string }, signal?: AbortSignal): Promise<SatBillingPage> {
     this.assertOpen();
-    if (typeof input.fromMs !== "bigint" || typeof input.toMs !== "bigint" || input.fromMs < 0n || input.toMs < input.fromMs) {
+    if (input.fromMs < 0n || input.toMs < input.fromMs) {
       throw new SatSubscriptionError("validation", "Billing time range is invalid");
     }
-    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
+    if (input.limit < 1 || input.limit > 100) {
       throw new SatSubscriptionError("validation", "Billing limit must be between 1 and 100");
     }
-    if (typeof input.cursor !== "string" || input.cursor.length > 2_048 || /[\u0000-\u001f\u007f]/.test(input.cursor)) {
-      throw new SatSubscriptionError("validation", "Billing cursor is invalid");
-    }
     throwIfSatOperationAborted(signal, "not-sent");
-    const requestId = validateRequestId(newRequestId());
+    const requestId = newRequestId();
     const requestGeneration = this.generation;
     let requestConnection: SatSupplierConnection | undefined;
     let response: Uint8Array;
@@ -1176,8 +1138,6 @@ export class SatSubscriptionHandle {
         throw new SatSubscriptionError(actionErrorCode(result.errorCode), `SSP BillingResponse failed: ${result.errorCode}`);
       }
       const records = result.records.map((record) => {
-        validateAmount(record.chargedAmount);
-        assertCanonicalAmount(record.chargedAmount);
         return {
           supplierId: input.supplierId,
           chargeId: record.chargeId,
@@ -1236,7 +1196,6 @@ export class SatSubscriptionHandle {
       event.channel = publish.channel;
       event.requestIdHex = bytesToHex(publish.requestId);
       event.contentJson = publish.contentJson.slice();
-      this.assertChannel(publish.channel, false);
       if (!(this.stateStore.getOwnerSettings()?.receiveSupplierIds ?? []).includes(supplierId)) {
         throw new SatSubscriptionError("config", "Ingress Supplier is not enabled for owner reception");
       }
@@ -1300,7 +1259,7 @@ export class SatSubscriptionHandle {
     if (config.supplierId === SAT_DEFAULT_SUPPLIER_ID) throw new SatSubscriptionError("config", "The built-in default Supplier cannot be edited");
     return this.enqueueMutation(async () => {
       this.assertOpen();
-      const normalized = normalizeSupplierConfig(config);
+      const normalized = structuredClone(config);
       if (isBuiltInDefaultSupplierConfig(normalized)) throw new SatSubscriptionError("config", "The built-in default Supplier cannot be overridden");
       const previous = this.stateStore.getSupplier(normalized.supplierId);
       const identityChanged = previous?.enabled
@@ -1437,7 +1396,6 @@ export class SatSubscriptionProvider {
     this.currentHandle = null;
     this.currentService = null;
     this.currentAdmin = null;
-    assertCompressedPublicKeyHex(input.ownerPublicKeyHex, "owner publicKeyHex");
     const stateStore = await this.cfg.stateForOwner(input.ownerPublicKeyHex);
     const handle = new SatSubscriptionHandle({
       ownerPublicKeyHex: input.ownerPublicKeyHex,

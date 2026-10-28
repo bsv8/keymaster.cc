@@ -8,8 +8,8 @@
 //     lastSeenAt）。这是平台管理记录，App 不能通过自己的文件权限修改它。
 //
 // 平台只提供已绑定 owner/module/purpose 的文件句柄；本文件负责格式解析、
-// 严格校验和整文件读-改-写。未知顶层字段拒绝；`apps.<appId>` 下其它模块的
-// 段在写回时原样保留。
+// 磁盘入口严格解析，内部更新使用已声明类型。App 设置写回只选择
+// name/观察时间/MSFile 覆盖额度，不序列化其它模块的附带字段。
 
 import type {
   BorrowedModuleFileStore,
@@ -421,21 +421,13 @@ export async function openMsFileRepository(stores: MsFileRepositoryStores): Prom
   };
   const mutateAppEntry = async (
     key: MsFileAppIdentityKey,
-    mutate: (entry: Record<string, unknown>, appId: string) => void,
+    mutate: (entry: StoredAppEntry | undefined) => StoredAppEntry,
   ): Promise<void> => {
     const publisher = key.publisherPublicKeyHex;
     const publishers = await readAppSettings();
     const apps = new Map(publishers.get(publisher) ?? []);
     const appId = key.appId;
-    const existing = apps.get(appId);
-    const entry: Record<string, unknown> = existing
-      ? { name: existing.name, firstSeenAt: existing.firstSeenAt, lastSeenAt: existing.lastSeenAt, ...(existing.msfiles === undefined ? {} : { msfiles: { ...existing.msfiles } }) }
-      : {};
-    mutate(entry, appId);
-    // 写前校验已知字段；未知模块段按 appId 原样保留。
-    parseAppEntry(entry, appId);
-    const parsed = parseAppEntry(entry, appId);
-    apps.set(appId, parsed);
+    apps.set(appId, mutate(apps.get(appId)));
     publishers.set(publisher, apps);
     await stores.appSettings.put(APP_SETTINGS_FILE, serializeAppSettingsFile(publishers));
   };
@@ -560,19 +552,25 @@ export async function openMsFileRepository(stores: MsFileRepositoryStores): Prom
     },
     async putAppPolicy(record) {
       assertOpen();
-      const override = sanitizeAppOverride(record.override);
-      if (override === undefined) throw new Error("override must contain at least one canonical amount field");
-      const nowIso = new Date(Number.isFinite(record.updatedAt) ? record.updatedAt : Date.now()).toISOString();
-      await mutateAppEntry(record.key, (entry) => {
-        if (typeof entry.name !== "string" || entry.name.length === 0) entry.name = record.key.appId;
-        if (typeof entry.firstSeenAt !== "string") entry.firstSeenAt = nowIso;
-        if (typeof entry.lastSeenAt !== "string") entry.lastSeenAt = nowIso;
-        entry.msfiles = { ...override };
-      });
+      const override: MsFileAppPriceOverride = {
+        ...(record.override.seedMaxPriceSatoshis === undefined ? {} : { seedMaxPriceSatoshis: record.override.seedMaxPriceSatoshis }),
+        ...(record.override.blockMaxPriceSatoshis === undefined ? {} : { blockMaxPriceSatoshis: record.override.blockMaxPriceSatoshis }),
+      };
+      if (Object.keys(override).length === 0) throw new Error("override must contain at least one amount field");
+      const nowIso = new Date(record.updatedAt).toISOString();
+      await mutateAppEntry(record.key, entry => ({
+        ...(entry ?? { name: record.key.appId, firstSeenAt: nowIso, lastSeenAt: nowIso }),
+        msfiles: override,
+      }));
     },
     async deleteAppPolicy(key) {
       assertOpen();
-      await mutateAppEntry(key, (entry) => { delete entry.msfiles; });
+      await mutateAppEntry(key, entry => {
+        if (!entry) throw new Error("App settings entry is unavailable");
+        const next = { ...entry };
+        delete next.msfiles;
+        return next;
+      });
     },
     async listAppUsages() {
       assertOpen();
@@ -593,14 +591,10 @@ export async function openMsFileRepository(stores: MsFileRepositoryStores): Prom
     },
     async touchAppUsage(key, appName, now) {
       assertOpen();
-      if (typeof appName !== "string" || appName.length === 0 || appName.length > MAX_APP_NAME_LENGTH) {
-        throw new Error("appName is invalid");
-      }
       const nowIso = new Date(now).toISOString();
-      await mutateAppEntry(key, (entry) => {
-        entry.name = appName;
-        if (typeof entry.firstSeenAt !== "string") entry.firstSeenAt = nowIso;
-        entry.lastSeenAt = nowIso;
+      await mutateAppEntry(key, entry => {
+        if (entry && now < Date.parse(entry.firstSeenAt)) throw new Error("app lastSeenAt is before firstSeenAt");
+        return { ...entry, name: appName, firstSeenAt: entry?.firstSeenAt ?? nowIso, lastSeenAt: nowIso };
       });
     },
     close() {

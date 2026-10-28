@@ -69,10 +69,9 @@ function toDuplex(stream: StreamLike) {
   };
 }
 
-function canonicalAmount(value: string): bigint {
-  if (!/^(0|[1-9][0-9]*)$/.test(value)) throw new Error("invalid max price");
+function priceLimit(value: string): bigint {
   const amount = BigInt(value);
-  if (amount > 0xffffffffffffffffn) throw new Error("max price exceeds uint64");
+  if (amount < 0n || amount > 0xffffffffffffffffn) throw new Error("max price exceeds uint64");
   return amount;
 }
 
@@ -185,7 +184,7 @@ export class MsFileSupplierRuntime {
   }): Promise<ReadOutcome> {
     const hash = hexToBytes(input.hashHex);
     const maxContentBytes = input.kind === "seed" ? MSFILE_MAX_SEED_BYTES : MSFILE_MAX_BLOCK_BYTES;
-    const amount = canonicalAmount(input.maxPriceSatoshis);
+    const amount = priceLimit(input.maxPriceSatoshis);
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const connection = await this.ensureConnection(input.supplier, input.supplierGeneration, input.signal);
       if (!connection.read.isUsable) {

@@ -15,13 +15,6 @@ export interface P2pkhTransferRequest {
   payment?: import("./p2pkhConnectPayment.js").P2pkhConnectPaymentFacts;
 }
 
-const transferRequestFields = new Set(["paymentContext", "recipientAddress", "amountSatoshis", "sendAll", "feeRateSatoshisPerKb", "payment"]);
-/** 检查请求字段边界；金额、地址和签名事实仍由执行层完整验证。 */
-export function assertP2pkhTransferRequestFields(request: unknown): void {
-  if (!request || typeof request !== "object" || Array.isArray(request)
-    || Object.keys(request).some(key => !transferRequestFields.has(key))) throw new TypeError("Unsupported transfer request field");
-}
-
 export interface P2pkhWorkerTransfer {
   readonly identity: Readonly<import("./networkIdentity.js").NetworkIdentity>;
   prepareTransfer(input: P2pkhTransferRequest): Promise<unknown>;

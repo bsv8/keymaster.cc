@@ -611,8 +611,12 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         }
         if (!Array.isArray(raw.result)) throw new Error("WOC unspent/all returned an invalid result");
         return (raw.result as Array<{ tx_hash: string; tx_pos: number; value: number; height?: number; status?: string; script?: string; isSpentInMempoolTx?: boolean }>).map((u) => {
+          // This is the external response ingress. Internal snapshot/manager
+          // consumers receive parsed facts and must not revalidate their schema.
+          if (typeof u.tx_hash !== "string") throw new Error("WOC unspent/all returned an invalid txid");
           const txid = normalizeTxidHex(u.tx_hash);
-          if (!Number.isSafeInteger(u.tx_pos) || u.tx_pos < 0) throw new Error("WOC unspent/all returned an invalid tx_pos");
+          if (!/^[0-9a-f]{64}$/.test(txid)) throw new Error("WOC unspent/all returned an invalid txid");
+          if (!Number.isSafeInteger(u.tx_pos) || u.tx_pos < 0 || u.tx_pos > 0xffffffff) throw new Error("WOC unspent/all returned an invalid tx_pos");
           if (!Number.isSafeInteger(u.value) || u.value < 0) throw new Error("WOC unspent/all returned an invalid value");
           if (u.status !== "confirmed" && u.status !== "unconfirmed") throw new Error("WOC unspent/all returned an unknown status");
           // isSpentInMempoolTx 是必填布尔：缺失/非法一律整次失败，不能按 false 放行。

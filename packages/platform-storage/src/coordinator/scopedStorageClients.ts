@@ -1,7 +1,6 @@
-import { STORAGE_FILE_CLIENTS_CAPABILITY, STORAGE_KV_CLIENTS_CAPABILITY, assertSystemStorageDeclaration, validatePluginStorageDeclaration, type KeyValueStore, type PluginManifest, type PluginStorageDeclaration } from "@keymaster/contracts";
+import { STORAGE_FILE_CLIENTS_CAPABILITY, STORAGE_KV_CLIENTS_CAPABILITY, type KeyValueStore, type PluginManifest, type PluginStorageDeclaration } from "@keymaster/contracts";
 import type { StorageBindingAuthority } from "@keymaster/contracts/storage-internal";
 import type { LifecycleScope, PluginConsumer } from "webloom-framework";
-import { isIssuedKeymasterConsumer } from "@keymaster/runtime/storage";
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
 function isStaleOwnerStorageBinding(error: unknown): boolean {
   const code = error && typeof error === "object" && "code" in error
@@ -259,18 +258,16 @@ function borrowKeyValueStore(store: KeyValueStore): import("@keymaster/contracts
 export function createScopedStorageClients(
   authority: StorageBindingAuthority,
   manifest: (pluginId: string) => { units?: readonly { id: string; storage?: PluginStorageDeclaration; storages?: readonly PluginStorageDeclaration[] }[] } | undefined,
-  authentic: (consumer: PluginConsumer, scope: LifecycleScope) => boolean = isIssuedKeymasterConsumer,
 ) {
   const files = new WeakMap<PluginConsumer, Map<string, import("@keymaster/contracts").BorrowedModuleFileStore>>();
   const kv = new WeakMap<PluginConsumer, Map<string, import("@keymaster/contracts").BorrowedKeyValueStore>>();
   const declarationFor = (consumer: PluginConsumer, scope: LifecycleScope, purposeId: string, model: "files" | "kv") => {
-    if (!authentic(consumer, scope) || consumer.status !== "active") throw new Error("Client binding requires its live issued consumer and Scope");
+    if (consumer.status !== "active") throw new Error("Storage consumer has been revoked");
     scope.assertActive(); consumer.capability(model === "files" ? STORAGE_FILE_CLIENTS_CAPABILITY : STORAGE_KV_CLIENTS_CAPABILITY);
     const unit = manifest(consumer.pluginId)?.units?.find(candidate => candidate.id === consumer.unitId);
     const declarations = unit?.storages ?? (unit?.storage ? [unit.storage] : []);
     const declaration = declarations.find(candidate => candidate.purposeId === purposeId && (model === "files" ? candidate.model === "files" : candidate.model !== "files"));
     if (!declaration) throw new Error(`${model === "files" ? "File" : "K-V"} purpose is not declared by this instance`);
-    validatePluginStorageDeclaration(declaration); assertSystemStorageDeclaration(consumer.pluginId, declaration);
     return declaration;
   };
   return [

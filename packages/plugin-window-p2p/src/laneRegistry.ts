@@ -16,9 +16,6 @@ export function createWindowP2pLaneRegistry(): WindowP2pLaneRegistry {
 
   return {
     register(lane) {
-      if (!lane || typeof lane.laneId !== "string" || lane.laneId.length === 0) {
-        throw new Error("Window P2P lane id is invalid or already registered");
-      }
       // 身份切换（切换桶/Key）会重建 owner-session 插件；旧实例的 teardown
       // 可能迟到，此时新实例会注册同一个 laneId。替换而不是拒绝：先停旧
       // lane，保证同一 laneId 同时最多一个活跃实例，也不让身份切换把插件

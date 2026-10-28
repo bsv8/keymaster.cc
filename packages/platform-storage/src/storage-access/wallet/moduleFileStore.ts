@@ -19,7 +19,6 @@ import {
   assertStorageKeyInNamespace,
   buildStorageNamespaceRoot,
   normalizeRelativeStoragePath,
-  validatePluginStorageDeclaration,
 } from "@keymaster/contracts";
 import type { WalletStore } from "../../local/indexedDbWalletStore.js";
 import { StorageRuntimeError } from "../../runtime/storageError.js";
@@ -51,8 +50,7 @@ function parseRevision(value: StorageObjectRevision | undefined): number | undef
 
 /** 构造已绑定身份世代与逻辑根的文件句柄。 */
 export function createModuleFileStore(options: ModuleFileStoreOptions): ModuleFileStore {
-  const declaration: PluginStorageDeclaration = validatePluginStorageDeclaration(options.binding);
-  if (declaration.model !== "files") throw fail("storage_forbidden", "Module file store requires the files model");
+  const declaration: PluginStorageDeclaration = options.binding;
   const root = buildStorageNamespaceRoot(options.binding);
   let closed = false;
 

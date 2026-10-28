@@ -9,6 +9,8 @@ import type {
   ChannelRuntime,
   ChannelSubscriptionSetResult,
   ChannelSubscriptionStatus,
+  CoordinatorChannelStateEvent,
+  SessionStateEvent,
   CoordinatorChannelOperation,
   CoordinatorSatOperation,
   SatIncomingPublish,
@@ -130,23 +132,14 @@ export function createSatWorkerChannelRuntime(
     if (offSubscriptionStatusTopic) return;
     subscribedOwner = currentOwner(coordinator);
     subscribedSessionEpoch = coordinator.getSessionEpoch();
-    offSubscriptionStatusTopic = coordinator.subscribeTopic("channel.events", (raw: {
-      sessionEpoch?: unknown;
-      subscriptionStatus?: ChannelSubscriptionStatus;
-      subscriptionStatuses?: ChannelSubscriptionStatus[];
-    }) => {
+    offSubscriptionStatusTopic = coordinator.subscribeTopic("channel.events", (raw: CoordinatorChannelStateEvent) => {
       if (raw.sessionEpoch !== subscribedSessionEpoch) return;
-      const status = raw.subscriptionStatus;
-      if (status && typeof status.channel === "string") publishLocalSubscriptionStatus(status);
-      if (Array.isArray(raw.subscriptionStatuses)) {
-        for (const snapshot of raw.subscriptionStatuses) {
-          if (snapshot && typeof snapshot.channel === "string") publishLocalSubscriptionStatus(snapshot);
-        }
-      }
+      if (raw.subscriptionStatus) publishLocalSubscriptionStatus(raw.subscriptionStatus);
+      for (const snapshot of raw.subscriptionStatuses ?? []) publishLocalSubscriptionStatus(snapshot);
     });
-    offSubscriptionStatusSession = coordinator.subscribeTopic("session.state", (raw: { sessionEpoch?: unknown; activePublicKeyHex?: unknown }) => {
-      const owner = typeof raw.activePublicKeyHex === "string" ? raw.activePublicKeyHex : undefined;
-      const epoch = typeof raw.sessionEpoch === "string" ? raw.sessionEpoch : undefined;
+    offSubscriptionStatusSession = coordinator.subscribeTopic("session.state", (raw: SessionStateEvent) => {
+      const owner = raw.activePublicKeyHex ?? undefined;
+      const epoch = raw.sessionEpoch;
       if (owner !== subscribedOwner || epoch !== subscribedSessionEpoch) {
         subscribedChannels.clear();
         subscriptionStatuses.clear();
@@ -163,7 +156,7 @@ export function createSatWorkerChannelRuntime(
   };
   const listen = <T>(handler: (value: T) => void, select: (event: { publicMessage?: ChannelMessageReceivedEventData; privateMessage?: ChannelPrivateMessageEvent }) => T | null): (() => void) =>
     (() => {
-      const offChannel = coordinator.subscribeTopic("channel.events", (raw: { sessionEpoch?: unknown; publicMessage?: ChannelMessageReceivedEventData; privateMessage?: ChannelPrivateMessageEvent }) => {
+      const offChannel = coordinator.subscribeTopic("channel.events", (raw: CoordinatorChannelStateEvent) => {
         // channel.events 是全局广播；只有当前 runtime 登记的 session epoch
         // 才能进入插件，不能依赖 session.state 事件的先后顺序兜底。
         if (raw.sessionEpoch !== subscribedSessionEpoch) return;
@@ -174,9 +167,9 @@ export function createSatWorkerChannelRuntime(
           try { handler(value); } catch { /* 单个插件 handler 失败不影响总线。 */ }
         }
       });
-      const offSession = coordinator.subscribeTopic("session.state", (raw: { sessionEpoch?: unknown; activePublicKeyHex?: unknown }) => {
-        const owner = typeof raw.activePublicKeyHex === "string" ? raw.activePublicKeyHex : undefined;
-        const epoch = typeof raw.sessionEpoch === "string" ? raw.sessionEpoch : undefined;
+      const offSession = coordinator.subscribeTopic("session.state", (raw: SessionStateEvent) => {
+        const owner = raw.activePublicKeyHex ?? undefined;
+        const epoch = raw.sessionEpoch;
         if (owner !== subscribedOwner || epoch !== subscribedSessionEpoch) {
           subscribedChannels.clear();
           subscribedOwner = owner;
@@ -283,7 +276,6 @@ export function createSatWorkerChannelRuntime(
       return result;
     },
     subscriptionStatus: (channel: string): ChannelSubscriptionStatus => {
-      validateExactChannelForRuntime(channel);
       const snapshot = coordinator.getBootstrapSnapshot();
       if (snapshot.activePublicKeyHex !== subscribedOwner || snapshot.sessionEpoch !== subscribedSessionEpoch) {
         subscriptionStatuses.clear();
@@ -309,19 +301,6 @@ export function createSatWorkerChannelRuntime(
     subscribe: (handler) => listen(handler, (event) => event.publicMessage ?? null),
     subscribePrivate: (handler) => listen(handler, (event) => event.privateMessage ?? null)
   };
-}
-
-function validateExactChannelForRuntime(channel: string): void {
-  if (
-    typeof channel !== "string" ||
-    channel.length === 0 ||
-    channel === "*" ||
-    new TextEncoder().encode(channel).byteLength > 256 ||
-    [...channel].some((char) => {
-      const code = char.codePointAt(0) ?? 0;
-      return code < 0x20 || code === 0x7f;
-    })
-  ) throw new Error("Channel must be a non-empty exact UTF-8 channel");
 }
 
 function idleChannelStatus(channel: string): ChannelSubscriptionStatus {

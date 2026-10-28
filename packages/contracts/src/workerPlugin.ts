@@ -51,7 +51,7 @@ export interface WorkerRequestRoute {
   stale?(request: { kind: string }, call: WorkerRequestCall): Promise<import("./sessionCoordinator.js").CoordinatorResponse | undefined>;
   prepare?(request: { kind: string }, call: WorkerRequestCall): WorkerRequestPreparation;
 }
-/** 外部输入已由 typed RPC parser 校验；这里只收口 union 的 kind 分发。 */
+/** 内部路由直接使用声明；Coordinator 按 kind 索引负责分发与重复注册冲突。 */
 export function defineWorkerRequestRoute<Request extends { kind: string }>(definition: {
   kinds: readonly Request["kind"][];
   policy(request: Request): WorkerRequestPolicy;
@@ -59,15 +59,5 @@ export function defineWorkerRequestRoute<Request extends { kind: string }>(defin
   stale?(request: Request, call: WorkerRequestCall): Promise<import("./sessionCoordinator.js").CoordinatorResponse | undefined>;
   prepare?(request: Request, call: WorkerRequestCall): WorkerRequestPreparation;
 }): WorkerRequestRoute {
-  const narrow = (request: { kind: string }): Request => {
-    if (!definition.kinds.includes(request.kind)) throw new Error(`Worker route does not own ${request.kind}`);
-    return request as Request;
-  };
-  return {
-    kinds: definition.kinds,
-    policy: request => definition.policy(narrow(request)),
-    execute: (request, call) => definition.execute(narrow(request), call),
-    ...(definition.stale ? { stale: (request, call) => definition.stale!(narrow(request), call) } : {}),
-    ...(definition.prepare ? { prepare: (request, call) => definition.prepare!(narrow(request), call) } : {}),
-  };
+  return definition;
 }

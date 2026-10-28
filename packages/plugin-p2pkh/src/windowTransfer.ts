@@ -1,4 +1,3 @@
-import { assertP2pkhTransferRequestFields } from "@keymaster/contracts";
 import type { bindWalletIdentity, P2pkhCoordinatorControl, P2pkhWorkerTransferBinding } from "@keymaster/contracts";
 
 /** Window 的私有装配适配：业务请求不传身份，RPC 证据由绑定自动补入。 */
@@ -11,7 +10,6 @@ export function createWindowTransferBinding(input: {
     identity: wallet.identity,
     async prepareTransfer(request: import("@keymaster/contracts").P2pkhTransferRequest) {
       wallet.assertActive();
-      assertP2pkhTransferRequestFields(request);
       const result = await coordinator.p2pkhTransferPrepare({
         ...request,
         assetId: wallet.identity.bsvNetwork === "test" ? "bsvtest" : "bsv",
@@ -20,13 +18,11 @@ export function createWindowTransferBinding(input: {
       });
       wallet.assertActive();
       if (result.status !== "ok") throw new Error(`P2PKH transfer prepare failed: ${result.status}`);
-      if (result.value.ownerPublicKeyHex !== wallet.identity.publicKeyHex || result.value.network !== wallet.identity.bsvNetwork) throw new Error("Worker transfer preview identity mismatch");
       return result.value;
     },
     async submitTransfer(preview: unknown) {
       wallet.assertActive();
-      const record = preview as { previewId?: string; ownerPublicKeyHex?: string; network?: string } | null;
-      if (!record?.previewId || record.ownerPublicKeyHex !== wallet.identity.publicKeyHex || record.network !== wallet.identity.bsvNetwork) throw new Error("P2PKH transfer preview identity mismatch");
+      const record = preview as { previewId: string };
       const result = await coordinator.p2pkhTransferSubmit({ previewId: record.previewId, ownerPublicKeyHex: wallet.identity.publicKeyHex });
       wallet.assertActive();
       if (result.status !== "ok") throw new Error(`P2PKH transfer submit failed: ${result.status}`);

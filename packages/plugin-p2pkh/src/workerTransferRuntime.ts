@@ -246,7 +246,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     finally { if (starting === run) starting = undefined; }
   }
   async function ensureProtocol() {
-    const transfer = await ensure();
+    await ensure();
     if (protocol) return protocol;
     if (protocolStarting) return protocolStarting;
     const owner = currentOwner!; const epoch = currentEpoch!; const token = generation;
@@ -254,7 +254,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     const assertActive = () => { deps.assertActive(); const now = deps.session(); const current = requireUnlockedWalletIdentity(deps.walletState().snapshot()); if (generation !== token || !now.unlocked || now.owner !== owner || now.epoch !== epoch || current.publicKeyHex.toLowerCase() !== owner.toLowerCase() || current.bsvNetwork !== network) throw new Error("Protocol wallet instance revoked"); };
     const run = createWorkerProtocolRuntime({
        assertActive, owner, network, storage: deps.storage(), crypto: deps.crypto,
-      central: central!, transfer, query: () => deps.query?.(), snapshot: async network => { const result = await deps.snapshot({ ownerPublicKeyHex: owner, network }, false); assertActive(); return result.status === "ok" ? result.value : { hasResult: false, items: null, seq: null, syncedAt: null }; },
+      central: central!, query: () => deps.query?.(),
       protocolManager: protocolManagerPort,
     });
     protocolStarting = run;

@@ -1,5 +1,5 @@
 import { requireWocNetwork } from "@keymaster/contracts";
-import { sameWalletSession, assertP2pkhTransferRequestFields } from "@keymaster/contracts";
+import { sameWalletSession } from "@keymaster/contracts";
 import { sameNetworkIdentity, requireUnlockedWalletIdentity, bindWalletIdentity } from "@keymaster/contracts";
 // packages/plugin-p2pkh/src/p2pkhService.ts
 // P2PKH 服务实现（2026-09-20 UTXO / 历史解耦后）。
@@ -26,7 +26,6 @@ import type {
   WocService,
   P2pkhCoordinatorControl,
   P2pkhBroadcastSubmission,
-  P2pkhUtxoBinding,
   P2pkhUtxoSnapshotResult,
   P2pkhWorkerTransferBinding,
 } from "@keymaster/contracts";
@@ -58,20 +57,6 @@ import { canonicalizeP2pkhUtxos } from "./p2pkhCanonical.js";
 import { parseP2pkhTransaction, p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
 
 export const P2PKH_TASK_TRANSACTIONS_SYNC = "p2pkh.transactions-sync";
-
-function validateReadQuery(query: unknown, local: boolean): void {
-  if (query === undefined) return;
-  if (!query || typeof query !== "object" || Array.isArray(query)) throw new TypeError("P2PKH query must be an object");
-  const fields = new Set(["txid", "cursor", "limit", ...(local ? ["submissionId", "includeResolved"] : [])]);
-  for (const [key, value] of Object.entries(query)) {
-    if (!fields.has(key)) throw new TypeError(`Unsupported P2PKH query field: ${key}`);
-    if (value === undefined) continue;
-    if (key === "limit" && (!Number.isSafeInteger(value) || Number(value) < 1 || Number(value) > 1000)) throw new TypeError("P2PKH page limit must be 1–1000");
-    if (key === "txid" && (typeof value !== "string" || !/^[0-9a-f]{64}$/iu.test(value))) throw new TypeError("P2PKH query txid is invalid");
-    if ((key === "cursor" || key === "submissionId") && (typeof value !== "string" || !value)) throw new TypeError(`P2PKH query ${key} is invalid`);
-    if (key === "includeResolved" && typeof value !== "boolean") throw new TypeError("P2PKH includeResolved must be boolean");
-  }
-}
 
 /** 未知余额的占位明细；这些 0 不能直接渲染为真实余额。 */
 const EMPTY_BALANCE_BREAKDOWN: P2pkhBalanceBreakdown = {
@@ -315,13 +300,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
     return result.value;
   }
 
-  /** 返回原资源和内容编号；未取得结果时没有绑定，不授予资金权限。 */
-  async function getUtxoBinding(input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<P2pkhUtxoBinding | undefined> {
-    const snapshot = await requireUtxoSnapshot(input, "get");
-    if (!snapshot.hasResult) return undefined;
-    return { resourceId: makeResourceId(input.network), seq: snapshot.seq };
-  }
-
   /** 从快照得到该 owner/network 的可花费 UTXO（只排除内存池已花费输出）。 */
   async function listSpendableUtxosFromSnapshot(input: {
     resource: P2pkhKeyResource;
@@ -398,7 +376,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
       const utxos = await listSpendableUtxosFromSnapshot({ resource, snapshot, ownerPublicKeyHex });
       return { utxos };
     },
-    getUtxoBinding: async ({ ownerPublicKeyHex, resource }) => getUtxoBinding({ ownerPublicKeyHex, network: resource.network }),
     getActiveKey: () => {
       const state = getVaultLifecycleSnapshot();
       if (!state.activePublicKeyHex) {
@@ -740,7 +717,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
     async getPaymentStatus(input) {
       assertWalletSession();
       if (Object.keys(input).some(key => key !== "paymentId")) throw new TypeError("Payment status accepts only paymentId");
-      if (typeof input.paymentId !== "string" || !input.paymentId) throw new TypeError("Payment status requires paymentId");
       const boundInput = { paymentId: input.paymentId, ownerPublicKeyHex: walletIdentity.publicKeyHex, network: walletIdentity.bsvNetwork };
       if (deps.utxoManager) {
         const result = await deps.utxoManager.paymentStatus(boundInput); assertWalletSession(); return result;
@@ -761,7 +737,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
     getAvailableUtxos: () => readAvailableUtxos("get"),
     refreshUtxos: () => readAvailableUtxos("refresh"),
     async listHistory(query) {
-      validateReadQuery(query, false);
       const filter = { ...query };
       const repository = await ensureRepository();
       const page = await repository.listHistoryPage({ ...filter, resourceId: makeResourceId(walletIdentity.bsvNetwork), network: walletIdentity.bsvNetwork });
@@ -769,7 +744,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
       return page;
     },
     async listLocalTransactions(query) {
-      validateReadQuery(query, true);
       const filter = { ...query };
       const repository = await ensureRepository();
       const page = await repository.listLocalTransactionsPage({ ...filter, resourceId: makeResourceId(walletIdentity.bsvNetwork) });
@@ -778,7 +752,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
     },
     async prepareTransfer(input) {
       assertWalletSession();
-      assertP2pkhTransferRequestFields(input);
       // Window 只转交、不补默认值；Worker 在本次 prepare 开始构造计划时读取一次有效费率并冻结进预览。
       // 显式费率按现有契约校验后使用；修改策略不改变已有预览，重新 prepare 才使用新策略。
       if (deps.workerTransfer) {

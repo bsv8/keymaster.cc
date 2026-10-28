@@ -293,12 +293,9 @@ function toStoreError(cause: unknown, fallback: MsFileSeedStoreErrorCode): MsFil
   return new MsFileSeedStoreError(fallback, message);
 }
 
-function assertSource(source: MsFileSeedSource): void {
-  if (!source || typeof source !== "object") fail("invalid-source", "source is invalid");
-  if (typeof source.name !== "string" || typeof source.mediaType !== "string") fail("invalid-source", "source name/mediaType is invalid");
-  if (typeof source.size !== "bigint" || source.size < 0n || source.size > UINT64_MAX) fail("invalid-source", "source size is invalid");
+function checkSourceSize(source: MsFileSeedSource): void {
+  if (source.size < 0n || source.size > UINT64_MAX) fail("invalid-source", "source size is out of range");
   if (source.size > BigInt(Number.MAX_SAFE_INTEGER)) fail("invalid-source", "source is too large for this browser");
-  if (typeof source.stream !== "function" || typeof source.read !== "function") fail("invalid-source", "source must provide stream() and read()");
 }
 
 function createSeedRandomAccess(seedBytes: Uint8Array): RandomAccessSeed {
@@ -454,7 +451,7 @@ export async function storeMsFileSeed(input: {
   const { store, source, signal, onProgress, putBlock } = input;
   const now = input.now ?? Date.now;
   try {
-    assertSource(source);
+    checkSourceSize(source);
     const seed = await createSeedBytesFromSource(source, signal, onProgress);
     const seedHashHex = seed.seedHashHex;
     const randomAccess = createSeedRandomAccess(seed.seedBytes);
@@ -533,8 +530,8 @@ export async function commitPurchasedMsFileContent(input: {
   now?(): number;
 }): Promise<MsFileSeedUploadResult> {
   const { store, signal } = input;
-  const seedHashHex = assertSeedHashHex(input.seedHashHex);
-  if (!(input.seedBytes instanceof Uint8Array) || input.seedBytes.byteLength === 0) fail("invalid-source", "purchased seed is empty");
+  const seedHashHex = input.seedHashHex;
+  if (input.seedBytes.byteLength === 0) fail("invalid-source", "purchased seed is empty");
   if (!/^(0|[1-9][0-9]*)$/u.test(input.fileSizeBytes)) fail("invalid-source", "purchased file size is invalid");
   const sourceSize = BigInt(input.fileSizeBytes);
   const now = input.now ?? Date.now;
@@ -580,8 +577,8 @@ export async function inspectPurchasedMsFileSeed(input: {
   /** 报价中绑定的原文件大小。 */
   fileSizeBytes: string;
 }): Promise<{ blockHashesHex: string[]; seedSizeBytes: string }> {
-  const seedHashHex = assertSeedHashHex(input.seedHashHex);
-  if (!(input.seedBytes instanceof Uint8Array) || input.seedBytes.byteLength === 0) {
+  const seedHashHex = input.seedHashHex;
+  if (input.seedBytes.byteLength === 0) {
     fail("invalid-source", "purchased seed is empty");
   }
   if (!/^(0|[1-9][0-9]*)$/u.test(input.fileSizeBytes)) fail("invalid-source", "purchased file size is invalid");
@@ -664,7 +661,7 @@ export async function inspectLocalMsFileSeed(input: {
   signal?: AbortSignal;
 }): Promise<MsFileLocalSeedDescriptor | null> {
   const { store, signal } = input;
-  const seedHashHex = assertSeedHashHex(input.seedHashHex);
+  const seedHashHex = input.seedHashHex;
   try {
     const metaBytes = await getFile(store, metaPath(seedHashHex), signal);
     if (!metaBytes) return null;
@@ -720,8 +717,8 @@ export async function readLocalMsFileBlock(input: {
   signal?: AbortSignal;
 }): Promise<Uint8Array> {
   const { store, signal } = input;
-  const seedHashHex = assertSeedHashHex(input.seedHashHex);
-  const blockHashHex = assertSeedHashHex(input.blockHashHex);
+  const seedHashHex = input.seedHashHex;
+  const blockHashHex = input.blockHashHex;
   const descriptor = await readLocalMsFileSeed({ store, seedHashHex, ...(signal === undefined ? {} : { signal }) });
   const sourceSize = BigInt(descriptor.meta.fileSizeBytes);
   const seedSize = BigInt(descriptor.seedBytes.byteLength);
@@ -756,13 +753,13 @@ export async function readLocalMsFileBlocks(input: {
   /** 取消批量读取。 */
   signal?: AbortSignal;
 }): Promise<Map<string, Uint8Array>> {
-  const seedHashHex = assertSeedHashHex(input.seedHashHex);
+  const seedHashHex = input.seedHashHex;
   if (input.blockHashHexes.length === 0) return new Map();
   if (input.blockHashHexes.length > 64) fail("invalid-hash", "a local block batch cannot exceed 64 hashes");
 
   const requested = new Set<string>();
   for (const rawHash of input.blockHashHexes) {
-    const hash = assertSeedHashHex(rawHash);
+    const hash = rawHash;
     if (requested.has(hash)) fail("invalid-hash", "a local block batch cannot contain duplicate hashes");
     requested.add(hash);
   }
@@ -813,7 +810,7 @@ export async function readMsFileSeed(input: {
   getBlock?(seedHashHex: string, blockHashHex: string, signal?: AbortSignal): Promise<Uint8Array | undefined>;
 }): Promise<MsFileSeedReadResult> {
   const { store, signal, onProgress, getBlock } = input;
-  const seedHashHex = assertSeedHashHex(input.seedHashHex);
+  const seedHashHex = input.seedHashHex;
   try {
     const metaBytes = await getFile(store, metaPath(seedHashHex), signal);
     if (!metaBytes) throw new MsFileSeedStoreError("missing-meta", "seed metadata is missing");
@@ -875,7 +872,7 @@ export async function verifyMsFileSeed(input: {
   signal?: AbortSignal;
 }): Promise<MsFileSeedVerifyResult> {
   const { store, signal } = input;
-  const seedHashHex = assertSeedHashHex(input.seedHashHex);
+  const seedHashHex = input.seedHashHex;
   try {
     const metaBytes = await getFile(store, metaPath(seedHashHex), signal);
     let meta: MsFileSeedMeta | null = null;
@@ -948,7 +945,7 @@ export async function deleteMsFileSeed(input: {
   signal?: AbortSignal;
 }): Promise<void> {
   const { store, signal } = input;
-  const seedHashHex = assertSeedHashHex(input.seedHashHex);
+  const seedHashHex = input.seedHashHex;
   try {
     const seedBytes = await getFile(store, seedPath(seedHashHex), signal);
     // 列表真值是 meta：先删它，条目立即从列表消失；再删种子和块。

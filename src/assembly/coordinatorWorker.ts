@@ -65,7 +65,7 @@ import type { SessionEpoch, CoordinatorVaultStatus, CoordinatorClientRequest as 
 /** 可信 Worker 入口内的命令联合；私有浏览不进入公共 transport parser。 */
 type CoordinatorClientRequest = PublicCoordinatorClientRequest | StorageBrowsePrivateCommand;
 
-import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, deriveAppStorageName, coordinatorClientRequestFromRpc, parseCoordinatorResponseFor, isValidBackgroundSyncIntervalMs, BACKGROUND_TRIGGER_REASON, AUTO_LOCK_DEFAULT_TIMEOUT_MS, isValidAutoLockTimeoutMs, normalizeAutoLockTimeoutMs } from "@keymaster/contracts";
+import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, deriveAppStorageName, coordinatorClientRequestFromRpc, projectCoordinatorResponse, isValidBackgroundSyncIntervalMs, BACKGROUND_TRIGGER_REASON, AUTO_LOCK_DEFAULT_TIMEOUT_MS, isValidAutoLockTimeoutMs, normalizeAutoLockTimeoutMs } from "@keymaster/contracts";
 import { BUILTIN_PLUGIN_PRODUCT_ID_SET } from "@keymaster/contracts";
 
 import { COORDINATOR_SERVICE_PROTOCOL_VERSION } from "@keymaster/contracts";
@@ -1558,7 +1558,6 @@ coordinatorWorkerUnitRegistry.onChange(() => {
 
 let coordinatorRuntimeApp: ReturnType<typeof startSharedWorkerApp> | undefined;
 let coordinatorRuntimeUnitSnapshotRevision = 0;
-const workerConsumers = new WeakMap<import("webloom-framework").PluginConsumer, import("webloom-framework").LifecycleScope>();
 /** Domain fixtures explicitly drive registry readiness; browser production uses Host instances. */
 let testDomainUnitReadiness = false;
 type CoordinatorPeerHandoffNotifier = (peerId: string, handoffRevision?: number) => boolean;
@@ -2072,7 +2071,7 @@ const workerStorageClientCapabilities = createScopedStorageClients({
   async openOwnerFileStore({ pluginId, declaration }) {
     const binding = storageWorkerRequests.currentCoordinatorStorageBinding();
     if (!binding) throw storageUnavailableError("Worker file binding is unavailable");
-    // Scoped clients have verified the live consumer and its central declaration.
+    // Scoped clients retain the consumer lifetime and use the internal declaration directly.
     // Platform-managed App settings must use the private platform file entry.
     const files = declaration.authority === "platform-only"
       ? workerStorageClients.platformFiles(pluginId, declaration.purposeId)
@@ -2087,7 +2086,7 @@ const workerStorageClientCapabilities = createScopedStorageClients({
   },
   async openPlatformStore() { throw storageUnavailableError("Worker public clients do not expose platform purposes"); },
   async clearStorageRoot() { throw storageUnavailableError("Worker public clients do not clear roots"); },
-}, pluginId => BUILTIN_PLUGIN_DEFINITIONS.find(plugin => plugin.id === pluginId), (consumer, scope) => workerConsumers.get(consumer) === scope);
+}, pluginId => BUILTIN_PLUGIN_DEFINITIONS.find(plugin => plugin.id === pluginId));
 
 /**
  * P2PKH service 仍由现有 Coordinator broadcast pipeline 负责广播；Sat
@@ -2921,7 +2920,6 @@ const { owner: handleCoordinatorOwnerStorageRpc, platform: handleCoordinatorPlat
 const vaultWorkerRuntime = createVaultWorkerRuntime({
   walletControl: vaultWorkerOperations.walletControl,
   walletState: workerWalletState,
-  isIssued: (consumer, scope) => workerConsumers.get(consumer) === scope,
   activeCrypto: async (owner, scope) => vaultWorkerKeys.createWorkerActiveKeyCrypto(owner, scope),
   cryptoRpc: {
     authorize: call => { requireCoordinatorSessionPeer(call); },
@@ -2939,10 +2937,8 @@ function coordinatorRpcResponse(request: CoordinatorRpcRequest, response: Coordi
   const result = "requestId" in response
     ? (({ requestId: _requestId, ...withoutRequestId }) => withoutRequestId)(response)
     : response;
-  // Capability response parser only validates the common envelope. The
-  // request-aware pass below owns nested operation/control/data result
-  // selection and the strict ack/presence rules.
-  return parseCoordinatorResponseFor(request, result);
+  // Publish only this operation's public fields; internal results are trusted.
+  return projectCoordinatorResponse(request, result);
 }
 
 function coordinatorRequestFromRpc(
@@ -3265,9 +3261,8 @@ const coordinatorTransportPlugin = definePlugin({
   ] as const,
   dependencies: [{ capability: VAULT_WORKER_WALLET_CONTROL_CAPABILITY, sourceRuntime: "shared-worker", reason: "钱包控制面通过声明能力调用 Vault" }],
   setup(context) {
-    workerConsumers.set(context.consumer, context.scope);
     coordinatorWalletControl = context.capability(VAULT_WORKER_WALLET_CONTROL_CAPABILITY).bind(context.consumer, context.scope);
-    context.scope.onRevoke(() => { coordinatorWalletControl = undefined; workerConsumers.delete(context.consumer); });
+    context.scope.onRevoke(() => { coordinatorWalletControl = undefined; });
     context.handle(COORDINATOR_RPC_CAPABILITY, (request, call) => handleCoordinatorRpc(request, call));
     context.handle(COORDINATOR_TOPIC_STREAM_CAPABILITY, (request, call) => coordinatorTopicStream(request, call));
   },
@@ -3279,9 +3274,7 @@ function withCoordinatorWorkerLifecycle(plugin: ReturnType<typeof definePlugin>)
     ...plugin, async setup(context: import("webloom-framework").PluginContext) {
       const unitId = plugin.descriptor.id;
       const instance = activateCoordinatorWorkerUnitForRuntime(unitId, context.instanceId);
-      workerConsumers.set(context.consumer, context.scope);
       context.scope.onRevoke(() => {
-        workerConsumers.delete(context.consumer);
         stopCoordinatorWorkerUnit(unitId, context.instanceId);
       });
       try {
@@ -3318,7 +3311,6 @@ const coordinatorRuntimePlugins = [
   }),
   createWindowP2pWorkerPlugin({
     bridge: { get available() { return windowP2pWorkerRuntime.windowP2pExecutorLease?.transportReady === true; }, request: windowP2pWorkerRuntime.requestWindowP2pExecutorOperation },
-    isIssued: (consumer, scope) => workerConsumers.get(consumer) === scope,
     revokeLease(identity) {
       if (coordinatorWorkerUnitRegistry.get("window-p2p.coordinator-worker")?.instanceId === identity.instanceId && windowP2pWorkerRuntime.windowP2pExecutorLease?.sessionEpoch === identity.sessionEpoch && windowP2pWorkerRuntime.windowP2pExecutorLease.ownerPublicKeyHex === identity.ownerPublicKeyHex) windowP2pWorkerRuntime.clearWindowP2pExecutorLeaseLocked();
     },

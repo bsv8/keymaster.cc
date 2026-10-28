@@ -4,10 +4,6 @@ interface SatWorkerTransportPorts {
   operation(operation: SatWindowLaneOperation, signal?: AbortSignal): Promise<unknown>;
   cancelInbound(connectionId: string, reason: string): void;
 }
-function asWire(value: unknown, label: string): Uint8Array {
-  if (!(value instanceof Uint8Array)) throw new Error(label + " did not return wire bytes");
-  return value;
-}
 /** Sat owns connection instances and registrations; WindowP2P only carries the wire. */
 export function createSatWorkerTransport(ports: SatWorkerTransportPorts) {
   const satIncomingHandlers = new Map<string, { supplierId: string; ownerSessionEpoch: string; supplierGeneration: number; handler: (wire: Uint8Array) => Promise<Uint8Array> }>();
@@ -31,27 +27,18 @@ export function createSatWorkerTransport(ports: SatWorkerTransportPorts) {
           handler: input.onSspRequest,
         });
       }
-      let result: unknown;
+      let result: { authenticatedPublicKeyHex: string };
       try {
         result = await ports.operation({
           type: "connect",
           ...fence,
           supplierPublicKeyHex: input.supplier.supplierPublicKeyHex,
           multiaddrs: [...input.supplier.multiaddrs]
-        }, input.signal);
+        }, input.signal) as { authenticatedPublicKeyHex: string };
       } catch (error) {
         ports.cancelInbound(connectionId, "Sat connection setup failed");
         satIncomingHandlers.delete(connectionId);
         throw error;
-      }
-      if (!result || typeof result !== "object" || typeof (result as { authenticatedPublicKeyHex?: unknown }).authenticatedPublicKeyHex !== "string"
-        || (result as Partial<typeof fence>).supplierId !== fence.supplierId
-        || (result as Partial<typeof fence>).connectionId !== fence.connectionId
-        || (result as Partial<typeof fence>).ownerSessionEpoch !== fence.ownerSessionEpoch
-        || (result as Partial<typeof fence>).supplierGeneration !== fence.supplierGeneration) {
-        ports.cancelInbound(connectionId, "Sat connection returned an invalid fence");
-        satIncomingHandlers.delete(connectionId);
-        throw new Error("Sat Window lane returned an invalid authenticated connection");
       }
       let connectionState: "online" | "degraded" | "closed" = "online";
       const stateListeners = new Set<(state: "online" | "degraded" | "closed") => void>();
@@ -65,7 +52,7 @@ export function createSatWorkerTransport(ports: SatWorkerTransportPorts) {
       satConnectionStateHandlers.set(connectionId, { ...fence, handler: setConnectionState });
       const connection: SatSupplierConnection = {
         ...fence,
-        authenticatedPublicKeyHex: (result as { authenticatedPublicKeyHex: string }).authenticatedPublicKeyHex,
+        authenticatedPublicKeyHex: result.authenticatedPublicKeyHex,
         get state() { return connectionState; },
         onStateChange: (handler) => {
           stateListeners.add(handler);
@@ -75,7 +62,7 @@ export function createSatWorkerTransport(ports: SatWorkerTransportPorts) {
         requestSsp: async (wire, signal) => {
           if (connectionState === "closed") throw new Error("Sat supplier connection is closed");
           try {
-            const response = asWire(await ports.operation({ type: "requestSsp", ...fence, wire: wire.slice() }, signal), "requestSsp");
+            const response = await ports.operation({ type: "requestSsp", ...fence, wire: wire.slice() }, signal) as Uint8Array;
             setConnectionState("online");
             return response;
           } catch (error) {
@@ -86,7 +73,7 @@ export function createSatWorkerTransport(ports: SatWorkerTransportPorts) {
         requestSpi: async (wire, signal) => {
           if (connectionState === "closed") throw new Error("Sat supplier connection is closed");
           try {
-            const response = asWire(await ports.operation({ type: "requestSpi", ...fence, wire: wire.slice() }, signal), "requestSpi");
+            const response = await ports.operation({ type: "requestSpi", ...fence, wire: wire.slice() }, signal) as Uint8Array;
             setConnectionState("online");
             return response;
           } catch (error) {

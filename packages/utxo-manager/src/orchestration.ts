@@ -209,10 +209,6 @@ async function runSubmit(
   const commandId = `${allocationId}:broadcast`;
   const exactHex = signedTxHex.toLowerCase();
   candidate.markDispatching(commandId);
-  const persisted = candidate.outboxView().find((entry) => entry.commandId === commandId);
-  if (!persisted || persisted.rawTxHex !== exactHex || persisted.txid !== completed.txid) {
-    throw new UtmError("state-conflict", "outbox bytes do not match signed transaction");
-  }
 
   // One durable transaction: exact bytes + all kernel responsibility + the
   // dispatch intent. If it fails, the live held allocation remains occupied
@@ -224,7 +220,7 @@ async function runSubmit(
   let outcome: BroadcastOutcome | null = null;
   let transportError = false;
   try {
-    outcome = await ports.broadcaster.broadcast(persisted.rawTxHex);
+    outcome = await ports.broadcaster.broadcast(exactHex);
   } catch {
     transportError = true;
   }
@@ -331,13 +327,6 @@ export async function completeProtocolIntent(
   const completed = candidate.completeProtocol({ allocationId, signedTxHex, delivery });
   const commandId = `${allocationId}:broadcast`;
   const exactHex = signedTxHex.toLowerCase();
-  const entry = candidate.outboxView().find((row) => row.commandId === commandId);
-  if (!entry || entry.rawTxHex !== exactHex || entry.txid !== completed.txid) {
-    throw new UtmError("state-conflict", "outbox bytes do not match signed transaction");
-  }
-  if (delivery === "external" && entry.state !== "unknown") {
-    throw new UtmError("state-conflict", "external delivery must start in the unknown state");
-  }
   await store.saveDispatch(commandId, completed.txid, exactHex, candidate.serialize());
   kernel.replaceFrom(candidate);
   return completed;

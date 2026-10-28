@@ -9,15 +9,6 @@ function cloneDescriptor(descriptor: P2pkhProviderDescriptor): P2pkhProviderDesc
   return { ...descriptor, supportedNetworks: [...descriptor.supportedNetworks] };
 }
 
-function assertDescriptor(descriptor: P2pkhProviderDescriptor): void {
-  if (!descriptor.id || !descriptor.label || descriptor.supportedNetworks.length === 0) {
-    throw new Error("Invalid P2PKH provider descriptor");
-  }
-  if (new Set(descriptor.supportedNetworks).size !== descriptor.supportedNetworks.length) {
-    throw new Error(`Duplicate network in provider descriptor: ${descriptor.id}`);
-  }
-}
-
 /**
  * Coordinator-owned in-memory registry；只剩广播 Provider。
  *
@@ -32,7 +23,6 @@ export function createP2pkhProviderRegistry(): P2pkhProviderRegistry {
     provider: T,
     capability: string
   ): void {
-    assertDescriptor(provider.descriptor);
     if (map.has(provider.descriptor.id)) {
       throw new Error(`Duplicate P2PKH ${capability} provider id: ${provider.descriptor.id}`);
     }

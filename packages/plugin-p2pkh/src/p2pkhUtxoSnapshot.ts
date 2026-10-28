@@ -4,7 +4,6 @@ import { requireWocNetwork } from "@keymaster/contracts";
 import type { WocService, WocUtxoResponse, P2pkhUtxoSnapshotItem, P2pkhUtxoSnapshotResult } from "@keymaster/contracts";
 import type { P2pkhUtxoManager } from "./p2pkhUtxoManager.js";
 
-const TXID_PATTERN = /^[0-9a-f]{64}$/u;
 export interface P2pkhUtxoSnapshotResource {
   resourceId: string;
   publicKeyHex: string;
@@ -20,19 +19,12 @@ export interface P2pkhUtxoSnapshotStore {
   clearAll(): void;
 }
 
-/** Validate the entire provider response before committing any observation. */
-export function validateP2pkhUnspentAll(rows: readonly WocUtxoResponse[]): P2pkhUtxoSnapshotItem[] {
+/** Merge already parsed WoC facts before atomically observing the batch. */
+export function mergeP2pkhUnspentFacts(rows: readonly WocUtxoResponse[]): P2pkhUtxoSnapshotItem[] {
   const byOutpoint = new Map<string, P2pkhUtxoSnapshotItem>();
   for (const row of rows) {
-    const txid = String(row.txid ?? "").trim().toLowerCase();
-    if (!TXID_PATTERN.test(txid)) throw new Error("WoC unspent/all returned an invalid txid");
-    if (!Number.isSafeInteger(row.vout) || row.vout < 0) throw new Error("WoC unspent/all returned an invalid vout");
-    if (!Number.isSafeInteger(row.value) || row.value < 0) throw new Error("WoC unspent/all returned an invalid value");
-    if (row.status !== "confirmed" && row.status !== "unconfirmed") throw new Error("WoC unspent/all returned an unknown status");
-    if (typeof row.isSpentInMempoolTx !== "boolean") throw new Error("WoC unspent/all returned an invalid isSpentInMempoolTx");
-    if (row.script !== undefined && typeof row.script !== "string") throw new Error("WoC unspent/all returned an invalid script");
-    const height = row.status === "confirmed"
-      ? (Number.isSafeInteger(row.height) && row.height > 0 ? row.height : (() => { throw new Error("WoC unspent/all returned an invalid confirmed height"); })()) : 0;
+    const txid = row.txid.toLowerCase();
+    const height = row.status === "confirmed" ? row.height! : 0;
     const item: P2pkhUtxoSnapshotItem = { txid, vout: row.vout, value: row.value, height, status: row.status, isSpentInMempoolTx: row.isSpentInMempoolTx,
       ...(row.script ? { script: row.script } : {}) };
     const key = `${txid}:${row.vout}`;
@@ -82,7 +74,7 @@ export function createP2pkhUtxoSnapshotStore(deps: {
       const captured = epoch;
       check(captured);
       const task = (async () => {
-        const rows = validateP2pkhUnspentAll(await requireWocNetwork(deps.woc, resource.network).getAddressUnspentAll(resource.address, { priority: "background", ...(options?.signal ? { signal: options.signal } : {}) }));
+        const rows = mergeP2pkhUnspentFacts(await requireWocNetwork(deps.woc, resource.network).getAddressUnspentAll(resource.address, { priority: "background", ...(options?.signal ? { signal: options.signal } : {}) }));
         check(captured);
         if (options?.signal?.aborted) throw new Error("Manager observation cancelled");
         await deps.manager.observe({ ownerPublicKeyHex: resource.publicKeyHex, resource, utxos: rows.map(row => ({ ...row, id: `${row.txid}:${row.vout}`, resourceId: resource.resourceId, publicKeyHex: resource.publicKeyHex, network: resource.network, address: resource.address, syncedAt: deps.now?.() ?? new Date().toISOString() })) });

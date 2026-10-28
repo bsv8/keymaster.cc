@@ -5,7 +5,7 @@
 //   - 设置由 Host 绑定的 K-V 句柄承载，字段固定，不引入迁移框架；
 //   - 服务器按 PriceCast 发布器公钥唯一标识；名称只是展示标签；
 //   - 激活项是「供应商-交易所-交易对」三元组，服务只订阅激活服务器；
-//   - 输入保存前统一 trim + toLowerCase，并严格校验公钥 / 标识符；
+//   - 用户表单与磁盘入口归一并解析公钥／标识符，内部保存直接复制声明字段；
 //   - 缺省公钥是生产 PriceCast 发布器；旧配置缺失或损坏时回落到默认值，
 //     不进入"未配置"状态；
 //   - 读到坏 JSON / 坏 schema 时，按"没有本地配置"处理，由调用方 seed。
@@ -296,14 +296,14 @@ export function createKeyValueBsvPriceSettingsStore(
   }
 
   function applyBootstrap(config: BsvPriceGlobalConfig): BsvPriceGlobalConfig {
-    const next = assertConfig(config, now);
+    const next = prepareConfig(config, now);
     current = next;
     emit();
     return cloneConfig(next)!;
   }
 
   function saveConfig(config: BsvPriceGlobalConfig): Promise<BsvPriceGlobalConfig> {
-    const next = assertConfig(config, now);
+    const next = prepareConfig(config, now);
     return enqueue(async () => {
       await storage.put(BSV_PRICE_SETTINGS_STORAGE_KEY, next, { partition: "settings" });
       current = next;
@@ -350,12 +350,12 @@ export function createMemoryBsvPriceSettingsStore(
     load: () => cloneConfig(current),
     snapshot: () => cloneConfig(current),
     bootstrapConfig(config) {
-      current = assertConfig(config, now);
+      current = prepareConfig(config, now);
       emit();
       return cloneConfig(current)!;
     },
     async saveConfig(config) {
-      current = assertConfig(config, now);
+      current = prepareConfig(config, now);
       emit();
       return cloneConfig(current)!;
     },
@@ -367,11 +367,13 @@ export function createMemoryBsvPriceSettingsStore(
   };
 }
 
-/** 校验并刷新 savedAtMs；非法配置直接抛错。 */
-function assertConfig(config: BsvPriceGlobalConfig, now: () => number): BsvPriceGlobalConfig {
-  const coerced = coerceBsvPriceGlobalConfig(config);
-  if (!coerced) throw new Error("invalid_bsv_price_config");
-  return { ...coerced, savedAtMs: now() };
+/** Internal settings: preserve catalog relationships, copy public fields and stamp the commit. */
+function prepareConfig(config: BsvPriceGlobalConfig, now: () => number): BsvPriceGlobalConfig {
+  if (config.servers.length === 0 || config.servers.length > MAX_SERVERS) throw new Error("server_limit");
+  const keys = new Set(config.servers.map(server => server.publisherPublicKeyHex));
+  if (keys.size !== config.servers.length) throw new Error("server_exists");
+  if (!keys.has(config.active.publisherPublicKeyHex)) throw new Error("server_not_found");
+  return { ...cloneConfig(config)!, savedAtMs: now() };
 }
 
 function cloneConfig(input: BsvPriceGlobalConfig | null): BsvPriceGlobalConfig | null {
@@ -381,7 +383,7 @@ function cloneConfig(input: BsvPriceGlobalConfig | null): BsvPriceGlobalConfig |
       name: server.name,
       publisherPublicKeyHex: server.publisherPublicKeyHex
     })),
-    active: { ...input.active },
+    active: { publisherPublicKeyHex: input.active.publisherPublicKeyHex, market: input.active.market, pair: input.active.pair },
     savedAtMs: input.savedAtMs
   };
 }

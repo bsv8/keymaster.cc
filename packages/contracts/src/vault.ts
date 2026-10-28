@@ -191,7 +191,7 @@ export const VAULT_WALLET_STATE_CAPABILITY = defineCapability<VaultWalletStateAc
 export function requireUnlockedWalletIdentity(snapshot: Readonly<VaultLifecycleSnapshot>): KeyIdentity {
   if (snapshot.status !== "unlocked" || !snapshot.activePublicKeyHex) throw new Error("Active key is unavailable");
   const identity = snapshot.activeKeyIdentity;
-  if (!identity || (identity.bsvNetwork !== "main" && identity.bsvNetwork !== "test") || identity.publicKeyHex !== snapshot.activePublicKeyHex) throw new Error("Network identity is unavailable");
+  if (!identity) throw new Error("Network identity is unavailable");
   return { ...identity, publicKeyHex: identity.publicKeyHex.toLowerCase(), capabilities: [...identity.capabilities] };
 }
 /**
@@ -202,15 +202,16 @@ export function bindWalletIdentity(state: VaultWalletState, signal?: AbortSignal
   const initial = state.snapshot();
   const issued = { ...initial, activeKeyIdentity: initial.activeKeyIdentity ? { ...initial.activeKeyIdentity } : undefined };
   const identity = requireUnlockedWalletIdentity(issued);
-  if ([issued.sessionEpoch, issued.runGeneration, issued.walletGeneration].some(value => typeof value !== "string" || !value)) throw new Error("Wallet identity generation is unavailable");
+  if ([issued.sessionEpoch, issued.runGeneration, issued.walletGeneration].some(value => !value)) throw new Error("Wallet identity generation is unavailable");
   Object.freeze(identity.capabilities);
   Object.freeze(identity);
   function isActive(): boolean {
     try {
       if (signal?.aborted) return false;
       const current = state.snapshot();
-      const active = requireUnlockedWalletIdentity(current);
-      return sameWalletSession(issued, current) && active.publicKeyHex === identity.publicKeyHex && active.bsvNetwork === identity.bsvNetwork;
+      const active = current.activeKeyIdentity;
+      return current.status === "unlocked" && !!active && sameWalletSession(issued, current)
+        && active.publicKeyHex.toLowerCase() === identity.publicKeyHex;
     } catch { return false; }
   }
   function assertActive(): void {

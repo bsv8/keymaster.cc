@@ -36,7 +36,6 @@ function signatureFromResult(result: { status: string; value?: WindowP2pIdentity
     throw new Error(`${purpose} signer RPC failed${result.message ? `: ${result.message}` : ""}`);
   }
   const signature = new Uint8Array(result.value.signatureDer);
-  if (signature.byteLength === 0) throw new Error(`${purpose} signer RPC returned an empty DER signature`);
   return signature.slice();
 }
 
@@ -68,9 +67,6 @@ export class KeymasterWindowP2pIdentitySigner implements TypedSigner {
     this.activePublicKeyHex = input.activePublicKeyHex;
     this.rpc = input.rpc;
     const bytes = new Uint8Array(input.activePublicKeyHex.length / 2);
-    if (!/^(02|03)[0-9a-f]{64}$/.test(input.activePublicKeyHex)) {
-      throw new Error("active public key must be compressed secp256k1 hex");
-    }
     for (let index = 0; index < bytes.length; index += 1) {
       bytes[index] = Number.parseInt(input.activePublicKeyHex.slice(index * 2, index * 2 + 2), 16);
     }
@@ -108,7 +104,6 @@ export class KeymasterWindowP2pIdentitySigner implements TypedSigner {
 
   async signNoiseStaticKey(staticKey32: Uint8Array, signal?: AbortSignal): Promise<Uint8Array> {
     this.assertOpen();
-    if (staticKey32.byteLength !== 32) throw new Error("Noise static public key must be exactly 32 bytes");
     this.pending += 1;
     try {
       this.noiseSigns += 1;

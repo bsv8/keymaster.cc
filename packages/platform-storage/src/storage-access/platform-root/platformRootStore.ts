@@ -1,4 +1,4 @@
-import { validateNetworkIdentity, sameNetworkIdentity, networkIdentityStorageRoot, type NetworkIdentity } from "@keymaster/contracts";
+import { sameNetworkIdentity, networkIdentityStorageRoot, type NetworkIdentity } from "@keymaster/contracts";
 import type { StorageBrowseWallet } from "../../runtime/storageBrowsePrivate.js";
 // 平台存储根：所有受限句柄的唯一装配点。
 //
@@ -9,7 +9,7 @@ import type { StorageBrowseWallet } from "../../runtime/storageBrowsePrivate.js"
 //   - 不再有 Provider、bucket 与 bucketGeneration；物理数据按逻辑根隔离，权限
 //     由绑定里的四件事（钱包世代、会话 epoch、运行世代、App 身份）保证；
 //   - 清空一个根按前缀分页删除，不全量读取对象字节；
-//   - platform-only 与 built-in-module 走中央登记表，未登记的声明一律拒绝。
+//   - platform-only 与 built-in-module 直接使用可信装配提供的声明。
 
 import type {
   KeyValueStore,
@@ -22,24 +22,15 @@ import type {
   StorageSnapshotJsonCompatible,
 } from "@keymaster/contracts";
 import {
-  CENTRAL_STORAGE_DECLARATIONS,
-  SYSTEM_STORAGE_DECLARATIONS,
   buildStorageNamespaceRoot,
   buildWalletStorageRoot,
   normalizeAppStorageName,
-  validatePluginStorageDeclaration,
 } from "@keymaster/contracts";
 import { createKeyValueStore } from "../../kv-engine/walletKvEngine.js";
 import type { WalletStore } from "../../local/indexedDbWalletStore.js";
 import { StorageRuntimeError } from "../../runtime/storageError.js";
 import { createFixedCasSnapshotStore } from "../../snapshot/fixedCasSnapshotStore.js";
 import { createModuleFileStore } from "../wallet/moduleFileStore.js";
-
-/** 平台与内置模块共享的中央声明全集。 */
-const CENTRALLY_DECLARED: readonly PluginStorageDeclaration[] = Object.freeze([
-  ...Object.values(CENTRAL_STORAGE_DECLARATIONS),
-  ...Object.values(SYSTEM_STORAGE_DECLARATIONS).flat(),
-]);
 
 /** 只供 Storage Worker 实现与可信装配使用，不发布给其他插件。 */
 export interface StoragePrivateRootStore extends PlatformRootStore {
@@ -69,28 +60,13 @@ const CLEAR_LIST_LIMIT = 256;
 const CLEAR_MAX_PASSES = 64;
 const CLEAR_REQUIRED_EMPTY_PASSES = 2;
 
-function declarationKey(declaration: PluginStorageDeclaration): string {
-  return [
-    declaration.moduleId,
-    declaration.purposeId,
-    declaration.authority,
-    declaration.model,
-    declaration.schemaVersion,
-  ].join("|");
-}
-
 function isStorageConflict(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && (error as { code?: unknown }).code === "storage_conflict");
 }
 
-/** 该坐标是否在中央登记表中完全匹配（含 schema 版本）。 */
-function centrallyDeclared(declaration: PluginStorageDeclaration): boolean {
-  return CENTRALLY_DECLARED.some((candidate) => declarationKey(candidate) === declarationKey(declaration));
-}
-
 /** 构造平台存储根。 */
 export function createPlatformRootStore(options: PlatformRootStoreOptions): StoragePrivateRootStore {
-  const identity = validateNetworkIdentity(options.identity);
+  const identity = Object.freeze({ ...options.identity });
   /**
    * 世代栅栏：句柄绑定时的世代必须仍然是当前世代。
    *
@@ -140,8 +116,6 @@ function platformRootMatchesGeneration(live: { walletGeneration: string; session
       sessionEpoch: live.sessionEpoch,
       runGeneration: live.runGeneration,
     });
-    // 构造期就固定逻辑根：之后调用方无法改写。
-    buildStorageNamespaceRoot(binding);
     return binding;
   }
 
@@ -178,7 +152,6 @@ function platformRootMatchesGeneration(live: { walletGeneration: string; session
         appId: verifiedAppIdentity.appId,
       },
     });
-    buildStorageNamespaceRoot(binding);
     return binding;
   }
 
@@ -238,72 +211,35 @@ function platformRootMatchesGeneration(live: { walletGeneration: string; session
       };
     },
     async openKeyValueStore(input): Promise<OwnerAppStore> {
-      const declaration = validatePluginStorageDeclaration(input.declaration);
-      if (declaration.model !== "kv") {
-        throw new StorageRuntimeError("storage_forbidden", "Module K-V store requires the kv model");
-      }
-      if (declaration.authority !== "built-in-module") {
-        throw new StorageRuntimeError("storage_forbidden", "Module K-V store requires built-in-module authority");
-      }
-      if (!centrallyDeclared(declaration)) {
-        throw new StorageRuntimeError("storage_forbidden", "Module storage namespace is not centrally authorized");
-      }
-      const binding = bind(declaration);
+      const binding = bind(input.declaration);
       return createKeyValueStore({ store: options.store, binding, isCurrent: gateFor(binding) });
     },
     async openModuleFileStore(input): Promise<ModuleFileStore> {
-      const declaration = validatePluginStorageDeclaration(input.declaration);
+      const declaration = input.declaration;
       if (declaration.authority === "third-party-app") {
         const binding = bindApp(declaration, input.appStorageName, input.verifiedAppIdentity);
         return createModuleFileStore({ store: options.store, binding, isCurrent: gateFor(binding) });
-      }
-      if (declaration.model !== "files") {
-        throw new StorageRuntimeError("storage_forbidden", "Module file store requires the files model");
-      }
-      if (declaration.authority !== "built-in-module") {
-        throw new StorageRuntimeError("storage_forbidden", "Module file store requires built-in-module authority");
-      }
-      if (!centrallyDeclared(declaration)) {
-        throw new StorageRuntimeError("storage_forbidden", "Module storage namespace is not centrally authorized");
       }
       const binding = bind(declaration);
       return createModuleFileStore({ store: options.store, binding, isCurrent: gateFor(binding) });
     },
     openPlatformFileStore: async (input: { declaration: PluginStorageDeclaration }): Promise<ModuleFileStore> => {
-      const declaration = validatePluginStorageDeclaration(input.declaration);
-      if (declaration.authority !== "platform-only" || declaration.model !== "files" || !centrallyDeclared(declaration)) {
-        throw new StorageRuntimeError("storage_forbidden", "Platform file store requires a centrally declared platform-only files namespace");
-      }
-      const binding = bind(declaration);
+      const binding = bind(input.declaration);
       return createModuleFileStore({ store: options.store, binding, isCurrent: gateFor(binding) });
     },
     openPlatformSnapshot: async <T>(input: {
       declaration: PluginStorageDeclaration;
       validate: (value: unknown) => StorageSnapshotJsonCompatible<T>;
     }): Promise<SnapshotStore<T>> => {
-      const declaration = validatePluginStorageDeclaration(input.declaration);
-      if (declaration.model !== "snapshot" || declaration.authority !== "platform-only") {
-        throw new StorageRuntimeError("storage_forbidden", "Platform snapshot requires a platform-only snapshot declaration");
-      }
-      if (!centrallyDeclared(declaration)) {
-        throw new StorageRuntimeError("storage_forbidden", "Platform storage namespace is not centrally authorized");
-      }
-      const binding = bind(declaration);
+      const binding = bind(input.declaration);
       return createFixedCasSnapshotStore({ store: options.store, binding, isCurrent: gateFor(binding), validate: input.validate });
     },
     openPlatformStore: async (input: { declaration: PluginStorageDeclaration }): Promise<KeyValueStore> => {
-      const declaration = validatePluginStorageDeclaration(input.declaration);
-      if (declaration.model !== "kv" || declaration.authority === "third-party-app") {
-        throw new StorageRuntimeError("storage_forbidden", "Platform K-V store requires a non-app kv declaration");
-      }
-      if (!centrallyDeclared(declaration)) {
-        throw new StorageRuntimeError("storage_forbidden", "Platform storage namespace is not centrally authorized");
-      }
-      const binding = bind(declaration);
+      const binding = bind(input.declaration);
       return createKeyValueStore({ store: options.store, binding, isCurrent: gateFor(binding) });
     },
     async clearStorageRoot(input): Promise<void> {
-      const declaration = validatePluginStorageDeclaration(input.declaration);
+      const declaration = input.declaration;
       if (declaration.authority === "third-party-app") {
         // 单 App 清理只作用于它自己的目录，不影响其它 App 或平台记录。
         if (input.appStorageName === undefined) {
@@ -317,9 +253,6 @@ function platformRootMatchesGeneration(live: { walletGeneration: string; session
         });
         await clearRoot(root);
         return;
-      }
-      if (!centrallyDeclared(declaration)) {
-        throw new StorageRuntimeError("storage_forbidden", "Storage namespace is not centrally authorized");
       }
       await clearRoot(buildStorageNamespaceRoot(bind(declaration)));
     },

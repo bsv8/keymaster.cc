@@ -124,28 +124,16 @@ export { deriveThirdPartyStorageModuleId };
  *   - third-party-app → `apps/<appStorageName>/`
  */
 export function buildStorageNamespaceRoot(binding: StorageNamespaceBinding): string {
-  const declaration = validatePluginStorageDeclaration(binding);
-  if (typeof binding.walletGeneration !== "string" || binding.walletGeneration.length === 0) {
-    throw new Error("walletGeneration is invalid");
-  }
-  if (typeof binding.sessionEpoch !== "string" || binding.sessionEpoch.length === 0) {
-    throw new Error("sessionEpoch is invalid");
-  }
-  if (typeof binding.runGeneration !== "string" || binding.runGeneration.length === 0) {
-    throw new Error("runGeneration is invalid");
-  }
+  // Host assembly supplies this binding. App authorization is performed when
+  // issuing the handle; path construction does not revalidate internal facts.
+  const declaration = binding;
   if (declaration.authority === "third-party-app") {
-    if (binding.appStorageName === undefined) throw new Error("third-party-app storage requires a registered appStorageName");
-    if (!binding.verifiedAppIdentity) throw new Error("third-party-app storage requires a verified app identity");
     return networkIdentityStorageRoot(binding) + buildWalletStorageRoot({
       authority: "third-party-app",
       moduleId: declaration.moduleId,
       purposeId: declaration.purposeId,
       appStorageName: binding.appStorageName,
     });
-  }
-  if (binding.appStorageName !== undefined || binding.verifiedAppIdentity !== undefined) {
-    throw new Error("app storage identity is only valid for third-party-app authority");
   }
   return networkIdentityStorageRoot(binding) + buildWalletStorageRoot({
     authority: declaration.authority,

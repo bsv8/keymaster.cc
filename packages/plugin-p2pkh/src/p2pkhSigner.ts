@@ -46,7 +46,6 @@ const SIGHASH_ALL_FORKID = 0x41;
  */
 export function pubKeyHash160Hex(publicKeyHex: string): string {
   const pub = hexToBytes(publicKeyHex);
-  if (pub.length !== 33) throw new Error("Public key must be 33 bytes (compressed)");
   return bytesToHex(ripemd160(sha256(pub)));
 }
 
@@ -127,9 +126,6 @@ export async function signMixedInputs(
   signDigest: (digest: Uint8Array) => Promise<Uint8Array>,
   options: { readonly publicKey: Uint8Array }
 ): Promise<string> {
-  if (inputs.length !== unsigned.inputs.length) {
-    throw new Error("Signable inputs must match the transaction inputs");
-  }
   const pub = options.publicKey;
   const signedInputs: TxInput[] = unsigned.inputs.map((i) => ({ ...i, scriptSig: new Uint8Array(0) }));
   for (let i = 0; i < unsigned.inputs.length; i++) {
@@ -153,18 +149,6 @@ export function rawTxHexByteLength(rawTxHex: string): number {
   }
   return clean.length / 2;
 }
-/** 组装钱包核心返回的全部输入签名，不再逐输入申请支付额度。 */
-export function attachP2pkhSignatures(unsigned: UnsignedTx, signatures: readonly string[], publicKeyHex: string): string {
-  if (signatures.length !== unsigned.inputs.length) throw new Error("P2PKH signature count mismatch");
-  const pub = hexToBytes(publicKeyHex);
-  const inputs = unsigned.inputs.map((input, index) => {
-    const signature = hexToBytes(signatures[index]!);
-    if (signature.length < 9 || signature.length > 73 || signature[signature.length - 1] !== SIGHASH_ALL_FORKID) throw new Error("Invalid P2PKH signature");
-    return {...input, scriptSig: concatBytes(new Uint8Array([signature.length]), signature, new Uint8Array([pub.length]), pub)};
-  });
-  return bytesToHex(serializeTx({...unsigned, inputs}));
-}
-
 /** 计算 rawTxHex 对应的 txid。 */
 export function calcTxidFromRawTxHex(rawTxHex: string): string {
   const bytes = hexToBytes(rawTxHex);
@@ -220,32 +204,6 @@ function calcBip143Sighash(
 /** dsha256 = sha256(sha256(x))。 */
 function dsha256(data: Uint8Array): Uint8Array {
   return sha256(sha256(data));
-}
-
-/** 把 r, s 整数编码为 ECDSA-DER。 */
-function encodeDERSignature(r: bigint, s: bigint): Uint8Array {
-  const encodeInt = (n: bigint): Uint8Array => {
-    let hex = n.toString(16);
-    if (hex.length % 2 !== 0) hex = "0" + hex;
-    let bytes = hexToBytes(hex);
-    while (bytes.length > 1 && bytes[0] === 0 && (bytes[1] ?? 0) < 0x80) {
-      bytes = bytes.slice(1);
-    }
-    if (bytes[0]! >= 0x80) {
-      const padded = new Uint8Array(bytes.length + 1);
-      padded.set(bytes, 1);
-      bytes = padded;
-    }
-    return concatBytes(new Uint8Array([0x02, bytes.length]), bytes);
-  };
-  const rEnc = encodeInt(r);
-  const sEnc = encodeInt(s);
-  const seqLen = rEnc.length + sEnc.length;
-  return concatBytes(
-    new Uint8Array([0x30, seqLen]),
-    rEnc,
-    sEnc
-  );
 }
 
 function addressToP2pkhScript(address: string): Uint8Array {
