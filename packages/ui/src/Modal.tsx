@@ -17,7 +17,8 @@ export function Modal({ open, title, onClose, children, footer, closeButtonLabel
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose?.();
+      // Native application approval lives in the top layer. Keep the underlying business dialog and its draft intact.
+      if (e.key === "Escape" && !document.querySelector('dialog[data-application-approval][open]')) onClose?.();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);

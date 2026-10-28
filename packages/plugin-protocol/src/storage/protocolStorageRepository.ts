@@ -82,6 +82,41 @@ export function openProtocolStorageRepository(stores: ProtocolStorageStores): Pr
   const connectPaymentKey = (key: string) => `${CONNECT_PAYMENT_PREFIX}${encodeURIComponent(key)}`;
 
   return {
+    async listApplicationEvents() {
+      return (await listValues<import("@keymaster/contracts").ApplicationConnectionEvent>(durablePolicy, "application-event:")).map(row => row.value);
+    },
+    async putApplicationEvent(event) {
+      await durablePolicy.put(`application-event:${event.id}`, event, { partition: PARTITION });
+    },
+    async listApplications() {
+      return (await listValues<import("@keymaster/contracts").ConnectedApplication>(durablePolicy, "application:")).map(row => row.value);
+    },
+    async putApplication(application) {
+      await durablePolicy.put(`application:${encodeURIComponent(application.key)}`, application, { partition: PARTITION });
+    },
+    async getApplicationPermissions(key: string) {
+      return (await durablePolicy.get<{ key: string; methods: import("@keymaster/contracts").ProtocolMethod[]; updatedAt: number }>(`app-permission:${encodeURIComponent(key)}`, { partition: PARTITION }))?.value ?? null;
+    },
+    async setApplicationPermission(key, method, enabled) {
+      const storeKey = `app-permission:${encodeURIComponent(key)}`;
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const revision = await currentRevision(durablePolicy);
+        const previous = (await durablePolicy.get<{ methods: import("@keymaster/contracts").ProtocolMethod[] }>(storeKey, { partition: PARTITION }))?.value;
+        const methods = new Set(previous?.methods ?? []);
+        if (enabled) methods.add(method); else methods.delete(method);
+        try {
+          const at = Date.now(), id = crypto.randomUUID();
+          await durablePolicy.commit({ partition: PARTITION, ifRevision: revision, operations: [
+            { type: "put", key: storeKey, value: { key, methods: [...methods], updatedAt: at } },
+            { type: "put", key: `application-event:${id}`, value: { id, applicationKey: key, at, kind: enabled ? "permission-granted" : "permission-revoked", method } }
+          ] });
+          return;
+        } catch (error) { if (attempt === 7 || (error as { code?: string }).code !== "storage_conflict") throw error; }
+      }
+    },
+    async listCommands() {
+      return (await listValues<ProtocolCommandRecord>(commandHistory, COMMAND_PREFIX)).map(row => row.value).sort((a, b) => b.updatedAt - a.updatedAt);
+    },
     /* ----- command-history ----- */
     async putCommand(record: ProtocolCommandRecord) {
       await commandHistory.put(commandKey(record.id), record, { partition: PARTITION });

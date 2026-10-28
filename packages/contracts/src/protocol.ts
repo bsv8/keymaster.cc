@@ -1398,8 +1398,7 @@ export type ChannelSubscriptionSetResultV1 = ChannelSubscriptionSetResult;
  *
  * 设计缘由（施工单 2026-06-29 002 硬切换）：
  *   - 这是 `plugin-apps` **唯一**允许调用的 appView 启动入口；plugin-apps
- *     自己**不**直接操作 `protocolMultipartUploadRepository` / `buildAppBootstrapPayload`
- *     / `installLauncherBootstrapRegistry` / `window.open` popup URL。
+ *     自己不操作协议存储、运行句柄或开窗；主钱包宿主接管外部应用连接。
  *   - `appOrigin` 必须是 exact origin；`new URL(appUrl).origin` 必须
  *     === `appOrigin`，否则视为配置错误、整次启动 fail-closed。
  *   - `claims` 是 launcher 期望在 `connect.login` 时一次解析的 claim
@@ -1428,17 +1427,17 @@ export interface LaunchAppViewInput {
  *
  * 设计缘由（施工单 2026-06-29 002 硬切换）：
  *   - 成功意味着 launcher 已完成整套：vault 已解锁校验 + owner key 已 ready
- *     校验 + app 配置合法 + 预建 connect session + 导出 unlock runtime +
- *     生成 launchToken + 安装 bootstrap registry + 打开 Session Window。
- *   - 启动失败（任何一道闸）一律 throw，**不**返回 `sessionWindowOpened=false`
+ *     校验 + app 配置合法 + 预建 connect session + 创建 App 专属 crypto capability +
+ *     生成 launchToken + 注册主钱包连接宿主 + 打开外部 App 窗口。
+ *   - 启动失败（任何一道闸）一律 throw，不返回 `appWindowOpened=false`
  *     的"半成功"语义——避免业务插件"先显示成功，再去查"等隐式兼容路径。
  *   - 返回的 `appUrl` 是已拼上 `?launchToken=<id>` 的真实打开 URL；
  *     `plugin-apps` 仅作展示用，**不**自己再去 `window.open(appUrl)`。
  */
 export interface LaunchAppViewResult {
   networkIdentity: NetworkIdentity;
-  /** Session Window 是否已成功打开新窗口。 */
-  sessionWindowOpened: boolean;
+  /** 外部 App 窗口已打开；不创建中间 Session Window。 */
+  appWindowOpened: boolean;
   /** launcher 已确认的钱包公钥；与 networkIdentity 一起定位身份。 */
   walletPublicKeyHex: string;
   /** 本次为该 app 生成的 launchToken；client app 首条 `connect.launch` 消费。 */
@@ -2038,6 +2037,14 @@ export interface ProtocolCommandRecord {
   failureReason?: ProtocolFailureReason;
   /** p2pkh.transfer / feepool.* / identity.get / cipher.* auto-approve 命中时为 true。 */
   autoApproved?: boolean;
+  /** 应用稳定归属；仅脱敏本地审计，不是协议授权凭据。 */
+  applicationKey?: string;
+  /** 人工批准时间，与业务执行成功/失败分开。 */
+  manualApprovedAt?: number;
+  /** 外部付款审批的真实冻结预览。 */
+  paymentPreview?: import("./p2pkhConnectPayment.js").P2pkhConnectPaymentPreview;
+  /** 付款执行结果与授权决定分开。 */
+  paymentStatus?: ConnectPaymentStatus;
 }
 
 /**
@@ -2189,6 +2196,15 @@ export const PROTOCOL_STORAGE_REPOSITORY_CAPABILITY = defineCapability<ProtocolS
  *     时 caller 被要求重新登录）。
  */
 export interface ProtocolStorageRepository {
+  listApplicationEvents?(): Promise<import("./applicationConnections.js").ApplicationConnectionEvent[]>;
+  putApplicationEvent?(event: import("./applicationConnections.js").ApplicationConnectionEvent): Promise<void>;
+  listApplications?(): Promise<import("./applicationConnections.js").ConnectedApplication[]>;
+  putApplication?(application: import("./applicationConnections.js").ConnectedApplication): Promise<void>;
+  /** Connect 外部应用许可；独立于钱包内部审批和会话。 */
+  getApplicationPermissions?(key: string): Promise<{ key: string; methods: ProtocolMethod[]; updatedAt: number } | null>;
+  setApplicationPermission?(key: string, method: ProtocolMethod, enabled: boolean): Promise<void>;
+  /** 全量脱敏历史，用于应用中心跨重启索引。 */
+  listCommands?(): Promise<ProtocolCommandRecord[]>;
   /* ----- commands ----- */
   putCommand(record: ProtocolCommandRecord): Promise<void>;
   getCommand(id: string): Promise<ProtocolCommandRecord | null>;
@@ -2497,7 +2513,7 @@ export interface ProtocolService {
    * 兼容旧 UI：未传 recordId 时取"当前最新一张 confirming 卡片"。新 UI
    * 应**始终**传 recordId。
    */
-  confirmByUser(recordId?: string): Promise<void>;
+  confirmByUser(recordId?: string, rememberApplicationPermission?: boolean): Promise<void>;
   /**
    * 用户在确认页或解锁页点击"取消"。service 立即向 opener 回
    * `user_rejected`；request 进入 `rejected` 终态。

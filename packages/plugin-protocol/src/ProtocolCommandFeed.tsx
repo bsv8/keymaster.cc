@@ -59,6 +59,12 @@ function decisionLabelForCommand(
   command: ProtocolCommandRecord,
   t: (key: string, values?: { defaultValue?: string; seconds?: number }) => string
 ): string {
+  if (command.paymentStatus) {
+    if (command.paymentStatus === "accepted" || command.paymentStatus === "already_known") return t("protocol.payment.execution.accepted", { defaultValue: "节点已接受" });
+    if (command.paymentStatus === "not_signed") return t("protocol.payment.execution.notSigned", { defaultValue: "未签名" });
+    if (command.paymentStatus === "failed") return t("protocol.payment.execution.failed", { defaultValue: "付款失败" });
+    return t("protocol.payment.execution.unresolved", { defaultValue: "付款待核实" });
+  }
   if (command.decision === "rejected") {
     if (command.failureReason === "user_canceled") {
       return t("protocol.feed.decision.rejected.user_canceled", {
@@ -242,7 +248,7 @@ function FeedSection({
  *     `confirming` / `waiting_unlock_*` / `queued` / `executing` 的交互体。
  *   - 历史区：默认折叠；卡片内只显示 summary，不显示交互按钮。
  */
-function CommandCard({
+export function CommandCard({
   t,
   command,
   initiallyExpanded,
@@ -278,6 +284,7 @@ function CommandCard({
       data-record-id={command.id}
       data-status={command.status}
       data-phase={command.phase}
+      data-payment-status={command.paymentStatus}
     >
       <button
         type="button"
@@ -452,6 +459,9 @@ function ConfirmCardBody({
   command: ProtocolCommandRecord;
   now: number;
 }) {
+  const [remember, setRemember] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
   const deadline = service.confirmDeadlineMs(command.id);
   const remainingSeconds = deadline === null ? null : Math.max(0, Math.ceil((deadline - now) / 1000));
   return (
@@ -461,13 +471,18 @@ function ConfirmCardBody({
         description={t(`protocol.confirm.method.${command.method}`, { defaultValue: command.method })}
       />
       <ConfirmDetails t={t} command={command} />
+      {command.paymentPreview ? <PaymentPreviewDetails command={command} /> : null}
+      {command.applicationKey ? <label className="application-remember"><input type="checkbox" checked={remember} disabled={busy} onChange={event => setRemember(event.target.checked)} />以后自动同意此应用的同类请求（仅 {command.method}）</label> : null}
+      {remember && command.method === "payment.pay" ? <p className="application-warning">此应用后续付款将自动同意，不设金额上限。可在应用 → 设置取消。</p> : null}
+      {error ? <p role="alert">{error}</p> : null}
       <div className="protocol-popup__actions">
-        <Button onClick={() => service.confirmByUser(command.id)}>
+        <Button disabled={busy || remainingSeconds === 0} onClick={async () => { setBusy(true); setError(undefined); try { await service.confirmByUser(command.id, remember); } catch { setError("批准失败，请检查连接与许可存储后重试。"); } finally { setBusy(false); } }}>
           {t("protocol.confirm.confirm", { defaultValue: "确认" })}
         </Button>
         <Button
           variant="ghost"
-          onClick={() => service.rejectByUser(command.id)}
+          disabled={busy}
+          onClick={async () => { try { await service.rejectByUser(command.id); } catch { setError("拒绝结果未能写入历史，请重试。"); } }}
         >
           {t("protocol.confirm.cancel", { defaultValue: "取消" })}
         </Button>
@@ -475,6 +490,22 @@ function ConfirmCardBody({
       </div>
     </>
   );
+}
+
+export function PaymentPreviewDetails({ command }: { command: ProtocolCommandRecord }) {
+  const payment = command.paymentPreview;
+  if (!payment) return null;
+  return <section className="application-payment-preview"><h3>冻结付款预览</h3><dl>
+    <dt>App / 实际来源</dt><dd>{payment.appName}<br /><code>{payment.origin}</code></dd>
+    <dt>发行人公钥</dt><dd><code>{payment.publisherPublicKeyHex}</code></dd>
+    <dt>付款用途 / 类型</dt><dd>{payment.businessKind} / {payment.paymentType}</dd>
+    <dt>收款方</dt><dd><code>{payment.recipientLabel}</code></dd>
+    <dt>收款归属</dt><dd>{payment.recipientOwnership === "app-publisher" ? "发行人收款" : "第三方 / 未知收款方"}</dd>
+    <dt>业务金额</dt><dd>{payment.businessAmountSats} sat</dd>
+    <dt>矿工费</dt><dd>{payment.feeSats} sat</dd>
+    <dt>自有找零</dt><dd>{payment.changeAmountSats} sat</dd>
+    <dt>钱包实际花费</dt><dd>{((payment.businessScriptHex === payment.changeScriptHex ? 0n : BigInt(payment.businessAmountSats)) + BigInt(payment.feeSats)).toString()} sat（含费）</dd>
+  </dl><p className="application-warning">身份已验证不等于交易安全，请核对实际收款方、用途与花费。</p></section>;
 }
 
 /* ============== queued 卡（已确认，等待执行） ============== */
@@ -642,6 +673,7 @@ function ReadOnlyBody({
           </dd>
         </>
       ) : null}
+      {command.paymentStatus ? <><dt>付款执行结果</dt><dd>{command.paymentStatus === "accepted" || command.paymentStatus === "already_known" ? "节点已接受（不等于区块确认）" : command.paymentStatus === "not_signed" ? "未签名" : command.paymentStatus === "failed" ? "失败" : "待核实"} · {command.paymentStatus}</dd></> : null}
       {command.errorCode ? (
         <>
           <dt>{t("protocol.feed.error", { defaultValue: "错误" })}</dt>

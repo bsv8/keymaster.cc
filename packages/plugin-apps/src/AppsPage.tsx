@@ -136,7 +136,7 @@ export function AppsPage() {
       <PageHeader
         title={t("apps.page.title", { defaultValue: "Apps" })}
         description={t("apps.page.description", {
-          defaultValue: "Open an app to start a Keymaster Session Window."
+          defaultValue: "Open an external app and manage its connections in Keymaster."
         })}
         actions={
           <Button variant="secondary" onClick={goHome}>

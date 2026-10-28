@@ -44,7 +44,7 @@ const appsResources: I18nPluginResources = {
       "apps.menu.label": "Apps",
       "apps.domain.label": "Applications",
       "apps.page.title": "Apps",
-      "apps.page.description": "Open an app to start a Keymaster Session Window.",
+      "apps.page.description": "Open an external app. Manage its connections and permissions in Keymaster.",
       "apps.page.backToHome": "Back to home",
       "apps.page.empty.title": "No apps yet",
       "apps.page.empty.description": "Apps registered in the catalog will appear here.",
@@ -69,9 +69,9 @@ const appsResources: I18nPluginResources = {
       "apps.open.error.exportOwnerRuntimeFailed":
         "Failed to prepare the app owner runtime. Please try again.",
       "apps.open.error.openSessionWindowFailed":
-        "Failed to open the Session Window. Please try again.",
+        "Failed to open the app window. Please try again.",
       "apps.open.error.openSessionWindowBlocked":
-        "The browser blocked opening the Session Window. Please allow popups for Keymaster and try again.",
+        "The browser blocked opening the app. Please allow popups for Keymaster and try again.",
       "apps.open.error.internal":
         "Failed to open the app. Please try again.",
       "apps.launch.title": "Open {name}",
@@ -91,7 +91,7 @@ const appsResources: I18nPluginResources = {
       "apps.menu.label": "应用",
       "apps.domain.label": "应用",
       "apps.page.title": "应用",
-      "apps.page.description": "打开应用以启动 Keymaster Session Window。",
+      "apps.page.description": "打开外部应用，在钱包内管理该应用的连接与许可。",
       "apps.page.backToHome": "返回首页",
       "apps.page.empty.title": "还没有应用",
       "apps.page.empty.description": "在清单中注册的应用会显示在这里。",
@@ -107,8 +107,8 @@ const appsResources: I18nPluginResources = {
       "apps.open.error.windowUnavailable": "当前浏览器环境无法打开该应用。",
       "apps.open.error.sessionStorageUnavailable": "Keymaster 本地存储不可用，请稍后再试。",
       "apps.open.error.exportOwnerRuntimeFailed": "app owner runtime 准备失败，请稍后再试。",
-      "apps.open.error.openSessionWindowFailed": "打开 Session Window 失败，请稍后再试。",
-      "apps.open.error.openSessionWindowBlocked": "浏览器拦截了 Session Window 的打开。请允许 Keymaster 弹出窗口后再试一次。",
+      "apps.open.error.openSessionWindowFailed": "打开应用窗口失败，请稍后再试。",
+      "apps.open.error.openSessionWindowBlocked": "浏览器拦截了应用窗口。请允许 Keymaster 打开新窗口后再试一次。",
       "apps.open.error.internal": "打开应用失败，请稍后再试。",
       "apps.launch.title": "打开 {name}",
       "apps.launch.titleFallback": "打开应用",

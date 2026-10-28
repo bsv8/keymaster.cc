@@ -37,6 +37,7 @@ export * from "./keyDisplay.js";
 export * from "./p2pkhConnectPayment.js";
 export * from "./p2pkhConclusion.js";
 export * from "./protocol.js";
+export * from "./applicationConnections.js";
 export * from "./satSubscription.js";
 export * from "./appIdentity.js";
 export * from "./storage/index.js";

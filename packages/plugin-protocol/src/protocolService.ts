@@ -1,3 +1,4 @@
+import { applicationKey, requiresApplicationApproval, readApplicationPermissions, setApplicationPermission } from "./applicationPermissions.js";
 import { projectNetworkIdentity, sameNetworkIdentity, type NetworkIdentity } from "@keymaster/contracts";
 import { requireUnlockedWalletIdentity } from "@keymaster/contracts";
 async function appPaymentChannelId(owner: string, name: string, paymentType: string, network: string): Promise<string> {
@@ -146,7 +147,6 @@ import {
   type VaultWalletState,
   type LaunchAppViewInput,
   type LaunchAppViewResult,
-  type LauncherBootstrapRegistry,
   type MethodParams,
   type MethodResult,
   type OwnerExecutionRuntime,
@@ -211,7 +211,7 @@ import { cborDecode, cborEncode, type CborValue } from "./protocolCbor.js";
 import { buildClaimProjectionFromParams, resolveBuiltinClaim, resolveClaims } from "./protocolClaims.js";
 import { consumeLauncherBootstrap, encodeOrigin, parseBootstrapToken } from "./sessionWindowBootstrap.js";
 import { buildAppBootstrapPayload } from "./sessionWindowBootstrap.js";
-import { installLauncherBootstrapRegistry, bindWalletIdentity } from "@keymaster/contracts";
+import { bindWalletIdentity } from "@keymaster/contracts";
 import type { FeepoolPendingOpsMap } from "./feepoolOperations.js";
 import {
   calcTxidFromRawTxHex,
@@ -288,17 +288,6 @@ const BOOTSTRAP_TIMEOUT_MS = 30_000;
  *     不再主动 pump。
  */
 const APPVIEW_READY_RETRY_WINDOW_MS = 5_000;
-
-/**
- * Session Window 打开参数。
- *
- * 设计缘由：
- *   - 明确请求浏览器以 popup/window 形态打开，而不是普通新 tab；
- *   - 这只是请求，不是强保证；浏览器可按自己的策略降级；
- *   - **不能**带 `noopener`，否则 Session Window 拿不到 launcher 的
- *     `window.opener`，bootstrap consume 会直接失效。
- */
-const SESSION_WINDOW_OPEN_FEATURES = "popup=yes,width=460,height=820,resizable=yes,scrollbars=yes";
 
 /**
  * 把 K-V 读到的 origin 记录补齐新字段默认值。**纯函数**；不改入参，不读 K-V。
@@ -382,6 +371,12 @@ export interface ProtocolServiceDeps {
    * 不再次解析——避免 URL 被中途篡改。
    */
   bootMode?: "connect" | "appView";
+  /** 主钱包接管新 App 的独立 Receiver/运行上下文，不经窗口 bootstrap。 */
+  acceptApplicationLaunch?: (payload: AppBootstrapPayload, source: Window) => Promise<void>;
+  applicationPermissionChanged?: () => Promise<void>;
+  /** Shared main-wallet connection: App logout must not lock the whole wallet. */
+  hostedApplication?: boolean;
+  applicationLoggedOut?: () => void;
 }
 
 /**
@@ -394,6 +389,11 @@ interface RequestRecord {
   readonly walletGeneration: string;
   readonly runGeneration: string;
   readonly bindingId?: string;
+  applicationKey?: string;
+  manualApprovedAt?: number;
+  paymentPreview?: import("@keymaster/contracts").P2pkhConnectPaymentPreview;
+  paymentStatus?: import("@keymaster/contracts").ConnectPaymentStatus;
+  paymentApproval?: (approved: boolean) => void;
   networkIdentity: NetworkIdentity;
   /** service 内部稳定主键；与 transport requestId 解耦。 */
   recordId: string;
@@ -534,6 +534,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   private lockStateValue: ProtocolPopupLockState = "locked";
   /** 旧 session phase 兼容字段：在多 request 模型下主要用于 "至少有一条 confirming / queued" 的活跃态呈现；详细见 `snapshot()`。 */
   private phase: ProtocolSessionPhase = "waiting";
+  private sessionRevision = 0;
   private listeners = new Set<(snap: ProtocolSessionSnapshot) => void>();
   private feedListeners = new Set<(state: ProtocolCommandFeedState) => void>();
 
@@ -778,25 +779,6 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
-   * launcher 一次性 bootstrap entries Map：token -> AppBootstrapPayload。
-   *
-   * 设计缘由（施工单 2026-06-29 002 硬切换 + 用户反馈 issue #1）：
-   *   - launcher 同一窗口里**允许多次**点 `Open App` 各自预建 session；
-   *     各次点击不能互相打断。
-   *   - 旧实现每次 `launchAppView()` 都新建一个**只**含当前 token 的
-   *     registry 并 `installLauncherBootstrapRegistry(window, ...)` 覆盖
-   *     旧 registry；前一次还没 acquire 的 token 会被**直接覆盖**导致
-   *     启动失败。
-   *   - 新实现：把 entries Map 提升为 service 实例字段；首次 `launchAppView`
-   *     时挂一次 launcher-side registry（其 acquire 直接读 entries Map
-   *     并 delete 命中项），后续 `launchAppView` 只往 entries Map 加新
-   *     token，**不**重新挂 registry。
-   *   - 同一 token 仍保持"一次性消费"语义（acquire 命中即从 Map 删除）。
-   */
-  private readonly launcherBootstrapEntries: Map<string, AppBootstrapPayload> = new Map();
-  private launcherBootstrapRegistryInstalled = false;
-
-  /**
  * 当前 Session Window 一次性 bootstrap consume 状态。
  *
  * 设计缘由（修复 issue #1 / #3）：
@@ -948,6 +930,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    * origin 会残留到新会话里——违反 ProtocolService.startSession 接口契约。
    */
   startSession(): void {
+    this.sessionRevision++;
     this.receiver.reset();
     this.releaseAllChannelSessions();
     this.channelSessionBySource.clear();
@@ -1010,6 +993,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - 不发 `closing`（closing 由 pageUnloading 路径负责）。
    */
   endSession(): void {
+    this.sessionRevision++;
     this.receiver.clear();
     this.releaseAllChannelSessions();
     this.channelSessionBySource.clear();
@@ -1039,6 +1023,8 @@ export class ProtocolServiceImpl implements ProtocolService {
       if (rec.phase === "approved" || rec.phase === "rejected" || rec.phase === "failed" || rec.phase === "timed_out") {
         continue;
       }
+      rec.paymentApproval?.(false);
+      rec.paymentApproval = undefined;
       rec.phase = "rejected";
       rec.decision = "rejected";
       rec.status = "rejected";
@@ -1238,8 +1224,9 @@ export class ProtocolServiceImpl implements ProtocolService {
       return;
     }
 
+    const revision = this.sessionRevision;
     const context = await this.receiver.accept(event);
-    if (!context) return;
+    if (!context || revision !== this.sessionRevision) return;
     const method = PROTOCOL_METHODS.find(method => method === context.method);
     if (!method) {
       this.receiver.replyError(context, { code: "invalid_request", message: "Method is not available in this wallet" });
@@ -1260,10 +1247,47 @@ export class ProtocolServiceImpl implements ProtocolService {
    * recordId 缺省时取"当前任意一张 confirming request"（兼容旧 UI）；
    * 新 UI 应始终传 recordId。
    */
-  async confirmByUser(recordId?: string): Promise<void> {
+  async confirmByUser(recordId?: string, rememberApplicationPermission = false): Promise<void> {
     const rec = this.resolveRecordForConfirm(recordId);
-    if (!rec) return;
-    if (rec.phase !== "confirming") return;
+    if (!rec || rec.phase !== "confirming") return;
+    try {
+      this.assertWalletGeneration(rec);
+      this.receiver.assertCurrent(rec.protocol);
+    } catch (error) {
+      this.clearConfirmTimeout(rec.recordId);
+      rec.phase = "failed";
+      const failure = toProtocolError(error);
+      rec.errorCode = failure.code; rec.errorMessage = failure.message;
+      rec.finishedAt = rec.updatedAt = Date.now();
+      rec.paymentApproval?.(false); rec.paymentApproval = undefined;
+      await this.persistFeedCommandFor(rec);
+      await this.replyErrorToRec(rec, failure.code, failure.message);
+      this.emit(); return;
+    }
+    if (this.confirmDeadlineMs(rec.recordId) !== null && this.confirmDeadlineMs(rec.recordId)! <= Date.now()) {
+      await this.finalizeRequestByTimeout(rec.recordId); return;
+    }
+    if (rememberApplicationPermission && rec.applicationKey && requiresApplicationApproval(rec.method)) {
+      await readApplicationPermissions(this.deps.storageRepository, rec.applicationKey);
+      this.assertWalletGeneration(rec);
+      if (rec.phase !== "confirming" || rec.cancelRequested) return;
+      await setApplicationPermission(this.deps.storageRepository, rec.applicationKey, rec.method, true);
+      await this.deps.applicationPermissionChanged?.();
+      this.assertWalletGeneration(rec);
+      if (rec.phase !== "confirming") return;
+      const deadline = this.confirmDeadlineMs(rec.recordId);
+      if (deadline !== null && deadline <= Date.now()) { await this.finalizeRequestByTimeout(rec.recordId); return; }
+    }
+    rec.manualApprovedAt = Date.now();
+    if (rec.paymentApproval) {
+      const resolve = rec.paymentApproval;
+      rec.paymentApproval = undefined;
+      this.clearConfirmTimeout(rec.recordId);
+      this.setRecordPhase(rec.recordId, "executing");
+      resolve(true);
+      this.emit(); this.emitFeed();
+      return;
+    }
     // 清掉 timer；进入 queued。
     this.clearConfirmTimeout(rec.recordId);
     this.setRecordPhase(rec.recordId, "queued");
@@ -1410,6 +1434,13 @@ export class ProtocolServiceImpl implements ProtocolService {
       void msfileService?.abortSession(sessionId);
     }
     this.sendClosingBestEffort();
+  }
+
+  /** Dispose subscriptions as well as runtime authority; only used when the host drops this instance. */
+  dispose(): void {
+    this.endSession();
+    this.channelRuntimeUnsubscribe?.();
+    this.channelRuntimeUnsubscribe = undefined;
   }
 
   /**
@@ -1591,6 +1622,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 立即把 ownerPublicKeyHex 落到 rec；executeConnectLogin 之后建的
     // session record 与该 ownerPublicKeyHex 一致。
     rec.ownerPublicKeyHex = ownerPublicKeyHex;
+    rec.manualApprovedAt = Date.now();
     this.clearConfirmTimeout(recordId);
     this.setRecordPhase(recordId, "queued");
     rec.enteredPhaseAt = Date.now();
@@ -1715,6 +1747,14 @@ export class ProtocolServiceImpl implements ProtocolService {
       }
       await this.applyLauncherBootstrap(out.bootstrap);
     })();
+  }
+
+  /** 主钱包的受信装配入口，不对外部 App 暴露。 */
+  async acceptLaunchedApplication(payload: AppBootstrapPayload, source: Window): Promise<void> {
+    await this.applyLauncherBootstrap(payload);
+    if (this.bootstrapFailedFlag) throw new Error(this.bootstrapFailureReasonValue ?? "App initialization failed");
+    this.currentAppClientSource = source;
+    this.childReadyFlag = true;
   }
 
   /** bootstrap 是否失败。 */
@@ -2044,7 +2084,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     //    bootstrap 就绪后再导航，opener 关系仍可保持不变。
     let popup: Window | null = null;
     try {
-      popup = window.open("about:blank", "_blank", SESSION_WINDOW_OPEN_FEATURES);
+      popup = window.open("about:blank", "_blank");
     } catch (err) {
       throw new LaunchAppViewError(
         "open_session_window_failed",
@@ -2148,46 +2188,21 @@ export class ProtocolServiceImpl implements ProtocolService {
       expiresAt: now + 24 * 60 * 60 * 1000,
       sessionRuntimeBootstrap
     });
-    // 12) 在 launcher window 上挂一次性 bootstrap registry。
-    //     设计缘由（issue #1）：同一 launcher 窗口里多次点 `Open App` 时
-    //     不能互相覆盖。这里用 service 实例字段 `launcherBootstrapEntries`
-    //     + 一次性 install；后续 `launchAppView()` 只往 entries Map 加新
-    //     token，**不**重新挂 registry。token 一次性消费（命中即 delete）。
-    const token = `bt-${launchToken}`;
-    this.launcherBootstrapEntries.set(token, bootstrap);
-    if (!this.launcherBootstrapRegistryInstalled && typeof window !== "undefined") {
-      const registry: LauncherBootstrapRegistry = {
-        acquire: async (t: string) => {
-          const v = this.launcherBootstrapEntries.get(t);
-          if (!v) return null;
-          this.launcherBootstrapEntries.delete(t);
-          return v;
-        }
-      };
-      installLauncherBootstrapRegistry(window, registry);
-      this.launcherBootstrapRegistryInstalled = true;
-    }
-    // 13) bootstrap 已就绪，才导航预开的 Session Window。这里不能再调
-    //     window.open，否则 iOS Safari 已丢失 user activation。
-    const popupUrl = `/protocol/v1/popup?boot=appView&bootstrapToken=${encodeURIComponent(token)}`;
-    try {
-      if (popup.closed) {
-        throw new Error("reserved Session Window was closed before navigation");
-      }
-      popup.location.replace(popupUrl);
-    } catch (err) {
-      throw new LaunchAppViewError(
-        "open_session_window_failed",
-        "launchAppView: failed to navigate reserved Session Window"
-      );
-    }
+    // 主钱包内接管应用；外部窗口只收到一次性 launchToken 和钱包 origin。
+    if (!this.deps.acceptApplicationLaunch) throw new Error("Application connection host unavailable");
+    await this.deps.acceptApplicationLaunch(bootstrap, popup);
+    wallet.assertActive();
+    const clientUrl = new URL(appUrlWithLaunchToken);
+    clientUrl.searchParams.set("sessionWindowOrigin", window.location.origin);
+    if (popup.closed) throw new Error("App window was closed during launch");
+    popup.location.replace(clientUrl.toString());
     sessionWindowNavigated = true;
     return {
-      sessionWindowOpened: true,
+      appWindowOpened: true,
       networkIdentity: projectNetworkIdentity(key),
       walletPublicKeyHex: key.publicKeyHex,
       launchToken,
-      appUrl: appUrlWithLaunchToken
+      appUrl: clientUrl.toString()
     };
     } finally {
       if (!sessionWindowNavigated) {
@@ -2659,6 +2674,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const method = parsed.method;
 
     const rec: RequestRecord = {
+      ...(this.currentAppViewContext ? { applicationKey: applicationKey(origin, this.currentAppViewContext.appIdentity) } : {}),
       protocol: parsed.protocol,
       recordId,
       transportRequestId: parsed.id,
@@ -2815,6 +2831,14 @@ export class ProtocolServiceImpl implements ProtocolService {
       } else {
         rec.walletPublicKeyHex = sessionId;
         rec.ownerPublicKeyHex = session.ownerPublicKeyHex;
+        rec.applicationKey = applicationKey(origin, session.appIdentity);
+        if (!this.deps.hostedApplication && this.deps.storageRepository?.putApplication) {
+          try {
+            await this.deps.storageRepository.putApplication({ key: rec.applicationKey, origin, name: session.appIdentity?.appName ?? new URL(origin).host, identity: session.appIdentity, updatedAt: now });
+          } catch {
+            await this.scheduleFailFastRequest(recordId, "internal_error", "storage_error"); return;
+          }
+        }
         if ((method.startsWith("storage.") || method.startsWith("msfile.")) && !session.appIdentity) {
           // MSFile 与 Storage 一致：无 verified App Identity 的 session 不允许
           // 进入执行；对外用稳定 code fail-fast。
@@ -2830,7 +2854,15 @@ export class ProtocolServiceImpl implements ProtocolService {
       }
     }
 
+    if (this.isTerminalPhase(rec.phase)) return;
+    // Payment must first obtain a real frozen preview; its external approval is requested before submit, not at the internal wallet signer.
+    if (method === "payment.pay") {
+      rec.autoExecuteAfterUnlock = true;
+      this.applyManualPhaseDecision(recordId, origin, true);
+      return;
+    }
     const autoApproved = await this.tryAutoApprove(parsed, origin, rec);
+    if (this.isTerminalPhase(rec.phase)) return;
     if (autoApproved) {
       rec.autoApproved = true;
       // auto-approve 路径：unlocked → queued；locked → waiting_unlock_auto。
@@ -3164,54 +3196,21 @@ export class ProtocolServiceImpl implements ProtocolService {
     return null;
   }
 
-  /**
-   * 判断新 request 是否命中 auto-approve / auto-sign。
-   *
-   * 命中条件（与旧实现一致，但**不**依赖当前 lockState）：
-   *   - 付款直接进入钱包核心审核；true 不授予签名或免除钱包金额检查。
-   *   - 已知 identity.get / intent.sign 操作自动静默，仍校验当前会话和正文。
-   *   - cipher.*：originCache 命中相应 auto-approve 配置；
-   *     cache miss 时先 await getOriginSettingsCached 兜底一次（不翻案）。
-   *
-   * 注意：lockState **不**参与 auto-approve 判断。auto-approve 的命中只
-   * 取决于 origin 配置；解锁后是否真的"跳过 confirming 直接执行"由
-   * `acceptRequest` 根据 lockState + autoApproved 决定（见施工单
-   * 2026-06-27 001 第五节）：
-   *   - unlocked + auto-approved → queued；
-   *   - locked + auto-approved   → waiting_unlock_auto（解锁后入队）。
-   *
-   * 旧实现的问题：`tryAutoApprove` 在 locked 时直接 return false，导致
-   * 锁屏期间到达的 auto-approve 请求被错误地推到 `waiting_unlock_manual`，
-   * 解锁后还要人工确认——这与施工单"auto-confirm 在锁屏期间不要绕过
-   * 解锁直接执行，但解锁后应直接入队"的语义相反。
+  /** External operation grants belong to the application, independently for each method.
+   * Unknown grants never silently authorize execution. Payment obtains a frozen preview and checks its own grant before submission.
+   * Connection, wallet-generation and real business-state checks remain in the execution path; no wallet-internal approval is installed here.
    */
   private async tryAutoApprove(
     parsed: { id: string; networkIdentity: NetworkIdentity; method: ProtocolMethod; params: MethodParams<ProtocolMethod> },
     origin: string,
     _rec: RequestRecord
   ): Promise<boolean> {
-    // Known operation signatures are silent after normal session binding.
-    // This skips only the per-call confirmation; execute still validates the
-    // current session, scope, owner/network and complete typed document.
-    // Login, key export/settings and generic digest signing are not included.
-    if (parsed.method === "identity.get" || parsed.method === "intent.sign") return true;
-    if (parsed.method === "payment.channel.register" || parsed.method === "payment.pay" || parsed.method === "payment.status" || parsed.method === "p2pkh.transfer" || parsed.method === "feepool.prepare" || parsed.method === "feepool.commit") return true;
-    if (
-      parsed.method === "cipher.encrypt" ||
-      parsed.method === "cipher.decrypt"
-    ) {
-      // 同步 cache 检查；cache miss 时直接 await 一次 K-V 再判定一次。
-      let hit = this.isCipherAutoApprovedSync(origin);
-      if (!hit) {
-        const settings = await this.getOriginSettingsCached(origin);
-        if (settings) {
-          hit =
-            ((parsed.method === "cipher.encrypt" || parsed.method === "cipher.decrypt") &&
-              settings.cipherAutoApproveEnabled);
-        }
-      }
-      return hit;
+    if (requiresApplicationApproval(parsed.method)) {
+      if (!_rec.applicationKey) return false;
+      try { return (await readApplicationPermissions(this.deps.storageRepository, _rec.applicationKey)).includes(parsed.method); }
+      catch { return false; } // unknown permission never silently authorizes execution
     }
+    if (parsed.method === "payment.channel.register" || parsed.method === "payment.status" || parsed.method === "p2pkh.transfer" || parsed.method === "feepool.prepare" || parsed.method === "feepool.commit") return true;
     // connect.* 走 manual 路径（施工单 2026-06-28 001）：
     //   - connect.login / resume：用户必须明确点确认（login 还要选 key）；
     //   - connect.logout：unlocked 时直接入队执行（不需要额外确认 UI），
@@ -3219,13 +3218,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     // auto-approve 配置对 connect.* 不生效——caller 主动发 connect.* 已经是
     // "希望走 connect 流程"的信号，不应被 per-origin auto-approve 跳过。
     return false;
-  }
-
-  private isCipherAutoApprovedSync(origin: string): boolean {
-    if (!this.deps.storageRepository) return false;
-    const rec = this.originCache.get(origin) ?? null;
-    if (!rec) return false;
-    return rec.cipherAutoApproveEnabled === true;
   }
 
   private async getOriginSettingsCached(origin: string): Promise<ProtocolOriginSettingsRecord | null> {
@@ -3468,6 +3460,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!rec) return;
     if (rec.phase !== "confirming") return;
     this.clearConfirmTimeout(recordId);
+    rec.paymentApproval?.(false);
+    rec.paymentApproval = undefined;
     rec.phase = "timed_out";
     rec.errorCode = "user_rejected";
     rec.errorMessage = "User rejected";
@@ -3504,6 +3498,8 @@ export class ProtocolServiceImpl implements ProtocolService {
       this.executionQueue = this.executionQueue.filter((id) => id !== recordId);
     }
     this.clearConfirmTimeout(recordId);
+    rec.paymentApproval?.(false);
+    rec.paymentApproval = undefined;
     rec.phase = "rejected";
     rec.errorCode = "user_rejected";
     rec.errorMessage = "User rejected";
@@ -3733,6 +3729,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       const activeIdentity = boot?.networkIdentity ?? this.requireCurrentOwnerKey(rec.networkIdentity.publicKeyHex);
       if (!activeIdentity || !sameNetworkIdentity(activeIdentity, rec.networkIdentity)) throw new ProtocolValidationError("invalid_request", "Network identity mismatch");
       const result = await this.dispatch(rec);
+      if (this.isTerminalPhase(rec.phase)) return;
       await this.rememberChannelSessionFromResult(rec, result);
       if (
       rec.cancelRequested &&
@@ -3754,13 +3751,14 @@ export class ProtocolServiceImpl implements ProtocolService {
         rec.updatedAt = rec.finishedAt;
         await this.persistFeedCommandFor(rec);
         await this.replyResultToRec(rec, result);
+        if (rec.method === "connect.logout") this.deps.applicationLoggedOut?.();
       }
       this.emitFeed();
       this.emit();
     } catch (err) {
-      // A terminal command-history write is part of the user-visible request
-      // result. Surface its failure as a protocol error instead of allowing a
-      // rejected background promise to disappear.
+      // Failed persistence of an approved result must still become a visible error.
+      // Only an independently cancelled/timed-out request has already been replied to.
+      if (rec.phase === "rejected" || rec.phase === "timed_out") return;
       const protoErr = toProtocolError(err);
       rec.phase = "failed";
       rec.errorCode = protoErr.code;
@@ -4560,10 +4558,13 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 抛错、对外回 ok=false，session 真值层面 logout 已生效——下次
     // connect.resume / cipher.* 仍会按 fail-fast 路径失败（session
     // revoked）。这是 fail-closed 的安全语义，不是 bug。
-    try {
-      requireVaultCommandAccepted(await this.deps.vault.lock(), "lock");
-    } catch {
-      throw localFailure("internal_error", "connect.logout: vault lock failed");
+    // App logout revokes its own connection, never locks the shared main wallet.
+    if (!this.deps.hostedApplication) {
+      try {
+        requireVaultCommandAccepted(await this.deps.vault.lock(), "lock");
+      } catch {
+        throw localFailure("internal_error", "connect.logout: vault lock failed");
+      }
     }
     return result;
   }
@@ -4934,9 +4935,12 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     if (!claimed.created) {
       if (claimed.record.requestDigest !== requestDigest) throw protocolError("id_conflict", "clientRequestId was already used with different payment facts");
-      return paymentResultFromRecord(await this.refreshConnectPaymentFromManager(rec, claimed.record));
+      const existing = await this.refreshConnectPaymentFromManager(rec, claimed.record);
+      rec.paymentStatus = existing.status;
+      return paymentResultFromRecord(existing);
     }
     let current = claimed.record;
+    let submissionStarted = false;
     try {
       assertBoundPayment();
       const channelId = await publisherPaymentChannelId(session.appIdentity.publisherPublicKeyHex, params.paymentType, session.networkIdentity.bsvNetwork);
@@ -4975,6 +4979,22 @@ export class ProtocolServiceImpl implements ProtocolService {
       };
       current = await storeConnectPaymentRecord(repo, current);
       assertBoundPayment();
+      rec.paymentPreview = payment;
+      const permitted = await readApplicationPermissions(repo, rec.applicationKey!);
+      assertBoundPayment();
+      rec.autoApproved = permitted.includes("payment.pay");
+      if (!rec.autoApproved) {
+        const approved = await new Promise<boolean>(resolve => {
+          rec.paymentApproval = resolve;
+          this.setRecordPhase(rec.recordId, "confirming");
+          const timeout = this.resolveConfirmTimeoutSnapshot(rec.origin);
+          this.startConfirmTimeout(rec.recordId, timeout.initialSeconds, timeout.startedFromFallback);
+          this.emit(); this.emitFeed();
+        });
+        if (!approved) throw protocolError("user_rejected", "External payment was not approved");
+      }
+      assertBoundPayment();
+      submissionStarted = true;
       const submitted = await p2pkhService.submitTransfer({ ...preview, ownerPublicKeyHex: identity.ownerPublicKeyHex } as never);
       const reason = submitted.error ?? submitted.reason ?? "";
       const status: import("@keymaster/contracts").ConnectPaymentStatus =
@@ -4992,15 +5012,19 @@ export class ProtocolServiceImpl implements ProtocolService {
         updatedAt: Date.now(),
       };
       current = await storeConnectPaymentRecord(repo, current);
+      rec.paymentStatus = current.status;
+      if (this.isTerminalPhase(rec.phase)) await this.persistFeedCommandFor(rec);
       return paymentResultFromRecord(current);
     } catch (error) {
       current = {
         ...current,
-        status: "unknown",
+        status: submissionStarted ? "unknown" : "not_signed",
         reason: (error instanceof Error ? error.message : String(error)).slice(0, 256),
         updatedAt: Date.now(),
       };
       current = await storeConnectPaymentRecord(repo, current).catch(() => current);
+      rec.paymentStatus = current.status;
+      if (this.isTerminalPhase(rec.phase)) await this.persistFeedCommandFor(rec);
       return paymentResultFromRecord(current);
     }
   }
@@ -6224,6 +6248,10 @@ export class ProtocolServiceImpl implements ProtocolService {
       : "pending";
     return {
       id: rec.recordId,
+      ...(rec.applicationKey ? { applicationKey: rec.applicationKey } : {}),
+      ...(rec.manualApprovedAt ? { manualApprovedAt: rec.manualApprovedAt } : {}),
+      ...(rec.paymentPreview ? { paymentPreview: rec.paymentPreview } : {}),
+      ...(rec.paymentStatus ? { paymentStatus: rec.paymentStatus } : {}),
       origin: rec.origin,
       requestId: rec.transportRequestId,
       method: rec.method,

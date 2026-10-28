@@ -29,7 +29,7 @@
 import { useEffect, useRef, useState } from "react";
 import { PageHeader } from "@keymaster/ui";
 import { usePluginCapability } from "webloom-framework/react";
-import { usePluginI18n } from "@keymaster/runtime";
+import { AppLink, usePluginI18n } from "@keymaster/runtime";
 import {
   PROTOCOL_SERVICE_CAPABILITY,
   type ProtocolOriginSettings,
@@ -192,16 +192,6 @@ export function OriginSettingsTrayInline({ origin, onClose }: OriginSettingsTray
     }
   }
 
-  /** 复选框 onChange：构造 next + 立即提交。无中间态。 */
-  function toggleBoolean<K extends keyof ProtocolOriginSettings>(
-    key: K,
-    value: boolean
-  ): void {
-    if (!record) return;
-    const next: ProtocolOriginSettings = { ...record, [key]: value };
-    void commit(next);
-  }
-
   /**
    * 数字字段提交：规范化 → 幂等检查 → 提交。
    * 幂等：规范化值等于当前 record 真值时不写库（覆盖 blur 与 Enter 连续
@@ -309,22 +299,8 @@ export function OriginSettingsTrayInline({ origin, onClose }: OriginSettingsTray
         </button>
       </header>
       <div className="origin-settings-panel__form">
-        <p>{t("protocol.originSettings.walletPaymentReview", {defaultValue: "付款由钱包核验实际金额及许可；额度在钱包的支付渠道设置中管理。"})}</p>
-        <p>{t("protocol.originSettings.knownOperationPolicy", {defaultValue: "已授权会话内的账户信息与意图签名为自动静默操作；仍校验身份、网络、权限和完整正文。登录、配置及密钥管理不在此范围。"})}</p>
-        {/* Cipher access is not silently promoted to an operation signature. */}
-        <label className="origin-settings-panel__field origin-settings-panel__field--inline">
-          <input
-            type="checkbox"
-            checked={record.cipherAutoApproveEnabled}
-            disabled={saving}
-            onChange={(e) => toggleBoolean("cipherAutoApproveEnabled", e.currentTarget.checked)}
-          />
-          <span>
-            {t("protocol.originSettings.cipherAutoApprove.label", {
-              defaultValue: "始终同意 加密解密"
-            })}
-          </span>
-        </label>
+        <p>自动许可属于应用，不属于会话，也不使用站点级合并开关。身份签名、加密、解密、付款分别授权。</p>
+        <AppLink to="/apps/connections" target="_blank" rel="noopener noreferrer">进入钱包的应用连接 → 对应应用 → 设置，查看或取消许可</AppLink>
         {/* ============== 施工单 003：per-origin 确认超时 ============== */}
         {renderNumberField(
           "confirmTimeoutSeconds",

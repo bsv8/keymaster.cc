@@ -335,13 +335,13 @@ function useVaultUnlocked(): boolean {
   }
 }
 
-function MsFileApprovalSection({ t }: { t: (key: string, options?: { defaultValue?: string }) => string }) {
+export function MsFileApprovalSection({ t, approvalId }: { t: (key: string, options?: { defaultValue?: string }) => string; approvalId?: string }) {
   const hasMsfile = useHasPluginCapability(MSFILE_SERVICE_CAPABILITY);
   if (!hasMsfile) return null;
-  return <MsFileApprovalSectionInner t={t} />;
+  return <MsFileApprovalSectionInner t={t} approvalId={approvalId} />;
 }
 
-function MsFileApprovalSectionInner({ t }: { t: (key: string, options?: { defaultValue?: string }) => string }) {
+function MsFileApprovalSectionInner({ t, approvalId }: { t: (key: string, options?: { defaultValue?: string }) => string; approvalId?: string }) {
   // 仅在 has("msfile.service") 为真时挂载，hook 顺序稳定。
   const service = usePluginCapability(MSFILE_SERVICE_CAPABILITY);
   const resources = useProtocolResources();
@@ -354,7 +354,7 @@ function MsFileApprovalSectionInner({ t }: { t: (key: string, options?: { defaul
     (a, b) => JSON.stringify(a.approvals) === JSON.stringify(b.approvals)
   );
   const unlocked = useVaultUnlocked();
-  const approvals = statusResource.approvals;
+  const approvals = statusResource.approvals.filter(approval => !approvalId || approval.approvalId === approvalId);
   const [amounts, setAmounts] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
 
@@ -1055,7 +1055,7 @@ function pickConfirmingConnectRecordId(service: ProtocolService, method: "connec
 
 /* ============== 施工单 2026-06-28 003：auth owner 全屏页 ============== */
 
-function ConnectLoginAuthPage({
+export function ConnectLoginAuthPage({
   t,
   service,
   auth
@@ -1157,7 +1157,7 @@ function ConnectLoginAuthPage({
   );
 }
 
-function ConnectResumeAuthPage({
+export function ConnectResumeAuthPage({
   t,
   service,
   auth

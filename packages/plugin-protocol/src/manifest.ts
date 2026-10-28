@@ -1,3 +1,6 @@
+import { ApplicationConnectionHost } from "./applicationConnectionHost.js";
+import { ApplicationCenterPage, ApplicationConnectionControls } from "./ApplicationCenter.js";
+import { APPLICATION_CONNECTIONS_CAPABILITY, BUSINESS_REGISTRY_CAPABILITY, type ApplicationConnectionsSnapshot } from "@keymaster/contracts";
 import { createPublicProtocolService } from "./publicProtocolService.js";
 import { APP_STORAGE_CLIENTS_CAPABILITY } from "@keymaster/contracts";
 import { STORAGE_KV_CLIENTS_CAPABILITY } from "@keymaster/contracts";
@@ -477,7 +480,7 @@ const protocolPluginDefinition = {
     runtime: "window-main",
     connect: { providerMethods: ["connect.login", "connect.resume", "connect.logout", "connect.launch"] },
     scopeKind: "storage",
-    provides: [PROTOCOL_SERVICE_CAPABILITY, PROTOCOL_STORAGE_REPOSITORY_CAPABILITY, PROTOCOL_COORDINATOR_CONTROL_CAPABILITY],
+    provides: [PROTOCOL_SERVICE_CAPABILITY, PROTOCOL_STORAGE_REPOSITORY_CAPABILITY, PROTOCOL_COORDINATOR_CONTROL_CAPABILITY, APPLICATION_CONNECTIONS_CAPABILITY],
     storages: [
       PROTOCOL_STORAGE_DECLARATIONS.durablePolicy,
       PROTOCOL_STORAGE_DECLARATIONS.sessions,
@@ -486,7 +489,8 @@ const protocolPluginDefinition = {
     dependencies: defineRuntimeUnitDependencies([
       { capability: STORAGE_KV_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "声明存储客户端及用途授权" },
       { capability: PROTOCOL_COORDINATOR_CLIENT_BINDING_CAPABILITY, sourceRuntime: "window-main", reason: "声明本插件的受限 Coordinator 连接" },
-      { capability: PAGE_UI_REGISTRY_CAPABILITY, reason: "注册 Connect 弹窗" },
+      { capability: PAGE_UI_REGISTRY_CAPABILITY, reason: "注册 Connect 与应用连接中心" },
+      { capability: BUSINESS_REGISTRY_CAPABILITY, reason: "应用连接管理入口" },
       { capability: OWNED_RESOURCE_ACCESS_CAPABILITY, reason: "Protocol 自有资源" },
       { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
       {
@@ -539,7 +543,8 @@ const protocolPluginDefinition = {
       }
     };
 
-    const service = createProtocolService({
+    let applicationHost: ApplicationConnectionHost;
+    const serviceDeps: import("./protocolService.js").ProtocolServiceDeps = {
         vault: vaultService,
         walletState: walletStateService,
         storageController,
@@ -575,7 +580,9 @@ const protocolPluginDefinition = {
         // 施工单 2026-06-29 001：从 URL `?boot=appView` 解析当前模式。
         // 仅在 popup 挂载时解析一次；session 启动后不再变动。
         bootMode: typeof window !== "undefined" ? parseBootMode(window.location.search) : "connect",
-      });
+        acceptApplicationLaunch: (payload, source) => applicationHost.acceptLaunch(payload, source),
+      };
+    const service = createProtocolService(serviceDeps);
       ctx.provide(PROTOCOL_SERVICE_CAPABILITY, createPublicProtocolService(service, () => ctx.scope.assertActive()));
       const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
       resources.register<{ snapshot: ProtocolSessionSnapshot; feed: ProtocolCommandFeedState }, readonly string[]>({
@@ -621,6 +628,23 @@ const protocolPluginDefinition = {
       });
       ctx.provide(PROTOCOL_STORAGE_REPOSITORY_CAPABILITY, storageRepository);
       await service.attachProtocolStorageRepository(storageRepository);
+      applicationHost = new ApplicationConnectionHost(serviceDeps, storageRepository);
+      ctx.provide(APPLICATION_CONNECTIONS_CAPABILITY, applicationHost);
+      await applicationHost.initialize();
+      const onApplicationMessage = (event: MessageEvent) => {
+        void applicationHost.handleMessage(event).catch(() => console.error("[connect] Application request handling failed"));
+      };
+      const onApplicationUnload = () => applicationHost.dispose();
+      // A BFCache restoration must rebuild a stopped host, not silently revive old connection authority.
+      const onApplicationRestore = (event: PageTransitionEvent) => { if (event.persisted) window.location.reload(); };
+      window.addEventListener("message", onApplicationMessage);
+      window.addEventListener("pagehide", onApplicationUnload);
+      window.addEventListener("pageshow", onApplicationRestore);
+      resources.register<ApplicationConnectionsSnapshot, readonly string[]>({
+        id: "protocol.applications", scope: "global", key: () => ["protocol.applications"],
+        load: async () => applicationHost.snapshot(),
+        subscribe: (_args, _context, invalidate) => applicationHost.subscribe(invalidate), invalidation: "immediate"
+      });
 
       resources.register({ id: "protocol.msfile-approvals", scope: "active-key", key: (_args, context) => ["protocol.msfile-approvals", context.activePublicKeyHex ?? "none"],
         load: async () => ({ approvals: ctx.optionalCapability(MSFILE_SERVICE_CAPABILITY)?.listPendingApprovals() ?? [] }),
@@ -638,11 +662,22 @@ const protocolPluginDefinition = {
       const Popup = bindProtocolUi(ctx, ProtocolPopupPage);
       const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope).view;
       pages.register({ kind: "frame", slot: "protocol-popup", id: "protocol.popup", label: "Connect", render: () => createElement(Popup) });
+      const Center = bindProtocolUi(ctx, ApplicationCenterPage);
+      const Controls = bindProtocolUi(ctx, ApplicationConnectionControls);
+      pages.register({ kind: "page", path: "/apps/connections", id: "protocol.applications", label: "应用连接", render: () => createElement(Center) });
+      pages.register({ kind: "header", slot: "topbar", id: "protocol.application-controls", order: 900, label: "应用连接", render: () => createElement(Controls) });
+      ctx.capability(BUSINESS_REGISTRY_CAPABILITY).registerFeature("protocol", "home", {
+        id: "home.application-connections", label: "应用连接", order: 55, icon: "Plug", entry: { path: "/apps/connections", routeId: "protocol.applications" }
+      });
 
       return () => {
+        window.removeEventListener("message", onApplicationMessage);
+        window.removeEventListener("pagehide", onApplicationUnload);
+        window.removeEventListener("pageshow", onApplicationRestore);
+        applicationHost.dispose();
         // 幂等 teardown：service 内部状态在 endSession 后清空。
         try {
-          service.endSession();
+          service.dispose();
         } catch {
           // ignore
         }

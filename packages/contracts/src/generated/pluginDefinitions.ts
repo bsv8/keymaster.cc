@@ -928,6 +928,11 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             "kind": "local",
             "id": "protocol.coordinator-control",
             "version": "1"
+          },
+          {
+            "kind": "local",
+            "id": "protocol.application-connections",
+            "version": "1"
           }
         ],
         "privateProvides": [],
@@ -957,7 +962,16 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
               "version": "1"
             },
             "sourceRuntime": "window-main",
-            "reason": "注册 Connect 弹窗"
+            "reason": "注册 Connect 与应用连接中心"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "business.registry",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "应用连接管理入口"
           },
           {
             "capability": {
