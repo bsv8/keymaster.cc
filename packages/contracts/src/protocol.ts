@@ -1164,6 +1164,8 @@ export type ProtocolFailureReason =
  *     `bootstrap_runtime | vault_runtime` 两条来源里挑当前可用的那条。
  */
 export interface ConnectSessionRecord {
+  /** 持久连接授权引用；锁定/刷新不撤销，显式断开后失效。 */
+  authorizationId?: string;
   networkIdentity: import("./networkIdentity.js").NetworkIdentity;
   /** 内部缓存与付款核算键：由网络、公钥、来源确定性压缩，不作为公开授权编号。 */
   sessionId: string;
@@ -1228,6 +1230,7 @@ export interface ConnectLoginParams {
  * 任何 key 域 surrogate id（硬切换 002 后连内部借用句柄也按 hex 走）。
  */
 export interface ConnectLoginResult {
+  authorizationId: string;
   networkIdentity: import("./networkIdentity.js").NetworkIdentity;
   /** 钱包压缩公钥；后续请求用它定位身份。 */
   walletPublicKeyHex: string;
@@ -1264,6 +1267,7 @@ export interface ConnectResumeParams {
  * 关键（施工单 2026-06-28 002 硬切换）：**不**再返回 `ownerKeyId`。
  */
 export interface ConnectResumeResult {
+  authorizationId: string;
   networkIdentity: import("./networkIdentity.js").NetworkIdentity;
   walletPublicKeyHex: string;
   ownerPublicKeyHex: string;
@@ -1364,6 +1368,7 @@ export interface ConnectLaunchParams {
 
 /** `connect.launch` 成功结果（与 `connect.login` 对齐）。 */
 export interface ConnectLaunchResult {
+  authorizationId: string;
   networkIdentity: import("./networkIdentity.js").NetworkIdentity;
   walletPublicKeyHex: string;
   ownerPublicKeyHex: string;
@@ -1403,8 +1408,6 @@ export interface LaunchAppViewInput {
   appOrigin: string;
   /** client app 真正打开的 URL（appView bootstrap 后会带上 `?launchToken=`）。 */
   appUrl: string;
-  /** 解锁 appView 专属 session 所需的 Vault 密码。 */
-  password: string;
   /**
    * 期望在 connect.login 快照的 claim 列表；与 `connect.login.claims`
    * 同语义。V1 不传时取空数组。
@@ -1420,16 +1423,16 @@ export interface LaunchAppViewInput {
  * 设计缘由（施工单 2026-06-29 002 硬切换）：
  *   - 成功意味着 launcher 已完成整套：vault 已解锁校验 + owner key 已 ready
  *     校验 + app 配置合法 + 预建 connect session + 创建 App 专属 crypto capability +
- *     生成 launchToken + 注册主钱包连接宿主 + 打开外部 App 窗口。
- *   - 启动失败（任何一道闸）一律 throw，不返回 `appWindowOpened=false`
+ *     生成 launchToken + 注册主钱包连接宿主 + 导航跨源 App iframe。
+ *   - 启动失败（任何一道闸）一律 throw，不返回 `appViewOpened=false`
  *     的"半成功"语义——避免业务插件"先显示成功，再去查"等隐式兼容路径。
  *   - 返回的 `appUrl` 是已拼上 `?launchToken=<id>` 的真实打开 URL；
  *     `plugin-apps` 仅作展示用，**不**自己再去 `window.open(appUrl)`。
  */
 export interface LaunchAppViewResult {
   networkIdentity: NetworkIdentity;
-  /** 外部 App 窗口已打开；不创建中间 Session Window。 */
-  appWindowOpened: boolean;
+  /** 外部 App 已在钱包创建的跨源 iframe 中打开。 */
+  appViewOpened: true;
   /** launcher 已确认的钱包公钥；与 networkIdentity 一起定位身份。 */
   walletPublicKeyHex: string;
   /** 本次为该 app 生成的 launchToken；client app 首条 `connect.launch` 消费。 */
@@ -2463,12 +2466,12 @@ export interface ProtocolService {
    * 若 vault 当前已锁定，则会先解锁再建立新 session，成功后原子吊销
    * 同 origin 旧 session。
    */
-  confirmConnectLogin(recordId: string, password: string): Promise<void>;
+  confirmConnectLogin(recordId: string): Promise<void>;
   /**
    * 用户在 connect resume 视图提交密码。service 先验密；若 vault 当前
    * 已锁定，则会先解锁再恢复既有 session。
    */
-  confirmConnectResume(recordId: string, password: string): Promise<void>;
+  confirmConnectResume(recordId: string): Promise<void>;
   /**
    * 用户在 connect login / resume / cipher confirm / 任何视图点击"取消"，
    * service 把 request 收尾为 `rejected`，对外回 `user_rejected`。

@@ -7,7 +7,7 @@ import { STORAGE_KV_CLIENTS_CAPABILITY } from "@keymaster/contracts";
 import { PROTOCOL_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
 import { createElement } from "react";
 import { bindProtocolUi } from "./ProtocolResourceContext.js";
-import { PAGE_UI_REGISTRY_CAPABILITY, OWNED_RESOURCE_ACCESS_CAPABILITY } from "@keymaster/contracts";
+import { PAGE_UI_REGISTRY_CAPABILITY, PAGE_UI_RENDERER_CAPABILITY, OWNED_RESOURCE_ACCESS_CAPABILITY } from "@keymaster/contracts";
 import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 // packages/plugin-protocol/src/manifest.ts
 // 对外协议插件：完整钱包应用连接中心、逐操作外部许可与受限业务网关。
@@ -466,6 +466,7 @@ const protocolPluginDefinition = {
       { capability: STORAGE_KV_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "声明存储客户端及用途授权" },
       { capability: PROTOCOL_COORDINATOR_CLIENT_BINDING_CAPABILITY, sourceRuntime: "window-main", reason: "声明本插件的受限 Coordinator 连接" },
       { capability: PAGE_UI_REGISTRY_CAPABILITY, reason: "注册 Connect 与应用连接中心" },
+      { capability: PAGE_UI_RENDERER_CAPABILITY, reason: "钱包内的跨源应用工作区" },
       { capability: BUSINESS_REGISTRY_CAPABILITY, reason: "应用连接管理入口" },
       { capability: OWNED_RESOURCE_ACCESS_CAPABILITY, reason: "Protocol 自有资源" },
       { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
@@ -555,7 +556,9 @@ const protocolPluginDefinition = {
         },
         // 根服务只作为钱包内启动器；连接实例的方向由主钱包宿主装配。
         bootMode: "connect",
-        acceptApplicationLaunch: (payload, source) => applicationHost.acceptLaunch(payload, source),
+        reserveApplicationView: input => ctx.capability(PAGE_UI_RENDERER_CAPABILITY).openApplication(input),
+        acceptApplicationLaunch: (payload, source, view) => applicationHost.acceptLaunch(payload, source, view),
+        closeApplicationView: source => applicationHost.closeView(source),
       };
     const service = createProtocolService(serviceDeps);
       ctx.provide(PROTOCOL_SERVICE_CAPABILITY, createPublicProtocolService(service, () => ctx.scope.assertActive()));

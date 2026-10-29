@@ -15,6 +15,8 @@ export interface ApplicationConnection {
   applicationKey: string;
   createdAt: number;
   closedAt?: number;
+  /** 瞬时运行权已结束，原连接授权仍保留。 */
+  pausedAt?: number;
   /** Wallet-internal authority already bound to this connection; never sent through Connect. */
   service: ProtocolService;
 }
@@ -35,13 +37,11 @@ export interface ApplicationConnectionsSnapshot {
   error?: string;
 }
 export interface ApplicationConnections {
-  /** 完整钱包壳层就绪后登记浏览器的真实 opener；不从外部消息认领来源。 */
-  acceptOpener(source: Window | null): void;
   snapshot(): ApplicationConnectionsSnapshot;
   subscribe(listener: () => void): () => void;
   permissions(key: string): Promise<ProtocolMethod[]>;
   revokePermission(key: string, method: ProtocolMethod): Promise<void>;
-  disconnect(id: string): void;
+  disconnect(applicationKey: string): Promise<void>;
   focus(id: string): void;
 }
 export const APPLICATION_CONNECTIONS_CAPABILITY = defineCapability<ApplicationConnections>({ kind: "local", id: "protocol.application-connections", version: "1" });

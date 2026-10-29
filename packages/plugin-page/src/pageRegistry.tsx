@@ -4,7 +4,7 @@ import { ScopedPluginConsumerProvider as PluginConsumerProvider } from "@keymast
 import { createScopedRegistryView } from "webloom-framework/advanced";
 import type { PluginConsumer } from "webloom-framework";
 import { PAGE_UI_REGISTRY_CAPABILITY } from "@keymaster/contracts";
-import type { PageUiContribution, PageUiRegistry, PageUiRenderer, PageUiLocation, I18nText } from "@keymaster/contracts";
+import type { ApplicationView, PageUiContribution, PageUiRegistry, PageUiRenderer, PageUiLocation, I18nText } from "@keymaster/contracts";
 import { comparePagePaths, matchPagePath, pagePathShape } from "./pagePath.js";
 
 interface OwnedEntry { entry: PageUiContribution; consumer: PluginConsumer; ownerInstanceId: string; component: ComponentType<{ location: PageUiLocation }> }
@@ -75,7 +75,62 @@ export function createPageRegistry(resolveText: (label: I18nText) => string = la
       return binding;
     },
   };
+  let outlet: HTMLElement | null = null;
+  let selectedApplication: string | null = null;
+  const appViews = new Map<string, { view: ApplicationView; frame: HTMLIFrameElement }>();
+  const updateFrames = () => {
+    for (const [id, { frame }] of appViews) frame.hidden = id !== selectedApplication;
+  };
   const renderer: PageUiRenderer = {
+    openApplication(input) {
+      active();
+      if (!outlet?.isConnected) throw new Error("Application workspace is not mounted");
+      const origin = new URL(input.origin);
+      if (!['https:', 'http:'].includes(origin.protocol) || origin.origin !== input.origin || origin.origin === window.location.origin) throw new Error("Applications require a separate HTTP origin");
+      appViews.get(input.id)?.view.close();
+      const frame = document.createElement("iframe");
+      frame.title = input.title;
+      frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms allow-downloads");
+      frame.referrerPolicy = "no-referrer";
+      frame.className = "workspace-app-frame";
+      outlet.append(frame);
+      const source = frame.contentWindow;
+      if (!source) { frame.remove(); throw new Error("Application frame unavailable"); }
+      let closed = false;
+      const view: ApplicationView = {
+        id: input.id, title: input.title, origin: input.origin, source,
+        get closed() { return closed || !frame.isConnected; },
+        navigate(url) {
+          active();
+          if (view.closed) throw new Error("Application has closed");
+          if (new URL(url).origin !== input.origin) throw new Error("Application origin changed");
+          frame.src = url;
+        },
+        focus() { active(); if (view.closed) throw new Error("Application has closed"); selectedApplication = input.id; updateFrames(); changed(); frame.focus(); },
+        close() {
+          if (closed) return;
+          closed = true;
+          // Revoke transport authority before removing the browsing context.
+          try { input.onClose(); } finally {
+            frame.remove(); appViews.delete(input.id);
+            if (selectedApplication === input.id) selectedApplication = null;
+            updateFrames(); changed();
+          }
+        },
+      };
+      appViews.set(input.id, { view, frame });
+      selectedApplication = input.id; updateFrames(); changed();
+      return view;
+    },
+    applicationViews() { active(); return [...appViews.values()].map(item => item.view); },
+    activeApplication() { active(); return selectedApplication; },
+    selectApplication(id) { active(); if (id !== null && !appViews.has(id)) throw new Error("Application is not open"); selectedApplication = id; updateFrames(); changed(); },
+    attachApplicationOutlet(element) {
+      active();
+      if (element === outlet) return;
+      if (!element && appViews.size) for (const item of [...appViews.values()]) item.view.close();
+      outlet = element;
+    },
     revision: () => revision,
     hasPage(path) { active(); return matching(entry => entry.kind === "page" && !!matchPagePath(entry.path, path)).length > 0; },
     hasSettings(path) { active(); return matching(entry => entry.kind === "settings-block" && !!matchPagePath(entry.path, path)).length > 0; },
@@ -116,5 +171,5 @@ export function createPageRegistry(resolveText: (label: I18nText) => string = la
     renderHeader(slot) { active(); return matching(entry => entry.kind === "header" && entry.slot === slot).map(entry => render(entry, Object.freeze({ path: "", params: Object.freeze({}) }))); },
     subscribe(listener) { active(); listeners.add(listener); return () => { listeners.delete(listener); }; },
   };
-  return { registry, renderer, dispose() { if (disposed) return; disposed = true; entries.clear(); changed(); listeners.clear(); } };
+  return { registry, renderer, dispose() { if (disposed) return; for (const item of [...appViews.values()]) item.view.close(); outlet = null; disposed = true; entries.clear(); changed(); listeners.clear(); } };
 }

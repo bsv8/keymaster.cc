@@ -15,27 +15,6 @@ async function publisherPaymentChannelId(publisher: string, paymentType: Payment
 async function publisherPaymentSessionId(sessionId: string): Promise<string> {
   return appPaymentChannelId("connect-session", sessionId, "publisher-single.v1", "session");
 }
-async function authenticateAppWallet(
-  vault: Pick<import("@keymaster/contracts").VaultService, "verifyPassword">,
-  publicKeyHex: string,
-  password: string,
-  walletState: Pick<import("@keymaster/contracts").VaultWalletState, "snapshot">,
-): Promise<void> {
-  const issued = walletState.snapshot();
-  const assertLive = () => {
-    const current = walletState.snapshot();
-    if (issued.status !== "unlocked" || issued.activePublicKeyHex !== publicKeyHex
-      || current.status !== issued.status || current.activePublicKeyHex !== issued.activePublicKeyHex
-      || current.sessionEpoch !== issued.sessionEpoch || current.runGeneration !== issued.runGeneration
-      || current.walletGeneration !== issued.walletGeneration
-      || current.activeKeyIdentity?.bsvNetwork !== issued.activeKeyIdentity?.bsvNetwork) {
-      throw new Error("Active wallet key session has been revoked");
-    }
-  };
-  assertLive();
-  await vault.verifyPassword(password);
-  assertLive();
-}
 import { createProviderDispatch } from "./providerDispatch.js";
 import { KeymasterConnectReceiver, type ReceiverRequest } from "keymaster-connect/server";
 import type * as ConnectPublic from "keymaster-connect/protocol";
@@ -348,7 +327,9 @@ export interface ProtocolServiceDeps {
    */
   bootMode?: "connect" | "appView";
   /** 主钱包接管新 App 的独立 Receiver/运行上下文，不经窗口 bootstrap。 */
-  acceptApplicationLaunch?: (payload: AppBootstrapPayload, source: Window) => Promise<void>;
+  reserveApplicationView?: (input: { id: string; title: string; origin: string; onClose(): void }) => import("@keymaster/contracts").ApplicationView;
+  acceptApplicationLaunch?: (payload: AppBootstrapPayload, source: Window, view: import("@keymaster/contracts").ApplicationView) => Promise<void>;
+  closeApplicationView?: (source: Window) => void;
   applicationPermissionChanged?: () => Promise<void>;
   /** Shared main-wallet connection: App logout must not lock the whole wallet. */
   hostedApplication?: boolean;
@@ -974,6 +955,11 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /* ============== 公开只读接口 ============== */
 
+  /** 恢复控制只读检查瞬时绑定，不为健康连接重新签发运行权。 */
+  matchesBinding(source: Window, origin: string, bindingId: string | undefined): boolean {
+    return this.receiver.matchesBinding(source, origin, bindingId);
+  }
+
   /** 同步取当前快照。 */
   snapshot(): ProtocolSessionSnapshot {
     return this.snapshotInternal();
@@ -1485,7 +1471,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *     `connectLoginRecord()` 检查）；任何路径出错时保持 best-effort，不阻塞
    *     其它请求。
    */
-  async confirmConnectLogin(recordId: string, password: string): Promise<void> {
+  async confirmConnectLogin(recordId: string): Promise<void> {
     const rec = this.requestsByRecordId.get(recordId);
     if (!rec) return;
     if (rec.method !== "connect.login") return;
@@ -1494,28 +1480,10 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.assertWalletGeneration(rec);
     const ownerPublicKeyHex = rec.connectLoginWallet?.publicKeyHex;
     if (!ownerPublicKeyHex || ownerPublicKeyHex.toLowerCase() !== rec.networkIdentity.publicKeyHex) return;
-    if (this.lockStateValue === "locked") {
-      this.authUnlockInProgress = recordId;
-      rec.connectAuthSubmittedAt = Date.now();
-      try {
-        requireVaultCommandAccepted(await this.deps.vault.unlock(password), "unlock");
-      } catch (err) {
-        rec.connectAuthSubmittedAt = undefined;
-        this.authUnlockInProgress = null;
-        throw err;
-      } finally {
-        this.authUnlockInProgress = null;
-      }
-    } else {
-      rec.connectAuthSubmittedAt = Date.now();
-      try {
-        await authenticateAppWallet(this.deps.vault, ownerPublicKeyHex, password, this.deps.walletState);
-      } catch (err) {
-        rec.connectAuthSubmittedAt = undefined;
-        throw err;
-      }
-    }
-    // 认证 RPC 在等待期间允许取消；旧结果不能重新把已拒绝请求排入执行队列。
+    // 解锁属于完整钱包入口；连接确认不再解密或重复验证密码。
+    if (this.computeLockState() !== "unlocked") throw new Error("Unlock the wallet before approving a connection");
+    rec.connectAuthSubmittedAt = Date.now();
+    // 失效或已取消的申请不能重新进入执行队列。
     if (rec.cancelRequested || (rec.phase !== "waiting_unlock_manual" && rec.phase !== "confirming")) return;
     this.assertWalletGeneration(rec);
     // 关键（施工单 2026-06-28 002 硬切换）：login record 在用户点确认时
@@ -1541,7 +1509,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - snapshot 缺失（K-V 不可用 / session 失效）时不推进，UI 应当展示
    *     "该会话已失效，请重新登录"。
    */
-  async confirmConnectResume(recordId: string, password: string): Promise<void> {
+  async confirmConnectResume(recordId: string): Promise<void> {
     const rec = this.requestsByRecordId.get(recordId);
     if (!rec) return;
     if (rec.method !== "connect.resume") return;
@@ -1550,27 +1518,9 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!rec.connectResumeSnapshot) {
       return;
     }
-    if (this.lockStateValue === "locked") {
-      this.authUnlockInProgress = recordId;
-      rec.connectAuthSubmittedAt = Date.now();
-      try {
-        requireVaultCommandAccepted(await this.deps.vault.unlock(password), "unlock");
-      } catch (err) {
-        rec.connectAuthSubmittedAt = undefined;
-        this.authUnlockInProgress = null;
-        throw err;
-      } finally {
-        this.authUnlockInProgress = null;
-      }
-    } else {
-      rec.connectAuthSubmittedAt = Date.now();
-      try {
-        await authenticateAppWallet(this.deps.vault, rec.connectResumeSnapshot.ownerPublicKeyHex, password, this.deps.walletState);
-      } catch (err) {
-        rec.connectAuthSubmittedAt = undefined;
-        throw err;
-      }
-    }
+    if (this.computeLockState() !== "unlocked") throw new Error("Unlock the wallet before restoring a connection");
+    this.assertWalletGeneration(rec);
+    rec.connectAuthSubmittedAt = Date.now();
     if (rec.cancelRequested || (rec.phase !== "waiting_unlock_manual" && rec.phase !== "confirming")) return;
     this.clearConfirmTimeout(recordId);
     this.setRecordPhase(recordId, "queued");
@@ -1705,9 +1655,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       !input ||
       !input.appId ||
       !input.appOrigin ||
-      !input.appUrl ||
-      typeof input.password !== "string" ||
-      !input.password
+      !input.appUrl
     ) {
       throw new Error("launchAppView: missing app fields");
     }
@@ -1731,7 +1679,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         "launchAppView: invalid appUrl"
       );
     }
-    if (parsedAppUrl.origin !== input.appOrigin) {
+    if (!['https:', 'http:'].includes(parsedAppUrl.protocol) || parsedAppUrl.origin === window.location.origin || parsedAppUrl.origin !== input.appOrigin) {
       throw new LaunchAppViewError(
         "invalid_app_config",
         "launchAppView: appOrigin does not match appUrl.origin"
@@ -1752,26 +1700,15 @@ export class ProtocolServiceImpl implements ProtocolService {
         "launchAppView: session storage unavailable"
       );
     }
-    // 4) 必须在用户点击的同步调用栈中预开窗口。iOS Safari 会在任意
-    //    async 边界后清掉 user activation；等密码派生、会话落库完成后才
-    //    调 window.open 会被当作脚本弹窗拦截。先开 about:blank，待
-    //    bootstrap 就绪后再导航，opener 关系仍可保持不变。
-    let popup: Window | null = null;
+    if (!this.deps.reserveApplicationView) throw new LaunchAppViewError("window_unavailable", "Application workspace unavailable");
+    let view: import("@keymaster/contracts").ApplicationView;
     try {
-      popup = window.open("about:blank", "_blank");
-    } catch (err) {
-      throw new LaunchAppViewError(
-        "open_session_window_failed",
-        "launchAppView: window.open popup failed"
-      );
-    }
-    if (!popup) {
-      throw new LaunchAppViewError(
-        "open_session_window_blocked",
-        "launchAppView: window.open returned null"
-      );
-    }
-
+      view = this.deps.reserveApplicationView({
+        id: `${input.appOrigin}\0${input.appId}`, title: catalog.snapshot?.appName ?? input.appId, origin: input.appOrigin,
+        onClose: () => this.deps.closeApplicationView?.(view.source),
+      });
+    } catch { throw new LaunchAppViewError("open_session_window_failed", "Could not create application frame"); }
+    const popup = view.source;
     let sessionWindowNavigated = false;
     let stagedAppViewSessionId: string | undefined;
     try {
@@ -1790,6 +1727,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const sessionId = await this.connectBindingKey(key, input.appOrigin);
     wallet.assertActive();
     const sessionRecord: ConnectSessionRecord = {
+      authorizationId: crypto.randomUUID(),
       sessionId,
       origin: input.appOrigin,
       networkIdentity: projectNetworkIdentity(key),
@@ -1805,8 +1743,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     let sessionRuntimeBootstrap: SessionRuntimeBootstrap;
     try {
       const crypto = await this.deps.vault.createAppViewSession({
-        sessionId,
-        password: input.password
+        sessionId
       });
       stagedAppViewSessionId = sessionId;
       try { wallet.assertActive(); } catch (error) { crypto.dispose("launch-authority-revoked"); throw error; }
@@ -1862,17 +1799,18 @@ export class ProtocolServiceImpl implements ProtocolService {
       expiresAt: now + 24 * 60 * 60 * 1000,
       sessionRuntimeBootstrap
     });
-    // 主钱包内接管应用；外部窗口只收到一次性 launchToken 和钱包 origin。
+    // 主钱包保留所有执行句柄；跨源 iframe 只收到一次性 launchToken 和钱包 origin。
     if (!this.deps.acceptApplicationLaunch) throw new Error("Application connection host unavailable");
-    await this.deps.acceptApplicationLaunch(bootstrap, popup);
+    if (view.closed) throw new Error("Application closed during launch");
+    await this.deps.acceptApplicationLaunch(bootstrap, popup, view);
     wallet.assertActive();
     const clientUrl = new URL(appUrlWithLaunchToken);
     clientUrl.searchParams.set("sessionWindowOrigin", window.location.origin);
-    if (popup.closed) throw new Error("App window was closed during launch");
-    popup.location.replace(clientUrl.toString());
+    if (view.closed) throw new Error("Application closed during launch");
+    view.navigate(clientUrl.toString());
     sessionWindowNavigated = true;
     return {
-      appWindowOpened: true,
+      appViewOpened: true,
       networkIdentity: projectNetworkIdentity(key),
       walletPublicKeyHex: key.publicKeyHex,
       launchToken,
@@ -1882,7 +1820,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       if (!sessionWindowNavigated) {
         if (stagedAppViewSessionId) this.deps.vault.disposeAppViewSession(stagedAppViewSessionId, "AppView launch did not complete");
         try {
-          popup.close();
+          view.close();
         } catch {
           // The browser may already have closed the reserved window.
         }
@@ -2688,6 +2626,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!session) return { code: "user_rejected", reason: "internal_error" };
     if (session.revokedAt !== null) return { code: "user_rejected", reason: "internal_error" };
     if (session.origin !== origin) return { code: "invalid_origin", reason: "internal_error" };
+    if (rec.protocol.authorizationId && session.authorizationId !== rec.protocol.authorizationId) return { code: "connection_expired", reason: "internal_error" };
     try {
       const key = await this.publicOwnerKey(session.networkIdentity);
       if (!key) {
@@ -2700,6 +2639,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (params.appIdentity) {
       try {
         const appIdentity = verifyAppIdentityProof(params.appIdentity);
+        if (applicationKey(origin, session.appIdentity) !== applicationKey(origin, appIdentity)) throw new Error("Application authorization identity mismatch");
         this.assertLoginRequirements(params.appIdentity, true);
         session = { ...session, appIdentity };
         await this.deps.storageRepository.putConnectSession(session);
@@ -3943,6 +3883,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const now = Date.now();
     const sessionId = await this.connectBindingKey(key, rec.origin);
     const record: ConnectSessionRecord = {
+      authorizationId: crypto.randomUUID(),
       sessionId,
       origin: rec.origin,
       networkIdentity: projectNetworkIdentity(key),
@@ -3960,6 +3901,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     };
     await this.deps.storageRepository.putConnectSessionAndRevokeOriginPeers(record);
     return {
+      authorizationId: record.authorizationId!,
       walletPublicKeyHex: key.publicKeyHex,
       networkIdentity: projectNetworkIdentity(key),
       ownerPublicKeyHex: key.publicKeyHex,
@@ -3984,6 +3926,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   private async executeConnectResume(rec: RequestRecord): Promise<ConnectResumeResult> {
     const params = rec.params as ConnectResumeParams;
     const session = await this.requireConnectSession(rec, params.walletPublicKeyHex);
+    if (rec.protocol.authorizationId && session.authorizationId !== rec.protocol.authorizationId) throw protocolError("connection_expired", "Application authorization changed during recovery");
     const storageRepository = this.deps.storageRepository;
     if (!storageRepository) {
       throw localFailure("internal_error", "connect.resume: session storage unavailable");
@@ -3994,9 +3937,10 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
     const now = Date.now();
-    const next: ConnectSessionRecord = { ...session, lastUsedAt: now };
+    const next: ConnectSessionRecord = { ...session, authorizationId: session.authorizationId ?? crypto.randomUUID(), lastUsedAt: now };
     await storageRepository.putConnectSession(next);
     return {
+      authorizationId: next.authorizationId!,
       walletPublicKeyHex: session.ownerPublicKeyHex,
       networkIdentity: session.networkIdentity,
       ownerPublicKeyHex: session.ownerPublicKeyHex,
@@ -4191,6 +4135,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 这样失败可由调用方观察并重试，而不会留下半成功的内存状态。
     this.launchTokensByToken.set(params.launchToken, { ...record, consumed: true });
     return {
+      authorizationId: session.authorizationId!,
       walletPublicKeyHex: session.ownerPublicKeyHex,
       networkIdentity: session.networkIdentity,
       ownerPublicKeyHex: session.ownerPublicKeyHex,

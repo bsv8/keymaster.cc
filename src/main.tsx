@@ -37,6 +37,7 @@ import { installInsecureContextCryptoFallback } from "@keymaster/plugin-vault";
 import "./shims/buffer.js";
 import "./styles/global.css";
 import "./styles/plugins.css";
+import "./styles/pi-wallet.css";
 
 // 主题/语言首帧前置：不阻塞 fatal 接管,这两个都是最佳努力。
 applyInitialTheme();

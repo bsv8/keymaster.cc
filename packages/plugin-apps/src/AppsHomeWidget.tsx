@@ -112,7 +112,7 @@ function AppsHomeWidgetContent({ protocol }: { protocol: ProtocolService }) {
     });
   };
 
-  const handleConfirmLaunch = async (input: { password: string }) => {
+  const handleConfirmLaunch = async () => {
     if (!launchEntry) return;
     setLaunchingId(launchEntry.id);
     setLaunchError(null);
@@ -122,8 +122,7 @@ function AppsHomeWidgetContent({ protocol }: { protocol: ProtocolService }) {
         appOrigin: launchEntry.appOrigin,
         appUrl: launchEntry.appUrl,
         claims: launchEntry.claims,
-        appIdentity: launchEntry.appIdentity,
-        password: input.password
+        appIdentity: launchEntry.appIdentity
       });
       setLaunchEntry(null);
     } catch (err) {

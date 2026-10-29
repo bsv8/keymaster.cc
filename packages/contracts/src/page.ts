@@ -27,7 +27,22 @@ export interface PageUiRegistry {
   bind(consumer: PluginConsumer, scope: LifecycleScope): ScopedRegistryView<PageUiRegistration>;
 }
 export type PageFrameSlot = "unlocked-shell" | "wallet-entry" | "wallet-recovery" | "wallet-guard" | "storage-guard" | "onboarding" | "uri-action";
+export interface ApplicationView {
+  readonly id: string;
+  readonly title: string;
+  readonly origin: string;
+  readonly source: Window;
+  readonly closed: boolean;
+  navigate(url: string): void;
+  focus(): void;
+  close(): void;
+}
 export interface PageUiRenderer {
+  openApplication(input: { id: string; title: string; origin: string; onClose(): void }): ApplicationView;
+  applicationViews(): readonly ApplicationView[];
+  activeApplication(): string | null;
+  selectApplication(id: string | null): void;
+  attachApplicationOutlet(element: HTMLElement | null): void;
   /** 精确路径优先，其次按静态段优先匹配 :param 路径。 */
   hasPage(path: string): boolean;
   hasSettings(path: string): boolean;

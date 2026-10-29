@@ -967,6 +967,15 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "capability": {
               "kind": "local",
+              "id": "page.ui.renderer",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "钱包内的跨源应用工作区"
+          },
+          {
+            "capability": {
+              "kind": "local",
               "id": "business.registry",
               "version": "1"
             },

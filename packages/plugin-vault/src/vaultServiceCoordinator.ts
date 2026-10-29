@@ -290,12 +290,10 @@ export class VaultServiceCoordinator implements InternalVaultService {
 
   async createAppViewSession(input: {
     sessionId: string;
-    password: string;
   }): Promise<ActiveKeyCrypto> {
     if ("publicKeyHex" in input || "network" in input || "ownerPublicKeyHex" in input) throw new TypeError("AppView sessions do not accept wallet selectors");
     const issued = this.walletSnapshot();
     const identity = requireUnlockedWalletIdentity(issued);
-    await this.verifyPassword(input.password);
     if (!sameWalletSession(issued, this.walletSnapshot())) throw new Error("AppView wallet session has been revoked");
     this.disposeAppViewSession(input.sessionId, "appView session replaced");
     const crypto = await this.createCoordinatorCrypto(identity.publicKeyHex, input.sessionId);

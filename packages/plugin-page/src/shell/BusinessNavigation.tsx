@@ -3,6 +3,8 @@ import type { BusinessDomain } from "@keymaster/contracts";
 import { useCurrentPath, usePluginI18n, useResourceViewSelector } from "@keymaster/runtime";
 import type { BusinessFeature } from "@keymaster/contracts";
 import { router } from "./RouteRenderer.js";
+import * as Icons from "lucide-react";
+import type { ComponentType } from "react";
 
 export function sortBusinessDomains<T extends { id: string; order: number }>(domains: readonly T[]): T[] {
   return [...domains].sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
@@ -24,6 +26,7 @@ export function BusinessNavigation({ onClose }: { onClose: () => void }) {
       <h5>{text(domain.label)}</h5>
       <ul>{[...domain.features].sort((a, b) => a.order - b.order || a.id.localeCompare(b.id)).filter((feature) => feature.entry.visibleWhen ? feature.entry.visibleWhen({ unlocked }) : true).map((feature: BusinessFeature) => <li key={feature.id}>
         <button type="button" className={`app-sidebar__item ${isBusinessFeatureActive(feature, path) ? "is-active" : ""}`} onClick={() => { router.push(feature.entry.path); onClose(); }}>
+          {feature.icon && (() => { const Icon = (Icons as unknown as Record<string, ComponentType<{ size: number }>>)[feature.icon!]; return Icon ? <Icon size={14}/> : null; })()}
           {text(feature.label)}
         </button>
       </li>)}</ul>

@@ -1,0 +1,33 @@
+:root { --bg:#fff; --surface:#f5f5f5; --surface-2:#f9fafb; --border:#e0e0e0; --text:#1a1a1a; --text-dim:#5e6673; --muted:#515c6b; --primary:#245bce; --primary-contrast:#fff; --radius:6px; --shadow:none; }
+[data-theme=dark] { --bg:#1a1a1a; --surface:#242424; --surface-2:#292929; --border:#3a3a3a; --text:#e5e5e5; --text-dim:#a0a0a0; --muted:#b0b0b0; --primary:#7aa2f7; --primary-contrast:#111; --shadow:none; }
+body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--bg); color:var(--text); }
+button,input,select,textarea { font-family:inherit; }
+.onboarding-shell { background:var(--bg); }
+.onboarding-header { background:var(--surface); backdrop-filter:none; padding:12px 16px; }
+[data-theme=dark] .onboarding-header { background:var(--surface); }
+.onboarding-header__row,.onboarding-header__note { max-width:none; }
+.onboarding-header__brand { gap:9px; }
+.onboarding-header__brand-icon { width:25px; height:25px; border-radius:7px; }
+.onboarding-header__brand-mark { font-size:15px; letter-spacing:-.3px; }
+.onboarding-header__brand-subtitle { font-size:10px; }
+.onboarding-header__note { font-size:11px; }
+.onboarding-shell__main { padding:48px 24px 56px; }
+.onboarding-shell__panel { background:none; border:0; border-radius:0; box-shadow:none; padding:0; gap:24px; }
+.onboarding-shell__panel--narrow { max-width:440px; }
+.onboarding-shell__panel--wide { max-width:640px; }
+.onboarding-shell__panel--wizard { max-width:580px; }
+.locked-shell__hero { text-align:left; margin-bottom:24px; }
+.locked-shell__hero h1 { font-size:22px; font-weight:600; letter-spacing:-.4px; }
+.locked-shell__hero p { font-size:12px; color:var(--muted); line-height:1.8; }
+.locked-shell__cards { gap:12px; }
+.locked-shell__card { background:var(--bg); border-radius:7px; padding:20px 16px; gap:10px; }
+.locked-shell__card:hover { background:var(--surface); border-color:var(--border); }
+.locked-shell__card h2 { color:var(--text); font-size:13px; font-weight:600; }
+.locked-shell__card p { color:var(--muted); font-size:11px; line-height:1.8; }
+.locked-shell__card-cta { color:var(--primary); font-size:11px; font-weight:400; margin-top:8px; }
+.onboarding-shell .page-header h1 { font-size:20px; font-weight:600; letter-spacing:-.3px; }
+.onboarding-shell input,.onboarding-shell select,.onboarding-shell textarea { border-radius:5px; font-size:12px; background:var(--bg); }
+.onboarding-shell .btn { border-radius:6px; font-size:12px; box-shadow:none; }
+.onboarding-shell .empty-state { border-radius:6px; background:none; box-shadow:none; }
+.application-drawer,.modal { border-radius:8px; }
+@media(max-width:640px) { .onboarding-shell__main { padding:32px 20px 40px; } .onboarding-shell__panel { padding:0; border-radius:0; } .onboarding-header { padding:10px; } }

@@ -12,6 +12,8 @@ function msFilePreviewHeaders(): Plugin {
     name: "keymaster-msfile-preview-headers",
     configurePreviewServer(server) {
       server.middlewares.use((request, response, next) => {
+        response.setHeader("Content-Security-Policy", "frame-ancestors 'none'");
+        response.setHeader("X-Frame-Options", "DENY");
         const pathname = request.url?.split("?", 1)[0];
         if (pathname === "/msfile-media-sw.js") {
           response.setHeader("Content-Type", "application/javascript; charset=utf-8");
@@ -89,6 +91,8 @@ export default defineConfig({
       // 开发服务器从 /src 提供 module SW 时也允许根 scope；生产由
       // public/_headers 为 Pages 提供同一响应头。
       "Service-Worker-Allowed": "/",
+      "Content-Security-Policy": "frame-ancestors 'none'",
+      "X-Frame-Options": "DENY",
     },
   },
   resolve: {

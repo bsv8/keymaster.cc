@@ -167,7 +167,6 @@ export interface VaultService {
    */
   createAppViewSession(input: {
     sessionId: string;
-    password: string;
   }): Promise<ActiveKeyCrypto>;
   /** 销毁单个 appView session。 */
   disposeAppViewSession(sessionId: string, reason?: string): void;

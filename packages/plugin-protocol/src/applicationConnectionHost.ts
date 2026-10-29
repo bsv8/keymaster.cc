@@ -1,18 +1,20 @@
 import type {
-  AppBootstrapPayload, AppIdentitySnapshot, ApplicationConnection, ApplicationConnections, ApplicationConnectionsSnapshot,
+  ApplicationView, AppBootstrapPayload, AppIdentitySnapshot, ApplicationConnection, ApplicationConnections, ApplicationConnectionsSnapshot,
   ApplicationConnectionEvent, ConnectedApplication, ProtocolCommandRecord, ProtocolMethod, ProtocolStorageRepository,
 } from "@keymaster/contracts";
+import { requireUnlockedWalletIdentity, sameNetworkIdentity } from "@keymaster/contracts";
+import { parseReconnectMessage } from "keymaster-connect/server";
 import { createProtocolService, type ProtocolServiceDeps, type ProtocolServiceImpl } from "./protocolService.js";
 import { applicationKey, readApplicationPermissions, setApplicationPermission } from "./applicationPermissions.js";
 
-type HostedConnection = ApplicationConnection & { source: Window; service: ProtocolServiceImpl; off: () => void; identifyingKey?: string };
+type HostedConnection = ApplicationConnection & { source: Window; service: ProtocolServiceImpl; off: () => void; authorizationId?: string; identifyingKey?: string };
 
-/** One Receiver per registered Window: unrelated pages cannot elect themselves a trusted peer. */
+/** 持久授权与运行期分离；每次恢复重新登记实际来源、创建 Receiver 和执行句柄。 */
 export class ApplicationConnectionHost implements ApplicationConnections {
   private applications = new Map<string, ConnectedApplication>();
   private connections = new Map<string, HostedConnection>();
-  private incomingSource: Window | null = null;
-  private incomingRegistered = false;
+  private recovering = new Set<Window>();
+  private views = new Map<Window, ApplicationView>();
   private listeners = new Set<() => void>();
   private history = new Map<string, ProtocolCommandRecord>();
   private events: ApplicationConnectionEvent[] = [];
@@ -29,14 +31,13 @@ export class ApplicationConnectionHost implements ApplicationConnections {
       const generation = this.walletGeneration();
       if (generation !== this.generation) {
         this.generation = generation;
-        for (const connection of this.connections.values()) if (!connection.closedAt) this.disconnect(connection.id);
+        for (const connection of this.connections.values()) this.pause(connection);
       } else {
-        for (const connection of this.connections.values()) if (!connection.closedAt) connection.service.syncWalletState();
+        for (const connection of this.connections.values()) if (!connection.closedAt && !connection.pausedAt) connection.service.syncWalletState();
       }
-      this.tryAttachIncoming();
     });
     this.timer = setInterval(() => {
-      for (const connection of this.connections.values()) if (!connection.closedAt && connection.source.closed) this.disconnect(connection.id);
+      for (const [source, view] of this.views) if (view.closed) this.closeView(source);
     }, 1000);
   }
   private walletGeneration(): string {
@@ -51,81 +52,113 @@ export class ApplicationConnectionHost implements ApplicationConnections {
       for (const command of commands) if (!this.history.has(command.id)) this.history.set(command.id, command);
     } catch {
       this.available = false;
-      this.error = "应用历史读取失败，请重新打开钱包重试；不会恢复旧连接。";
+      this.error = "应用历史读取失败，不能将未知授权当成允许。";
     }
     this.emit();
   }
-  async acceptLaunch(payload: AppBootstrapPayload, source: Window): Promise<void> {
+  private createConnection(source: Window, bootMode: "connect" | "appView" = "connect"): HostedConnection {
+    const id = crypto.randomUUID();
+    const service = createProtocolService({ ...this.deps, bootMode, hostedApplication: true, resolveOpener: () => source, storageRepository: this.repo,
+      applicationIdentified: (origin, identity) => this.identifyIncoming(id, origin, identity),
+      applicationLoggedOut: () => { const connection = this.connections.get(id); if (connection) { this.pause(connection); connection.closedAt = Date.now(); this.emit(); } },
+      applicationPermissionChanged: () => this.refreshEvents() });
+    const connection: HostedConnection = { id, applicationKey: "", createdAt: Date.now(), source, service, off: () => {} };
+    this.connections.set(id, connection);
+    connection.off = service.subscribeFeed(() => this.emit());
+    service.startSession();
+    return connection;
+  }
+  async acceptLaunch(payload: AppBootstrapPayload, source: Window, view: ApplicationView): Promise<void> {
     if (this.disposed) throw new Error("Application host stopped");
     const generation = this.walletGeneration();
     const key = applicationKey(payload.app.appOrigin, payload.appIdentity);
     const app: ConnectedApplication = { key, origin: payload.app.appOrigin, name: payload.appIdentity?.appName ?? payload.app.appId, identity: payload.appIdentity, updatedAt: Date.now() };
     await this.repo.putApplication!(app);
     if (this.disposed || this.walletGeneration() !== generation) throw new Error("Application host stopped or wallet changed");
-    // Durable Connect records are origin-scoped today. Explicit replacement avoids two windows borrowing the same runtime authority.
-    for (const connection of this.connections.values()) {
-      if (!connection.closedAt && this.applications.get(connection.applicationKey)?.origin === app.origin) this.disconnect(connection.id);
+    for (const previous of this.connections.values()) {
+      if (this.applications.get(previous.applicationKey)?.origin === app.origin) this.pause(previous);
     }
-    const service = createProtocolService({ ...this.deps, hostedApplication: true, applicationLoggedOut: () => this.disconnect(id), applicationPermissionChanged: () => this.refreshEvents(), bootMode: "appView", resolveOpener: () => source, storageRepository: this.repo });
-    service.startSession();
+    if (view.closed) throw new Error("Application closed during launch");
+    this.views.set(source, view);
+    const connection = this.createConnection(source, "appView");
     try {
-      await service.acceptLaunchedApplication(payload, source);
+      await connection.service.acceptLaunchedApplication(payload, source);
       if (this.disposed || this.walletGeneration() !== generation) throw new Error("Application host stopped or wallet changed");
-    }
-    catch (error) { service.dispose(); throw error; }
-    const id = crypto.randomUUID();
-    const connection = { id, applicationKey: key, createdAt: Date.now(), source, service, off: () => {} };
-    try {
-      await this.recordEvent({ id: crypto.randomUUID(), applicationKey: key, at: connection.createdAt, kind: "connected", connectionId: id });
+      connection.applicationKey = key;
+      await this.recordEvent({ id: crypto.randomUUID(), applicationKey: key, at: connection.createdAt, kind: "connected", connectionId: connection.id });
       if (this.disposed || this.walletGeneration() !== generation) throw new Error("Wallet changed while recording connection");
-    } catch (error) { service.dispose(); throw error; }
-    connection.off = service.subscribeFeed(() => this.emit());
+    } catch (error) { this.pause(connection); throw error; }
     this.applications.set(key, app);
-    this.connections.set(id, connection);
     this.emit();
   }
-  /** 只接收浏览器提供的真实 opener；初始化/解锁完成前不发布 ready，也不让任意消息认领来源。 */
-  acceptOpener(source: Window | null): void {
-    if (this.incomingSource || this.incomingRegistered || !source || source.closed) return;
-    this.incomingSource = source;
-    this.tryAttachIncoming();
-  }
-  private tryAttachIncoming(): void {
-    if (this.disposed || this.incomingRegistered || !this.incomingSource || this.incomingSource.closed || this.deps.walletState.snapshot().status !== "unlocked") return;
-    this.incomingRegistered = true;
-    const source = this.incomingSource;
-    const id = crypto.randomUUID();
-    const service = createProtocolService({ ...this.deps, bootMode: "connect", hostedApplication: true, resolveOpener: () => source, storageRepository: this.repo,
-      applicationIdentified: (origin, identity) => this.identifyIncoming(id, origin, identity),
-      applicationLoggedOut: () => this.disconnect(id), applicationPermissionChanged: () => this.refreshEvents() });
-    const connection: HostedConnection = { id, applicationKey: "", createdAt: Date.now(), source, service, off: () => {} };
-    this.connections.set(id, connection);
-    connection.off = service.subscribeFeed(() => this.emit());
-    // 先注册来源与监听，再发布 ready，避免客户端立即请求时丢失连接。
-    service.startSession();
+  closeView(source: Window): void {
+    this.views.delete(source);
+    for (const connection of this.connections.values()) {
+      if (connection.source !== source) continue;
+      this.pause(connection);
+      connection.closedAt ??= Date.now();
+      connection.off();
+    }
     this.emit();
   }
   private async identifyIncoming(id: string, origin: string, identity?: AppIdentitySnapshot): Promise<void> {
     const connection = this.connections.get(id);
-    if (!connection || connection.closedAt || this.disposed) throw new Error("Connection expired");
+    if (!connection || connection.closedAt || connection.pausedAt || this.disposed) throw new Error("Connection expired");
     const key = applicationKey(origin, identity);
-    if ((connection.applicationKey && connection.applicationKey !== key) || (connection.identifyingKey && connection.identifyingKey !== key)) throw new Error("Application identity changed; reconnect explicitly");
+    if ((connection.applicationKey && connection.applicationKey !== key) || (connection.identifyingKey && connection.identifyingKey !== key)) throw new Error("Application identity changed");
     if (connection.applicationKey === key) return;
     connection.identifyingKey = key;
     try {
       const app: ConnectedApplication = { key, origin, name: identity?.appName ?? new URL(origin).host, identity, updatedAt: Date.now() };
       await this.repo.putApplication!(app);
-      if (connection.closedAt || this.disposed) throw new Error("Connection expired");
+      if (connection.closedAt || connection.pausedAt || this.disposed) throw new Error("Connection expired");
       await this.recordEvent({ id: crypto.randomUUID(), applicationKey: key, at: connection.createdAt, kind: "connected", connectionId: id });
-      if (connection.closedAt || this.disposed) throw new Error("Connection expired");
+      if (connection.closedAt || connection.pausedAt || this.disposed) throw new Error("Connection expired");
       this.applications.set(key, app);
       connection.applicationKey = key;
       this.emit();
     } finally { connection.identifyingKey = undefined; }
   }
   async handleMessage(event: MessageEvent): Promise<void> {
+    if (this.disposed || !event.source) return;
+    // Only a frame explicitly registered by this wallet may enter Connect.
+    const view = this.views.get(event.source as Window);
+    if (!view || view.closed || event.origin !== view.origin) return;
+    const reconnect = parseReconnectMessage(event.data);
+    if (reconnect) {
+      if (this.deps.walletState.snapshot().status !== "unlocked") return;
+      const source = event.source as Window;
+      const current = [...this.connections.values()].find(c => c.source === source && !c.closedAt && !c.pausedAt);
+      // 健康连接的发现轮询不读磁盘、不更换 binding，更不会重放业务。
+      if (current?.authorizationId === reconnect.authorizationId && current.service.matchesBinding(source, event.origin, reconnect.bindingId)) return;
+      if (this.recovering.has(source)) return;
+      this.recovering.add(source);
+      try {
+        const generation = this.walletGeneration();
+        const sessions = await this.repo.listConnectSessionsByOrigin(event.origin);
+        const grant = sessions.find(record => record.authorizationId === reconnect.authorizationId);
+        if (this.disposed || generation !== this.walletGeneration() || view.closed || this.views.get(source) !== view) return;
+        if (!grant || grant.revokedAt !== null) {
+          source.postMessage({ v: 1, type: "revoked", authorizationId: reconnect.authorizationId }, event.origin);
+          return;
+        }
+        // 身份变化只能暂停原授权，绝不让旧任务无感换钱包。
+        const identity = requireUnlockedWalletIdentity(this.deps.walletState.snapshot());
+        if (!sameNetworkIdentity(identity, grant.networkIdentity)) return;
+        if (current && applicationKey(event.origin, grant.appIdentity) === current.applicationKey) {
+          current.authorizationId = grant.authorizationId;
+          if (current.service.matchesBinding(source, event.origin, reconnect.bindingId)) return;
+        }
+        if (current) this.pause(current);
+        const connection = this.createConnection(source);
+        connection.authorizationId = grant.authorizationId;
+        await connection.service.handleMessage(event);
+        this.emit();
+      } finally { this.recovering.delete(source); }
+      return;
+    }
     for (const connection of this.connections.values()) {
-      if (connection.closedAt || connection.source !== event.source) continue;
+      if (connection.closedAt || connection.pausedAt || connection.source !== event.source) continue;
       const application = this.applications.get(connection.applicationKey);
       if (application && application.origin !== event.origin) return;
       await connection.service.handleMessage(event);
@@ -136,8 +169,7 @@ export class ApplicationConnectionHost implements ApplicationConnections {
     const commands = new Map(this.history);
     for (const connection of this.connections.values()) {
       for (const command of connection.service.feedSnapshot().commands) {
-        if (command.applicationKey !== connection.applicationKey) continue;
-        commands.set(command.id, command);
+        if (command.applicationKey === connection.applicationKey) commands.set(command.id, command);
       }
     }
     return {
@@ -157,43 +189,54 @@ export class ApplicationConnectionHost implements ApplicationConnections {
     await this.refreshEvents();
     this.emit();
   }
-  disconnect(id: string): void {
-    const connection = this.connections.get(id);
-    if (!connection || connection.closedAt) return;
-    connection.closedAt = Date.now();
-    if (connection.applicationKey) void this.recordEvent({ id: crypto.randomUUID(), applicationKey: connection.applicationKey, at: connection.closedAt, kind: "disconnected", connectionId: id }).catch(() => { this.available = false; this.error = "连接历史写入失败。"; this.emit(); });
+  /** 唯一的显式断开入口：先持久撤销，再撤回所有关联窗口的瞬时权限。 */
+  async disconnect(key: string): Promise<void> {
+    const app = this.applications.get(key);
+    if (!app) throw new Error("Application is not registered");
+    const grants = await this.repo.listConnectSessionsByOrigin(app.origin);
+    for (const grant of grants.filter(value => applicationKey(value.origin, value.appIdentity) === key && value.revokedAt === null)) {
+      await this.repo.putConnectSession({ ...grant, revokedAt: Date.now() });
+      for (const connection of this.connections.values()) {
+        if (connection.applicationKey !== key) continue;
+        this.pause(connection);
+        connection.closedAt = Date.now();
+        try { connection.source.postMessage({ v: 1, type: "revoked", authorizationId: grant.authorizationId }, app.origin); } catch { /* 关闭的窗口以后也不能凭旧授权恢复。 */ }
+      }
+    }
+    await this.recordEvent({ id: crypto.randomUUID(), applicationKey: key, at: Date.now(), kind: "disconnected" });
+    this.emit();
+  }
+  /** 只结束旧运行权，不撤销持久授权；在途资金责任仍由原业务执行链收尾。 */
+  private pause(connection: HostedConnection): void {
+    if (connection.pausedAt) return;
+    connection.pausedAt = Date.now();
     connection.service.pageUnloading();
     for (const command of connection.service.feedSnapshot().commands) {
       const terminal = ["approved", "rejected", "failed", "timed_out"].includes(command.phase);
-      const archived: ProtocolCommandRecord = terminal ? command : { ...command, phase: "failed", decision: "failed", status: "connection_expired", errorCode: "connection_expired", errorMessage: "Connection closed", finishedAt: connection.closedAt, updatedAt: connection.closedAt,
+      const archived: ProtocolCommandRecord = terminal ? command : { ...command, phase: "failed", decision: "failed", status: "connection_expired", errorCode: "connection_expired", errorMessage: "Connection paused", finishedAt: connection.pausedAt, updatedAt: connection.pausedAt,
         ...(command.method === "payment.pay" ? { paymentStatus: command.phase === "executing" ? "unknown" : "not_signed" } : {}) };
       this.history.set(archived.id, archived);
-      if (!terminal) void this.repo.putCommand(archived).catch(() => { this.available = false; this.error = "断开事件写入历史失败，未丢弃内存中的责任摘要。"; this.emit(); });
+      if (!terminal) void this.repo.putCommand(archived).catch(() => { this.available = false; this.error = "暂停事件写入失败，未丢弃内存中的业务责任。"; this.emit(); });
     }
     connection.service.dispose();
-    // Keep read-only late completion updates until this host is disposed. A closed connection never regains message authority.
     this.emit();
   }
   focus(id: string): void {
     const connection = this.connections.get(id);
-    if (!connection || connection.closedAt || connection.source.closed) throw new Error("应用窗口已断开");
-    connection.source.focus();
+    const view = connection && this.views.get(connection.source);
+    if (!connection || connection.closedAt || !view || view.closed) throw new Error("Application view is unavailable");
+    view.focus();
   }
-  private async refreshEvents(): Promise<void> {
-    this.events = await this.repo.listApplicationEvents!();
-    this.emit();
-  }
-  private async recordEvent(event: ApplicationConnectionEvent): Promise<void> {
-    this.events = [...this.events, event];
-    await this.repo.putApplicationEvent!(event);
-    this.emit();
-  }
+  private async refreshEvents(): Promise<void> { this.events = await this.repo.listApplicationEvents!(); this.emit(); }
+  private async recordEvent(event: ApplicationConnectionEvent): Promise<void> { this.events = [...this.events, event]; await this.repo.putApplicationEvent!(event); this.emit(); }
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
     clearInterval(this.timer);
     this.offWallet();
-    for (const connection of this.connections.values()) { this.disconnect(connection.id); connection.off(); }
+    for (const connection of this.connections.values()) { this.pause(connection); connection.off(); }
+    for (const view of [...this.views.values()]) view.close();
+    this.views.clear();
     this.listeners.clear();
   }
 }

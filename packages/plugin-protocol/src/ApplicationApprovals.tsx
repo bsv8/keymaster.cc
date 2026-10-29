@@ -8,7 +8,6 @@ type Translate = (key: string, values?: { defaultValue?: string }) => string;
 
 /** 登录认证只属于所选外部申请，不启动或销毁钱包/协议宿主。 */
 export function ApplicationAuthentication({ service, auth, t }: { service: ProtocolService; auth: ProtocolConnectAuthSnapshot; t: Translate }) {
-  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const login = auth.ownerType === "login";
@@ -19,19 +18,17 @@ export function ApplicationAuthentication({ service, auth, t }: { service: Proto
     {wallet ? <p>{wallet.label} · <code>{formatShortPublicKey(wallet.publicKeyHex)}</code></p> : <p>Wallet identity is not ready.</p>}
     <form className="protocol-auth__form" onSubmit={async event => {
       event.preventDefault();
-      if (busy || !password || !wallet || !auth.canSubmit || !auth.recordId) return;
+      if (busy || !wallet || !auth.canSubmit || !auth.recordId) return;
       setBusy(true); setError(undefined);
       try {
-        if (login) await service.confirmConnectLogin(auth.recordId, password);
-        else await service.confirmConnectResume(auth.recordId, password);
-        setPassword("");
+        if (login) await service.confirmConnectLogin(auth.recordId);
+        else await service.confirmConnectResume(auth.recordId);
       } catch (cause) { setError(cause instanceof Error ? cause.message : "Authentication failed"); }
       finally { setBusy(false); }
     }}>
-      <label className="protocol-auth__password"><span>{t("protocol.unlock.password", { defaultValue: "密码" })}</span><input type="password" autoComplete="current-password" value={password} disabled={busy || auth.submitted} onChange={event => setPassword(event.target.value)} /></label>
       {error ? <p role="alert">{error}</p> : null}
       <div className="protocol-popup__actions"><button type="button" disabled={busy} onClick={async () => { try { await service.rejectConnectRequest(auth.recordId!); } catch { setError("Request rejection could not be saved"); } }}>{t("protocol.connect.cancel", { defaultValue: "取消" })}</button>
-        <button type="submit" disabled={busy || auth.submitted || !auth.canSubmit || !wallet || !password}>{t(login ? "protocol.connect.login.confirm" : "protocol.connect.resume.confirm", { defaultValue: "确认连接" })}</button></div>
+        <button type="submit" disabled={busy || auth.submitted || !auth.canSubmit || !wallet}>{t(login ? "protocol.connect.login.confirm" : "protocol.connect.resume.confirm", { defaultValue: "确认连接" })}</button></div>
     </form>
   </section>;
 }

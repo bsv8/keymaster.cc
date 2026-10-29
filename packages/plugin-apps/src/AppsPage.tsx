@@ -102,7 +102,7 @@ export function AppsPage() {
     });
   };
 
-  const handleConfirmLaunch = async (input: { password: string }) => {
+  const handleConfirmLaunch = async () => {
     if (!launchEntry) return;
     setLaunchingId(launchEntry.id);
     setLaunchError(null);
@@ -112,8 +112,7 @@ export function AppsPage() {
         appOrigin: launchEntry.appOrigin,
         appUrl: launchEntry.appUrl,
         claims: launchEntry.claims,
-        appIdentity: launchEntry.appIdentity,
-        password: input.password
+        appIdentity: launchEntry.appIdentity
       });
       setLaunchEntry(null);
     } catch (err) {
