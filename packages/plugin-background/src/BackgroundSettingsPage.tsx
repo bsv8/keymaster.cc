@@ -1,5 +1,6 @@
 import type { ChainFeeSnapshot } from "@keymaster/contracts";
 import { useBackgroundResources } from "./BackgroundResourceContext.js";
+import { BackgroundTasksPanel } from "./BackgroundTasksPanel.js";
 // packages/plugin-background/src/BackgroundSettingsPage.tsx
 // 智能调度设置页：余额快照的智能刷新说明 + 各后台任务的同步管理。
 //
@@ -8,7 +9,7 @@ import { useBackgroundResources } from "./BackgroundResourceContext.js";
 //     不提供周期配置；页面只解释机制。
 //   - 其余后台任务（P2PKH 历史、BSV-21、STAS、1Sat、联系人探测）可以
 //     单独设置同步间隔：30 秒 / 1 分钟 / 5 分钟 / 关闭。
-//   - 「关闭」只关闭自动同步；托盘「立即同步一次」仍然有效。
+//   - 「关闭」只关闭自动同步；任务模块「立即同步一次」仍然有效。
 //   - 保存后不立即触发网络同步，新周期从保存时刻开始计时。
 //
 // 硬切换 003：使用 Resource Store 读取后台设置，跨标签同步由 resource subscribe 处理。
@@ -271,6 +272,7 @@ function AvailableBackgroundSettingsPage({ backgroundService }: { backgroundServ
 
   return (
     <div className="background-settings">
+      <BackgroundTasksPanel />
       <section className="background-settings__section">
         <h4 className="background-settings__section-title">
           {t("background.settings.smartTitle", { defaultValue: "BSV 余额快照（智能）" })}
@@ -285,7 +287,7 @@ function AvailableBackgroundSettingsPage({ backgroundService }: { backgroundServ
           {t("background.settings.syncManagement", { defaultValue: "同步管理" })}
         </h4>
         <p className="background-settings__hint">
-          {t("background.settings.syncManagementDesc", { defaultValue: "每个任务可以单独设置同步间隔；「自定义」可输入 10 秒～24 小时之间的任意整秒间隔。选择「关闭」后该任务不再自动同步，托盘的「立即同步一次」仍然可用。" })}
+          {t("background.settings.syncManagementDesc", { defaultValue: "每个任务可以单独设置同步间隔；「自定义」可输入 10 秒～24 小时之间的任意整秒间隔。选择「关闭」后该任务不再自动同步，任务模块的「立即同步一次」仍然可用。" })}
         </p>
         <ul className="background-settings__tasks">
           {BACKGROUND_MANAGED_SYNC_TASK_IDS.map((taskId) => {

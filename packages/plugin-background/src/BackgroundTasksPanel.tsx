@@ -1,6 +1,5 @@
 import { useBackgroundResources } from "./BackgroundResourceContext.js";
-// packages/plugin-background/src/BackgroundTray.tsx
-// Topbar 后台任务托盘。
+// 智能调度页常驻后台任务模块。
 // 设计缘由：托盘只显示通用任务信息，不出现 P2PKH 专属字段。
 // 施工单 001：只渲染"立即同步一次"或"取消本次同步"，
 // 没有暂停、继续、重试。失败不是稳态，显示为"上次同步失败"。
@@ -9,7 +8,7 @@ import { useBackgroundResources } from "./BackgroundResourceContext.js";
 // pendingRunIds 是本地交互 state，基于 resource 数据变化更新。
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Activity, AlertCircle, CheckCircle2, Square, X, Zap } from "lucide-react";
+import { Activity, AlertCircle, CheckCircle2, Square, Zap } from "lucide-react";
 import { useOptionalPluginCapability } from "webloom-framework/react";
 import { useResourceViewSelector } from "@keymaster/runtime";
 import { usePluginI18n, usePluginLocale } from "@keymaster/runtime";
@@ -17,18 +16,15 @@ import { BACKGROUND_SERVICE_CAPABILITY, type BackgroundService, type BackgroundT
 
 const EMPTY_SNAPSHOTS: BackgroundTaskSnapshot[] = [];
 
-export function BackgroundTray() {
-  // 锁定是一个跨 Host 的身份切换：Background 的 owner-session capability
-  // 会先被同步撤销，而旧 Topbar registry 快照可能还会在同一轮 React
-  // 更新中短暂渲染本组件。这里必须把“能力暂不可用”视为正常过渡，不能
-  // 用 usePluginCapability 抛错把锁屏升级成全局 fatal。
+export function BackgroundTasksPanel() {
+  // 锁定过渡中能力会先撤销；路由卸载前不再读取资源。
   const service = useOptionalPluginCapability(BACKGROUND_SERVICE_CAPABILITY);
   if (!service) return null;
-  return <AvailableBackgroundTray service={service} />;
+  return <AvailableBackgroundTasksPanel service={service} />;
 }
 
 /** capability 存在时才挂载 resource hook，避免资源定义已撤销时调用 ensure。 */
-function AvailableBackgroundTray({ service }: { service: BackgroundService }) {
+function AvailableBackgroundTasksPanel({ service }: { service: BackgroundService }) {
   const resources = useBackgroundResources();
   const { t } = usePluginI18n();
   const locale = usePluginLocale();
@@ -37,7 +33,6 @@ function AvailableBackgroundTray({ service }: { service: BackgroundService }) {
     () => new Intl.DateTimeFormat(locale, { timeStyle: "medium" }),
     [locale]
   );
-  const [open, setOpen] = useState(false);
 
   // 使用 Resource Store 读取任务快照（跨标签同步由 resource subscribe 处理）
   const snapshots = useResourceViewSelector<BackgroundTaskSnapshot[], BackgroundTaskSnapshot[]>(
@@ -109,46 +104,9 @@ function AvailableBackgroundTray({ service }: { service: BackgroundService }) {
     });
   };
 
-  const counts = useMemo(() => {
-    let running = 0;
-    let queued = 0;
-    let blocked = 0;
-    for (const s of snapshots) {
-      if (s.state === "running") running++;
-      else if (s.state === "queued") queued++;
-      else if (s.state === "blocked") blocked++;
-    }
-    return { running, queued, blocked };
-  }, [snapshots]);
-
-  const trayLabel = t("background.topbar.label", { defaultValue: "后台任务" });
-
   return (
-    <div className="background-tray">
-      <button
-        type="button"
-        className={`background-tray__button ${counts.blocked > 0 ? "is-blocked" : counts.running > 0 ? "is-running" : ""}`}
-        onClick={() => setOpen((v) => !v)}
-        aria-label={trayLabel}
-        title={trayLabel}
-      >
-        <Activity size={16} />
-        {counts.running > 0 ? <span className="background-tray__count">{counts.running}</span> : null}
-        {counts.blocked > 0 ? <span className="background-tray__count background-tray__count--blocked">!</span> : null}
-      </button>
-      {open ? (
-        <div className="background-tray__panel" role="dialog">
-          <header className="background-tray__header">
-            <h4>{t("background.tray.title", { defaultValue: "后台任务" })}</h4>
-            <button
-              type="button"
-              className="background-tray__close"
-              onClick={() => setOpen(false)}
-              aria-label={t("background.tray.close", { defaultValue: "关闭" })}
-            >
-              <X size={14} />
-            </button>
-          </header>
+    <section className="background-settings__section background-tasks" aria-labelledby="background-tasks-title">
+          <h4 id="background-tasks-title" className="background-settings__section-title">{t("background.tray.title", { defaultValue: "后台任务" })}</h4>
           {commandError ? <p className="background-tray__error" role="status">{commandError}</p> : null}
           {snapshots.length === 0 ? (
             <p className="background-tray__empty">{t("background.tray.empty", { defaultValue: "没有已注册的后台任务。" })}</p>
@@ -166,9 +124,7 @@ function AvailableBackgroundTray({ service }: { service: BackgroundService }) {
               ))}
             </ul>
           )}
-        </div>
-      ) : null}
-    </div>
+    </section>
   );
 }
 

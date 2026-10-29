@@ -1520,38 +1520,17 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
 /* ---------- Topbar extensions ---------- */
 .app-topbar__actions { display: flex; align-items: center; gap: 8px; position: relative; }
 
-/* Background tray */
-.background-tray { position: relative; }
-.background-tray__button {
-  background: transparent; color: var(--text); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 8px 14px; display: inline-flex; align-items: center; gap: 4px;
-  cursor: pointer; font: inherit; font-weight: 600; line-height: 1.2; position: relative;
-}
-.background-tray__button.is-running { border-color: var(--primary); color: var(--primary); }
-.background-tray__button.is-failed { border-color: var(--danger); color: var(--danger); }
-.background-tray__count {
-  background: var(--primary); color: var(--primary-text);
-  font-size: 10px; border-radius: 8px; padding: 0 5px; line-height: 14px; min-width: 14px; text-align: center;
-}
-.background-tray__count--failed { background: var(--danger); color: #fff; }
-.background-tray__panel {
-  position: absolute; right: 0; top: calc(100% + 6px);
-  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
-  min-width: 320px; max-width: 380px; max-height: 60vh; overflow: auto;
-  box-shadow: var(--shadow);
-  z-index: 200;
-}
-.background-tray__header { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid var(--border); }
-.background-tray__header h4 { margin: 0; font-size: 13px; }
-.background-tray__close { background: transparent; border: 0; color: var(--text-dim); cursor: pointer; }
+/* Smart scheduling: live background tasks */
+.background-tasks { min-width: 0; }
+.background-tray__blocked-reason { color: var(--text-dim); font-size: 12px; overflow-wrap: anywhere; }
 .background-tray__empty { padding: 12px; color: var(--text-dim); font-size: 12px; }
 .background-tray__list { list-style: none; margin: 0; padding: 0; }
 .background-tray__item { padding: 10px 12px; border-bottom: 1px solid var(--border); }
 .background-tray__item:last-child { border-bottom: 0; }
-.background-tray__item-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.background-tray__item-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
 .background-tray__name { font-weight: 600; font-size: 13px; }
 .background-tray__meta { color: var(--text-dim); font-size: 11px; margin: 4px 0; }
-.background-tray__error { color: var(--danger); font-size: 11px; margin: 4px 0; }
+.background-tray__error { color: var(--danger); font-size: 11px; margin: 4px 0; overflow-wrap: anywhere; }
 .background-tray__actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .background-tray__actions button {
   background: transparent; color: var(--text); border: 1px solid var(--border);

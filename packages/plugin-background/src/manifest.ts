@@ -4,7 +4,7 @@ import { createElement } from "react";
 import { bindBackgroundUi } from "./BackgroundResourceContext.js";
 import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 // packages/plugin-background/src/manifest.ts
-// 后台任务平台清单：注册 background.registry + background.service + Topbar 托盘。
+// 后台任务平台清单：注册服务、资源与智能调度设置页。
 
 import type {
   BackgroundRegistry,
@@ -15,7 +15,6 @@ import type {
   PluginManifest,
   PluginSetup,
   ResourceRegistry,
-  TopbarRegistry,
   BackgroundCoordinatorControl
 } from "@keymaster/contracts";
 import {
@@ -36,16 +35,13 @@ import { createBackgroundServiceCoordinator } from "./backgroundServiceCoordinat
 
 export const BACKGROUND_TASK_SNAPSHOTS_RESOURCE_ID = "background.taskSnapshots";
 import type { CoordinatorClientLike } from "./backgroundServiceCoordinator.js";
-import { BackgroundTray } from "./BackgroundTray.js";
 import { BackgroundSettingsPage } from "./BackgroundSettingsPage.js";
 
 const backgroundResources: I18nPluginResources = {
   namespace: "background",
   resources: {
     en: {
-      "background.topbar.label": "Background tasks",
       "background.tray.title": "Background tasks",
-      "background.tray.close": "Close",
       "background.tray.empty": "No background tasks registered.",
       "background.tray.lastCompletePrefix": "Last completed ",
       "background.tray.lastAttemptPrefix": "Last attempt ",
@@ -63,7 +59,7 @@ const backgroundResources: I18nPluginResources = {
       "background.settings.crumb.settings": "Settings",
       "background.settings.description": "Smart scheduling refreshes the BSV balance snapshot immediately after unlock and then every time the WoC queue stays idle for 2 seconds, so idle time is always used without competing with your actions. The sync management below controls the other background tasks.",
       "background.settings.syncManagement": "Sync management",
-      "background.settings.syncManagementDesc": "Each task can have its own sync interval; \"Custom\" accepts any whole-second interval between 10 seconds and 24 hours. \"Off\" disables automatic sync for that task; the tray's \"Sync once now\" still works.",
+      "background.settings.syncManagementDesc": "Each task can have its own sync interval; \"Custom\" accepts any whole-second interval between 10 seconds and 24 hours. \"Off\" disables automatic sync for that task; the task module's \"Sync once now\" still works.",
       "background.settings.smartTitle": "BSV balance snapshot (smart)",
       "background.settings.smartDesc": "The balance comes from the in-memory UTXO snapshot: refreshed right after unlock and every time the WoC queue is idle for 2 seconds. This interval is not configurable.",
       "background.settings.task.chain.fee-sync": "Network fee recommendation",
@@ -109,9 +105,7 @@ const backgroundResources: I18nPluginResources = {
       "background.blocked.task": "Task is blocked"
     },
     "zh-CN": {
-      "background.topbar.label": "后台任务",
       "background.tray.title": "后台任务",
-      "background.tray.close": "关闭",
       "background.tray.empty": "没有已注册的后台任务。",
       "background.tray.lastCompletePrefix": "上次完成 ",
       "background.tray.lastAttemptPrefix": "上次尝试 ",
@@ -129,7 +123,7 @@ const backgroundResources: I18nPluginResources = {
       "background.settings.crumb.settings": "设置",
       "background.settings.description": "智能调度在解锁后立即刷新一次 BSV 余额快照，之后只要 WoC 队列空闲满 2 秒就自动刷新：所有闲暇时间都用来获取余额，用户操作时自动让路。下面的「同步管理」控制其余后台任务。",
       "background.settings.syncManagement": "同步管理",
-      "background.settings.syncManagementDesc": "每个任务可以单独设置同步间隔；「自定义」可输入 10 秒～24 小时之间的任意整秒间隔。选择「关闭」后该任务不再自动同步，托盘的「立即同步一次」仍然可用。",
+      "background.settings.syncManagementDesc": "每个任务可以单独设置同步间隔；「自定义」可输入 10 秒～24 小时之间的任意整秒间隔。选择「关闭」后该任务不再自动同步，任务模块的「立即同步一次」仍然可用。",
       "background.settings.smartTitle": "BSV 余额快照（智能）",
       "background.settings.smartDesc": "余额来自内存 UTXO 快照：解锁后立即刷新，之后每次 WoC 队列空闲满 2 秒自动刷新，间隔不可配置。",
       "background.settings.task.chain.fee-sync": "网络建议费率",
@@ -180,7 +174,7 @@ const backgroundResources: I18nPluginResources = {
 const backgroundPluginDefinition = {
   id: "background",
   name: "Background",
-  description: "通用后台任务平台：注册、调度、去重、Topbar 托盘。",
+  description: "通用后台任务平台：注册、调度、去重、实时任务与同步设置。",
 
   units: [{
     id: "background.window",
@@ -288,10 +282,7 @@ const backgroundPluginDefinition = {
         return () => { offConsumer(); off(); };
       }, invalidation: "immediate" });
     const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope).view;
-    const Tray = bindBackgroundUi(ctx, BackgroundTray);
     const Settings = bindBackgroundUi(ctx, BackgroundSettingsPage);
-    pages.register({ kind: "header", slot: "topbar", id: "background.tray", order: 100,
-      label: { key: "background.topbar.label", fallback: "Background tasks" }, render: () => createElement(Tray) });
     pages.register({ kind: "page", path: "/settings/smart-scheduling", id: "background.smart-scheduling", order: 10,
       label: { key: "background.settings.title", fallback: "Smart scheduling" }, render: () => createElement(Settings) });
 

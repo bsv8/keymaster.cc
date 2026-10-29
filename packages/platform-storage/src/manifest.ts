@@ -1,6 +1,5 @@
 import { STORAGE_FILE_CLIENTS_CAPABILITY, STORAGE_KV_CLIENTS_CAPABILITY } from "@keymaster/contracts";
 import { COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY, COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY } from "@keymaster/contracts";
-import { StorageActivityIndicator } from "./ui/StorageActivityIndicator.js";
 import { APP_STORAGE_CLIENTS_CAPABILITY } from "@keymaster/contracts";
 import { createAppStorageClients } from "./coordinator/appStorageClients.js";
 import { STORAGE_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
@@ -274,9 +273,6 @@ const storagePlatformPluginDefinition = {
     });
     pages.view.register({ id: "storage.persistence", kind: "header", slot: "above-header", order: 0,
       label: { key: "storage.status.title", fallback: "Local storage" }, render: () => privateContents(IndexedDbPersistenceBar),
-    });
-    pages.view.register({ id: "storage.activity", kind: "header", slot: "topbar", order: 5,
-      label: "Storage activity", render: () => privateContents(StorageActivityIndicator),
     });
     // 「设置」域由 Page 拥有，各产品把自己的设置页注册成它的 feature；存储浏览器
     // 同样如此。此前本插件自建 domain，侧边栏因此多出一个与「设置」并列的一级
