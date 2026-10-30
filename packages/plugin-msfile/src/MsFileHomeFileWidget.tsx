@@ -1037,7 +1037,7 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
           {state.error.message} <span className="msfile-home-file__diagnostic">{t("msfile.home.diagnostic", { defaultValue: "诊断代码" })}: <code>{state.error.code}</code></span>
         </p>
       ) : null}
-      {state.notice ? <p className="msfile-home-file__notice" role="status">{state.notice}</p> : null}
+      {state.notice ? <p className="msfile-home-file__notice" role="status">{state.bitfsDemand?.existingPurchaseSessionId || state.bitfsDemand?.purchase ? "已建立购买任务，执行与资金状态见下方进度。" : state.bitfsDemand?.quotes.length ? "已收到卖家报价，请查看报价并选择购买。" : state.notice}</p> : null}
 
       {state.bitfsDemand || fileSummary ? (
         <section className="msfile-file-summary" aria-label="文件摘要">

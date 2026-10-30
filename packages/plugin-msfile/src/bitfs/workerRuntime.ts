@@ -1114,6 +1114,9 @@ async function listMsfileBitfsBuyerTaskSnapshots(): Promise<import("@keymaster/c
       await task.listDiscoveredQuotes(),
     );
     const purchase = entry.purchase;
+    const kernel = msfileBitfsKernelRuntimes.get(msfileBitfsKernelRuntimeKey(owner, entry.seedHashHex));
+    const kernelView = kernel?.adapter.view();
+    const kernelMessage = kernelView ? `下载任务：${({ ready: "准备中", running: "正在下载", waiting: "等待执行条件", paused: "已暂停", stopping: "正在停止", stopped: "已停止", finished: "内容完成" } as const)[kernelView.execution]}。${kernelView.reasons.map(reason => ({ "manifest-unknown": "尚未取得 Seed 目录", "problem-pool": "费用池异常，需核对", "no-eligible-seller": "没有符合条件的在线卖家", "speed-unmeasured": "卖家速度尚未测量", "price-limit": "部分报价超过价格上限", opening: "正在开池", settling: "正在结算", "awaiting-resources": "等待可用资金或调度资源" })[reason] ?? reason).join("；")}` : null;
     const selectedQuote = purchase
       ? availableQuotes.find((item) => item.sessionId === purchase.sessionId)
       : undefined;
@@ -1147,11 +1150,12 @@ async function listMsfileBitfsBuyerTaskSnapshots(): Promise<import("@keymaster/c
       minerFeeSatoshis: "0",
       lockedSatoshis: "0",
       pendingReturnSatoshis: "0",
-      discoveryOnly: !activePurchase,
+      discoveryOnly: !activePurchase && !kernelView,
       availableQuotes,
       canCancel: activePurchase ? cancellableBeforeFunding : true,
       message: activePurchase && purchase
         ? purchase.message
+        : kernelMessage ? kernelMessage
         : availableQuotes.length === 0
           ? "正在等待卖家报价；发布需求不会拆分或广播资金。"
           : "已收到已验签报价；设置本文件最高单块价后可选择卖家开始下载。",
@@ -1237,7 +1241,7 @@ async function msfileBitfsBuyerDemandSnapshot(
     seedHashHex: normalizedSeed,
     requestMessageId: entry.requestMessageId ?? null,
     expiresAtMs: entry.expiresAtMs > 0 ? entry.expiresAtMs : null,
-    quotes: activeTask ? [] : await addMsfileBitfsRecentSellerSpeeds(
+    quotes: await addMsfileBitfsRecentSellerSpeeds(
       entry.ownerPublicKeyHex,
       normalizedSeed,
       await task.listDiscoveredQuotes(),

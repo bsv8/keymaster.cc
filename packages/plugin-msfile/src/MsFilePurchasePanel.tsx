@@ -15,12 +15,18 @@ export function MsFilePurchasePanel({ service, demand, maximumPrice, onPurchase 
   onPurchase(sessionId: string): Promise<void>;
 }) {
   const purchase = demand.purchase;
+  const [starting, setStarting] = useState<string | null>(null);
+  const begin = async (sessionId: string) => {
+    if (starting) return;
+    setStarting(sessionId);
+    try { await onPurchase(sessionId); }
+    finally { setStarting(null); }
+  };
   return <section className="msfile-market" aria-label="卖家与购买配置">
     <header className="msfile-section-heading"><div><h4>卖家报价</h4><p>比较单价与最近速度，选择卖家购买文件。</p></div><span>{demand.quotes.length} 位卖家</span></header>
-    {demand.quotes.length ? <div className="msfile-table-scroll"><table className="msfile-market__table msfile-market__table--quotes">
-      <caption className="sr-only">已验签卖家报价</caption>
-      <thead><tr><th>卖家</th><th className="numeric">Seed 单价</th><th className="numeric">完整 Block 单价</th><th>最近速度</th><th>文件内容费参考</th><th>购买</th></tr></thead>
-      <tbody>{demand.quotes.map(quote => {
+    {starting ? <p role="status">正在准备购买：核对报价、资金与卖家连接，请勿重复操作…</p> : null}
+    {demand.quotes.length ? <div className="msfile-quote-cards" aria-label="已验签卖家报价">
+      {demand.quotes.map(quote => {
         const samePurchase = purchase?.sessionId === quote.sessionId;
         const emptyFile = BigInt(quote.fileSizeBytes) === 0n;
         const aboveLimit = maximumPrice === null || BigInt(quote.fullBlockPriceSatoshis) > BigInt(maximumPrice);
@@ -28,19 +34,21 @@ export function MsFilePurchasePanel({ service, demand, maximumPrice, onPurchase 
         // 保留原报价按钮的购买状态判断，不增加费用预览、余额预检或新的准入条件。
         const blockedByOtherPurchase = Boolean(purchase && !samePurchase
           && purchase.phase !== "cancelled" && purchase.phase !== "refunded" && purchase.phase !== "failed" && purchase.phase !== "connection-closed");
-        const disabled = !service.startBitfsPurchase || emptyFile || !hasArbiter || aboveLimit || blockedByOtherPurchase || samePurchase;
+        const disabled = Boolean(starting || demand.existingPurchaseSessionId) || !service.startBitfsPurchase || emptyFile || !hasArbiter || aboveLimit || blockedByOtherPurchase || samePurchase;
         const reference = quoteContentReference(quote);
         const label = emptyFile ? "暂不支持购买空文件" : aboveLimit ? "超过本文件已选上限" : !hasArbiter ? "此报价没有可用仲裁方" : samePurchase ? purchase?.phase === "completed" ? "购买完成" : "查看购买进度" : blockedByOtherPurchase ? purchase?.phase === "completed" ? "该 Seed 已购买" : "请先完成当前购买" : "购买此报价";
-        return <tr key={quote.sessionId}>
-          <th scope="row"><code title={quote.sellerPublicKeyHex}>{short(quote.sellerPublicKeyHex)}</code><details><summary>报价详情与费用</summary><QuoteBill quote={quote} /></details></th>
-          <td data-label="Seed 单价" className="numeric">{money(quote.seedPriceSatoshis)}</td>
-          <td data-label="完整 Block 单价" className="numeric">{money(quote.fullBlockPriceSatoshis)}</td>
-          <td data-label="最近速度">{quote.recentBytesPerSecond == null ? "未知" : `${(Number(quote.recentBytesPerSecond) / 1024).toFixed(1)} KiB/s`}</td>
-          <td data-label="文件内容费参考" className="numeric">{money(reference)}<small>整份文件内容费上界</small></td>
-          <td><Button size="sm" disabled={disabled} onClick={() => void onPurchase(quote.sessionId)}>{label}</Button>{samePurchase ? <AppLink to={`/msfile/purchases/${encodeURIComponent(quote.sessionId)}`}>查看购买详情</AppLink> : null}</td>
-        </tr>;
-      })}</tbody>
-    </table></div> : !demand.existingPurchaseSessionId ? <p className="msfile-empty" role="status">需求已发出，尚未收到有效报价；页面会继续刷新报价。</p> : null}
+        return <article className="msfile-quote-card" key={quote.sessionId}>
+          <header><span>卖家 <code title={quote.sellerPublicKeyHex}>{short(quote.sellerPublicKeyHex)}</code></span>
+            <Button disabled={disabled} onClick={() => void begin(quote.sessionId)}>{starting === quote.sessionId ? "正在准备购买…" : demand.existingPurchaseSessionId ? "已有购买任务" : label}</Button></header>
+          <dl><div><dt>Seed 单价</dt><dd>{money(quote.seedPriceSatoshis)}</dd></div>
+            <div><dt>完整 Block 单价</dt><dd>{money(quote.fullBlockPriceSatoshis)}</dd></div>
+            <div><dt>最近速度</dt><dd>{quote.recentBytesPerSecond == null ? "未知" : `${(Number(quote.recentBytesPerSecond) / 1024).toFixed(1)} KiB/s`}</dd></div>
+            <div><dt>整份文件内容费上界</dt><dd>{money(reference)}</dd></div></dl>
+          {samePurchase ? <AppLink to={`/msfile/purchases/${encodeURIComponent(quote.sessionId)}`}>查看购买详情</AppLink> : null}
+          <details><summary>报价详情与费用</summary><QuoteBill quote={quote} /></details>
+        </article>;
+      })}
+    </div> : !demand.existingPurchaseSessionId ? <p className="msfile-empty" role="status">需求已发出，尚未收到有效报价；页面会继续刷新报价。</p> : null}
     <p className="msfile-checkout__help">内容费参考按 Seed 和文件块单价计算；实际按剩余内容在卖家间分配采购预算，另计仲裁预留与链上费用。关池余款退回钱包。</p>
     {purchase || demand.existingPurchaseSessionId ? <PurchaseProgress key={demand.seedHashHex} demand={demand} /> : null}
     <details className="msfile-market__discovery"><summary>查询详情</summary><dl className="msfile-checkout__details">

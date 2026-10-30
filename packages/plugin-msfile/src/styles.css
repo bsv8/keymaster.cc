@@ -1347,6 +1347,16 @@ textarea.msfile-settings__control {
 .msfile-price-filter label,.msfile-price-filter > span { font-size:13px; }
 .msfile-price-filter label strong { margin-left:10px; font-variant-numeric:tabular-nums; }
 .msfile-price-filter p { grid-column:1 / -1; color:var(--text-dim); font-size:12px; margin:0; }
+.msfile-quote-cards { display:grid; gap:12px; min-width:0; }
+.msfile-quote-card { border:1px solid var(--border); border-radius:var(--radius); padding:16px; min-width:0; overflow-wrap:anywhere; }
+.msfile-quote-card > header { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; }
+.msfile-quote-card > header button { flex-shrink:0; }
+.msfile-quote-card > dl { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; }
+.msfile-quote-card dt { color:var(--text-dim); font-size:12px; }
+.msfile-quote-card dd { margin:6px 0 0; }
+.msfile-quote-card > details { margin-top:12px; }
+.msfile-quote-card .msfile-bill { white-space:normal; min-width:0; }
+@media(max-width:480px) { .msfile-quote-card > header button { width:100%; } }
 .msfile-table-scroll { overflow-x:auto; max-width:100%; }
 .msfile-market__table { width:100%; border-collapse:collapse; font-size:13px; white-space:nowrap; }
 .msfile-market__table th,.msfile-market__table td { padding:14px 12px; border-bottom:1px solid var(--border); text-align:left; }
