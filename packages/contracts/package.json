@@ -12,7 +12,7 @@
   },
   "types": "./src/index.ts",
   "dependencies": {
-    "keymaster-connect": "0.1.0",
+    "keymaster-connect": "0.1.4",
     "@noble/hashes": "^2.0.1",
     "cborg": "^5.1.6",
     "webloom-framework": "0.6.0",
