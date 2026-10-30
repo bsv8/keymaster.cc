@@ -402,8 +402,12 @@ textarea.msfile-settings__control {
 .msfile-home-file {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
   min-width: 0;
+  padding: 20px;
+  background: var(--surface, #ffffff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: calc(var(--radius, 6px) + 2px);
 }
 
 .msfile-home-file__header,
@@ -427,6 +431,17 @@ textarea.msfile-settings__control {
   margin: 0;
 }
 
+.msfile-home-file__header h3 {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.msfile-home-file__header p {
+  margin-top: 5px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .msfile-home-file__header p,
 .msfile-home-file__hint,
 .msfile-home-file__supplier-detail,
@@ -445,6 +460,8 @@ textarea.msfile-settings__control {
 }
 
 .msfile-home-file__label {
+  color: var(--text-dim, #6b7280);
+  font-size: 12px;
   font-weight: 600;
 }
 
@@ -455,18 +472,21 @@ textarea.msfile-settings__control {
 .msfile-home-file__input {
   flex: 1 1 auto;
   min-width: 0;
-  border: 1px solid var(--km-border, #d1d5db);
+  min-height: 36px;
+  border: 1px solid var(--border, #d1d5db);
   border-radius: 7px;
-  background: var(--km-surface, #fff);
-  color: var(--km-text, #111827);
+  background: var(--bg, #fff);
+  color: var(--text, #111827);
   font: inherit;
   padding: 8px 10px;
 }
 
 .msfile-home-file__input:focus-visible {
-  outline: 2px solid var(--km-primary, #2563eb);
+  outline: 2px solid var(--primary, #2563eb);
   outline-offset: 1px;
 }
+
+.msfile-home-file__input-row .ui-button { min-height: 36px; }
 
 .msfile-home-file__notice {
   border-left: 3px solid var(--km-border, #d1d5db);
@@ -1246,11 +1266,25 @@ textarea.msfile-settings__control {
 
 /* 首页 MSFile 空间里的折叠入口。 */
 .msfile-bucket--collapsed {
+  gap: 8px;
   background: var(--surface, #ffffff);
   border: 1px solid var(--border, #e5e7eb);
   border-radius: calc(var(--radius, 8px) + 2px);
-  padding: 16px;
+  padding: 20px;
 }
+
+.msfile-bucket--collapsed h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.msfile-bucket--collapsed .msfile-bucket__hint {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.msfile-bucket--collapsed .msfile-bucket__actions { margin-top: 6px; }
 
 @media (max-width: 620px) {
   .msfile-bucket__tasks {

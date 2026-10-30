@@ -82,6 +82,6 @@ export function IdentityHomeButton() {
  const state = useResourceView<VaultLifecycleSnapshot>(useP2pkhResources(), "p2pkh.identity-key", []).data;
  const identity = state?.status === "unlocked" && state.activeKeyIdentity?.publicKeyHex === state.activePublicKeyHex ? state.activeKeyIdentity : undefined;
  return <section className="home-actions"><div className="home-actions__grid">
- <button type="button" className="home-actions__shortcut" onClick={() => setOpen(true)} data-testid="home-my-info-button"><span className="home-actions__icon home-actions__icon--info"><UserRound size={28} /></span><span>{t("p2pkh.identity.action.myInfo")}</span></button>
+ <button type="button" className="home-actions__shortcut" onClick={() => setOpen(true)} data-testid="home-my-info-button"><span className="home-actions__icon home-actions__icon--info"><UserRound size={22} /></span><span className="home-actions__text"><strong>{t("p2pkh.identity.action.myInfo")}</strong><small>{t("p2pkh.identity.action.myInfoHint", { defaultValue: "查看公钥、地址与二维码" })}</small></span></button>
  </div><MyInfoModal open={open} onClose={() => setOpen(false)} identity={identity} /></section>;
 }

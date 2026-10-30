@@ -525,3 +525,128 @@
     scroll-behavior: auto;
   }
 }
+
+/* ---------- 首页余额摘要卡（对齐 /settings/auto-lock 摘要卡） ----------
+ * 左：圆形图标；中：小标题 + 大字金额 + 明细；右：网络与同步状态胶囊。
+ * 容器与卡片外观归首页分节统一管理，这里只负责摘要卡内部排版。 */
+.home-widget.home-widget--p2pkh-balance {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 20px;
+  border-radius: calc(var(--radius) + 2px);
+}
+
+.home-widget--p2pkh-balance .home-widget__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--primary) 10%, var(--surface));
+  color: var(--primary);
+}
+
+.home-widget--p2pkh-balance .home-widget__content {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.home-widget--p2pkh-balance .home-widget__eyebrow {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.home-widget--p2pkh-balance .home-widget__amount {
+  margin: 6px 0 0;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+.home-widget--p2pkh-balance .home-widget__breakdown {
+  display: grid;
+  grid-template-columns: auto auto;
+  justify-content: start;
+  gap: 3px 14px;
+  margin: 10px 0 0;
+}
+
+.home-widget--p2pkh-balance .home-widget__breakdown dt {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.home-widget--p2pkh-balance .home-widget__breakdown dd {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.home-widget--p2pkh-balance .home-widget__side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.home-widget--p2pkh-balance .home-widget__network,
+.home-widget--p2pkh-balance .home-widget__badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.home-widget--p2pkh-balance .home-widget__badge.is-ok {
+  border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
+  background: color-mix(in srgb, var(--primary) 8%, var(--surface));
+  color: var(--primary);
+}
+
+.home-widget--p2pkh-balance .home-widget__badge.is-warn {
+  border-color: #d6a417;
+  background: rgba(214, 164, 23, 0.10);
+  color: #a97f0d;
+}
+
+.home-widget--p2pkh-balance .home-widget__badge.is-error {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 9%, var(--surface));
+  color: var(--danger);
+}
+
+[data-theme="dark"] .home-widget--p2pkh-balance .home-widget__badge.is-warn {
+  border-color: #f3c969;
+  background: rgba(243, 201, 105, 0.10);
+  color: #f3c969;
+}
+
+@media (max-width: 640px) {
+  .home-widget.home-widget--p2pkh-balance {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .home-widget--p2pkh-balance .home-widget__side {
+    grid-column: 1 / -1;
+    flex-direction: row;
+    align-items: center;
+  }
+}

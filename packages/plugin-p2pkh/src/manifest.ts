@@ -911,7 +911,7 @@ const p2pkhPluginDefinition = {
     const identityResources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
     identityResources.register({ id: "p2pkh.identity-key", scope: "global", key: () => ["p2pkh.identity-key"], load: async () => walletState.snapshot(), subscribe: (_args, _context, invalidate) => walletState.subscribe(invalidate), invalidation: "immediate" });
     const Identity = bindP2pkhUi(ctx, IdentityHomeButton);
-    pages.register({ kind: "home", id: "p2pkh.identity", slot: "main", order: -990, label: "Identity", render: () => createElement(Identity) });
+    pages.register({ kind: "home", id: "p2pkh.identity", slot: "main", order: -990, label: "Identity", space: { id: "home.quickActions", label: { key: "home.space.quickActions", fallback: "Quick actions" }, order: 300 }, render: () => createElement(Identity) });
 
 
     const SettingsBlock = bindP2pkhUi(ctx, P2pkhSettingsBlock);

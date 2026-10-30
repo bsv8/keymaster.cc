@@ -19,7 +19,7 @@ export function HomePage() {
     <div className="home-page home-page--single">
       <PageHeader
         title={t("home.page.title", { defaultValue: "首页" })}
-        description={t("home.page.description", { defaultValue: "常用操作" })}
+        description={t("home.page.description", { defaultValue: "钱包余额、快捷操作与应用" })}
       />
       <div className="home-single">
         <div className="home-single__summary">

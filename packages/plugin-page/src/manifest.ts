@@ -25,8 +25,8 @@ const pagePluginDefinition = {
       { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "布局语言" }],
   }],
   i18n: { namespace: "common", resources: {
-    en: { ...bsvChainResources.resources.en, ...settingsResources.resources.en, ...Object.fromEntries(Object.entries(homeResources.resources.en ?? {}).filter(([key]) => /home\.(domain|route|menu|page|business)\./.test(key))) },
-    "zh-CN": { ...bsvChainResources.resources["zh-CN"], ...settingsResources.resources["zh-CN"], ...Object.fromEntries(Object.entries(homeResources.resources["zh-CN"] ?? {}).filter(([key]) => /home\.(domain|route|menu|page|business)\./.test(key))) },
+    en: { ...bsvChainResources.resources.en, ...settingsResources.resources.en, ...Object.fromEntries(Object.entries(homeResources.resources.en ?? {}).filter(([key]) => /home\.(domain|route|menu|page|business|space)\./.test(key))) },
+    "zh-CN": { ...bsvChainResources.resources["zh-CN"], ...settingsResources.resources["zh-CN"], ...Object.fromEntries(Object.entries(homeResources.resources["zh-CN"] ?? {}).filter(([key]) => /home\.(domain|route|menu|page|business|space)\./.test(key))) },
   } },
 } satisfies PluginManifest;
 export const pagePlugin = pagePluginDefinition;

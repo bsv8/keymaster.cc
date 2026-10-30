@@ -780,19 +780,20 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
   min-width: 0;
 }
 .home-layout__cell { min-width: 0; }
-/* ---------- Home single column (准绳 wallet-demo：无左右分割，单列堆叠) ----------
- * 容器对齐 upstream demo/app/wallet-demo.css 的 .wallet-home：
- * max-width 920px，padding 48px 40px，移动 28px 20px。
- * 摘要（余额）置顶，其余功能组件全宽上下堆，不再分 main/aside 双栏。 */
+/* ---------- Home single column (准绳 wallet-demo + auto-lock 卡片语法) ----------
+ * 容器沿用 upstream demo/app/wallet-demo.css 的单列：max-width 920px。
+ * 2026-10-29 起区块外观对齐 /settings/auto-lock：
+ *   卡片 = surface + 1px border + radius+2 + padding 20；
+ *   分节标题 16px，分节内多个贡献共享一张卡，用分隔线区隔。 */
 .home-page--single {
   width: min(100%, 920px);
   margin-inline: auto;
-  padding: 16px 0;
+  padding: 8px 0 24px;
 }
 .home-single {
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 20px;
   min-width: 0;
 }
 .home-single__summary {
@@ -803,78 +804,86 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
 }
 .home-single__main {
   display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
+  flex-direction: column;
+  gap: 20px;
   min-width: 0;
 }
 .home-single__main > .home-layout__cell {
-  flex: 1 1 100%;
   min-width: 0;
 }
-/* 扫码 / 我的信息是两个独立单按钮 section，并排横放不再各占一整行。 */
-.home-single__main > .home-layout__cell:has(.home-actions) {
-  flex: 0 0 auto;
-}
-.home-single__main > .business-home__space {
-  flex: 1 1 100%;
-  min-width: 0;
-}
+/* 分节卡：同一 space 的贡献共享一张卡，卡片标题由 space 提供。 */
 .home-single .business-home__space {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
   min-width: 0;
+  padding: 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 2px);
 }
 .home-single .business-home__space > h2 {
   margin: 0;
-  font-size: 14px;
+  color: var(--text);
+  font-size: 16px;
   font-weight: 600;
+  letter-spacing: -0.01em;
 }
-/* 应用外层 space 标题与 widget 内标题重复（都是“应用”），只留内层。 */
-.home-single .business-home__space:has(.apps-home-widget) > h2 {
-  display: none;
+.home-single .business-home__space > .home-layout__cell {
+  min-width: 0;
 }
-/* 余额摘要收紧：对齐准绳 summary 卡，不再全宽撑空。 */
-.home-single__summary .home-widget {
-  padding: 22px 24px;
-}
-.home-single__summary .home-widget__amount {
-  font-size: 26px;
-  letter-spacing: -1px;
-  margin: 8px 0;
-}
-.home-single__summary .home-widget__breakdown {
+/* 快捷操作：一张卡内两枚并列选项卡。 */
+.home-single .business-home__space:has(.home-actions) {
   display: grid;
-  grid-template-columns: auto auto;
-  justify-content: start;
-  gap: 4px 16px;
-  max-width: 320px;
-  margin: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
 }
-.home-single__summary .home-widget__breakdown dt {
-  color: var(--text-dim);
-  font-size: 11px;
+.home-single .business-home__space:has(.home-actions) > h2 {
+  grid-column: 1 / -1;
 }
-.home-single__summary .home-widget__breakdown dd {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
+/* 同一分节的多块贡献（文件）之间用分隔线区隔，不嵌套卡片。 */
+.home-single .business-home__space:has(.msfile-bucket) > .home-layout__cell + .home-layout__cell {
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+/* 分节卡内的业务 widget 只提供内容，边框与内边距由分节统一负责。 */
+.home-single .business-home__space .home-widget,
+.home-single .business-home__space .apps-home-widget,
+.home-single .business-home__space .msfile-home-file,
+.home-single .business-home__space .msfile-bucket--collapsed {
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+/* 分节内二级标题比卡片标题低一级。 */
+.home-single .business-home__space .msfile-home-file__header h3,
+.home-single .business-home__space .msfile-bucket--collapsed h3 {
+  font-size: 14px;
+}
+/* 余额摘要卡占满内容宽。 */
+.home-single__summary .home-widget {
+  width: 100%;
 }
 /* MSFile 取文件表单收窄，输入行不再无限拉长。 */
-.home-single .msfile-home-file {
-  width: 100%;
-  margin: 0;
-}
 .home-single .msfile-home-file__form {
   max-width: 640px;
 }
+@media (max-width: 720px) {
+  .home-single .business-home__space:has(.home-actions) {
+    grid-template-columns: 1fr;
+  }
+}
 @media (max-width: 640px) {
   .home-page--single {
-    padding: 4px 0;
+    padding: 0 0 16px;
   }
   .home-single {
-    gap: 20px;
+    gap: 16px;
+  }
+  .home-single .business-home__space {
+    gap: 12px;
+    padding: 16px;
   }
 }
 .home-widget { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
@@ -1483,21 +1492,28 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
   .assets-page .asset-overview-row__meta { justify-content: flex-start; max-width: none; }
 }
 
-/* ---------- Home quick actions ---------- */
-.home-actions { max-width: 560px; }
-.home-actions__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 132px)); gap: 18px; }
+/* ---------- Home quick actions（选项卡，对齐 auto-lock 的选项卡） ---------- */
+.home-actions { max-width: none; min-width: 0; }
+.home-actions__grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
 .home-actions__shortcut {
-  appearance: none; border: 0; background: transparent; color: var(--text); cursor: pointer;
-  display: flex; flex-direction: column; align-items: center; gap: 9px; font: inherit; font-size: 14px;
+  appearance: none; width: 100%; cursor: pointer;
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 14px; text-align: left;
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  font: inherit;
+  transition: border-color .15s ease, background .15s ease;
 }
+.home-actions__shortcut:hover { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 6%, var(--surface-2)); }
+.home-actions__shortcut:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 .home-actions__icon {
-  width: 68px; height: 68px; display: grid; place-items: center; border-radius: 22px;
-  background: color-mix(in srgb, var(--primary) 16%, var(--surface)); color: var(--primary);
-  border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--border)); transition: transform .15s ease, background .15s ease;
+  width: 40px; height: 40px; flex: 0 0 40px; display: grid; place-items: center; border-radius: 10px;
+  background: color-mix(in srgb, var(--primary) 12%, var(--surface-2)); color: var(--primary);
 }
-.home-actions__icon--info { background: color-mix(in srgb, #5b8def 16%, var(--surface)); color: #5b8def; border-color: color-mix(in srgb, #5b8def 28%, var(--border)); }
-.home-actions__shortcut:hover .home-actions__icon, .home-actions__shortcut:focus-visible .home-actions__icon { transform: translateY(-2px); background: color-mix(in srgb, var(--primary) 24%, var(--surface)); }
-.home-actions__shortcut:focus-visible { outline: 2px solid var(--primary); outline-offset: 4px; border-radius: 24px; }
+.home-actions__icon--info { background: color-mix(in srgb, #5b8def 12%, var(--surface-2)); color: #5b8def; }
+.home-actions__text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.home-actions__text strong { font-size: 13px; font-weight: 600; }
+.home-actions__text small { color: var(--text-dim); font-size: 11px; line-height: 1.4; }
 .home-actions__identity { align-items: center; display: flex; flex-direction: column; gap: 14px; }
 .home-actions__qr { background: #fff; border-radius: 14px; display: grid; padding: 10px; }
 .home-actions__identity-row { align-items: center; display: grid; gap: 8px; grid-template-columns: 44px minmax(0, 1fr) auto; width: 100%; }
@@ -1529,7 +1545,6 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
 .home-actions__create { align-items: end; display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) auto; }
 .home-actions__create .ui-field { margin-bottom: 0; }
 @media (max-width: 480px) {
-  .home-actions__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .home-actions__identity-row { grid-template-columns: 40px minmax(0, 1fr); }
   .home-actions__identity-row .home-actions__copy { grid-column: 2; justify-self: start; }
   .assets-home__account-address { align-items: start; grid-template-columns: auto minmax(0, 1fr); }

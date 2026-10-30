@@ -272,7 +272,7 @@ const resources: I18nPluginResources = {
       "msfile.errors.msfile_not_configured": "MSFile price limits are not configured yet.",
       "msfile.errors.msfile_unavailable": "MSFile is unavailable right now.",
       "msfile.errors.default": "MSFile request failed.",
-      "msfile.home.space": "MSFile files",
+      "msfile.home.space": "Files",
       "msfile.home.title": "Get a file by Seed",
       "msfile.home.description": "Enter a Seed Hash to query suppliers and safely preview or download the original file.",
       "msfile.home.seedHash.label": "Seed Hash",
@@ -736,7 +736,7 @@ const resources: I18nPluginResources = {
       "msfile.errors.msfile_not_configured": "MSFile 价格限制尚未配置。",
       "msfile.errors.msfile_unavailable": "MSFile 当前不可用。",
       "msfile.errors.default": "MSFile 请求失败。",
-      "msfile.home.space": "MSFile 文件",
+      "msfile.home.space": "文件",
       "msfile.home.title": "通过 Seed 获取文件",
       "msfile.home.description": "输入 Seed Hash，查询供应商并安全预览或下载原文件。",
       "msfile.home.seedHash.label": "Seed Hash",
@@ -1181,8 +1181,8 @@ const msfilePluginDefinition = {
     // Bind once per plugin instance so parent renders preserve card state and tasks.
     const HomeFileWidget = bindMsFileUi(ctx, MsFileHomeFileWidget);
     const BucketHomeWidget = bindMsFileUi(ctx, MsFileBucketHomeWidget);
-    pages.view.register({ kind: "home", slot: "main", id: "msfile.file-fetch", label: "MSFile", space: { id: "msfile.files", label: { key: "msfile.home.space", fallback: "MSFile files" }, order: 600 }, order: 10, visibleWhen: ({ unlocked }) => unlocked, render: () => createElement(HomeFileWidget) });
-    pages.view.register({ kind: "home", slot: "main", id: "msfile.bucket-storage", label: "MSFile", space: { id: "msfile.files", label: { key: "msfile.home.space", fallback: "MSFile files" }, order: 600 }, order: 20, visibleWhen: ({ unlocked }) => unlocked, render: () => createElement(BucketHomeWidget) });
+    pages.view.register({ kind: "home", slot: "main", id: "msfile.file-fetch", label: "MSFile", space: { id: "msfile.files", label: { key: "msfile.home.space", fallback: "Files" }, order: 600 }, order: 10, visibleWhen: ({ unlocked }) => unlocked, render: () => createElement(HomeFileWidget) });
+    pages.view.register({ kind: "home", slot: "main", id: "msfile.bucket-storage", label: "MSFile", space: { id: "msfile.files", label: { key: "msfile.home.space", fallback: "Files" }, order: 600 }, order: 20, visibleWhen: ({ unlocked }) => unlocked, render: () => createElement(BucketHomeWidget) });
     const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     business.registerFeature(MSFILE_PLUGIN_ID, "home", {
       id: "home.msfile-file",

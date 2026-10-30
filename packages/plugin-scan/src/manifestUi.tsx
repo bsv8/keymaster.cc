@@ -10,8 +10,23 @@ export const scanSetup: PluginSetup = ctx => {
  ctx.provide(URI_ACTION_RESOLVER_CAPABILITY, router.resolver);
  ctx.provide(SCAN_UI_CAPABILITY, router.scanUi);
  const resolver = router.resolver.bind(ctx.consumer, ctx.scope), scan = router.scanUi.bind(ctx.consumer, ctx.scope);
- function HomeButton() { const { t } = usePluginI18n(); return <section className="home-actions"><div className="home-actions__grid"><button type="button" className="home-actions__shortcut" onClick={() => scan.open()} data-testid="home-scan-button"><span className="home-actions__icon"><ScanLine size={28} /></span><span>{t("scan.home")}</span></button></div></section>; }
+ function HomeButton() {
+   const { t } = usePluginI18n();
+   return (
+     <section className="home-actions">
+       <div className="home-actions__grid">
+         <button type="button" className="home-actions__shortcut" onClick={() => scan.open()} data-testid="home-scan-button">
+           <span className="home-actions__icon"><ScanLine size={22} /></span>
+           <span className="home-actions__text">
+             <strong>{t("scan.home", { defaultValue: "扫描" })}</strong>
+             <small>{t("scan.home.hint", { defaultValue: "扫码或打开链接" })}</small>
+           </span>
+         </button>
+       </div>
+     </section>
+   );
+ }
  const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope).view;
- pages.register({ id: "scan.home", kind: "home", slot: "main", order: -1000, label: "Scan", render: () => createElement(HomeButton) });
+ pages.register({ id: "scan.home", kind: "home", slot: "main", order: -1000, label: "Scan", space: { id: "home.quickActions", label: { key: "home.space.quickActions", fallback: "Quick actions" }, order: 300 }, render: () => createElement(HomeButton) });
  pages.register({ id: "scan.frame", kind: "frame", slot: "uri-action", label: "URI action", render: () => createElement(ScanContextProvider, { value: { router, resolver }, children: createElement(ScanFrame) }) });
 };

@@ -1,6 +1,7 @@
 import { useP2pkhResources } from "../P2pkhResourceContext.js";
 import { formatSats } from "@keymaster/ui";
 import { countRender } from "webloom-framework/react";
+import { Wallet } from "lucide-react";
 import { usePluginI18n, usePluginLocale, useResourceViewSelector } from "@keymaster/runtime";
 import { emptyGlobalBalanceSnapshot, type GlobalBalanceSnapshot } from "@keymaster/contracts";
 import type { P2pkhSyncSnapshot } from "../p2pkhContracts.js";
@@ -30,18 +31,31 @@ export function P2pkhBalanceWidget() {
     readiness === "initializing" ? "p2pkh.balanceWidget.status.initializing" : "p2pkh.balanceWidget.status.noActiveKey",
     { defaultValue: readiness === "initializing" ? "钱包正在初始化" : "钱包尚未解锁" },
   );
+  // 摘要卡右侧状态胶囊：同步失败优先告警，初始化/同步中为提示色，其余中性。
+  const badgeTone = stale ? "is-error" : readiness !== "ready" || sync.status === "syncing" ? "is-warn" : sync.status === "ok" ? "is-ok" : "is-neutral";
+  const networkLabel = network
+    ? t(network === "main" ? "p2pkh.balanceWidget.bsvMain" : "p2pkh.balanceWidget.bsvTest", { defaultValue: network === "main" ? "BSV (main)" : "BSV Testnet (test)" })
+    : undefined;
   return (
     <div className={`home-widget home-widget--p2pkh-balance ${stale ? "is-stale" : ""}`}>
-      <header className="home-widget__head"><h3>{t("p2pkh.balanceWidget.title", { defaultValue: "P2PKH 余额" })}</h3></header>
-      <section className="home-widget__row"><div>
-        <p className="home-widget__label">{network ? t(network === "main" ? "p2pkh.balanceWidget.bsvMain" : "p2pkh.balanceWidget.bsvTest", { defaultValue: network === "main" ? "BSV (main)" : "BSV Testnet (test)" }) : "BSV"}</p>
+      <span className="home-widget__icon" aria-hidden="true"><Wallet size={20} /></span>
+      <div className="home-widget__content">
+        <h3 className="home-widget__eyebrow">{t("p2pkh.balanceWidget.title", { defaultValue: "P2PKH 余额" })}</h3>
         <p className="home-widget__amount">{known ? formatSats(balance.total, locale) : "—"}</p>
         {known && balance.breakdown ? <dl className="home-widget__breakdown">
           <dt>{t("p2pkh.balance.confirmed", { defaultValue: "已确认（可花费）" })}</dt><dd>{formatSats(balance.breakdown.confirmed)}</dd>
           <dt>{t("p2pkh.balance.localSpendable", { defaultValue: "可花费" })}</dt><dd>{formatSats(balance.breakdown.spendable)}</dd>
         </dl> : null}
-      </div></section>
-      <p className="home-widget__status">{t("p2pkh.balanceWidget.statusLabel", { defaultValue: "状态：" })}{statusText}</p>
+      </div>
+      <div className="home-widget__side">
+        {networkLabel ? <span className="home-widget__network">{networkLabel}</span> : null}
+        <span
+          className={`home-widget__badge ${badgeTone}`}
+          title={`${t("p2pkh.balanceWidget.statusLabel", { defaultValue: "状态：" })}${statusText}`}
+        >
+          {statusText}
+        </span>
+      </div>
     </div>
   );
 }

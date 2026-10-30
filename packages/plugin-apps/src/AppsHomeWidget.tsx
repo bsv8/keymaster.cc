@@ -74,13 +74,10 @@ export function AppsHomeWidget() {
     // apps namespace 可能已随 owner/session 插件注销；不可用空态不再
     // 读取已经不存在的翻译资源，保持生命周期降级无噪声。
     const unavailableText = language() === "zh-CN"
-      ? { title: "应用", message: "当前会话暂时无法提供应用服务。" }
-      : { title: "Apps", message: "The app service is temporarily unavailable for this session." };
+      ? { message: "当前会话暂时无法提供应用服务。" }
+      : { message: "The app service is temporarily unavailable for this session." };
     return (
       <div className="apps-home-widget apps-home-widget--unavailable" data-testid="apps-home-widget-unavailable">
-        <div className="apps-home-widget__title">
-          {unavailableText.title}
-        </div>
         <div className="apps-home-widget__empty">
           {unavailableText.message}
         </div>
@@ -99,7 +96,6 @@ function AppsHomeWidgetContent({ protocol }: { protocol: ProtocolService }) {
   const [errorById, setErrorById] = useState<Record<string, string>>({});
 
   const visible = validation.ok.slice(0, HOME_WIDGET_PREVIEW_LIMIT);
-  const hasMore = validation.ok.length > HOME_WIDGET_PREVIEW_LIMIT;
 
   const handleOpen = async (entry: AppCatalogEntry) => {
     if (launchingId) return;
@@ -141,9 +137,6 @@ function AppsHomeWidgetContent({ protocol }: { protocol: ProtocolService }) {
 
   return (
     <div className="apps-home-widget" data-testid="apps-home-widget">
-      <div className="apps-home-widget__title">
-        {t("apps.widget.title", { defaultValue: "Apps" })}
-      </div>
       <AppLaunchModal
         open={launchEntry !== null}
         entry={launchEntry}
@@ -177,11 +170,14 @@ function AppsHomeWidgetContent({ protocol }: { protocol: ProtocolService }) {
                     icon.type === "svg" ? (
                       <img src={icon.src} alt="" className="apps-home-widget__item-icon-img" />
                     ) : (
-                      <icon.component size={24} />
+                      <icon.component size={20} />
                     )
                   ) : null}
                 </div>
-                <div className="apps-home-widget__item-name">{entry.name}</div>
+                <div className="apps-home-widget__item-info">
+                  <div className="apps-home-widget__item-name">{entry.name}</div>
+                  <div className="apps-home-widget__item-origin">{entry.appOrigin}</div>
+                </div>
                 <Button
                   variant="ghost"
                   size="sm"
@@ -204,10 +200,10 @@ function AppsHomeWidgetContent({ protocol }: { protocol: ProtocolService }) {
           })}
         </div>
       )}
-      {hasMore ? (
+      {visible.length > 0 ? (
         <div className="apps-home-widget__footer">
-          <Button variant="ghost" onClick={openAll}>
-            {t("apps.widget.viewAll", { defaultValue: "查看全部" })}
+          <Button variant="ghost" size="sm" onClick={openAll}>
+            {t("apps.widget.viewAll", { defaultValue: "查看所有应用" })}
           </Button>
         </div>
       ) : null}
