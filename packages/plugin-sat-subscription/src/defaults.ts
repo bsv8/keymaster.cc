@@ -2,8 +2,8 @@
 // SatSubscription 缺省供应商。
 //
 // 设计缘由：
-//   - 开发（`npm run dev`）使用 testnet 网关，正式构建
-//     （`npm run build` / `npm run build:production`）使用 mainnet 网关；
+//   - main/test 由已解锁钱包身份决定，不由构建模式决定；
+//   - dev 可显式注入临时网关；不改变钱包链网络，不持久化临时默认值；
 //   - 缺省供应商是「出口」：当前 owner 新消息默认从它发布；
 //   - 入口不做单一化——所有被选为接收方的供应商都会侦听；
 //   - 用户清空供应商列表后，下次启动重新回到缺省供应商，
@@ -11,6 +11,8 @@
 
 import type { SatSupplierConfigV1 } from "@keymaster/contracts";
 import type { SatSubscriptionStateSnapshot } from "./satState.js";
+import { multiaddr } from "@multiformats/multiaddr";
+import { hexToBytes, peerIdFromPublicKeyBytes } from "bitcoin-libp2p/identity";
 
 /** 缺省供应商对应的网络选择。 */
 export type SatDefaultNetwork = "mainnet" | "testnet";
@@ -46,7 +48,26 @@ export function isBuiltInDefaultSupplierConfig(config: SatSupplierConfigV1): boo
 }
 
 /** 构造指定网络的缺省供应商配置。 */
-export function createDefaultSatSupplierConfig(network: SatDefaultNetwork): SatSupplierConfigV1 {
+export function createDefaultSatSupplierConfig(network: SatDefaultNetwork, devJson?: string): SatSupplierConfigV1 {
+  if (network !== "mainnet" && network !== "testnet") throw new Error("SatSubscription 缺省需要明确的钱包网络");
+  if (devJson !== undefined) {
+    const value: unknown = JSON.parse(devJson);
+    if (!value || typeof value !== "object" || !("publicKeyHex" in value) || !("multiaddrs" in value)
+      || typeof value.publicKeyHex !== "string" || !/^(02|03)[0-9a-f]{64}$/u.test(value.publicKeyHex)
+      || !Array.isArray(value.multiaddrs) || value.multiaddrs.length === 0) throw new Error("dev 网关需要 publicKeyHex 和非空 multiaddrs");
+    const peer = peerIdFromPublicKeyBytes(hexToBytes(value.publicKeyHex)).toString();
+    const addresses = value.multiaddrs.map((address: unknown) => {
+      if (typeof address !== "string") throw new Error("dev 网关地址必须是字符串");
+      const parsed = multiaddr(address);
+      const components = parsed.getComponents();
+      const last = components[components.length - 1];
+      if (last?.name !== "p2p" || last.value !== peer) throw new Error("dev 网关地址与公钥身份不一致");
+      return parsed.toString();
+    });
+    const name = "name" in value ? value.name : "dev 网关";
+    if (typeof name !== "string" || !name.trim()) throw new Error("dev 网关名称无效");
+    return { supplierId: SAT_DEFAULT_SUPPLIER_ID, name, supplierPublicKeyHex: value.publicKeyHex, multiaddrs: addresses, enabled: true };
+  }
   return {
     supplierId: SAT_DEFAULT_SUPPLIER_ID,
     name: SAT_DEFAULT_SUPPLIER_NAME,
@@ -70,10 +91,11 @@ export function createDefaultSatSupplierConfig(network: SatDefaultNetwork): SatS
  */
 export function applyDefaultSatSupplier(
   snapshot: SatSubscriptionStateSnapshot,
-  network: SatDefaultNetwork
+  network: SatDefaultNetwork,
+  devJson?: string,
 ): SatSubscriptionStateSnapshot {
   if (!snapshot.ownerPublicKeyHex) return snapshot;
-  const supplier = createDefaultSatSupplierConfig(network);
+  const supplier = createDefaultSatSupplierConfig(network, devJson);
   const customSuppliers = snapshot.suppliers.filter((item) => item.supplierId !== SAT_DEFAULT_SUPPLIER_ID);
   const customById = new Map(customSuppliers.map((item) => [item.supplierId, item]));
   const previousSettings = snapshot.ownerSettings;

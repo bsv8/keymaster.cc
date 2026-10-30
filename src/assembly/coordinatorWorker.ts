@@ -837,12 +837,17 @@ const msfileWorkerRequests = createMsFileWorkerRequests({
   io: { run: (operation, signal, execute, options) => withCoordinatorFinalIoLease(operation, signal, execute, { ...options, auditOperation: options.auditOperation }) },
 });
 
+// dev 是服务覆盖模式，不是第三种 BSV 链。production 构建不读取临时覆盖。
+const devServicesEnabled = import.meta.env.MODE === "development" || import.meta.env.MODE === "dev";
 const msfileWorkerLifecycle = createMsFileWorkerLifecycle({
   network: () => vaultWorkerKeys.requireCoordinatorNetworkIdentity().bsvNetwork,
   // 只有产品 Vite 装配启用内置目录；单测和外置 E2E 构建不携带公网缺省值。
   // 钱包网络来自已解锁身份，新建/导入/重新解锁共享同一路径。
-  arbitrationServices: () => typeof __KEYMASTER_PRODUCT_SERVICES__ !== "undefined" && __KEYMASTER_PRODUCT_SERVICES__
-    ? productArbitrationServices(vaultWorkerKeys.requireCoordinatorNetworkIdentity().bsvNetwork) : [],
+  arbitrationServices: () => {
+    const devJson = devServicesEnabled ? import.meta.env.VITE_KEYMASTER_DEV_ARBITRATION_SERVICES : undefined;
+    return devJson !== undefined || (typeof __KEYMASTER_PRODUCT_SERVICES__ !== "undefined" && __KEYMASTER_PRODUCT_SERVICES__)
+      ? productArbitrationServices(vaultWorkerKeys.requireCoordinatorNetworkIdentity().bsvNetwork, devJson) : [];
+  },
   assertAvailable() { assertCoordinatorUnitConstructible("msfile.coordinator-worker"); assertStorageDataAvailable(); },
   session: () => ({ unlocked: coordinatorState.vaultStatus === "unlocked", owner: coordinatorState.activePublicKeyHex, epoch: coordinatorState.sessionEpoch }),
   fixtureTransport: () => testDomainUnitReadiness ? windowP2pExecutorTransport : undefined,
@@ -1011,6 +1016,7 @@ const satWorkerLifecycle = createSatWorkerLifecycle({
   assertAvailable: () => assertCoordinatorUnitConstructible("sat-subscription.coordinator-worker"),
   session: () => ({ unlocked: coordinatorState.vaultStatus === "unlocked", owner: coordinatorState.activePublicKeyHex, epoch: coordinatorState.sessionEpoch }),
   transport: () => satSubscriptionTransport, network: satDefaultNetwork,
+  devSupplierJson: () => devServicesEnabled ? import.meta.env.VITE_KEYMASTER_DEV_SAT_SUPPLIER : undefined,
   getP2pkh: () => testDomainUnitReadiness ? ensureSatP2pkhService() : null,
   incoming: event => channelWorkerRuntime.handleIncomingChannelPublish(event),
   async deriveAddress(owner, network, epoch) {

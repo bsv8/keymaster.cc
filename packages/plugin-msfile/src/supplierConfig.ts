@@ -92,7 +92,14 @@ export function normalizeSupplierAddress(
   } catch {
     return { ok: false, message: "address is not a valid multiaddr" };
   }
-  const components: Component[] = addr.getComponents().map((c) => ({ name: c.name, value: c.value }));
+  const components: Component[] = addr.getComponents().flatMap((c): Component[] => c.name === "wss"
+    ? [{ name: "tls" }, { name: "ws" }]
+    : [{ name: c.name, value: c.value }]);
+  // multiaddr v13 保留 /wss 组件，不会自动展开成 /tls/ws。
+  // 按解析后的协议组件展开，避免误替换名字恰为 wss 的 DNS 主机。
+  if (addr.getComponents().some((c) => c.name === "wss")) {
+    addr = multiaddr(components.map((c) => `/${c.name}${c.value === undefined ? "" : `/${c.value}`}`).join(""));
+  }
 
   // 尾部必须是 p2p/<peer-id> 且与公钥派生 PeerId 一致。
   const last = components[components.length - 1];

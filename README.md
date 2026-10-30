@@ -53,7 +53,9 @@ pnpm build
 
 MSFile 设置页显示不可修改、不可删除的服务身份和完整连接地址；卖方还可以增加接受的仲裁公钥。保存设置不能移除固定仲裁方。当前两环境共用公钥与 PeerID，连接地址必须按网络选择。
 
-底层 MSFile service 默认没有仲裁服务；测试通过 `arbitrationServices` 显式注入本地服务运行时的公钥和地址，外置 E2E 构建关闭产品内置服务。卖方在线交付后超过付款等待时间（缺省 60 秒，可在设置中调整）会自动申请仲裁并提交结算交易。买方从 MSFile 设置页“仲裁与文件取回”手动取回已授权内容。锁定/退出后不补跑计时，重新登录只显示状态和操作按钮；失败操作由用户手动继续。节点接受交易与区块确认分开展示。取回成功不等于费用池已结算：链上花费尚未查明时保留专款保护，用户通过“检查结算状态”继续核验，已取回文件仍可使用。
+开发服务器（Vite mode `development`/`dev`）可通过 `.env.development.local` 或进程环境注入 `VITE_KEYMASTER_DEV_ARBITRATION_SERVICES`（JSON 数组 `{name?, publicKeyHex, address}`，替换完整仲裁目录）与 `VITE_KEYMASTER_DEV_SAT_SUPPLIER`（JSON 对象 `{name?, publicKeyHex, multiaddrs}`，替换默认 SatSubscription 网关）。未设置的服务仍使用钱包网络内置值；`[]` 表示无可信仲裁。dev 不改变钱包链网络，生产 mode 不使用临时覆盖；修改后重载并正常解锁。仲裁费率运行时向认证服务查询，不写死在 env。完整默认值见 `../BSV8_Engineering/docs/keymaster.cc/服务缺省与开发覆盖.md`。
+
+底层 MSFile service 默认没有仲裁服务；测试通过 `arbitrationServices` 显式注入本地服务运行时的公钥和地址，外置 E2E 构建关闭产品内置服务（显式 dev 环境变量仍可注入，未注入时不回退公网）。卖方在线交付后超过付款等待时间（缺省 60 秒，可在设置中调整）会自动申请仲裁并提交结算交易。买方从 MSFile 设置页“仲裁与文件取回”手动取回已授权内容。锁定/退出后不补跑计时，重新登录只显示状态和操作按钮；失败操作由用户手动继续。节点接受交易与区块确认分开展示。取回成功不等于费用池已结算：链上花费尚未查明时保留专款保护，用户通过“检查结算状态”继续核验，已取回文件仍可使用。
 
 当前依赖 `go-bitfs@0.3.3` 通过 `patches/` 和 pnpm lockfile 应用可复现补丁，支持历史交付证据的仲裁/补签、精确托管计费检查及买方本地付款状态的取回验收。请使用 `pnpm install --frozen-lockfile` 安装，不能绕过补丁直接使用未修正的同版本 npm 包。
 

@@ -12,6 +12,7 @@ export interface SatWorkerServicesDependencies {
   ownerSessionEpoch: string;
   signal: AbortSignal;
   network: SatDefaultNetwork;
+  devSupplierJson?: string;
   transport: SatSubscriptionTransport;
   assertFresh(): void;
   getOwnerPublicKeyHex: SatSpiServiceConfig["getOwnerPublicKeyHex"];
@@ -28,7 +29,7 @@ export async function createSatWorkerServices(deps: SatWorkerServicesDependencie
   try {
     const loaded = await repository.load();
     deps.assertFresh();
-    const state = createSatSubscriptionState({ ownerPublicKeyHex: deps.ownerPublicKeyHex, initial: applyDefaultSatSupplier(loaded, deps.network), persistence: repository });
+    const state = createSatSubscriptionState({ ownerPublicKeyHex: deps.ownerPublicKeyHex, initial: applyDefaultSatSupplier(loaded, deps.network, deps.devSupplierJson), persistence: repository });
     const stateForOwner = async (owner: string) => {
       deps.assertFresh();
       if (owner !== deps.ownerPublicKeyHex || owner !== deps.getOwnerPublicKeyHex()) throw new Error("SatSubscription owner changed");
