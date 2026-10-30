@@ -105,14 +105,16 @@ export function createStorageBindingAuthority(
     const grant = unwrap<StorageOwnerGrant>(await client.storageBindOwner({ pluginId: input.pluginId, declaration }), "module file storage bind");
     let closed = false;
     const assertOpen = (): void => { if (closed) throw new Error("Storage handle is closed"); };
-    const call = async <T>(data: CoordinatorOwnerStorageData): Promise<T> => unwrap<T>(await client.storageOwnerData(data), "module file storage");
+    // AbortSignal 是本地控制对象，不属于可序列化 RPC DTO。
+    const call = async <T>(data: CoordinatorOwnerStorageData, signal?: AbortSignal): Promise<T> => unwrap<T>(await client.storageOwnerData(data, [], signal), "module file storage");
     return {
       get walletGeneration() { return grant.walletGeneration; },
       get sessionEpoch() { return grant.sessionEpoch; },
       get runGeneration() { return grant.runGeneration; },
       async list(listInput = {}): Promise<ModuleFileListPage> {
         assertOpen();
-        return call<ModuleFileListPage>({ type: "owner.file-list", storageGrantId: grant.storageGrantId, input: listInput });
+        const { signal, ...input } = listInput;
+        return call<ModuleFileListPage>({ type: "owner.file-list", storageGrantId: grant.storageGrantId, input }, signal);
       },
       async get(path: string, getInput = {}): Promise<ModuleFileObject | undefined> {
         assertOpen();
@@ -121,7 +123,7 @@ export function createStorageBindingAuthority(
           storageGrantId: grant.storageGrantId,
           path,
           ...(getInput.ifRevision === undefined ? {} : { ifRevision: getInput.ifRevision }),
-        });
+        }, getInput.signal);
       },
       async getRange(path, range, rangeInput = {}): Promise<ModuleFileObject | undefined> {
         assertOpen();
@@ -131,9 +133,9 @@ export function createStorageBindingAuthority(
           path,
           range,
           ...(rangeInput.ifRevision === undefined ? {} : { ifRevision: rangeInput.ifRevision }),
-        });
+        }, rangeInput.signal);
       },
-      async put(path: string, bytes: Uint8Array, writeInput: StorageWriteCondition & { contentType?: string } = {}): Promise<ModuleFileWriteResult> {
+      async put(path: string, bytes: Uint8Array, writeInput: StorageWriteCondition & { contentType?: string; signal?: AbortSignal } = {}): Promise<ModuleFileWriteResult> {
         assertOpen();
         const result = await call<ModuleFileWriteResult>({
           type: "owner.file-put",
@@ -143,7 +145,7 @@ export function createStorageBindingAuthority(
           ...(writeInput.ifRevision === undefined ? {} : { ifRevision: writeInput.ifRevision }),
           ...(writeInput.ifNoneMatch === undefined ? {} : { ifNoneMatch: true }),
           ...(writeInput.contentType === undefined ? {} : { contentType: writeInput.contentType }),
-        });
+        }, writeInput.signal);
         return { revision: result.revision, lastModified: result.lastModified };
       },
       async delete(path: string, deleteInput = {}): Promise<void> {
@@ -153,7 +155,7 @@ export function createStorageBindingAuthority(
           storageGrantId: grant.storageGrantId,
           path,
           ...(deleteInput.ifRevision === undefined ? {} : { ifRevision: deleteInput.ifRevision }),
-        });
+        }, deleteInput.signal);
       },
       async batch(batchInput, batchOptions = {}) {
         assertOpen();
@@ -173,7 +175,7 @@ export function createStorageBindingAuthority(
             ...(condition.ifRevision === undefined ? {} : { ifRevision: condition.ifRevision }),
             ...(condition.ifNoneMatch === undefined ? {} : { ifNoneMatch: condition.ifNoneMatch }),
           })),
-        });
+        }, batchOptions.signal);
       },
       close() { closed = true; },
     };

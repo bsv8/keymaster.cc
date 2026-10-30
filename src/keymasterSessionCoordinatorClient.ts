@@ -1180,7 +1180,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     // endpoint loss; rejecting this operation never authorizes a new spend.
     // Likewise, a late error from an old request cannot close a new connection.
     if (belongsToPreviousConnection || (cause as CoordinatorSendError | undefined)?.connectionUnavailable === true
-      || code === "service_revoked" || code === "service_reference_stale" || code === "request_validation_failed") {
+      // DTO 编码失败只拒绝当前请求，不是健康 Runtime/端点断开的证据。
+      || code === "service_revoked" || code === "service_reference_stale" || code === "request_validation_failed" || code === "invalid_message") {
       this.reportRecoverableCoordinatorFailure(kind, cause);
       return { status: "transport-error", message: cause instanceof Error ? cause.message : "Coordinator request scope is stale", retryable: false, dispatchStatus };
     }
