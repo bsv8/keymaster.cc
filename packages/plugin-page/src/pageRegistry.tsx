@@ -77,58 +77,120 @@ export function createPageRegistry(resolveText: (label: I18nText) => string = la
   };
   let outlet: HTMLElement | null = null;
   let selectedApplication: string | null = null;
-  const appViews = new Map<string, { view: ApplicationView; frame: HTMLIFrameElement }>();
+  const appViews = new Map<string, { view: ApplicationView; frame?: HTMLIFrameElement }>();
+  const resultViews = new Map<string, import("@keymaster/contracts").WorkspaceResultView>();
+  let selectedResult: string | null = null;
   const updateFrames = () => {
-    for (const [id, { frame }] of appViews) frame.hidden = id !== selectedApplication;
+    for (const [id, { frame }] of appViews) if (frame) frame.hidden = id !== selectedApplication;
   };
   const renderer: PageUiRenderer = {
+    openResult(input) {
+      active();
+      resultViews.get(input.id)?.close();
+      let closed = false;
+      const view: import("@keymaster/contracts").WorkspaceResultView = {
+        id: input.id, title: input.title, render: input.render,
+        close() {
+          if (closed) return;
+          closed = true;
+          try { input.onClose(); } finally {
+            resultViews.delete(input.id);
+            if (selectedResult === input.id) selectedResult = null;
+            changed();
+          }
+        },
+      };
+      resultViews.set(input.id, view);
+      selectedResult = input.id; selectedApplication = null; updateFrames(); changed();
+      return view;
+    },
+    resultViews() { active(); return [...resultViews.values()]; },
+    activeResult() { active(); return selectedResult; },
+    selectResult(id) {
+      active();
+      if (id !== null && !resultViews.has(id)) throw new Error("Result is not open");
+      selectedResult = id;
+      if (id !== null) selectedApplication = null;
+      updateFrames(); changed();
+    },
     openApplication(input) {
       active();
-      if (!outlet?.isConnected) throw new Error("Application workspace is not mounted");
+      if (input.mode === "iframe" && !outlet?.isConnected) throw new Error("Application workspace is not mounted");
       const origin = new URL(input.origin);
       if (!['https:', 'http:'].includes(origin.protocol) || origin.origin !== input.origin || origin.origin === window.location.origin) throw new Error("Applications require a separate HTTP origin");
       appViews.get(input.id)?.view.close();
-      const frame = document.createElement("iframe");
-      frame.title = input.title;
-      frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms allow-downloads");
-      frame.referrerPolicy = "no-referrer";
-      frame.className = "workspace-app-frame";
-      outlet.append(frame);
-      const source = frame.contentWindow;
-      if (!source) { frame.remove(); throw new Error("Application frame unavailable"); }
+      let frame: HTMLIFrameElement | undefined;
+      let source: Window | null;
+      if (input.mode === "iframe") {
+        frame = document.createElement("iframe");
+        frame.title = input.title;
+        frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms allow-downloads");
+        frame.referrerPolicy = "no-referrer";
+        frame.className = "workspace-app-frame";
+        outlet!.append(frame);
+        source = frame.contentWindow;
+      } else {
+        // 必须在点击的同步栈内预开；异步授权和落盘后再开会被浏览器拦截。
+        source = window.open("about:blank", "_blank");
+      }
+      if (!source) { frame?.remove(); throw new Error("Application window unavailable or blocked"); }
+      const peer = source;
       let closed = false;
+      let closePoll: ReturnType<typeof setInterval> | undefined;
       const view: ApplicationView = {
-        id: input.id, title: input.title, origin: input.origin, source,
-        get closed() { return closed || !frame.isConnected; },
+        id: input.id, title: input.title, origin: input.origin, source: peer, mode: input.mode,
+        get closed() { return closed || (frame ? !frame.isConnected : peer.closed); },
         navigate(url) {
           active();
           if (view.closed) throw new Error("Application has closed");
           if (new URL(url).origin !== input.origin) throw new Error("Application origin changed");
-          frame.src = url;
+          if (frame) frame.src = url;
+          else peer.location.replace(url);
         },
-        focus() { active(); if (view.closed) throw new Error("Application has closed"); selectedApplication = input.id; updateFrames(); changed(); frame.focus(); },
+        focus() {
+          active(); if (view.closed) throw new Error("Application has closed");
+          if (frame) { selectedApplication = input.id; selectedResult = null; updateFrames(); changed(); frame.focus(); }
+          else peer.focus();
+        },
         close() {
           if (closed) return;
           closed = true;
+          if (closePoll) clearInterval(closePoll);
           // Revoke transport authority before removing the browsing context.
           try { input.onClose(); } finally {
-            frame.remove(); appViews.delete(input.id);
+            if (frame) frame.remove();
+            else if (!peer.closed) peer.close();
+            appViews.delete(input.id);
             if (selectedApplication === input.id) selectedApplication = null;
             updateFrames(); changed();
           }
         },
       };
       appViews.set(input.id, { view, frame });
-      selectedApplication = input.id; updateFrames(); changed();
+      if (frame) { selectedApplication = input.id; selectedResult = null; }
+      else closePoll = setInterval(() => { if (peer.closed) view.close(); }, 1000);
+      updateFrames(); changed();
       return view;
     },
     applicationViews() { active(); return [...appViews.values()].map(item => item.view); },
     activeApplication() { active(); return selectedApplication; },
-    selectApplication(id) { active(); if (id !== null && !appViews.has(id)) throw new Error("Application is not open"); selectedApplication = id; updateFrames(); changed(); },
+    selectApplication(id) {
+      active();
+      const item = id === null ? undefined : appViews.get(id);
+      if (id !== null && !item) throw new Error("Application is not open");
+      if (item?.view.mode === "popup") { item.view.focus(); return; }
+      selectedApplication = id; selectedResult = null; updateFrames(); changed();
+    },
     attachApplicationOutlet(element) {
+      // React detaches refs after scope revocation as well as before it. Null
+      // is an idempotent release, not a new use of a disposed renderer.
+      if (element === null) {
+        for (const item of [...appViews.values()]) item.view.close();
+        outlet = null;
+        return;
+      }
       active();
       if (element === outlet) return;
-      if (!element && appViews.size) for (const item of [...appViews.values()]) item.view.close();
       outlet = element;
     },
     revision: () => revision,
@@ -171,5 +233,5 @@ export function createPageRegistry(resolveText: (label: I18nText) => string = la
     renderHeader(slot) { active(); return matching(entry => entry.kind === "header" && entry.slot === slot).map(entry => render(entry, Object.freeze({ path: "", params: Object.freeze({}) }))); },
     subscribe(listener) { active(); listeners.add(listener); return () => { listeners.delete(listener); }; },
   };
-  return { registry, renderer, dispose() { if (disposed) return; for (const item of [...appViews.values()]) item.view.close(); outlet = null; disposed = true; entries.clear(); changed(); listeners.clear(); } };
+  return { registry, renderer, dispose() { if (disposed) return; for (const item of [...appViews.values()]) item.view.close(); for (const view of [...resultViews.values()]) view.close(); outlet = null; disposed = true; entries.clear(); changed(); listeners.clear(); } };
 }

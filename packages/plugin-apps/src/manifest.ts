@@ -164,7 +164,7 @@ const appsPluginDefinition = {
       id: "home.apps",
       label: { key: "apps.menu.label", fallback: "Apps" },
       order: 50,
-      icon: "Apps",
+      icon: "LayoutGrid",
       entry: { path: "/apps", routeId: "apps.launcher" },
     });
   }

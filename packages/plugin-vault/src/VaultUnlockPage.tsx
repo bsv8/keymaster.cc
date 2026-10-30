@@ -19,7 +19,7 @@ export function VaultUnlockPage() {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (wallet.lockCleanup) return;
+    if (busy || wallet.status !== "locked" || wallet.lockCleanup) return;
     setBusy(true);
     setError(null);
     try {
@@ -36,8 +36,6 @@ export function VaultUnlockPage() {
     }
   }
 
-  if (wallet.lockCleanup) return <VaultLockCleanup cleanup={wallet.lockCleanup} />;
-
   return (
     <div className="vault-page vault-page--unlock">
       <PageHeader
@@ -52,9 +50,11 @@ export function VaultUnlockPage() {
           value={password}
           onChange={(e) => setPassword(e.currentTarget.value)}
           required
+          disabled={busy || wallet.status !== "locked" || !!wallet.lockCleanup}
           error={error ?? undefined}
         />
-        <Button type="submit" loading={busy} disabled={!password}>
+        {wallet.lockCleanup && <VaultLockCleanup cleanup={wallet.lockCleanup} />}
+        <Button type="submit" loading={busy} disabled={!password || wallet.status !== "locked" || !!wallet.lockCleanup}>
           {t("vault.unlock.submit", { defaultValue: "解锁" })}
         </Button>
       </form>

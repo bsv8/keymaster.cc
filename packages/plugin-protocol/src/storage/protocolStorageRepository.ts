@@ -82,6 +82,15 @@ export function openProtocolStorageRepository(stores: ProtocolStorageStores): Pr
   const connectPaymentKey = (key: string) => `${CONNECT_PAYMENT_PREFIX}${encodeURIComponent(key)}`;
 
   return {
+    async getApplicationOpenMode() {
+      const record = await durablePolicy.get<{ mode: "iframe" | "popup" }>("wallet-application-open-mode", { partition: PARTITION });
+      if (!record) return "iframe";
+      if (record.value.mode !== "iframe" && record.value.mode !== "popup") throw new Error("Invalid stored application open mode");
+      return record.value.mode;
+    },
+    async setApplicationOpenMode(mode) {
+      await durablePolicy.put("wallet-application-open-mode", { mode }, { partition: PARTITION });
+    },
     async listApplicationEvents() {
       return (await listValues<import("@keymaster/contracts").ApplicationConnectionEvent>(durablePolicy, "application-event:")).map(row => row.value);
     },

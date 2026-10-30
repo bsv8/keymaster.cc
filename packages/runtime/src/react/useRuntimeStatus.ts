@@ -1,22 +1,12 @@
 import { useCallback, useSyncExternalStore } from "react";
-import { usePluginHost, useHostVersion } from "./PluginHostProvider.js";
-import { VAULT_WALLET_STATE_CAPABILITY, type VaultStatus } from "@keymaster/contracts";
+import { useOptionalCapability } from "webloom-framework/react";
+import { VAULT_SERVICE_CAPABILITY, type VaultStatus } from "@keymaster/contracts";
 export interface RuntimeStatus { vault: VaultStatus; ready: boolean }
-/** Trusted shell reads the Vault-owned resource; plugin contributions use their consumer. */
+/** The trusted shell observes Vault directly, including immediate local lock.
+ * An asynchronously reloaded resource must not leave revoked business UI up. */
 export function useRuntimeStatus(): RuntimeStatus {
-  const host = usePluginHost();
-  useHostVersion();
-  const ready = host.capabilities.has(VAULT_WALLET_STATE_CAPABILITY);
-  const read = useCallback(() => ready ? host.resourceStore.ensure<{ status: VaultStatus }>("vault.key-state", []).data?.status ?? "booting" : "booting", [host, ready]);
-  const subscribe = useCallback((listener: () => void) => {
-    if (!ready) return () => {};
-    let offRecord = host.resourceStore.subscribe("vault.key-state", [], listener);
-    const offContext = host.resourceStore.subscribeContext(() => {
-      offRecord();
-      offRecord = host.resourceStore.subscribe("vault.key-state", [], listener);
-      listener();
-    });
-    return () => { offContext(); offRecord(); };
-  }, [host, ready]);
-  return { vault: useSyncExternalStore(subscribe, read, read), ready };
+  const service = useOptionalCapability(VAULT_SERVICE_CAPABILITY);
+  const read = useCallback(() => service?.status() ?? "booting", [service]);
+  const subscribe = useCallback((listener: () => void) => service?.subscribeStatus(listener) ?? (() => {}), [service]);
+  return { vault: useSyncExternalStore(subscribe, read, read), ready: service !== undefined };
 }

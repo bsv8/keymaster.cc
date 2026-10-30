@@ -1,6 +1,7 @@
+import { ApplicationDisplaySettings } from "./ApplicationDisplaySettings.js";
 import { ApplicationConnectionHost } from "./applicationConnectionHost.js";
 import { ApplicationCenterPage, ApplicationConnectionControls } from "./ApplicationCenter.js";
-import { APPLICATION_CONNECTIONS_CAPABILITY, BUSINESS_REGISTRY_CAPABILITY, type ApplicationConnectionsSnapshot } from "@keymaster/contracts";
+import { APPLICATION_AI_TOOLS_CAPABILITY, APPLICATION_CONNECTIONS_CAPABILITY, BUSINESS_REGISTRY_CAPABILITY, type ApplicationConnectionsSnapshot } from "@keymaster/contracts";
 import { createPublicProtocolService } from "./publicProtocolService.js";
 import { APP_STORAGE_CLIENTS_CAPABILITY } from "@keymaster/contracts";
 import { STORAGE_KV_CLIENTS_CAPABILITY } from "@keymaster/contracts";
@@ -63,6 +64,12 @@ const protocolResources: I18nPluginResources = {
   namespace: "protocol",
   resources: {
     en: {
+      "protocol.applicationDisplay.title": "Application display",
+      "protocol.applicationDisplay.description": "Choose how the wallet opens applications. This preference is saved for the whole wallet.",
+      "protocol.applicationDisplay.mode": "Open applications in",
+      "protocol.applicationDisplay.iframe": "Embedded iframe (default)",
+      "protocol.applicationDisplay.popup": "New window",
+      "protocol.applicationDisplay.note": "Only applies to applications opened next. Existing applications stay where they are. Apps can still open the wallet directly.",
       "protocol.route.popup": "Protocol",
       "protocol.opener.missing":
         "This page must be opened by a third-party site via window.open. The opener window is no longer available.",
@@ -254,6 +261,12 @@ const protocolResources: I18nPluginResources = {
       "protocol.sessionWindow.appView.ready": "Session ready"
     },
     "zh-CN": {
+      "protocol.applicationDisplay.title": "应用打开方式",
+      "protocol.applicationDisplay.description": "整个钱包统一使用此设置，并持久保存。",
+      "protocol.applicationDisplay.mode": "打开应用时使用",
+      "protocol.applicationDisplay.iframe": "iframe 内嵌（默认）",
+      "protocol.applicationDisplay.popup": "新窗口",
+      "protocol.applicationDisplay.note": "仅影响之后启动的应用，已打开的应用保持原样；不影响 App 主动拉起钱包。",
       "protocol.route.popup": "协议页",
       "protocol.opener.missing": "该页面必须由第三方站点通过 window.open 打开。opener 窗口已不可用。",
       "protocol.topbar.origin": "当前站点",
@@ -456,7 +469,7 @@ const protocolPluginDefinition = {
     runtime: "window-main",
     connect: { providerMethods: ["connect.login", "connect.resume", "connect.logout", "connect.launch"] },
     scopeKind: "storage",
-    provides: [PROTOCOL_SERVICE_CAPABILITY, PROTOCOL_STORAGE_REPOSITORY_CAPABILITY, PROTOCOL_COORDINATOR_CONTROL_CAPABILITY, APPLICATION_CONNECTIONS_CAPABILITY],
+    provides: [PROTOCOL_SERVICE_CAPABILITY, PROTOCOL_STORAGE_REPOSITORY_CAPABILITY, PROTOCOL_COORDINATOR_CONTROL_CAPABILITY, APPLICATION_CONNECTIONS_CAPABILITY, APPLICATION_AI_TOOLS_CAPABILITY],
     storages: [
       PROTOCOL_STORAGE_DECLARATIONS.durablePolicy,
       PROTOCOL_STORAGE_DECLARATIONS.sessions,
@@ -556,6 +569,7 @@ const protocolPluginDefinition = {
         },
         // 根服务只作为钱包内启动器；连接实例的方向由主钱包宿主装配。
         bootMode: "connect",
+        getApplicationOpenMode: () => applicationHost.applicationOpenMode(),
         reserveApplicationView: input => ctx.capability(PAGE_UI_RENDERER_CAPABILITY).openApplication(input),
         acceptApplicationLaunch: (payload, source, view) => applicationHost.acceptLaunch(payload, source, view),
         closeApplicationView: source => applicationHost.closeView(source),
@@ -573,6 +587,7 @@ const protocolPluginDefinition = {
       await service.attachProtocolStorageRepository(storageRepository);
       applicationHost = new ApplicationConnectionHost(serviceDeps, storageRepository);
       ctx.provide(APPLICATION_CONNECTIONS_CAPABILITY, applicationHost);
+      ctx.provide(APPLICATION_AI_TOOLS_CAPABILITY, applicationHost.aiTools);
       await applicationHost.initialize();
       const onApplicationMessage = (event: MessageEvent) => {
         void applicationHost.handleMessage(event).catch(() => console.error("[connect] Application request handling failed"));
@@ -603,6 +618,11 @@ const protocolPluginDefinition = {
           return () => { offConsumer(); off(); };
         }, invalidation: "immediate" });
       const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope).view;
+      const DisplaySettings = bindProtocolUi(ctx, ApplicationDisplaySettings);
+      pages.register({ kind: "page", path: "/settings/application-display", id: "protocol.application-display", label: { key: "protocol.applicationDisplay.title", fallback: "Application display" }, render: () => createElement(DisplaySettings) });
+      ctx.capability(BUSINESS_REGISTRY_CAPABILITY).registerFeature("protocol", "settings", {
+        id: "settings.application-display", label: { key: "protocol.applicationDisplay.title", fallback: "Application display" }, order: 30, icon: "PanelsTopLeft", entry: { path: "/settings/application-display", routeId: "protocol.application-display" },
+      });
       const Center = bindProtocolUi(ctx, ApplicationCenterPage);
       const Controls = bindProtocolUi(ctx, ApplicationConnectionControls);
       pages.register({ kind: "page", path: "/apps/connections", id: "protocol.applications", label: "应用连接", render: () => createElement(Center) });

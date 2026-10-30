@@ -327,7 +327,8 @@ export interface ProtocolServiceDeps {
    */
   bootMode?: "connect" | "appView";
   /** 主钱包接管新 App 的独立 Receiver/运行上下文，不经窗口 bootstrap。 */
-  reserveApplicationView?: (input: { id: string; title: string; origin: string; onClose(): void }) => import("@keymaster/contracts").ApplicationView;
+  getApplicationOpenMode?: () => import("@keymaster/contracts").ApplicationOpenMode;
+  reserveApplicationView?: (input: { id: string; title: string; origin: string; mode: import("@keymaster/contracts").ApplicationOpenMode; onClose(): void }) => import("@keymaster/contracts").ApplicationView;
   acceptApplicationLaunch?: (payload: AppBootstrapPayload, source: Window, view: import("@keymaster/contracts").ApplicationView) => Promise<void>;
   closeApplicationView?: (source: Window) => void;
   applicationPermissionChanged?: () => Promise<void>;
@@ -1700,14 +1701,15 @@ export class ProtocolServiceImpl implements ProtocolService {
         "launchAppView: session storage unavailable"
       );
     }
-    if (!this.deps.reserveApplicationView) throw new LaunchAppViewError("window_unavailable", "Application workspace unavailable");
+    if (!this.deps.reserveApplicationView || !this.deps.getApplicationOpenMode) throw new LaunchAppViewError("window_unavailable", "Application workspace unavailable");
+    const openMode = this.deps.getApplicationOpenMode();
     let view: import("@keymaster/contracts").ApplicationView;
     try {
       view = this.deps.reserveApplicationView({
-        id: `${input.appOrigin}\0${input.appId}`, title: catalog.snapshot?.appName ?? input.appId, origin: input.appOrigin,
+        id: `${input.appOrigin}\0${input.appId}`, title: catalog.snapshot?.appName ?? input.appId, origin: input.appOrigin, mode: openMode,
         onClose: () => this.deps.closeApplicationView?.(view.source),
       });
-    } catch { throw new LaunchAppViewError("open_session_window_failed", "Could not create application frame"); }
+    } catch { throw new LaunchAppViewError("open_session_window_failed", "Could not open application view"); }
     const popup = view.source;
     let sessionWindowNavigated = false;
     let stagedAppViewSessionId: string | undefined;
@@ -1779,6 +1781,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       try {
         const u = new URL(input.appUrl);
         u.searchParams.set("launchToken", launchToken);
+        u.searchParams.set("mode", openMode === "iframe" ? "iframe" : "appView");
         return u.toString();
       } catch {
         return input.appUrl;

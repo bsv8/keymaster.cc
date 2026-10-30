@@ -4,6 +4,7 @@ import type { InternalVaultService } from "./internalVaultService.js";
 export function createPublicVaultService(service: InternalVaultService): VaultService {
   return Object.freeze(Object.assign(Object.create(null), {
     status: service.status.bind(service),
+    subscribeStatus: service.subscribeStatus.bind(service),
     getCurrentKey: service.getCurrentKey.bind(service),
     hasVault: service.hasVault.bind(service),
     unlock: service.unlock.bind(service),

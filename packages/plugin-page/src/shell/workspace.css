@@ -15,6 +15,10 @@
 .workspace-body { flex:1; display:flex; min-height:0; overflow:hidden; }
 .workspace-sidebar { width:0; min-width:0; flex-shrink:0; background:var(--surface); overflow:hidden; display:flex; flex-direction:column; transition:width .15s; }
 .workspace-sidebar.is-open { width:min(var(--workspace-sidebar-width),calc(100vw - 320px)); border-right:1px solid var(--border); }
+/* 调整尺寸时直接跟随指针，且不让跨源 iframe 截走拖动和松手事件。 */
+.workspace-shell[data-resizing] .workspace-sidebar { transition:none; }
+.workspace-shell[data-resizing] iframe { pointer-events:none; }
+.workspace-sidebar-resize,.workspace-list-resize { touch-action:none; }
 .workspace-sidebar-header { height:36px; flex-shrink:0; display:flex; border-bottom:1px solid var(--border); white-space:nowrap; }
 .workspace-sidebar-header>button { display:flex; align-items:center; gap:6px; padding:0 12px; background:none; color:var(--muted); border:0; border-right:1px solid var(--border); border-top:2px solid transparent; font-size:12px; }
 .workspace-sidebar-header>button.is-active { color:var(--text); border-top-color:var(--primary); background:var(--workspace-selected); }
@@ -59,6 +63,7 @@
 .workspace-tab-close:hover { background:var(--workspace-hover); color:var(--text); }
 .workspace-route { flex:1; min-height:0; overflow:auto; padding:32px 36px; }
 .workspace-route>.home-page,.workspace-route>div { max-width:1200px; margin-left:auto; margin-right:auto; }
+.workspace-route>.home-page--single { max-width:920px; }
 .workspace-app-outlet { flex:1; min-height:0; overflow:hidden; }
 .workspace-app-frame { width:100%; height:100%; border:0; display:block; background:var(--bg); }
 .workspace-mobile-conversations { flex:1; min-height:0; display:flex; flex-direction:column; }

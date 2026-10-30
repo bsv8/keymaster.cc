@@ -1189,6 +1189,7 @@ const msfilePluginDefinition = {
       label: { key: "msfile.home.title", fallback: "Get a file by Seed" },
       description: { key: "msfile.home.description", fallback: "Get a file by Seed" },
       order: 600,
+      icon: "FileSearch",
       entry: {
         path: "/msfile/files",
         routeId: entryRouteId,
@@ -1197,11 +1198,13 @@ const msfilePluginDefinition = {
     });
     business.registerFeature(MSFILE_PLUGIN_ID, "home", {
       id: "home.msfile-purchases", label: { key: "msfile.purchases.title", fallback: "Purchase history" }, order: 615,
+      icon: "Receipt",
       entry: { path: "/msfile/purchases", routeId: "msfile.purchases", visibleWhen: ({ unlocked }) => unlocked,
         activeWhen: path => path.startsWith("/msfile/purchases/") },
     });
     business.registerFeature(MSFILE_PLUGIN_ID, "home", { id: "home.msfile-demands", order: 612,
       label: { key: "msfile.demands.title", fallback: "File demands" },
+      icon: "Inbox",
       entry: { path: "/msfile/demands", routeId: "msfile.demands", visibleWhen: ({ unlocked }) => unlocked },
     });
     // 桶存储文件：正式页面入口 `/msfile/storage`，首页 MSFile 空间复用同一组件。
@@ -1210,6 +1213,7 @@ const msfilePluginDefinition = {
       label: { key: "msfile.bucket.title", fallback: "Bucket storage files" },
       description: { key: "msfile.bucket.description", fallback: "Seeds and blocks stored in this bucket" },
       order: 610,
+      icon: "Database",
       entry: {
         path: "/msfile/storage",
         routeId: bucketRouteId,

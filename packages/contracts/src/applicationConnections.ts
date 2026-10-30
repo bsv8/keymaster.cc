@@ -1,4 +1,5 @@
 import { defineCapability } from "webloom-framework";
+import type { ApplicationOpenMode } from "./page.js";
 import type { AppIdentitySnapshot } from "./appIdentity.js";
 import type { ProtocolCommandRecord, ProtocolMethod, ProtocolService } from "./protocol.js";
 
@@ -37,6 +38,9 @@ export interface ApplicationConnectionsSnapshot {
   error?: string;
 }
 export interface ApplicationConnections {
+  acceptOpener(source: Window | null): void;
+  applicationOpenMode(): ApplicationOpenMode;
+  setApplicationOpenMode(mode: ApplicationOpenMode): Promise<void>;
   snapshot(): ApplicationConnectionsSnapshot;
   subscribe(listener: () => void): () => void;
   permissions(key: string): Promise<ProtocolMethod[]>;

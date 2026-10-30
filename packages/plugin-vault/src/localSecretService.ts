@@ -19,7 +19,9 @@ export function createVaultLocalSecretService(client: Client): VaultLocalSecretS
       try {
         result = value(await client.vaultOperation({ type: "sealLocalSecret", scope, plaintext: transferable }), "sealLocalSecret");
       } finally {
-        transferable.fill(0);
+        // Coordinator may transfer ownership of this buffer to the crypto Worker.
+        // A detached buffer is already inaccessible here; fill() would mask a successful seal.
+        if (transferable.byteLength) transferable.fill(0);
       }
       if (result.version !== 3 || result.keySource !== "active-key-hkdf-v1") throw new Error("Invalid sealed secret returned by Vault");
       return result;

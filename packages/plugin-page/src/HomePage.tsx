@@ -16,17 +16,17 @@ export function HomePage() {
   const { t } = usePluginI18n();
 
   return (
-    <div className="home-page">
+    <div className="home-page home-page--single">
       <PageHeader
         title={t("home.page.title", { defaultValue: "首页" })}
         description={t("home.page.description", { defaultValue: "常用操作" })}
       />
-      <div className="home-layout">
-        <div className="home-layout__main">
-          {pages.renderHome("main", unlocked)}
-        </div>
-        <div className="home-layout__aside">
+      <div className="home-single">
+        <div className="home-single__summary">
           {pages.renderHome("aside", unlocked)}
+        </div>
+        <div className="home-single__main">
+          {pages.renderHome("main", unlocked)}
         </div>
       </div>
     </div>

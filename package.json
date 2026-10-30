@@ -59,6 +59,7 @@
     "@keymaster/msfile-media": "*",
     "@keymaster/platform-storage": "*",
     "@keymaster/plugin-apps": "*",
+    "@keymaster/plugin-ai": "*",
     "@keymaster/plugin-background": "*",
     "@keymaster/plugin-msfile": "*",
     "@keymaster/plugin-p2pkh": "*",

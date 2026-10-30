@@ -26,8 +26,10 @@ export interface PageUiRegistry {
   /** 使用贡献方真实 consumer 与 Scope 创建框架注册视图，归属不接受自报字符串。 */
   bind(consumer: PluginConsumer, scope: LifecycleScope): ScopedRegistryView<PageUiRegistration>;
 }
-export type PageFrameSlot = "unlocked-shell" | "wallet-entry" | "wallet-recovery" | "wallet-guard" | "storage-guard" | "onboarding" | "uri-action";
+export type PageFrameSlot = "unlocked-shell" | "wallet-entry" | "wallet-recovery" | "wallet-guard" | "storage-guard" | "onboarding" | "uri-action" | "ai-conversations" | "ai-session-list" | "ai-session-actions" | "ai-onboarding";
+export type ApplicationOpenMode = "iframe" | "popup";
 export interface ApplicationView {
+  readonly mode: ApplicationOpenMode;
   readonly id: string;
   readonly title: string;
   readonly origin: string;
@@ -37,8 +39,18 @@ export interface ApplicationView {
   focus(): void;
   close(): void;
 }
+export interface WorkspaceResultView {
+  readonly id: string;
+  readonly title: string;
+  render(): ReactNode;
+  close(): void;
+}
 export interface PageUiRenderer {
-  openApplication(input: { id: string; title: string; origin: string; onClose(): void }): ApplicationView;
+  openResult(input: { id: string; title: string; render(): ReactNode; onClose(): void }): WorkspaceResultView;
+  resultViews(): readonly WorkspaceResultView[];
+  activeResult(): string | null;
+  selectResult(id: string | null): void;
+  openApplication(input: { id: string; title: string; origin: string; mode: ApplicationOpenMode; onClose(): void }): ApplicationView;
   applicationViews(): readonly ApplicationView[];
   activeApplication(): string | null;
   selectApplication(id: string | null): void;

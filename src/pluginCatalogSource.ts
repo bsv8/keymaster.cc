@@ -1,3 +1,4 @@
+import { aiPlugin, aiSetup } from "@keymaster/plugin-ai";
 import { scanPlugin, scanSetup } from "@keymaster/plugin-scan";
 // Web Window 运行单元实现注册。
 //
@@ -39,5 +40,6 @@ export const WEB_PLUGIN_IMPLEMENTATIONS: readonly { manifest: PluginManifest; se
   { manifest: wocPlugin, setup: wocSetup },
   { manifest: p2pkhPlugin, setup: p2pkhSetup },
   { manifest: appsPlugin, setup: appsSetup },
+  { manifest: aiPlugin, setup: aiSetup },
 ] as const;
 export const WEB_PLUGIN_CATALOG_SOURCE: readonly PluginManifest[] = WEB_PLUGIN_IMPLEMENTATIONS.map(entry => entry.manifest);

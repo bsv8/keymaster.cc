@@ -12,16 +12,16 @@ export interface P2pkhNavigationDeps {
 
 /** Both lists belong to the current wallet; routes never select a network. */
 export function registerP2pkhNavigation(deps: P2pkhNavigationDeps): () => void {
-  const routes: Array<{ view: P2pkhWalletView; label: { key: string; fallback: string }; order: number }> = [
-    { view: "transactions", label: { key: "p2pkh.menu.transactions", fallback: "On-chain transactions" }, order: 15 },
-    { view: "local-transactions", label: { key: "p2pkh.menu.localTransactions", fallback: "Local transactions" }, order: 16 },
+  const routes: Array<{ view: P2pkhWalletView; label: { key: string; fallback: string }; order: number; icon: string }> = [
+    { view: "transactions", label: { key: "p2pkh.menu.transactions", fallback: "On-chain transactions" }, order: 15, icon: "Wallet" },
+    { view: "local-transactions", label: { key: "p2pkh.menu.localTransactions", fallback: "Local transactions" }, order: 16, icon: "FileClock" },
   ];
-  for (const { view, label, order } of routes) {
+  for (const { view, label, order, icon } of routes) {
     const Component = bindP2pkhUi(deps.context, () => createElement<{ view?: P2pkhWalletView }>(P2pkhWalletPage, { view }));
     const id = `p2pkh.${view}`, path = `/p2pkh/${view}`;
     deps.pages.register({ kind: "page", id, path, label, render: () => createElement(Component) });
     deps.business.registerFeature("p2pkh", "assets", {
-      id: `assets.p2pkh.${view}`, label, order, icon: "Wallet",
+      id: `assets.p2pkh.${view}`, label, order, icon,
       entry: { path, routeId: id, visibleWhen: ({ unlocked }) => unlocked, activeWhen: current => isP2pkhListOrDetailPath(current, view) },
     });
   }

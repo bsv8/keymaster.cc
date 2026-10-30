@@ -933,6 +933,11 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             "kind": "local",
             "id": "protocol.application-connections",
             "version": "1"
+          },
+          {
+            "kind": "local",
+            "id": "protocol.ai-tools",
+            "version": "1"
           }
         ],
         "privateProvides": [],
@@ -1710,6 +1715,132 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
         ],
         "permissions": [],
         "storages": []
+      }
+    ]
+  },
+  {
+    "id": "ai",
+    "name": "AI",
+    "units": [
+      {
+        "id": "ai.window",
+        "runtime": "window-main",
+        "scopeKind": "owner-session",
+        "provides": [],
+        "privateProvides": [],
+        "dependencies": [
+          {
+            "capability": {
+              "kind": "local",
+              "id": "storage.kv-clients",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "AI 本地加密数据"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "vault.local-secret",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "按钱包身份封装密钥与会话"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "vault.wallet-state",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "绑定当前身份及运行世代"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "page.ui.registry",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "设置、会话和首启配置"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "page.ui.renderer",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "AI 结果工作区"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "business.registry",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "AI 设置入口"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "breadcrumb.registry",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "AI 设置导航"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "i18n.service",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "AI 页面语言上下文"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "p2pkh.service",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "钱包只读工具",
+            "optional": true
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "msfile.service",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "BitFS 只读工具",
+            "optional": true
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "protocol.ai-tools",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "有效 Connect App 的动态工具"
+          }
+        ],
+        "permissions": [],
+        "storages": [
+          {
+            "moduleId": "ai",
+            "purposeId": "state",
+            "authority": "platform-only",
+            "model": "kv",
+            "schemaVersion": 1
+          }
+        ]
       }
     ]
   }

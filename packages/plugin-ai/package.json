@@ -1,0 +1,22 @@
+{
+  "name": "@keymaster/plugin-ai",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@keymaster/contracts": "*",
+    "@keymaster/plugin-p2pkh": "*",
+    "@keymaster/runtime": "*",
+    "@keymaster/ui": "*",
+    "lucide-react": "0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
+    "webloom-framework": "0.6.0"
+  }
+}

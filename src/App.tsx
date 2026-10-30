@@ -1,10 +1,9 @@
-import { useRuntimeStatus } from "@keymaster/runtime/assembly";
 // src/App.tsx
 // 根组件只按真实启动/钱包状态渲染完整钱包，不设置独立协议页入口。
 // 外部 App 打开钱包时也先完成正常创建/导入/解锁；连接由 Protocol 宿主接管，
 // 不从 URL 开启旁路授权或第二套钱包界面。
 
-import { useRef } from "react";
+import { Children, useRef } from "react";
 import type { ApplicationBootstrapSnapshot, ApplicationBootstrapStatus, VaultService, VaultStatus } from "@keymaster/contracts";
 import {
   APPLICATION_BOOTSTRAP_READY_CAPABILITY,
@@ -14,11 +13,10 @@ import {
   VAULT_SERVICE_CAPABILITY,
 } from "@keymaster/contracts";
 import { useHasCapability, useOptionalCapability, useResource } from "webloom-framework/react";
-import { useI18n } from "@keymaster/runtime";
-import { useHostVersion, usePluginHost } from "@keymaster/runtime/assembly";
+import { useHostVersion, usePluginHost, useRuntimeStatus } from "@keymaster/runtime/assembly";
 import { PAGE_UI_RENDERER_CAPABILITY, type PageUiRenderer, type PageFrameSlot } from "@keymaster/contracts";
 import { useSyncExternalStore, useCallback, createContext, useContext, type ReactNode } from "react";
-import { StartupError, StartupPlaceholder } from "./shell/StartupPlaceholder.js";
+import { WalletEntryState } from "./shell/WalletEntryState.js";
 
 const ApplicationPages = createContext<PageUiRenderer | undefined>(undefined);
 export function App() {
@@ -43,7 +41,7 @@ function ApplicationBootstrapApp() {
 
   if (!hasBootstrapResource) {
     return (
-      <StartupError
+      <WalletEntryState error
         title="应用启动资源暂不可用"
         message="存储运行时正在恢复，启动状态资源尚未注册。请稍后重试。"
         onRetry={() => retryStartup(host, bootstrap, resourceArgs)}
@@ -72,6 +70,9 @@ function retryStartup(
 }
 
 function ApplicationBootstrapResourceApp({ host, hostVersion, bootstrap }: ApplicationBootstrapResourceAppProps) {
+  // Subscribe at the decision owner, not only inside an already-unlocked shell.
+  // Local lock presentation precedes async bootstrap/host version changes.
+  useRuntimeStatus();
   // Storage unit 的 bucket-generation 重绑会先同步撤销旧 plugin scope，再
   // 异步安装新 scope；在这个受控窗口中 storage.status 定义暂时不存在。
   // 记住它曾经成功注册过，避免把生命周期重绑的 pending 窗口发布成
@@ -80,6 +81,7 @@ function ApplicationBootstrapResourceApp({ host, hostVersion, bootstrap }: Appli
   // Keep the existing unlock form mounted until this Window's business scopes
   // are ready. Worker unlock success alone must not insert a startup screen.
   const hasUnlockEntry = useRef(false);
+  const hadReadyWallet = useRef(false);
   const resourceArgs = [String(hostVersion)] as const;
   const snapshot = useResource<ApplicationBootstrapSnapshot>(
     host.resourceStore,
@@ -94,9 +96,21 @@ function ApplicationBootstrapResourceApp({ host, hostVersion, bootstrap }: Appli
   const hasStorageStatusResource = host.resourceRegistry?.get("storage.status") !== undefined;
   if (hasStorageStatusResource) hadStorageStatusResource.current = true;
 
+  // Lock revokes business scopes before bootstrap resources settle. The
+  // authoritative locked Vault goes straight to its entry, never through a
+  // bootstrap loading page. StorageGuard still owns corrupt/unavailable I/O.
+  if (snapshot.status !== "error" && snapshot.status !== "blocked" && snapshot.data?.phase !== "error"
+    && (hadReadyWallet.current || snapshot.data?.storageReady === true)
+    && snapshot.data?.storageReady !== false
+    && hasStorageStatusResource && hasStorageController && hasVaultWalletState
+    && readVaultStatus(vaultService) === "locked") {
+    hasUnlockEntry.current = true;
+    return <RuntimeApp vaultStatus="locked" walletEntry />;
+  }
+
   if (snapshot.status === "error") {
     return (
-      <StartupError
+      <WalletEntryState error
         title="无法读取应用启动状态"
         message={snapshot.error?.message ?? "启动状态资源读取失败，请重试。"}
         onRetry={() => retryStartup(host, bootstrap, resourceArgs)}
@@ -105,7 +119,7 @@ function ApplicationBootstrapResourceApp({ host, hostVersion, bootstrap }: Appli
   }
   if (snapshot.status === "blocked") {
     return (
-      <StartupError
+      <WalletEntryState error
         title="应用启动被阻止"
         message="启动状态资源被运行时阻止，应用尚未安全启动。请检查运行时后重试。"
         onRetry={() => retryStartup(host, bootstrap, resourceArgs)}
@@ -127,10 +141,10 @@ function ApplicationBootstrapResourceApp({ host, hostVersion, bootstrap }: Appli
         && hasVaultWalletState && (currentVault === "locked" || currentVault === "unlocked")) {
         return <RuntimeApp vaultStatus="locked" walletEntry />;
       }
-      return <StartupPlaceholder />;
+      return <WalletEntryState />;
     }
     return (
-      <StartupError
+      <WalletEntryState error
         title="应用启动状态为空"
         message="启动状态资源没有返回可用快照，无法安全判断钱包状态。请重试。"
         onRetry={() => retryStartup(host, bootstrap, resourceArgs)}
@@ -142,7 +156,7 @@ function ApplicationBootstrapResourceApp({ host, hostVersion, bootstrap }: Appli
   // 仍然不应悄悄使用旧决定，避免把一个真实读取错误隐藏成业务页面。
   if (bootstrapSnapshot.phase === "error") {
     return (
-      <StartupError
+      <WalletEntryState error
         title="应用装配失败"
         message={bootstrapSnapshot.error ?? "应用装配失败，请重试。"}
         onRetry={() => retryStartup(host, bootstrap, resourceArgs)}
@@ -154,9 +168,9 @@ function ApplicationBootstrapResourceApp({ host, hostVersion, bootstrap }: Appli
   // 避免短暂回收窗口中挂载子树并调用 ensure()。这条路径必须是恢复页，
   // 不能退回创建/导入入口。
   if (!hasStorageStatusResource) {
-    if (hadStorageStatusResource.current) return <StartupPlaceholder />;
+    if (hadStorageStatusResource.current) return <WalletEntryState message="正在恢复钱包存储…" />;
     return (
-      <StartupError
+      <WalletEntryState error
         title="存储运行时正在恢复"
         message="存储状态资源暂不可用，已保留当前钱包状态；请稍后重试。"
         onRetry={() => retryStartup(host, bootstrap, resourceArgs)}
@@ -172,12 +186,12 @@ function ApplicationBootstrapResourceApp({ host, hostVersion, bootstrap }: Appli
     if (hasStorageController && hasVaultService) {
       return <ApplicationFrame slot="storage-guard"><ApplicationFrame slot="wallet-entry" /></ApplicationFrame>;
     }
-    return <StartupPlaceholder />;
+    return <WalletEntryState />;
   }
 
   if (!bootstrapSnapshot.storageReady) {
     return (
-      <StartupError
+      <WalletEntryState error
         title="本地钱包状态不一致"
         message="启动快照尚未确认本地钱包结构完整，不能继续装配。请重试。"
         onRetry={() => retryStartup(host, bootstrap, resourceArgs)}
@@ -186,7 +200,7 @@ function ApplicationBootstrapResourceApp({ host, hostVersion, bootstrap }: Appli
   }
   if (!hasStorageController) {
     return (
-      <StartupError
+      <WalletEntryState error
         title="存储运行时未就绪"
         message="启动快照已确认存储可用，但存储控制能力尚未注册。请稍后重试。"
         onRetry={() => retryStartup(host, bootstrap, resourceArgs)}
@@ -195,13 +209,13 @@ function ApplicationBootstrapResourceApp({ host, hostVersion, bootstrap }: Appli
   }
 
   const vaultStatus = readVaultStatus(vaultService);
-  if (vaultStatus === "booting" || vaultStatus === undefined) return <StartupPlaceholder />;
+  if (vaultStatus === "booting" || vaultStatus === undefined) return <WalletEntryState />;
 
   // Vault 与 WalletState 是读取钱包真值和提供创建/解锁入口的前置条件。
   // 缺能力时只能停在占位页：不能把「capability 还没注册」误判成空钱包而
   // 渲染创建入口，那会诱导用户在错误的判断上覆盖数据。
   if (!bootstrapSnapshot.vaultCapabilityReady || !hasVaultService || !hasVaultWalletState) {
-    return <StartupPlaceholder />;
+    return <WalletEntryState />;
   }
   // locked 不需要等 vault-selection 之后的业务插件装配：解锁页与创建/导入
   // 入口都只依赖第一阶段就已经注册的 Vault 能力。
@@ -226,9 +240,10 @@ function ApplicationBootstrapResourceApp({ host, hostVersion, bootstrap }: Appli
   if (!applicationReady && hasUnlockEntry.current) {
     return <RuntimeApp vaultStatus="locked" walletEntry />;
   }
-  if (!bootstrapSnapshot.vaultSelectionReady) return <StartupPlaceholder />;
-  if (!applicationReady) return <StartupPlaceholder message="正在准备应用…" />;
+  if (!bootstrapSnapshot.vaultSelectionReady) return <WalletEntryState message="正在准备钱包身份…" />;
+  if (!applicationReady) return <WalletEntryState message="正在准备钱包服务…" />;
   hasUnlockEntry.current = false;
+  hadReadyWallet.current = true;
   return <RuntimeApp vaultStatus="unlocked" />;
 }
 
@@ -244,26 +259,19 @@ function readVaultStatus(vaultService: VaultService | undefined): VaultStatus | 
 interface RuntimeAppProps {
   /** Root revalidates this decision on every render. Resource context rebinding
    * may temporarily leave vault.key-state pending, but must not undo it. */
-  vaultStatus?: "locked" | "unlocked";
+  vaultStatus: "locked" | "unlocked";
   walletEntry?: boolean;
 }
 
-function RuntimeApp({ vaultStatus, walletEntry }: RuntimeAppProps = {}) {
-  const { vault, ready } = useRuntimeStatus();
-  const { t } = useI18n();
-  const effectiveVault = vaultStatus ?? vault;
-  const effectiveReady = ready || vaultStatus !== undefined;
-
+function RuntimeApp({ vaultStatus, walletEntry }: RuntimeAppProps) {
   if (walletEntry) {
     return <ApplicationFrame slot="storage-guard"><ApplicationFrame slot="wallet-entry" /></ApplicationFrame>;
   }
-  if (!effectiveReady || effectiveVault === "booting") return <StartupPlaceholder message={t("common.status.loading", { defaultValue: "正在准备存储…" })} />;
-
-  if (effectiveVault === "uninitialized" || effectiveVault === "locked") {
+  if (vaultStatus === "locked") {
     return <ApplicationFrame slot="storage-guard"><ApplicationFrame slot="wallet-entry" /></ApplicationFrame>;
   }
 
-  return <ApplicationFrame slot="storage-guard"><ApplicationFrame slot="unlocked-shell" /></ApplicationFrame>;
+  return <ApplicationFrame slot="storage-guard"><ApplicationFrame slot="ai-onboarding"><ApplicationFrame slot="unlocked-shell" /></ApplicationFrame></ApplicationFrame>;
 }
 
 /** Trusted app selects a registered entry; Page retains every executable closure. */
@@ -272,5 +280,8 @@ function ApplicationFrame({ slot, children }: { slot: PageFrameSlot; children?: 
   const subscribe = useCallback((listener: () => void) => pages?.subscribe(listener) ?? (() => {}), [pages]);
   const snapshot = useCallback(() => pages?.revision() ?? 0, [pages]);
   useSyncExternalStore(subscribe, snapshot, snapshot);
-  return pages ? <>{pages.renderFrame(slot, children)}</> : <StartupPlaceholder />;
+  if (!pages) return <WalletEntryState />;
+  const frames = pages.renderFrame(slot, children);
+  // AI is optional product UI; disabling it must not hide the entire wallet.
+  return <>{slot === "ai-onboarding" && Children.count(frames) === 0 ? children : frames}</>;
 }

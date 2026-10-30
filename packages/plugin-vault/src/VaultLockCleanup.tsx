@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, PageHeader } from "@keymaster/ui";
+import { Button } from "@keymaster/ui";
 import { usePluginI18n } from "@keymaster/runtime";
 import type { WalletLockCleanup } from "@keymaster/contracts";
 import { useInternalVault } from "./VaultInternalContext.js";
@@ -12,7 +12,7 @@ export function WalletLockDetails({ title, details }: { title: string; details: 
   </details>;
 }
 
-/** Root Vault stays mounted while owner plugins exit, so errors and retry survive teardown. */
+/** Inline lock state: the owning unlock form remains mounted throughout cleanup. */
 export function VaultLockCleanup({ cleanup }: { cleanup: WalletLockCleanup }) {
   const vault = useInternalVault();
   const { t } = usePluginI18n();
@@ -26,12 +26,11 @@ export function VaultLockCleanup({ cleanup }: { cleanup: WalletLockCleanup }) {
     } catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)); }
     finally { setBusy(false); }
   };
-  return <div className="locked-shell locked-shell--form">
-    <PageHeader title={t("shell.locked.lockedTitle", { defaultValue: "钱包已锁定" })} />
+  return <div className="vault-lock-cleanup" aria-busy={cleanup.phase === "pending"}>
     {cleanup.phase === "pending"
       ? <p role="status" aria-live="polite">{t("vault.lock.cleaning", { defaultValue: "正在锁定钱包，等待服务退出…完成后可解锁。" })}</p>
       : <><p role="alert">{t("vault.lock.cleanupFailed", { defaultValue: "钱包已锁定，但部分服务清理失败。请重试清理，完成后才能解锁。" })}</p>
-        <Button onClick={retry} loading={busy}>{t("vault.lock.retry", { defaultValue: "重试清理" })}</Button></>}
+        <Button type="button" onClick={retry} loading={busy}>{t("vault.lock.retry", { defaultValue: "重试清理" })}</Button></>}
     {(cleanup.diagnostics || cleanup.phase === "failed" || error) ? <WalletLockDetails
       title={t("vault.lock.details", { defaultValue: "锁定错误详情" })}
       details={[cleanup.diagnostics ?? (cleanup.phase === "failed" ? cleanup.error : undefined), error].filter(Boolean).join("\n\n")}

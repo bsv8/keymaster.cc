@@ -8,6 +8,9 @@ import type { PluginStorageDeclaration } from "./access.js";
  * 复制这些坐标再拼物理路径。
  */
 export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
+  aiState: Object.freeze({
+    moduleId: "ai", purposeId: "state", authority: "platform-only", model: "kv", schemaVersion: 1,
+  } satisfies PluginStorageDeclaration),
   vaultPayments: Object.freeze({
     moduleId: "vault", purposeId: "payments", authority: "platform-only", model: "files", schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
@@ -128,6 +131,7 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
 
 /** manifest pluginId 到中央声明的绑定目录。 */
 export const SYSTEM_STORAGE_DECLARATIONS: Readonly<Record<string, readonly PluginStorageDeclaration[]>> = Object.freeze({
+  ai: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.aiState]),
   vault: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.vaultPayments]),
   "collectible-1satordinals": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.ordinalsMintHistory]),
   p2pkh: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.p2pkhFiles, CENTRAL_STORAGE_DECLARATIONS.p2pkhState]),

@@ -33,6 +33,8 @@ function Command({ connection, command, kind }: { connection: ApplicationConnect
 
 export function ApplicationConnectionControls() {
   const { host, snapshot } = useApplications();
+  // 完整钱包壳层装配后才接纳 App 主动拉起钱包的真实 opener。
+  useEffect(() => { host.acceptOpener(window.opener); }, [host]);
   const { t } = usePluginI18n();
   const msfile = useResourceView<{ approvals: MsFilePendingApprovalView[] }>(useProtocolResources(), "protocol.msfile-approvals", []);
   const msApprovals = msfile.data?.approvals ?? [];

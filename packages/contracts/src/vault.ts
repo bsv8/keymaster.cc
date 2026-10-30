@@ -128,8 +128,10 @@ export interface VaultLocalSecretService {
  * Vault 内部重置 UI 之后的重新创建或导入。
  */
 export interface VaultService {
-  /** 当前状态。 */
+  /** 当前状态，包含本窗口发起锁定后的立即禁用状态。 */
   status(): VaultStatus;
+  /** 订阅同一状态源；壳层不等待异步 resource 投影才撤下业务页。 */
+  subscribeStatus(listener: () => void): () => void;
 
   /**
    * 唯一钱包 Key 的公开信息；未初始化或尚未解密时返回 undefined。

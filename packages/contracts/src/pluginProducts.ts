@@ -27,6 +27,7 @@ export const BUILTIN_PLUGIN_PRODUCT_IDS = [
   "woc",
   "p2pkh",
   "apps",
+  "ai",
 ] as const;
 
 /** 供 Worker / 装配层做 O(1) 产品边界校验的只读集合。 */
@@ -78,6 +79,7 @@ export const BUILTIN_PLUGIN_RUNTIME_UNIT_CATALOG = [
   { productId: "p2pkh", unitId: "p2pkh.window", runtime: "window-main", scopeKind: "owner-session" },
   { productId: "p2pkh", unitId: "p2pkh.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
   { productId: "apps", unitId: "apps.window", runtime: "window-main", scopeKind: "root" },
+  { productId: "ai", unitId: "ai.window", runtime: "window-main", scopeKind: "owner-session" },
 ] as const satisfies readonly BuiltinPluginRuntimeUnitDeclaration[];
 
 /** 返回一个产品的静态运行单元声明；调用方不得自行补默认单元。 */

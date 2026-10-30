@@ -1994,6 +1994,8 @@ export const PROTOCOL_STORAGE_REPOSITORY_CAPABILITY = defineCapability<ProtocolS
  *     时 caller 被要求重新登录）。
  */
 export interface ProtocolStorageRepository {
+  getApplicationOpenMode(): Promise<import("./page.js").ApplicationOpenMode>;
+  setApplicationOpenMode(mode: import("./page.js").ApplicationOpenMode): Promise<void>;
   listApplicationEvents?(): Promise<import("./applicationConnections.js").ApplicationConnectionEvent[]>;
   putApplicationEvent?(event: import("./applicationConnections.js").ApplicationConnectionEvent): Promise<void>;
   listApplications?(): Promise<import("./applicationConnections.js").ConnectedApplication[]>;

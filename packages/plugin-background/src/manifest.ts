@@ -292,7 +292,7 @@ const backgroundPluginDefinition = {
       label: { key: "background.settings.title", fallback: "Smart scheduling" },
       description: { key: "background.settings.description", fallback: "Smart scheduling and per-task sync intervals." },
       order: 14,
-      icon: "Activity",
+      icon: "Timer",
       entry: {
         path: "/settings/smart-scheduling",
         routeId: "background.smart-scheduling",

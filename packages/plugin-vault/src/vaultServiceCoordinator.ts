@@ -170,6 +170,10 @@ export class VaultServiceCoordinator implements InternalVaultService {
     return this.walletState.snapshot().status;
   }
 
+  subscribeStatus(listener: () => void): () => void {
+    return this.walletState.subscribe(listener);
+  }
+
   subscribeWalletState(handler: (snapshot: VaultLifecycleSnapshot) => void): () => void {
     return this.walletState.subscribe(handler);
   }

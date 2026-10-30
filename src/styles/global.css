@@ -50,69 +50,9 @@ body {
   color: var(--text);
 }
 
-/* ---------- Startup gate ---------- */
-.startup-placeholder,
-.startup-error {
-  min-height: 100vh;
-  display: grid;
-  place-content: center;
-  justify-items: center;
-  gap: 14px;
-  padding: 32px 20px;
-  text-align: center;
-  background: radial-gradient(circle at 50% 42%, color-mix(in srgb, var(--primary) 10%, transparent), transparent 34%), var(--bg);
-}
-.startup-placeholder {
-  color: var(--text-dim);
-}
-.startup-placeholder p {
-  margin: 0;
-  font-size: 15px;
-  letter-spacing: .02em;
-}
-.startup-placeholder__spinner {
-  width: 44px;
-  height: 44px;
-  border: 3px solid color-mix(in srgb, var(--text-dim) 22%, transparent);
-  border-top-color: var(--primary);
-  border-radius: 50%;
-  box-shadow: 0 0 0 8px color-mix(in srgb, var(--primary) 7%, transparent);
-  animation: startup-placeholder-spin .8s linear infinite;
-}
-@keyframes startup-placeholder-spin {
-  to { transform: rotate(360deg); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .startup-placeholder__spinner { animation: none; }
-}
-.startup-error__content {
-  width: min(100%, 520px);
-}
-.startup-error h1 {
-  margin: 0;
-  font-size: 20px;
-}
-.startup-error p {
-  margin: 10px 0 0;
-  color: var(--text-dim);
-  line-height: 1.6;
-  white-space: pre-wrap;
-}
-.startup-error__retry {
-  margin-top: 18px;
-  padding: 9px 16px;
-  border: 0;
-  border-radius: var(--radius);
-  background: var(--primary);
-  color: var(--primary-text);
-  font: inherit;
-  font-weight: 600;
-  cursor: pointer;
-}
-.startup-error__retry:focus-visible {
-  outline: 2px solid var(--primary);
-  outline-offset: 3px;
-}
+/* Wallet state belongs inside the ordinary entry panel, not a loading page. */
+.wallet-entry-state h1 { margin: 0; font-size: 20px; }
+.wallet-entry-state p { margin: 12px 0; color: var(--text-dim); line-height: 1.6; white-space: pre-wrap; }
 
 a { color: var(--primary); }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
@@ -840,6 +780,103 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
   min-width: 0;
 }
 .home-layout__cell { min-width: 0; }
+/* ---------- Home single column (准绳 wallet-demo：无左右分割，单列堆叠) ----------
+ * 容器对齐 upstream demo/app/wallet-demo.css 的 .wallet-home：
+ * max-width 920px，padding 48px 40px，移动 28px 20px。
+ * 摘要（余额）置顶，其余功能组件全宽上下堆，不再分 main/aside 双栏。 */
+.home-page--single {
+  width: min(100%, 920px);
+  margin-inline: auto;
+  padding: 16px 0;
+}
+.home-single {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  min-width: 0;
+}
+.home-single__summary {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+.home-single__main {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  min-width: 0;
+}
+.home-single__main > .home-layout__cell {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+/* 扫码 / 我的信息是两个独立单按钮 section，并排横放不再各占一整行。 */
+.home-single__main > .home-layout__cell:has(.home-actions) {
+  flex: 0 0 auto;
+}
+.home-single__main > .business-home__space {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+.home-single .business-home__space {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.home-single .business-home__space > h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+/* 应用外层 space 标题与 widget 内标题重复（都是“应用”），只留内层。 */
+.home-single .business-home__space:has(.apps-home-widget) > h2 {
+  display: none;
+}
+/* 余额摘要收紧：对齐准绳 summary 卡，不再全宽撑空。 */
+.home-single__summary .home-widget {
+  padding: 22px 24px;
+}
+.home-single__summary .home-widget__amount {
+  font-size: 26px;
+  letter-spacing: -1px;
+  margin: 8px 0;
+}
+.home-single__summary .home-widget__breakdown {
+  display: grid;
+  grid-template-columns: auto auto;
+  justify-content: start;
+  gap: 4px 16px;
+  max-width: 320px;
+  margin: 0;
+}
+.home-single__summary .home-widget__breakdown dt {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.home-single__summary .home-widget__breakdown dd {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+/* MSFile 取文件表单收窄，输入行不再无限拉长。 */
+.home-single .msfile-home-file {
+  width: 100%;
+  margin: 0;
+}
+.home-single .msfile-home-file__form {
+  max-width: 640px;
+}
+@media (max-width: 640px) {
+  .home-page--single {
+    padding: 4px 0;
+  }
+  .home-single {
+    gap: 20px;
+  }
+}
 .home-widget { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
 .home-widget__head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .home-widget__head h3 { margin: 0; font-size: 14px; }

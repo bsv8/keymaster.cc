@@ -41,7 +41,7 @@ export function VaultWalletEntry() {
   // 触发 languageChanged 重渲染。
   const wallet = useSyncExternalStore(listener => vault.subscribeWalletState(listener), () => vault.walletSnapshot(), () => vault.walletSnapshot());
   const status = wallet.status;
-  const [mode, setMode] = useState<Mode>("welcome");
+  const [mode, setMode] = useState<Mode>(() => status === "uninitialized" ? "welcome" : "unlock-form");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -160,10 +160,8 @@ export function VaultWalletEntry() {
     }
   }
 
-  if (wallet.lockCleanup) return <OnboardingShell width="narrow"><VaultLockCleanup cleanup={wallet.lockCleanup} /></OnboardingShell>;
-
   // ---------- 未初始化：欢迎页 ----------
-  if (mode === "welcome") {
+  if (status === "uninitialized" && mode === "welcome") {
     return (
       <OnboardingShell width="wide">
         <div className="locked-shell locked-shell--welcome">
@@ -282,14 +280,15 @@ export function VaultWalletEntry() {
           type="password"
           autoComplete="current-password"
           value={password}
-          disabled={busy || status === "unlocked"}
+          disabled={busy || status !== "locked" || !!wallet.lockCleanup}
           onChange={(e) => setPassword(e.currentTarget.value)}
           error={error ?? undefined}
         />
+        {wallet.lockCleanup && <VaultLockCleanup cleanup={wallet.lockCleanup} />}
         <div className="locked-shell__actions">
           {/* Worker acceptance precedes Window assembly. Keep the same loading
               feedback until App replaces this entry with the ready shell. */}
-          <Button onClick={unlock} loading={busy || status === "unlocked"} disabled={!password}>
+          <Button onClick={unlock} loading={busy || status === "unlocked"} disabled={!password || status !== "locked" || !!wallet.lockCleanup}>
             {t("common.action.unlock", { defaultValue: "解锁" })}
           </Button>
         </div>
