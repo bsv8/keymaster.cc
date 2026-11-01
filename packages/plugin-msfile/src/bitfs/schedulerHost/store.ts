@@ -1,7 +1,7 @@
 // 内核快照 + 命令 outbox 的原子持久化；沿用 bitfs-journal 的条件写（CAS）约定。
 
 import type { BorrowedModuleFileStore } from "@keymaster/contracts";
-import type { Command, State } from "keymaster.cc-download-scheduler";
+import type { Command, State } from "keymaster-trade-scheduler";
 
 const FORMAT = "keymaster.scheduler-host";
 const VERSION = 1;

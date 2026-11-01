@@ -16,7 +16,7 @@ import {
 } from "./schedulerHost/index.js";
 import type {
   Command as SchedulerCommand, Fees as SchedulerFees, Payload as SchedulerPayload, Quote as SchedulerQuote,
-} from "keymaster.cc-download-scheduler";
+} from "keymaster-trade-scheduler";
 import { prepareBitfsPoolRecoveryWithCurrentRevision } from "./funding.js";
 import { BitfsArbitrationWorkflow } from "./arbitrationWorkflow.js";
 import type { CoordinatorClientRequest, CoordinatorMsFileControl, CoordinatorResponse, MsFileErrorCode, ActiveKeyCrypto, BorrowedModuleFileStore, MsFileSellerSettings, SessionEpoch, ProtocolSpendService, P2pkhUtxoSnapshotResult, WocWorkerChainPort } from "@keymaster/contracts";

@@ -1,6 +1,6 @@
 // 下载策略器宿主的设置映射：keymaster.cc 买方设置 → 内核显式 Config。
 
-import type { Config } from "keymaster.cc-download-scheduler";
+import type { Config } from "keymaster-trade-scheduler";
 
 /** 宿主的调度器设置；由 MSFile 买方设置中的对应字段提供。 */
 export interface SchedulerHostSettings {

@@ -1,6 +1,6 @@
 import { requireWocNetwork } from "@keymaster/contracts";
 import type { BsvNetwork, WocService, WocSpentOutput } from "@keymaster/contracts";
-import type { InputObserver, InputObservation } from "@keymaster/utxo-manager";
+import type { InputObserver, InputObservation } from "keymaster-utxo-manager";
 
 function inputDiagnostic(error: unknown) {
   const value = error && typeof error === "object" ? error as { status?: unknown; body?: unknown } : {};

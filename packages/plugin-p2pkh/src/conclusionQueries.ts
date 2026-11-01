@@ -1,5 +1,5 @@
 import type { P2pkhConclusionInput, P2pkhConclusionResult, P2pkhConclusionRow } from "@keymaster/contracts";
-import type { SubmitResult } from "@keymaster/utxo-manager";
+import type { SubmitResult } from "keymaster-utxo-manager";
 
 type Scope = { ownerPublicKeyHex: string; network: "main" | "test" };
 interface Query { input: Scope & { allocationId: string }; assertFresh(): void; controller: AbortController; timer?: ReturnType<typeof setTimeout>; inFlight: boolean; attempts: number; }

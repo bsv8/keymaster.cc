@@ -13,8 +13,10 @@ import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, extname, join, relative, resolve } from "node:path";
 
 const root = process.cwd();
-// 生产实际安装的 SDK 仍纳入 Worker 导入图；不读取相邻 SDK 源码仓库。
-const connectRoots = new Set();
+// 遍历实际安装的 SDK/独立组件产物；不读取相邻源码仓库，也不跳过 Worker 门禁。
+const installedRuntimeRoots = new Set();
+const installedRuntimePackages = ["keymaster-connect", "keymaster-utxo-manager", "keymaster-trade-scheduler"];
+const isInstalledRuntime = specifier => installedRuntimePackages.some(name => specifier === name || specifier.startsWith(`${name}/`));
 const entry = resolve(root, "src/keymasterSessionCoordinator.worker.ts");
 const appRequire = createRequire(resolve(root, "package.json"));
 const violations = [];
@@ -28,11 +30,11 @@ function display(file) {
 
 function isInsideWorkspace(file) {
   const path = realpathSync(file);
-  return path === root || path.startsWith(`${root}/`) || [...connectRoots].some(sdk => path === sdk || path.startsWith(`${sdk}/`));
+  return path === root || path.startsWith(`${root}/`) || [...installedRuntimeRoots].some(directory => path === directory || path.startsWith(`${directory}/`));
 }
 
 function shouldWalk(file) {
-  return isInsideWorkspace(file) && (!file.includes("/node_modules/") || [...connectRoots].some(sdk => file === sdk || file.startsWith(`${sdk}/`)));
+  return isInsideWorkspace(file) && (!file.includes("/node_modules/") || [...installedRuntimeRoots].some(directory => file === directory || file.startsWith(`${directory}/`)));
 }
 
 function sourceCandidates(path) {
@@ -63,14 +65,14 @@ function resolveSpecifier(specifier, importer) {
     let resolved;
     try { resolved = realpathSync(createRequire(importer).resolve(specifier)); }
     catch { resolved = realpathSync(appRequire.resolve(specifier)); }
-    // 固定发布版的三个入口均在 dist/，记录真实安装目录及其内部 chunk。
-    if (specifier === "keymaster-connect" || specifier.startsWith("keymaster-connect/")) connectRoots.add(resolve(dirname(resolved), ".."));
+    // 公开入口均在 dist/，记录真实安装目录并继续检查其内部模块。
+    if (isInstalledRuntime(specifier)) installedRuntimeRoots.add(resolve(dirname(resolved), ".."));
     return resolved;
   } catch {
     // ESM-only third-party packages can reject createRequire resolution even
     // though Vite resolves them correctly. We only need to walk workspace
     // source here; direct forbidden package specifiers are checked below.
-    if (specifier.startsWith("@keymaster/") || specifier === "keymaster-connect" || specifier.startsWith("keymaster-connect/")) unresolvedWorkspaceImports.push({ importer, specifier });
+    if (specifier.startsWith("@keymaster/") || isInstalledRuntime(specifier)) unresolvedWorkspaceImports.push({ importer, specifier });
     return undefined;
   }
 }

@@ -3,7 +3,7 @@
 import {
   createTask, nextWakeAt, restoreTask, step, view,
   type Command, type Content, type Event, type Payload, type State, type View,
-} from "keymaster.cc-download-scheduler";
+} from "keymaster-trade-scheduler";
 import { MonotonicClock, schedulerEventTimes } from "./clock.js";
 import { schedulerKernelConfig, type SchedulerHostSettings } from "./settings.js";
 import type { SchedulerOutboxEntry, SchedulerSnapshotStore } from "./store.js";

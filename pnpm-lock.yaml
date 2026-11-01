@@ -184,12 +184,6 @@ importers:
         specifier: 0.6.0
         version: 0.6.0(react@18.3.1)
 
-  packages/download-scheduler:
-    devDependencies:
-      typescript:
-        specifier: 5.9.3
-        version: 5.9.3
-
   packages/msfile-media:
     dependencies:
       '@keymaster/contracts':
@@ -336,9 +330,9 @@ importers:
       go-bitfs:
         specifier: 0.5.0
         version: 0.5.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
-      keymaster.cc-download-scheduler:
-        specifier: workspace:*
-        version: link:../download-scheduler
+      keymaster-trade-scheduler:
+        specifier: 0.1.0
+        version: 0.1.0
       masterseed:
         specifier: 1.1.0
         version: 1.1.0
@@ -360,15 +354,15 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
-      '@keymaster/utxo-manager':
-        specifier: workspace:*
-        version: link:../utxo-manager
       '@noble/hashes':
         specifier: ^1.4.0
         version: 1.8.0
       '@noble/secp256k1':
         specifier: ^2.1.0
         version: 2.3.0
+      keymaster-utxo-manager:
+        specifier: 0.1.0
+        version: 0.1.0
       lucide-react:
         specifier: ^0.468.0
         version: 0.468.0(react@18.3.1)
@@ -596,8 +590,6 @@ importers:
       '@keymaster/contracts':
         specifier: '*'
         version: link:../contracts
-
-  packages/utxo-manager: {}
 
 packages:
 
@@ -1953,6 +1945,12 @@ packages:
   keymaster-multisig-pool@4.0.0:
     resolution: {integrity: sha512-/74xS1It1qMd2M6atx9gwCefhjHhXWjHUgV4MX018JuKEe6LcwNj6ryHxXeozqf3PpnK7CzXMyh1Whbm9kGVVQ==}
     engines: {node: '>=18.0.0'}
+
+  keymaster-trade-scheduler@0.1.0:
+    resolution: {integrity: sha512-xvbAIikxFAEE9bdSbbKhjmXguxzC0XeDPduLGoypY59n63sxDH5SpwkcrM4SwYfx48zlry+Wze448JJlu1X8zQ==}
+
+  keymaster-utxo-manager@0.1.0:
+    resolution: {integrity: sha512-Lg0ZDHkMR50SJPAOnknUXSv3f+U8Ywi7IvH2r7YmQlzDwmrGWbDbR90qbNqS7/x7TboRGp0eqSJjOVZgwckfGg==}
 
   leven@3.1.0:
     resolution: {integrity: sha512-qsda+H8jTaUaN/x5vzW2rzc+8Rw4TAQ/4KjB46IwK5VH+IlVeeeje/EoZRpiXvIqjFgK84QffqPztGI3VBLG1A==}
@@ -4434,6 +4432,10 @@ snapshots:
   keymaster-multisig-pool@4.0.0:
     dependencies:
       '@bsv/sdk': 2.1.7
+
+  keymaster-trade-scheduler@0.1.0: {}
+
+  keymaster-utxo-manager@0.1.0: {}
 
   leven@3.1.0: {}
 

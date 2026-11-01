@@ -5,7 +5,7 @@ import type { CentralBroadcastService, CoordinatorP2pkhBroadcastResult, Coordina
 import type { MessageBus } from "webloom-framework";
 import type { P2pkhKeyResource, P2pkhLocalTransaction, P2pkhTransferInput, P2pkhTransferPreview, P2pkhTransferResult, P2pkhUtxo, ReadyKeyIdentity } from "./p2pkhContracts.js";
 import { assetIdToNetwork, makeResourceId } from "./p2pkhContracts.js";
-import { parseTx, p2pkScriptFromPublicKey, publisherMatchesPaymentScript } from "@keymaster/utxo-manager";
+import { parseTx, p2pkScriptFromPublicKey, publisherMatchesPaymentScript } from "keymaster-utxo-manager";
 import type { P2pkhStateRepositoryHandle } from "./storage/p2pkhStateRepository.js";
 import { calcTxidFromRawTxHex, type UnsignedTx, rawTxHexByteLength, signP2pkhTx } from "./p2pkhSigner.js";
 import { p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";

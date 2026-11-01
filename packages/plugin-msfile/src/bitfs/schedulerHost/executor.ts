@@ -1,6 +1,6 @@
 // 内核命令执行器：按 commandId 幂等路由到宿主端口；端口失败抛出，由调用方映射为错误事实。
 
-import type { Command } from "keymaster.cc-download-scheduler";
+import type { Command } from "keymaster-trade-scheduler";
 
 /**
  * 宿主命令端口。实现方负责原子持久化与真实执行：
