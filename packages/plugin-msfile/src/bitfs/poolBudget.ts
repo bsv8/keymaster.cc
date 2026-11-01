@@ -1,5 +1,5 @@
 import { Transaction, UnlockingScript, LockingScript } from "@bsv/sdk";
-import { MultisigPoolEngine, parseFundingOutput, type PoolPublicKeys } from "go-bitfs";
+import { MultisigPoolEngine, parseFundingOutput, type PoolPublicKeys } from "bitfs-protocol";
 
 /** 用 SDK 的规范退款构造器估算池内结算矿工费。
  * 探针仅用于本地金额计算，不签名、不持久化、不广播；同一池最终只花费一次，

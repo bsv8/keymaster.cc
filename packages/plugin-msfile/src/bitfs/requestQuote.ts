@@ -1,4 +1,4 @@
-import { inspectContentRequestReference, inspectFileQuoteReference } from "go-bitfs";
+import { inspectContentRequestReference, inspectFileQuoteReference } from "bitfs-protocol";
 import type { BitfsSessionJournal, BitfsSessionRecord } from "./sessionJournal.js";
 
 /** 逐请求保存的报价是恢复依据；旧已签记录只回读当时的原始开池报价。 */

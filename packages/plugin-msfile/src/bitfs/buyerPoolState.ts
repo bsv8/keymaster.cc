@@ -3,7 +3,7 @@ import {
   parsePaymentState,
   verifyAcceptedPayment,
   type BuyerPoolEvidence,
-} from "go-bitfs";
+} from "bitfs-protocol";
 import type { BitfsSessionJournal, BitfsSessionRecord } from "./sessionJournal.js";
 
 const FINAL_POOL_SEQUENCE = 0xffff_ffff;

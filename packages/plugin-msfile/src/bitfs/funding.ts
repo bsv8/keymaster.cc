@@ -207,7 +207,7 @@ export interface BitfsFundingLedger {
     poolId: string;
     purpose: "close" | "refund" | "arbitration";
     txid: string;
-    /** 关池/退款交易实际花费的池状态 outpoint；必须从经 go-bitfs 验证的交易原文解析。 */
+    /** 关池/退款交易实际花费的池状态 outpoint；必须从经 BitFSProtocol 验证的交易原文解析。 */
     spendingOutpoint: string;
     outputs: Array<Pick<BitfsDedicatedUtxo, "txid" | "vout" | "valueSatoshis" | "scriptHex">>;
     nowMs: number;

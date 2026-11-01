@@ -16,9 +16,9 @@
   "dependencies": {
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
-    "@libp2p/webrtc": "6.0.30",
-    "@libp2p/websockets": "10.1.20",
-    "bitcoin-libp2p": "0.3.1",
+    "@libp2p/webrtc": "7.0.2",
+    "@libp2p/websockets": "10.1.25",
+    "bitcoin-libp2p": "0.3.2",
     "@keymaster/p2p-host": "workspace:*",
     "sat-subscription-protocol": "0.3.0",
     "webloom-framework": "0.6.0"

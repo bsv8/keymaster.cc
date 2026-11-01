@@ -21,7 +21,7 @@ import {
   type SellerPoolEvidence,
   type Signer,
   type SigningRequest,
-} from "go-bitfs";
+} from "bitfs-protocol";
 import { bitfsTxidHex } from "./txid.js";
 import { BitfsTransactionBroadcaster } from "./broadcast.js";
 import type { BitfsSessionJournal, BitfsSessionRecord } from "./sessionJournal.js";
@@ -30,7 +30,7 @@ import type { MsFileLocalContentSource } from "./localContentSource.js";
 import { bitfsWorkflowFacts } from "./sdk.js";
 import { assertBitfsSellerRefundWindow } from "./poolLockTime.js";
 
-/** Kind 5 验证后的应用可读视图。证据验证必须来自 go-bitfs，不得自行解释 CBOR。 */
+/** Kind 5 验证后的应用可读视图。证据验证必须来自 BitFSProtocol，不得自行解释 CBOR。 */
 export interface BitfsSellerContentResolution {
   /** PaymentAuthorizationID，32 字节小写 hex。 */
   authorizationIdHex: string;
@@ -156,7 +156,7 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
     if (reference.paymentAuthorizationID) await this.deps.onDelivered?.(await this.routePool(sessionId, frame));
   }
 
-  async onFrame(input: { sessionId: string; kind: import("go-bitfs").WireKind; bytes: Uint8Array }): Promise<BitfsSellerProtocolResult> {
+  async onFrame(input: { sessionId: string; kind: import("bitfs-protocol").WireKind; bytes: Uint8Array }): Promise<BitfsSellerProtocolResult> {
     let result: BitfsSellerProtocolResult = { type: "none" };
     if (input.kind === 2) {
       // 各连接可同时到达；开池容量检查与预签必须跨连接串行。
@@ -166,7 +166,7 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
     return this.onFrameNow(input);
   }
 
-  private async onFrameNow(input: { sessionId: string; kind: import("go-bitfs").WireKind; bytes: Uint8Array }): Promise<BitfsSellerProtocolResult> {
+  private async onFrameNow(input: { sessionId: string; kind: import("bitfs-protocol").WireKind; bytes: Uint8Array }): Promise<BitfsSellerProtocolResult> {
     input = { ...input, sessionId: await this.routePool(input.sessionId, input.bytes) };
     let result: BitfsSellerProtocolResult = { type: "none" };
     await this.serial(input.sessionId, async () => {
@@ -216,7 +216,7 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
     return record.sessionId;
   }
 
-  private async handle(input: { sessionId: string; kind: import("go-bitfs").WireKind; bytes: Uint8Array }): Promise<BitfsSellerProtocolResult> {
+  private async handle(input: { sessionId: string; kind: import("bitfs-protocol").WireKind; bytes: Uint8Array }): Promise<BitfsSellerProtocolResult> {
     let record = await this.requiredRecord(input.sessionId);
     this.assertCurrent(record);
     if (record.evidence.includes("kind8-arbitration-request")) return { type: "close", reason: "arbitration_pending" };
@@ -617,7 +617,7 @@ async function persistSellerCloseBeforeSigning(input: {
   };
   const guardedSigner: Signer = {
     publicKey: () => input.signer.publicKey().slice(),
-    async sign(request: Readonly<import("go-bitfs").SigningRequest>, signal?: AbortSignal): Promise<Uint8Array> {
+    async sign(request: Readonly<import("bitfs-protocol").SigningRequest>, signal?: AbortSignal): Promise<Uint8Array> {
       input.assertCurrent();
       if (signal?.aborted) throw new DOMException("BitFS 卖方关池签名已取消", "AbortError");
       if (request.purpose !== "transaction" || request.wireKind !== 0 || request.digest.byteLength !== 32) {
@@ -644,7 +644,7 @@ async function persistSellerCloseBeforeSigning(input: {
   return { record, signer: guardedSigner };
 }
 
-/** 使用 go-bitfs 预检 Kind 5，再从当前 Owner 的 MSFile 内容库按授权顺序取内容。 */
+/** 使用 BitFSProtocol 预检 Kind 5，再从当前 Owner 的 MSFile 内容库按授权顺序取内容。 */
 export function createBitfsLocalSellerContentResolver(input: {
   /** 当前 Owner 的本地 MSFile 内容来源。 */
   content: MsFileLocalContentSource;

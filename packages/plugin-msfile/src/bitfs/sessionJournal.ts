@@ -1,6 +1,6 @@
 // BitFS 买卖会话的 Keymaster 自有状态机存储。
 //
-// 与 go-bitfs 的边界：SDK 只返回普通 evidence 和 exact bytes；本文件
+// 与 BitFSProtocol 的边界：SDK 只返回普通 evidence 和 exact bytes；本文件
 // 记录应用进度、恢复 fence 和证据引用，不序列化 SDK 实例。
 
 import { traceBitfs } from "./debug.js";

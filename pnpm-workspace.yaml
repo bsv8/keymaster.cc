@@ -8,20 +8,16 @@ allowBuilds:
   esbuild: true
 
 overrides:
-  bitcoin-libp2p: 0.3.1
+  bitcoin-libp2p: 0.3.2
 
 minimumReleaseAgeExclude:
   - keymaster-connect@0.1.4
-  - bitcoin-libp2p@0.3.1
+  - bitcoin-libp2p@0.3.2
   - bsv8-channel-protocol@0.5.0 || 0.6.0
   - keymaster-hold@0.1.0
   - keyhold@2.1.0
   - sat-subscription-protocol@0.3.0
-  - go-bitfs@0.5.0
+  - bitfs-protocol@0.5.1
   - webloom-framework@0.6.0
   - keymaster-trade-scheduler@0.1.0
   - keymaster-utxo-manager@0.1.0
-
-patchedDependencies:
-  bitcoin-libp2p@0.3.1: patches/bitcoin-libp2p@0.3.1.patch
-  go-bitfs@0.5.0: patches/go-bitfs@0.5.0.patch

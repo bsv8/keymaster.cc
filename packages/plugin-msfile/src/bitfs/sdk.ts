@@ -1,4 +1,4 @@
-// go-bitfs TypeScript 角色工作流的 Keymaster 适配层。
+// BitFSProtocol TypeScript 角色工作流的 Keymaster 适配层。
 // SDK 只负责协议计算与验证；存储、时钟、网络、广播均由上层显式注入。
 
 import type { ActiveKeyCrypto } from "@keymaster/contracts";
@@ -9,7 +9,7 @@ import {
   type SigningRequest,
   type PureFunctionFacts,
   wireSignatureDigest,
-} from "go-bitfs";
+} from "bitfs-protocol";
 
 /** 由 Coordinator 提供的显式 UTC 秒事实；SDK 不读取系统时钟。 */
 export function bitfsWorkflowFacts(nowMs: number, blockHeight?: number): PureFunctionFacts {
@@ -44,7 +44,7 @@ export function preserveBitfsSignerErrors(signer: Signer): Signer {
   };
 }
 
-/** 把当前 Vault 的受限摘要签名能力收敛为 go-bitfs Signer。 */
+/** 把当前 Vault 的受限摘要签名能力收敛为 BitFSProtocol Signer。 */
 export function createBitfsVaultSigner(cryptoPort: ActiveKeyCrypto): Signer {
   const identity = cryptoPort.getIdentity();
   const publicKey = hexToBytes(identity.publicKeyHex);
@@ -63,7 +63,7 @@ export function createBitfsVaultSigner(cryptoPort: ActiveKeyCrypto): Signer {
        try {
          if(request.purpose==="wire_message" && cryptoPort.signBitfsWire) {
            if(!request.documentCBOR)throw new WireError("invalid_evidence",request.wireKind,"document_cbor","硬件签名需要完整认证文档");
-           const document=new Uint8Array(request.documentCBOR),digest=wireSignatureDigest(request.wireKind as import("go-bitfs").WireKind,document);
+           const document=new Uint8Array(request.documentCBOR),digest=wireSignatureDigest(request.wireKind as import("bitfs-protocol").WireKind,document);
            if(!digest.every((byte,index)=>byte===request.digest[index]))throw new WireError("invalid_evidence",request.wireKind,"digest","BitFS 文档与摘要不一致");
            const result=await cryptoPort.signBitfsWire({ kind:request.wireKind, document:document.buffer },signal);
            if(signal?.aborted)throw new DOMException("BitFS 签名已取消","AbortError");

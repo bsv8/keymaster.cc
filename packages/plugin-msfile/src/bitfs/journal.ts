@@ -4,7 +4,7 @@
 // MSFile 内容、设置或 App 用量文件；发送方只能发送 `prepareOutbound` 返回的副本。
 
 import type { BorrowedModuleFileStore } from "@keymaster/contracts";
-import { parse, type Artifact, type WireKind } from "go-bitfs";
+import { parse, type Artifact, type WireKind } from "bitfs-protocol";
 
 const RECORD_FORMAT = "keymaster.bitfs-journal";
 const RECORD_VERSION = 1;

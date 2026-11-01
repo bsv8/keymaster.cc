@@ -28,9 +28,7 @@ Keymaster 是本地优先的 BSV 浏览器钱包。它提供钱包身份、普�
 
 边测和集成测试由同级 `BSV8_Engineering` 仓库维护，测试专用页面钩子、夹具和构建配置也位于该仓库。
 
-下载调度器的 TypeScript 源码唯一位于 `packages/download-scheduler/`，包名为 `keymaster.cc-download-scheduler`，作为本仓 workspace 包使用，不依赖 CLI 仓库。CLI 的 Go 实现保留在 `keymaster.cc-cli/internal/scheduler/`。
-
-UTXO manager 的 TypeScript 源码唯一位于 `packages/utxo-manager/src/`，作为钱包内部 workspace 包使用，不依赖独立 manager 仓库或源码同步。
+下载调度器与 UTXO manager 是独立组件；钱包精确使用已发布的 `keymaster-trade-scheduler@0.1.0` 与 `keymaster-utxo-manager@0.1.0`，不保留内部核心副本。唯一 TypeScript 源码分别位于相邻的 `keymaster.cc-download-scheduler/src/` 与 `keymaster.cc-utxo-manager/typescript/src/`；CLI 使用对应独立仓发布的 Go module，产品构建不依赖相邻组件源码。
 
 ## 自行部署
 
@@ -57,6 +55,6 @@ MSFile 设置页显示不可修改、不可删除的服务身份和完整连接�
 
 底层 MSFile service 默认没有仲裁服务；测试通过 `arbitrationServices` 显式注入本地服务运行时的公钥和地址，外置 E2E 构建关闭产品内置服务（显式 dev 环境变量仍可注入，未注入时不回退公网）。卖方在线交付后超过付款等待时间（缺省 60 秒，可在设置中调整）会自动申请仲裁并提交结算交易。买方从 MSFile 设置页“仲裁与文件取回”手动取回已授权内容。锁定/退出后不补跑计时，重新登录只显示状态和操作按钮；失败操作由用户手动继续。节点接受交易与区块确认分开展示。取回成功不等于费用池已结算：链上花费尚未查明时保留专款保护，用户通过“检查结算状态”继续核验，已取回文件仍可使用。
 
-当前依赖 `go-bitfs@0.3.3` 通过 `patches/` 和 pnpm lockfile 应用可复现补丁，支持历史交付证据的仲裁/补签、精确托管计费检查及买方本地付款状态的取回验收。请使用 `pnpm install --frozen-lockfile` 安装，不能绕过补丁直接使用未修正的同版本 npm 包。
+当前精确依赖已发布的 `bitfs-protocol@0.5.1` 与 `bitcoin-libp2p@0.3.2`，历史交付证据的仲裁/补签、精确托管计费检查、买方本地付款状态和诊断能力由正式包提供，不使用旧 SDK 补丁或相邻源码替代。请使用 `pnpm install --frozen-lockfile` 安装；BitFS wire 版本仍为 1。
 
 MSFile 单个 Seed/Block 的缺省购买价格上限按钱包网络选择：test 为 20/30 聪，main 为 200/300 聪。用户可修改或选择不限额；已有配置优先。设置页“恢复缺省值”会保存当前网络的两个缺省金额，配置由钱包网络身份隔离。

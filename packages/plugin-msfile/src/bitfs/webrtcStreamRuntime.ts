@@ -1,5 +1,5 @@
-import { parse } from "go-bitfs";
-import { BITFS_PROTOCOL_ID, MAX_WIRE_FRAME_BYTES, readArtifacts, writeArtifact } from "go-bitfs/transport";
+import { parse } from "bitfs-protocol";
+import { BITFS_PROTOCOL_ID, MAX_WIRE_FRAME_BYTES, readArtifacts, writeArtifact } from "bitfs-protocol/transport";
 import { setStreamFrameMeter, type StreamFrameMeter } from "bitcoin-libp2p/stream";
 import { hexToBytes, peerIdFromPublicKeyBytes } from "bitcoin-libp2p/identity";
 import type {

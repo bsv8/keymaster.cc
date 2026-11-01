@@ -1,5 +1,5 @@
 /**
- * 新池到期高度只在开池时计算一次，再交由 go-bitfs 固定进退款模板。
+ * 新池到期高度只在开池时计算一次，再交由 BitFSProtocol 固定进退款模板。
  * 必须使用节点提供的真实链高度；不得用时钟推算，也不得越过时间戳解释阈值。
  */
 export function deriveBitfsPoolRefundLockHeight(currentBlockHeight: number, refundDelayBlocks: number): number {

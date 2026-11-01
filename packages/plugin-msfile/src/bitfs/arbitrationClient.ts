@@ -1,7 +1,7 @@
 // 仲裁网络客户端。只复用 Window executor 的 Host；不创建第二个 Host。
 // exact Kind 8/10 由调用方在发送前持久化，发送失败后只能重放同一请求。
 import { decode, encode } from "cborg";
-import { MAX_WIRE_FRAME_BYTES, parse, parseAs } from "go-bitfs";
+import { MAX_WIRE_FRAME_BYTES, parse, parseAs } from "bitfs-protocol";
 import { readUvarintFrames, writeUvarintFrame } from "bitcoin-libp2p/stream";
 import { dialAuthenticatedAddress, type AuthenticatedDialHost } from "../authenticatedDial.js";
 import { deriveSupplierPeerId, normalizeSupplierAddress } from "../supplierConfig.js";

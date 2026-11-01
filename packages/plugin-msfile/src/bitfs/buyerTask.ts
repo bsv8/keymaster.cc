@@ -20,7 +20,7 @@ import {
   type BuyerPoolEvidence,
   type Signer,
   type VerifiedQuote,
-} from "go-bitfs";
+} from "bitfs-protocol";
 import type { BitfsFundingLedger, BitfsFundingTransactionView, PreparedBitfsFunding } from "./funding.js";
 import { prepareBitfsPoolRecoveryWithCurrentRevision } from "./funding.js";
 import type { BitfsBroadcastOutcome, BitfsTransactionBroadcaster, BitfsTransactionJournal } from "./broadcast.js";
@@ -121,7 +121,7 @@ export interface BitfsBuyerOpeningInput {
   sessionId: string;
   /** 第一池在 Kind 2 中承诺的专款金额，十进制聪字符串。 */
   openingAmountSatoshis: string;
-  /** 退款交易到期锁定值；解释规则由 go-bitfs 决定。 */
+  /** 退款交易到期锁定值；解释规则由 BitFSProtocol 决定。 */
   expiryLockTime: number;
   /** 池内退款/付款交易矿工费率，单位聪/千字节。 */
   minerFeeRateSatoshisPerKilobyte: bigint;

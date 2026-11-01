@@ -7,7 +7,7 @@ import {
   createWorkerActiveKeyCryptoFactory,
 } from "./coordinator.js";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { wireSignatureDigest, type WireKind } from "go-bitfs";
+import { wireSignatureDigest, type WireKind } from "bitfs-protocol";
 
 export interface VaultWorkerKeyPorts {
   session(): { vaultStatus: string; sessionEpoch: string; activePublicKeyHex?: string; runGeneration: string };
@@ -60,7 +60,7 @@ export function createVaultWorkerKeys(ports: VaultWorkerKeyPorts) {
       const kind = (input as { kind: number }).kind;
       const document = new Uint8Array((input as { document: ArrayBuffer }).document);
       if (document.length === 0) throw new Error("BitFS document is empty");
-      // BitFS 协议摘要：与 go-bitfs wireSignatureDigest 一致，Kind 6 等需协议级摘要而非裸 SHA256。
+      // BitFS 协议摘要：与 BitFSProtocol wireSignatureDigest 一致，Kind 6 等需协议级摘要而非裸 SHA256。
       const digest = wireSignatureDigest(kind as WireKind, document);
       const signature = await vaultKeySession.signDigest(digest, "der", input.publicKeyHex);
       assertActiveWalletIdentity(input.publicKeyHex);

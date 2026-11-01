@@ -8,7 +8,7 @@ import {
    verifySellerFunding, completeBuyerOpening,
   requestBuyerArbitratedContent, verifyBuyerArbitratedContent, parsePaymentState,
   verifyAcceptedPayment, type Signer, type BuyerPoolEvidence, type SellerPoolEvidence,
-} from "go-bitfs";
+} from "bitfs-protocol";
 import type { BorrowedModuleFileStore, MsFileArbitrationService, MsFileArbitrationTask } from "@keymaster/contracts";
 import type { BitfsSessionJournal, BitfsSessionRecord, BitfsEvidenceName } from "./sessionJournal.js";
 import type { BitfsArbitrationTransport, BitfsArbitrationEndpoint } from "./arbitrationClient.js";

@@ -5,10 +5,10 @@
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
-    "bitcoin-libp2p": "0.3.1",
+    "bitcoin-libp2p": "0.3.2",
     "@chainsafe/libp2p-noise": "17.0.0",
     "@chainsafe/libp2p-yamux": "8.0.1",
-    "@libp2p/identify": "4.1.13",
-    "libp2p": "3.3.9"
+    "@libp2p/identify": "4.1.18",
+    "libp2p": "3.5.1"
   }
 }

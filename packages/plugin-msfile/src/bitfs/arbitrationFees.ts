@@ -1,5 +1,5 @@
 import { decode } from "cborg";
-import { parseAs } from "go-bitfs";
+import { parseAs } from "bitfs-protocol";
 import type { BitfsArbitrationInfo } from "./arbitrationClient.js";
 
 /** 费率来自认证 info，价格属于服务配置；Seed、尾块、完整块都是一个条目。 */

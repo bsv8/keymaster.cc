@@ -2,7 +2,7 @@
 // 中文说明：每个签名先保存摘要，再调用 Vault；返回签名后立即保存。
 // 若进程在摘要已保存、签名结果未保存时退出，恢复时拒绝再次签名。
 
-import type { Signer, SigningRequest } from "go-bitfs";
+import type { Signer, SigningRequest } from "bitfs-protocol";
 import type { BitfsSessionJournal } from "./sessionJournal.js";
 
 /** 当前买方签名对应的协议步骤。 */

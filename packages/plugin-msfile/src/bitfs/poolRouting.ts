@@ -1,4 +1,4 @@
-import { inspectFileQuoteEvidence, inspectPoolArtifactReference } from "go-bitfs";
+import { inspectFileQuoteEvidence, inspectPoolArtifactReference } from "bitfs-protocol";
 import { IncrementalSha256 } from "../sha256.js";
 import type { Pool } from "keymaster-trade-scheduler";
 import type { BitfsSessionJournal, BitfsSessionRecord } from "./sessionJournal.js";

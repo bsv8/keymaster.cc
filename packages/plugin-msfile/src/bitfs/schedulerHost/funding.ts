@@ -1,5 +1,5 @@
 import type { Command } from "keymaster-trade-scheduler";
-import { blockPriceSatoshis } from "go-bitfs";
+import { blockPriceSatoshis } from "bitfs-protocol";
 
 /** 把协议规定的尾块费用作为事实注入策略器，不在宿主另定价格策略。 */
 export function schedulerTailPrice(fullBlockPrice: string, fileSize: string): string | undefined {

@@ -1,7 +1,7 @@
 // BitFS 买方 DataChannel 会话：开池、按序取块、验货付款和最终入库。
 //
 // Worker 提供签名、链上查询、内容存储与 DataChannel 发送能力；本文件只用
-// go-bitfs 纯步骤验证/签名，且每个对外 Artifact 都先写入会话证据再发送。
+// BitFSProtocol 纯步骤验证/签名，且每个对外 Artifact 都先写入会话证据再发送。
 
 import {
   acceptBuyerQuote,
@@ -18,7 +18,7 @@ import {
   type BuyerPoolEvidence,
   type Signer,
   type WireKind,
-} from "go-bitfs";
+} from "bitfs-protocol";
 import type { MsFileBitfsPurchasePhase, BorrowedModuleFileStore } from "@keymaster/contracts";
 import type { BitfsBuyerTask } from "./buyerTask.js";
 import type { BitfsBuyerDownloadPlan } from "./buyerDownloadPlan.js";

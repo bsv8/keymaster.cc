@@ -8,7 +8,7 @@
 //     persist-before-send：返回的每一条出站帧都必须先落盘再交给本模块发送；
 //   - 私钥只经 Vault 的受限签名能力进入协议端口，不进入本模块。
 
-import { MAX_WIRE_FRAME_BYTES, parse, type WireKind } from "go-bitfs";
+import { MAX_WIRE_FRAME_BYTES, parse, type WireKind } from "bitfs-protocol";
 
 /** Window lane 提供的 BitFS stream 端口；只在 Window 侧持有 Host。 */
 export interface BitfsSellerStreamTransport {

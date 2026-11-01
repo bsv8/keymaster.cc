@@ -106,7 +106,7 @@ export type BitfsPoolSpendChain =
 /**
  * 读取费用池开池输出当前被哪一版累计付款状态花费，并返回其 exact 原文。
  * MultisigPool 的付款更新都竞争花费同一个开池输出，不是前后交易串接；调用方
- * 仍须用 go-bitfs 验证新状态，不得只信 WoC 的 spender 关系。
+ * 仍须用 BitFSProtocol 验证新状态，不得只信 WoC 的 spender 关系。
  */
 export async function readBitfsPoolSpendChain(input: {
   /** Worker 内 WoC 句柄。 */

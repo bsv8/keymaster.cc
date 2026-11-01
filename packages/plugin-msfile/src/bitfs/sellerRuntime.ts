@@ -3,7 +3,7 @@
 
 import { isVerifiedHashRequest, dedupKey, type VerifiedHashRequest } from "bsv8-channel-protocol/hash-request";
 import type { MsFileSellerSettings } from "@keymaster/contracts";
-import { createSellerQuote, type Signer } from "go-bitfs";
+import { createSellerQuote, type Signer } from "bitfs-protocol";
 import type { BitfsJournal } from "./journal.js";
 import type { BitfsSessionJournal } from "./sessionJournal.js";
 import type { BitfsSeedIndex } from "./seedIndex.js";
