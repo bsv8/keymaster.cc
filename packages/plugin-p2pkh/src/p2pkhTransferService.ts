@@ -14,8 +14,6 @@ import type { P2pkhManagerInputEvidence, P2pkhUtxoManager } from "./p2pkhUtxoMan
 export interface P2pkhTransferServiceDeps {
   vault: Pick<VaultService, "status" | "createActiveKeyCrypto">;
   previousTransactions(network: "main" | "test", inputs: readonly P2pkhUtxo[]): Promise<string[]>;
-  /** Chain observation, not a repeated check of an internal preview. */
-  assertInputsUnspent?(network: "main" | "test", inputs: readonly Pick<P2pkhUtxo, "txid" | "vout">[]): Promise<void>;
   messageBus: MessageBus;
   getStore: (publicKeyHex: string) => Promise<P2pkhStateRepositoryHandle>;
   loadSpendableUtxos: (input: {
@@ -153,7 +151,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       const selected = managerInputs.map(row => row.utxo);
       let durableIntent = false;
       try {
-        await deps.assertInputsUnspent?.(network, selected);
+        // 已由 manager 选定并占用；错误由 manager/提交结果报告，不在此重复查链。
         await loadPreviousTransactions(network, selected, managerInputs, deps.previousTransactions);
         if (options?.signal?.aborted) throw new Error("Transfer signing cancelled");
         await manager.prepareSigning({ ownerPublicKeyHex: owner.publicKeyHex, resource, allocationId: frozen.managerAllocationId!, unsignedTxHex: frozen.rawTxHex });

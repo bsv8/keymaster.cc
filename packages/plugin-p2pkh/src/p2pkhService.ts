@@ -349,12 +349,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
         return raw;
       }));
     },
-    async assertInputsUnspent(network, inputs) {
-      if (!deps.woc?.getSpentOutput) throw new Error("Spent-output evidence is unavailable");
-      await Promise.all(inputs.map(async ({ txid, vout }) => {
-        if (await requireWocNetwork(deps.woc!, network).getSpentOutput(txid, vout) !== null) throw new Error(`P2PKH input is already spent: ${txid}:${vout}`);
-      }));
-    },
     vault: deps.vault,
     utxoManager: deps.utxoManager,
     centralBroadcastService: deps.centralBroadcastService,

@@ -753,7 +753,22 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         // parse the leading `01` as an invalid JSON number and fail at
         // position 1, so read text first while retaining compatibility with
         // the JSON object/string shapes used by older proxies.
-        const body = (await fetchText(network, `/tx/${encodeURIComponent(normalized)}/hex`, { method: "GET" }, signal, opts.timeoutMs)).trim();
+        let body: string;
+        try {
+          body = (await fetchText(network, `/tx/${encodeURIComponent(normalized)}/hex`, { method: "GET" }, signal, opts.timeoutMs)).trim();
+        } catch (error) {
+          if (!isWocNotFoundError(error) && !(error instanceof TypeError && !signal.aborted)) throw error;
+          // 未确认交易可能在单笔 hex 索引缺失，但正式批量端点已可读。
+          // 只补一次只读查询；不重广播、不把 txid 回执伪装成原始交易。
+          const rows = await fetchJson<unknown>(network, "/txs/hex", {
+            method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ txids: [normalized] }),
+          }, signal, opts.timeoutMs);
+          if (!Array.isArray(rows) || rows.length !== 1 || rows[0]?.txid !== normalized || typeof rows[0]?.hex !== "string") throw error;
+          const hex = rows[0].hex as string;
+          if (await calcCanonicalTxidFromRawTxHex(hex) !== normalized) throw new Error("WOC bulk raw transaction txid mismatch");
+          return hex;
+        }
         let raw: unknown = body;
         if (body.startsWith("{") || body.startsWith("[") || body.startsWith('"')) {
           raw = JSON.parse(body) as unknown;

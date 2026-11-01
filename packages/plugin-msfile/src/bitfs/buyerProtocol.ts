@@ -5,6 +5,7 @@
 
 import {
   acceptBuyerQuote,
+  inspectFileQuoteEvidence,
   contentHashesPriceSatoshis,
   completeBuyerOpening,
   inspectBuyerContentRequest,
@@ -23,6 +24,7 @@ import type { BitfsBuyerTask } from "./buyerTask.js";
 import type { BitfsBuyerDownloadPlan } from "./buyerDownloadPlan.js";
 import type { BitfsSessionJournal, BitfsSessionRecord } from "./sessionJournal.js";
 import { createJournaledBitfsBuyerSigner } from "./signerJournal.js";
+import { readBitfsRequestQuote } from "./requestQuote.js";
 import {
   assertBitfsBuyerCloseBinding,
   encodeBitfsBuyerCloseBinding,
@@ -314,8 +316,28 @@ export class BitfsBuyerProtocol {
     return result!;
   }
 
+  /** 执行内核指定的逐次购买；报价来自本次命令，而不是池开立时的报价。 */
+  async dispatchRequest(input: { sessionId: string; quoteRaw: Uint8Array; contentIds: readonly string[]; maxPayment: string; stream: BitfsBuyerStream }): Promise<void> {
+    await this.serial(input.sessionId, async () => {
+      this.deps.assertCurrentContext();
+      const record = await this.requiredSession(input.sessionId);
+      if (record.phase !== "funded" || record.pendingAuthorizationId) throw new Error("BitFS 当前池已有未决购买，不能创建另一份授权");
+      const quote = acceptBuyerQuote(bitfsWorkflowFacts(this.deps.nowMs()), input.quoteRaw);
+      const seedHash = bytesToHex(quote.terms.seedHash);
+      const contentHashes = input.contentIds.map(hexToBytes);
+      const needsSeed = input.contentIds.some(id => id !== seedHash);
+      const seed = needsSeed ? await this.readStagedSeed(input.sessionId) : undefined;
+      const actual = await contentHashesPriceSatoshis(quote.terms, contentHashes, seed);
+      if (actual !== BigInt(input.maxPayment)) throw new Error("BitFS 本次报价费用与内核冻结授权不一致");
+      const outcome = await this.deps.downloadPlan.dispatchContent(input.sessionId, input.contentIds);
+      if (outcome !== "dispatched") throw new Error("BitFS 内核工作与本地内容归属冲突");
+      await this.prepareAndSendRequest({ sessionId: input.sessionId, quoteRaw: input.quoteRaw, contentHashes, seed, stream: input.stream });
+    });
+  }
+
   /** 响应其他卖家完成付款后，尝试分配此池的下一份内容。 */
   async continueSharedDownload(input: { sessionId: string; stream: BitfsBuyerStream }): Promise<void> {
+    if (this.deps.dispatchMode) return;
     await this.serial(input.sessionId, async () => {
       const record = await this.requiredSession(input.sessionId);
       if (record.phase !== "funded" || !record.evidence.includes("download-plan")) return;
@@ -328,7 +350,7 @@ export class BitfsBuyerProtocol {
     this.deps.assertCurrentContext();
     let record = await this.requiredSession(input.sessionId);
     const quoteRaw = await this.requiredEvidence(input.sessionId, "kind1-quote");
-    const quote = acceptBuyerQuote(bitfsWorkflowFacts(this.deps.nowMs()), quoteRaw);
+    const quote = inspectFileQuoteEvidence(quoteRaw);
     const openingConfiguration = await this.deps.sessions.getEvidence(input.sessionId, "opening-configuration");
     if (openingConfiguration) {
       try {
@@ -373,14 +395,15 @@ export class BitfsBuyerProtocol {
       }
 
       const pool = await this.readCurrentPool(input.sessionId, authorizationId);
-      const summary = await this.inspectKind5({ sessionId: input.sessionId, quoteRaw, pool, rawKind5: requestRaw });
+      const requestQuote = await readBitfsRequestQuote(this.deps.sessions, input.sessionId, authorizationId);
+      const summary = await this.inspectKind5({ sessionId: input.sessionId, quoteRaw: requestQuote, pool, rawKind5: requestRaw });
       if (summary.authorizationIdHex !== authorizationId) throw new Error("恢复中的 Kind 5 授权编号与会话不一致");
       this.deps.assertCurrentContext();
       // 重连后重放同一买方签名；卖方按本地日志幂等补签。
       await input.stream.send(paymentRaw);
       record = await this.requiredSession(input.sessionId);
       if (record.evidence.includes("download-plan")) {
-        await this.completeSharedPayment({ sessionId: input.sessionId, quote, summary, pool });
+        await this.completeSharedPayment({ sessionId: input.sessionId, quote: acceptBuyerQuote(bitfsWorkflowFacts(this.deps.nowMs()), requestQuote), summary, pool });
         this.deps.onDownloadPlanChanged?.();
       }
       record = await this.requiredSession(input.sessionId);
@@ -480,7 +503,7 @@ export class BitfsBuyerProtocol {
         pendingAuthorizationId: undefined,
       }, this.deps.nowMs());
     }
-    const quote = acceptBuyerQuote(bitfsWorkflowFacts(this.deps.nowMs()), await this.requiredEvidence(input.sessionId, "kind1-quote"));
+    const quote = inspectFileQuoteEvidence(await this.requiredEvidence(input.sessionId, "kind1-quote"));
     const totalBlocks = Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n);
     const verifiedBlocks = await this.countStagedBlocks(input.sessionId);
     try {
@@ -645,7 +668,7 @@ export class BitfsBuyerProtocol {
   async progressForSession(sessionId: string): Promise<BitfsBuyerPurchaseProgress> {
     const record = await this.requiredSession(sessionId);
     const quoteRaw = await this.requiredEvidence(record.sessionId, "kind1-quote");
-    const quote = acceptBuyerQuote(bitfsWorkflowFacts(this.deps.nowMs()), quoteRaw);
+    const quote = inspectFileQuoteEvidence(quoteRaw);
     const blockCount = Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n);
     const opening = this.readOpeningAmount(record.sessionId);
     const verifiedBlockCount = await this.countStagedBlocks(record.sessionId);
@@ -667,7 +690,7 @@ export class BitfsBuyerProtocol {
     let record = await this.requiredSession(sessionId);
     if (["cancel-opening", "cancelled", "completed", "refunded", "refund-ready", "refund-unknown", "failed", "content-committing"].includes(record.phase)) return;
     const quoteRaw = await this.requiredEvidence(sessionId, "kind1-quote");
-    const quote = acceptBuyerQuote(bitfsWorkflowFacts(this.deps.nowMs()), quoteRaw);
+    const quote = inspectFileQuoteEvidence(quoteRaw);
     const amount = this.readOpeningAmount(sessionId);
     const totalBlocks = Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n);
     if (["close-required", "close-requested", "close-unknown", "cancel-closing-pool", "cancel-close-unknown"].includes(record.phase)) {
@@ -758,7 +781,7 @@ export class BitfsBuyerProtocol {
         lastKeepAliveAt = this.deps.nowMs();
       }
       const quoteRaw = await this.requiredEvidence(sessionId, "kind1-quote");
-      const quote = acceptBuyerQuote(bitfsWorkflowFacts(this.deps.nowMs()), quoteRaw);
+      const quote = inspectFileQuoteEvidence(quoteRaw);
       const totalBlocks = Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n);
       const result = await this.deps.task.reconcileFunding(sessionId);
       if (result?.kind4) {
@@ -794,10 +817,7 @@ export class BitfsBuyerProtocol {
 
   /** 新下载计划按预算为多个池分配不同 Block，并共用一份已付款 Seed。 */
   private async continueSharedFundedPool(sessionId: string, quote: ReturnType<typeof acceptBuyerQuote>, stream: BitfsBuyerStream): Promise<void> {
-    if (this.deps.dispatchMode) {
-      await this.continueDispatchedPool(sessionId, quote, stream);
-      return;
-    }
+    if (this.deps.dispatchMode) return;
     const beforeActivation = await this.deps.downloadPlan.snapshot();
     if (beforeActivation.stopRequested || beforeActivation.pools.find(pool => pool.sessionId === sessionId)?.retired) {
       await this.closeStoppedSharedPool(sessionId, quote, stream);
@@ -891,57 +911,11 @@ export class BitfsBuyerProtocol {
     this.deps.onDownloadPlanChanged?.();
   }
 
-  /** 文件已请求取消时，不再领取内容；逐池发送既有 Kind 12 并等待回收确认。 */
-  /**
-   * 内核驱动模式：只请求宿主按内核派发登记的内容（Seed 或整批 Block），
-   * 没有派发就等待；不自行选择卖家、不自行领取下一批、也不因预算自行关池。
-   */
-  private async continueDispatchedPool(sessionId: string, quote: ReturnType<typeof acceptBuyerQuote>, stream: BitfsBuyerStream): Promise<void> {
-    const plan = await this.deps.downloadPlan.snapshot();
-    if (plan.stopRequested) {
-      await this.closeStoppedSharedPool(sessionId, quote, stream);
-      return;
-    }
-    const ownPool = plan.pools.find((pool) => pool.sessionId === sessionId);
-    const seedHashHex = bytesToHex(quote.terms.seedHash);
-    const totalBlocks = Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n);
-    if (!ownPool || ownPool.closed || ownPool.retired) {
-      this.progress(sessionId, "requesting-blocks", this.readOpeningAmount(sessionId), plan.completedBlockCount, totalBlocks,
-        "等待下载策略器关闭或重新评估该费用池");
-      return;
-    }
-    await this.deps.downloadPlan.activatePool(sessionId);
-    const dispatched = await this.deps.downloadPlan.dispatchedContent(sessionId);
-    if (dispatched.length === 0) {
-      this.progress(sessionId, "requesting-blocks", this.readOpeningAmount(sessionId), plan.completedBlockCount, totalBlocks,
-        "等待下载策略器派发下一批内容");
-      return;
-    }
-    const seedBytes = await this.readStagedBytes(sessionId, "seed.bin");
-    const blockIds = dispatched.filter((id) => id !== seedHashHex);
-    if (blockIds.length > 0) {
-      if (!seedBytes || !plan.seedCompleted) throw new Error("BitFS 内核派发 Block 前缺少已付款 Seed");
-      // 整批一次 Kind 5：批次上限已由内核（poolBlocks 与卖方 maxBlocks）约束。
-      await this.prepareAndSendRequest({ sessionId, contentHashes: blockIds.map(hexToBytes), seed: seedBytes, stream });
-      return;
-    }
-    if (dispatched.includes(seedHashHex) && !seedBytes) {
-      await this.prepareAndSendRequest({ sessionId, contentHashes: [quote.terms.seedHash.slice()], stream });
-      return;
-    }
-    if (plan.seedCompleted && plan.blockHashesHex === null) {
-      const hashes = await this.getAllBlockHashes(sessionId, quote.terms.fileSizeBytes.toString(10), seedHashHex);
-      await this.deps.downloadPlan.setBlockHashes(hashes);
-    }
-    this.progress(sessionId, "requesting-seed", this.readOpeningAmount(sessionId), 0, totalBlocks,
-      "Seed 已收到，等待本地付款证据或下一批派发");
-  }
-
   /** 内核驱动模式：宿主按内核 close 意图请求关池；不自行决定何时关闭。 */
   async closeDispatchedPool(input: { sessionId: string; stream: BitfsBuyerStream }): Promise<void> {
     await this.serial(input.sessionId, async () => {
       const record = await this.requiredSession(input.sessionId);
-      const quote = acceptBuyerQuote(bitfsWorkflowFacts(this.deps.nowMs()), await this.requiredEvidence(input.sessionId, "kind1-quote"));
+      const quote = inspectFileQuoteEvidence(await this.requiredEvidence(input.sessionId, "kind1-quote"));
       const totalBlocks = Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n);
       if (record.phase === "funded") {
         await this.deps.sessions.update(input.sessionId, record.revision, { phase: "close-required" }, this.deps.nowMs());
@@ -1003,7 +977,7 @@ export class BitfsBuyerProtocol {
     }
     this.progress(sessionId, "content-committing", this.readOpeningAmount(sessionId), completedBlockCount, uniqueBlockHashes.length,
       "所有唯一 Block 均已付款，正在写入本地文件");
-    await this.commitStagedFile(sessionId, quote.terms.fileSizeBytes.toString(10), quote.terms.recommendedFilename, seedHashHex, orderedBlockHashes);
+    await this.commitStagedFile(sessionId, seedHashHex, orderedBlockHashes);
     record = await this.requiredSession(sessionId);
     if (record.phase === "content-committing") {
       record = await this.deps.sessions.update(sessionId, record.revision, { phase: "close-required", pendingTxid: undefined }, this.deps.nowMs());
@@ -1033,7 +1007,7 @@ export class BitfsBuyerProtocol {
       let record = await this.requiredSession(sessionId);
       record = await this.deps.sessions.update(sessionId, record.revision, { phase: "content-committing" }, this.deps.nowMs());
       this.deps.assertCurrentContext();
-      await this.commitStagedFile(sessionId, quote.terms.fileSizeBytes.toString(10), quote.terms.recommendedFilename, seedHashHex, blockHashes);
+      await this.commitStagedFile(sessionId, seedHashHex, blockHashes);
       record = await this.requiredSession(sessionId);
       await this.deps.sessions.update(sessionId, record.revision, { phase: "close-required" }, this.deps.nowMs());
       try { await this.deps.onContentCommitted?.(seedHashHex); } catch { /* 文件已提交；索引刷新不阻止关池。 */ }
@@ -1079,7 +1053,7 @@ export class BitfsBuyerProtocol {
       return;
     }
     const rawKind5 = await this.requiredEvidence(sessionId, requestName);
-    const quoteRaw = await this.requiredEvidence(sessionId, "kind1-quote");
+    const quoteRaw = await readBitfsRequestQuote(this.deps.sessions, sessionId, authorizationId);
     const pool = await this.readCurrentPool(sessionId);
     const kind5Summary = await this.inspectKind5({ sessionId, quoteRaw, pool, rawKind5 });
     if (kind5Summary.authorizationIdHex !== authorizationId) throw new Error("Kind 5 授权编号与会话待处理编号不一致");
@@ -1168,10 +1142,12 @@ export class BitfsBuyerProtocol {
         pendingAuthorizationId: undefined,
       }, this.deps.nowMs());
       this.progress(sessionId, "content-committing", this.readOpeningAmount(sessionId), completedBlockCount, allBlockHashes.length, "所有块已验货并签署付款，正在提交本地文件");
-      await this.commitStagedFile(sessionId, quote.terms.fileSizeBytes.toString(10), quote.terms.recommendedFilename, seedHashHex, allBlockHashes);
+      await this.commitStagedFile(sessionId, seedHashHex, allBlockHashes);
       record = (await this.deps.sessions.get(sessionId)) ?? record;
       record = await this.deps.sessions.update(sessionId, record.revision, { phase: "close-required", pendingTxid: undefined }, this.deps.nowMs());
       try { await this.deps.onContentCommitted?.(seedHashHex); } catch { /* 文件已提交；索引刷新失败不应阻止关池。 */ }
+      // 完成事实已通过onDispatchedDelivery反馈，只有策略器能决定关哪些池。
+      if (this.deps.dispatchMode) return;
       try {
         await this.prepareAndSendClose(sessionId, completedBlockCount, allBlockHashes.length, stream);
         if (record.evidence.includes("download-plan")) this.deps.onDownloadPlanChanged?.();
@@ -1292,7 +1268,7 @@ export class BitfsBuyerProtocol {
     if (record.phase !== "completed" && record.phase !== "cancelled" && (record.phase !== pendingPhase || record.pendingTxid !== txid)) {
       record = await this.deps.sessions.update(sessionId, record.revision, { phase: pendingPhase, pendingTxid: txid }, this.deps.nowMs());
     }
-    const quote = acceptBuyerQuote(bitfsWorkflowFacts(this.deps.nowMs()), await this.requiredEvidence(sessionId, "kind1-quote"));
+    const quote = inspectFileQuoteEvidence(await this.requiredEvidence(sessionId, "kind1-quote"));
     const blockCount = Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n);
     const verifiedBlockCount = await this.countStagedBlocks(sessionId);
     const deadline = this.deps.nowMs() + MAX_CHAIN_WAIT_MS;
@@ -1307,7 +1283,9 @@ export class BitfsBuyerProtocol {
         }
         await this.deps.onPoolClosed?.({ sessionId });
         this.progress(sessionId, cancelling ? "cancelled" : "completed", this.readOpeningAmount(sessionId), verifiedBlockCount, blockCount,
-          cancelling ? "购买已取消，费用池已关闭且余款已收回" : "文件已验证并写入本地，费用池已关闭且余款已收回");
+          cancelling ? "购买已取消，费用池已关闭且余款已收回"
+            : verifiedBlockCount < blockCount ? "本费用池已关闭且余款已收回，文件仍有内容待采购"
+            : "文件已验证并写入本地，费用池已关闭且余款已收回");
         return;
       }
       if (result.outcome.status === "failed") {
@@ -1323,10 +1301,9 @@ export class BitfsBuyerProtocol {
       cancelling ? "取消关池交易暂未被节点观察；保留原交易等待恢复" : "关池交易暂未被节点观察；保留原交易等待恢复");
   }
 
-  private async prepareAndSendRequest(input: { sessionId: string; contentHashes: Uint8Array[]; seed?: Uint8Array; stream: BitfsBuyerStream }): Promise<void> {
+  private async prepareAndSendRequest(input: { sessionId: string; quoteRaw?: Uint8Array; contentHashes: Uint8Array[]; seed?: Uint8Array; stream: BitfsBuyerStream }): Promise<void> {
     this.deps.assertCurrentContext();
-    const record = await this.requiredSession(input.sessionId);
-    const quoteRaw = await this.requiredEvidence(input.sessionId, "kind1-quote");
+    const quoteRaw = input.quoteRaw ?? await this.requiredEvidence(input.sessionId, "kind1-quote");
     const quote = acceptBuyerQuote(bitfsWorkflowFacts(this.deps.nowMs()), quoteRaw);
     const pool = await this.readCurrentPool(input.sessionId);
     const nowSeconds = BigInt(Math.floor(this.deps.nowMs() / 1_000));
@@ -1348,13 +1325,15 @@ export class BitfsBuyerProtocol {
       nowMs: this.deps.nowMs,
       onError: this.deps.onSignerError,
     }));
-    const latestRecord = await this.requiredSession(input.sessionId);
+    let latestRecord = await this.requiredSession(input.sessionId);
     const summary = await inspectBuyerContentRequest(await this.facts(), {
       quoteRaw,
       pool,
       requestRaw: prepared.outbound.bytes(),
     });
     const authorizationIdHex = bytesToHex(summary.paymentAuthorizationID);
+    latestRecord = await this.deps.sessions.putEvidence(input.sessionId, latestRecord.revision,
+      `kind1-request-quote-${authorizationIdHex}`, quoteRaw, this.deps.nowMs());
     const name = `kind5-content-request-${authorizationIdHex}` as const;
     const latest = await this.deps.sessions.putEvidence(input.sessionId, latestRecord.revision, name, prepared.outbound.bytes(), this.deps.nowMs());
     const updated = await this.deps.sessions.update(input.sessionId, latest.revision, {
@@ -1469,7 +1448,7 @@ export class BitfsBuyerProtocol {
     };
   }
 
-  private async commitStagedFile(sessionId: string, fileSizeBytes: string, fileName: string, seedHashHex: string, blockHashes: readonly string[]): Promise<void> {
+  private async commitStagedFile(sessionId: string, seedHashHex: string, blockHashes: readonly string[]): Promise<void> {
     const seedBytes = await this.readStagedSeed(sessionId);
     const blocks: Uint8Array[] = [];
     for (const hash of blockHashes) {
@@ -1483,8 +1462,8 @@ export class BitfsBuyerProtocol {
       seedHashHex,
       seedBytes,
       blocks,
-      fileSizeBytes,
-      fileName,
+      fileSizeBytes: manifest.fileSizeBytes,
+      fileName: manifest.recommendedFilename,
       mediaType: manifest.mediaType ?? "application/octet-stream",
       now: () => this.deps.nowMs(),
     });

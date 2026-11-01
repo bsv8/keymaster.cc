@@ -3,6 +3,7 @@
 // 与 go-bitfs 的边界：SDK 只返回普通 evidence 和 exact bytes；本文件
 // 记录应用进度、恢复 fence 和证据引用，不序列化 SDK 实例。
 
+import { traceBitfs } from "./debug.js";
 import type { BorrowedModuleFileStore } from "@keymaster/contracts";
 
 const SESSION_FORMAT = "keymaster.bitfs-session";
@@ -114,6 +115,7 @@ export type BitfsEvidenceName = BitfsFixedEvidenceName
   | `kind5-signature-${string}`
   | `kind12-close-sign-digest-${string}`
   | `kind12-close-signature-${string}`
+  | `kind1-request-quote-${string}`
   | `kind5-content-request-${string}`
   | `kind6-content-delivery-${string}`
   | `kind7-payment-update-${string}`
@@ -193,7 +195,13 @@ export function createBitfsSessionJournal(store: BorrowedModuleFileStore): Bitfs
   };
   const write = async (record: BitfsSessionRecord, options: { ifNoneMatch?: true; ifRevision?: string } = {}): Promise<void> => {
     const bytes = new TextEncoder().encode(`${JSON.stringify({ format: SESSION_FORMAT, version: SESSION_VERSION, ...record }, null, 2)}\n`);
-    await store.put(recordPath(record.sessionId), bytes, options);
+    try {
+      await store.put(recordPath(record.sessionId), bytes, options);
+      traceBitfs("journal.session.committed", () => ({ record }));
+    } catch (error) {
+      traceBitfs("journal.session.failed", () => ({ sessionId: record.sessionId, phase: record.phase, revision: record.revision, error }));
+      throw error;
+    }
   };
   const mutate = async (id: string, expectedRevision: number, change: (current: BitfsSessionRecord) => BitfsSessionRecord): Promise<BitfsSessionRecord> => {
     const current = await read(id);
@@ -227,6 +235,7 @@ export function createBitfsSessionJournal(store: BorrowedModuleFileStore): Bitfs
       if (!prior) await store.put(path, bytes.slice(), { ifNoneMatch: true });
       const committed = await store.get(path);
       if (!committed || !equal(committed.bytes, bytes)) throw new Error("BitFS 证据持久化校验失败");
+      traceBitfs("journal.evidence.committed", () => ({ sessionId, name, revision: expectedRevision, byteLength: bytes.byteLength, reused: Boolean(prior) }));
       return mutate(sessionId, expectedRevision, current => ({
         ...current,
         evidence: uniqueEvidence([...current.evidence, name]),
@@ -312,7 +321,7 @@ const evidenceNames = new Set<BitfsFixedEvidenceName>([
 function assertSessionId(value: string): string { if (!SESSION_ID.test(value)) throw new TypeError("BitFS 会话 ID 不合法"); return value; }
 function assertEvidenceName(value: BitfsEvidenceName): BitfsEvidenceName {
   if (evidenceNames.has(value as BitfsFixedEvidenceName)
-    || /^(kind2-sign-digest|kind2-signature|kind5-sign-digest|kind5-signature|kind5-content-request|kind6-content-delivery|kind7-payment-update|kind7-payment-sign-digest|kind7-payment-signature|kind12-close-sign-digest|kind12-close-signature|latest-payment-transaction|seller-speed-sample|kind10-retrieval-request|kind11-retrieval-response)-[0-9a-f]{64}$/u.test(value)) return value;
+    || /^(kind2-sign-digest|kind2-signature|kind5-sign-digest|kind5-signature|kind1-request-quote|kind5-content-request|kind6-content-delivery|kind7-payment-update|kind7-payment-sign-digest|kind7-payment-signature|kind12-close-sign-digest|kind12-close-signature|latest-payment-transaction|seller-speed-sample|kind10-retrieval-request|kind11-retrieval-response)-[0-9a-f]{64}$/u.test(value)) return value;
   throw new TypeError("BitFS 证据名不合法");
 }
 function uniqueEvidence(values: readonly BitfsEvidenceName[]): BitfsEvidenceName[] { return [...new Set(values)].sort(); }

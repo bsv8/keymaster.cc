@@ -295,7 +295,7 @@ export function createBitfsBuyerDownloadPlan(input: {
         }
         if (plan.seedOwnerSessionId !== sessionId) throw new Error("BitFS Seed 付款未由当前费用池认领");
         const pool = needPool(plan, sessionId);
-        if (BigInt(pool.seedCommittedSatoshis) > 0n || BigInt(paid) > BigInt(pool.seedBudgetSatoshis)) {
+        if (BigInt(pool.seedCommittedSatoshis) > 0n || (!pool.dispatch && BigInt(paid) > BigInt(pool.seedBudgetSatoshis))) {
           throw new Error("BitFS Seed 付款超过本池专用 Seed 预算");
         }
         addPayment(pool, paid);
@@ -376,16 +376,14 @@ export function createBitfsBuyerDownloadPlan(input: {
         }
         if (wantsSeed) {
           if (plan.seedCompleted || (plan.seedOwnerSessionId !== undefined && plan.seedOwnerSessionId !== sessionId)) return { plan, result: "conflict" as const };
-          if (BigInt(pool.seedBudgetSatoshis) < BigInt(pool.seedPriceSatoshis)) return { plan, result: "conflict" as const };
         }
         for (const id of blockIds) {
           if (!blockHashes.includes(id) || plan.blockedHashes?.includes(id)) return { plan, result: "conflict" as const };
           const existing = plan.blocks[id];
           if (existing && (existing.sessionId !== sessionId || existing.state !== "claimed")) return { plan, result: "conflict" as const };
         }
-        if (BigInt(blockIds.length) * BigInt(pool.fullBlockPriceSatoshis) > BigInt(pool.blockBudgetSatoshis) - BigInt(pool.blockCommittedSatoshis)) {
-          return { plan, result: "conflict" as const };
-        }
+        // 派发是内核命令，初次内容预算不是池寿命上限；真实资金容量
+        // 已在内核决定，执行前仍由 SDK 按本次报价及池证明验证。
         if (wantsSeed) plan.seedOwnerSessionId = sessionId;
         for (const id of blockIds) plan.blocks[id] = { sessionId, state: "claimed" };
         pool.dispatch = ids;
@@ -441,7 +439,7 @@ export function createBitfsBuyerDownloadPlan(input: {
         if (!block || block.sessionId !== sessionId || block.state !== "claimed") throw new Error("BitFS 当前池没有独占认领此 Block");
         const pool = needPool(plan, sessionId);
         if (pool.inFlightBlockHashHex !== hash) throw new Error("BitFS 池内 Block 与下载计划不一致");
-        if (BigInt(pool.blockCommittedSatoshis) + BigInt(paid) > BigInt(pool.blockBudgetSatoshis)) {
+        if (!pool.dispatch && BigInt(pool.blockCommittedSatoshis) + BigInt(paid) > BigInt(pool.blockBudgetSatoshis)) {
           throw new Error("BitFS Block 付款超过本池专用 Block 预算");
         }
         addPayment(pool, paid);
@@ -453,7 +451,6 @@ export function createBitfsBuyerDownloadPlan(input: {
       });
     },
     async completeBlocks(sessionId, blocks) {
-      if (blocks.length < 1 || blocks.length > 16) throw new Error("BitFS 验收批次块数无效");
       const entries = blocks.map(({ blockHashHex, paidSatoshis }) => ({
         hash: assertHash(blockHashHex), paid: assertAmount(paidSatoshis, true),
       }));
@@ -472,7 +469,7 @@ export function createBitfsBuyerDownloadPlan(input: {
           throw new Error("BitFS 验收批次与当前池独占认领不一致");
         }
         const total = entries.reduce((sum, entry) => sum + BigInt(entry.paid), 0n);
-        if (BigInt(pool.blockCommittedSatoshis) + total > BigInt(pool.blockBudgetSatoshis)) {
+        if (!pool.dispatch && BigInt(pool.blockCommittedSatoshis) + total > BigInt(pool.blockBudgetSatoshis)) {
           throw new Error("BitFS 批次付款超过本池专用 Block 预算");
         }
         addPayment(pool, total.toString(10));
@@ -578,9 +575,6 @@ function parsePool(value: unknown, id: string): BitfsBuyerDownloadPool {
   };
   if (BigInt(pool.seedBudgetSatoshis) + BigInt(pool.blockBudgetSatoshis) !== BigInt(pool.contentBudgetSatoshis)
     || BigInt(pool.committedSatoshis) !== BigInt(pool.seedCommittedSatoshis) + BigInt(pool.blockCommittedSatoshis)
-    || BigInt(pool.committedSatoshis) > BigInt(pool.contentBudgetSatoshis)
-    || BigInt(pool.seedCommittedSatoshis) > BigInt(pool.seedBudgetSatoshis)
-    || BigInt(pool.blockCommittedSatoshis) > BigInt(pool.blockBudgetSatoshis)
     || (pool.seedBudgetReserved && BigInt(pool.seedBudgetSatoshis) < BigInt(pool.seedPriceSatoshis))
     || (!pool.seedBudgetReserved && BigInt(pool.seedBudgetSatoshis) !== 0n)) {
     throw new Error("BitFS 下载计划池预算或付款累计无效");
@@ -607,7 +601,7 @@ function sortedPools(plan: StoredPlan): BitfsBuyerDownloadPool[] {
 
 function addPayment(pool: BitfsBuyerDownloadPool, amount: string): void {
   const next = BigInt(pool.committedSatoshis) + BigInt(amount);
-  if (next > BigInt(pool.contentBudgetSatoshis)) throw new Error("BitFS 池内内容付款超过已分配预算");
+  if (!pool.dispatch && next > BigInt(pool.contentBudgetSatoshis)) throw new Error("BitFS 池内内容付款超过已分配预算");
   pool.committedSatoshis = next.toString(10);
 }
 

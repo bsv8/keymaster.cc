@@ -1,5 +1,10 @@
+import { configureBitfsDebug, traceBitfs } from "./debug.js";
 import { requireWocNetwork } from "@keymaster/contracts";
 import { bitfsPoolSettlementFee } from "./poolBudget.js";
+import { createSchedulerPoolSession, findBuyerPoolResponseSession, readPoolQuoteContext, readSchedulerPoolSessionId, schedulerPoolSessionId } from "./poolRouting.js";
+import { schedulerOpeningBudget, schedulerCloseAmounts, schedulerTailPrice } from "./schedulerHost/funding.js";
+import { readSchedulerTaskState, schedulerFailureSettled, schedulerSuccessSettled, schedulerSessionResponsibilitiesSettled, schedulerTaskFields } from "./schedulerHost/taskState.js";
+import { view as schedulerView } from "keymaster-trade-scheduler";
 import { deleteBitfsPurchaseData } from "./purchaseCleanup.js";
 import { listBitfsFundingPools } from "./fundingPools.js";
 import { createBitfsRetainedContentStore, readBitfsDeletedHistory, readBitfsHiddenHistory } from "./purchaseRetention.js";
@@ -15,7 +20,7 @@ import {
   type SchedulerCommandPorts,
 } from "./schedulerHost/index.js";
 import type {
-  Command as SchedulerCommand, Fees as SchedulerFees, Payload as SchedulerPayload, Quote as SchedulerQuote,
+  Command as SchedulerCommand, Fees as SchedulerFees, Payload as SchedulerPayload, Quote as SchedulerQuote, State as SchedulerState,
 } from "keymaster-trade-scheduler";
 import { prepareBitfsPoolRecoveryWithCurrentRevision } from "./funding.js";
 import { BitfsArbitrationWorkflow } from "./arbitrationWorkflow.js";
@@ -96,6 +101,8 @@ interface MsFileBitfsSellerSpeedSample {
   recordedAtMs: number;
 }
 export function createBitfsWorkerRuntime(deps: BitfsWorkerDependencies) {
+configureBitfsDebug(deps.diagnosticsEnabled());
+traceBitfs("runtime.created", () => ({ ...deps.session(), network: deps.network() }));
 const demandMonitor = createBitfsDemandMonitor();
 function buyerContentStore(owner: string, seed: string, sessionId: string) {
   return createBitfsRetainedContentStore({ store: deps.files(""), journal: deps.files("bitfs-journal"), owner, seed, sessionId });
@@ -307,10 +314,20 @@ const msfileBitfsWebRtcBuyerLinks = new Map<string, {
   quoteAccepted?: Promise<void>;
   /** 用户选择报价后绑定此 WebRTC stream 的买方协议端口。 */
   protocol?: BitfsBuyerProtocol;
+  /** 独立池日志各自持有协议实例；连接与报价不再限制池数量。 */
+  poolProtocols?: Map<string, Promise<BitfsBuyerProtocol>>;
   /** 内核驱动模式下协议使用的共享下载计划；与协议同时创建。 */
   downloadPlan?: ReturnType<typeof createBitfsBuyerDownloadPlan>;
   /** 新连接复用了这条已经开池的买方日志会话时设置。 */
   resumedPurchaseSessionId?: string;
+  /** 按接收顺序处理帧；断流判定必须等待此前帧完成验证与持久化。 */
+  receivedFrames?: Promise<void>;
+  /** 已验签 Kind 13 后旧流关闭；保留链上核对上下文直到结清。 */
+  transportClosed?: boolean;
+  /** 此池交易已观察结清，协议尾部不再依赖旧流注册。 */
+  settlementObserved?: boolean;
+  /** 同一连接各池独立结清，不能用单个池的成功替代其他池的责任。 */
+  settledPoolSessions?: Set<string>;
 }>();
 /** 测试注入的卖方 bridge；生产为 undefined，使用 Window lane + 未就绪端口。 */
 let testMsfileSellerBridge: { transport: BitfsSellerStreamTransport; protocol: BitfsSellerProtocolPort } | undefined;
@@ -613,8 +630,22 @@ async function finishPurchaseTask(owner: string, seed: string, sessionId: string
   const tasks = await purchaseTasksFor(owner, seed);
   const task = (await tasks.list()).find(t => t.sessionIds.includes(sessionId));
   if (!task || task.state !== "active") return;
+  const kernel = await readSchedulerTaskState({ store: deps.files("bitfs-journal"), ownerPublicKeyHex: owner, network: deps.network(), taskId: task.taskId });
+  if (kernel?.failure) {
+    if (schedulerFailureSettled(schedulerView(kernel))) await tasks.end(task.taskId, "failed", Date.now());
+    return;
+  }
   const journal = createBitfsSessionJournal(deps.files("bitfs-journal"));
   const records = await Promise.all(task.sessionIds.map(id => journal.get(id)));
+  if (kernel) {
+    const current = schedulerView(kernel);
+    const unresolved = !schedulerSessionResponsibilitiesSettled(records);
+    const settled = schedulerSuccessSettled(current) && !unresolved;
+    traceBitfs("purchase.lifecycle.review", () => ({ taskId: task.taskId, seedHashHex: seed, current, unresolved, settled,
+      sessions: records.map(record => record && ({ sessionId: record.sessionId, phase: record.phase, pendingTxid: record.pendingTxid, pendingAuthorizationId: record.pendingAuthorizationId })) }));
+    if (settled) await tasks.end(task.taskId, "completed", Date.now());
+    return;
+  }
   if (records.length && records.every(r => r && ["quote-selected", "failed"].includes(r.phase) && !r.evidence.includes("funding-transaction") && !r.pendingTxid)) { await tasks.end(task.taskId, "failed", Date.now()); return; }
   if (records.length && records.every(r => r && ["completed","cancelled","refunded","failed"].includes(r.phase))) {
     const plan = await openMsfileBitfsBuyerDownloadPlan(owner, seed, sessionId).catch(() => undefined);
@@ -672,6 +703,7 @@ async function adoptExistingPurchaseContent(owner: string, seed: string, size: s
 
 /** 解锁后扫描当前 Key 的全部买方会话，先对账已保存交易，再允许新购买。 */
 async function recoverAllMsfileBitfsBuyerSessions(ownerPublicKeyHex: string): Promise<void> {
+  traceBitfs("recovery.start", () => ({ ownerPublicKeyHex, ...deps.session() }));
   const owner = ownerPublicKeyHex.trim().toLowerCase();
   if (!owner || deps.session().vaultStatus !== "unlocked"
     || deps.session().activePublicKeyHex?.toLowerCase() !== owner) return;
@@ -1162,6 +1194,54 @@ async function listMsfileBitfsBuyerTaskSnapshots(): Promise<import("@keymaster/c
     });
     purchaseSeeds.add(entry.seedHashHex);
   }
+  // 即使没有开成池、进程已重启或内容后来齐全，也从持久调度状态保留任务错误。
+  let schedulerCursor: string | undefined;
+  do {
+    const page = await deps.files("bitfs-journal").list({ prefix: "scheduler/tasks/", limit: 200, ...(schedulerCursor ? { cursor: schedulerCursor } : {}) });
+    traceBitfs("scheduler.history.scan", () => ({ paths: page.files.map(file => file.path), schedulerCursor }));
+    for (const file of page.files) {
+      const match = /^scheduler\/tasks\/([0-9a-z][0-9a-z._-]{0,127})\.json$/u.exec(file.path);
+      if (!match) continue;
+      const state = await readSchedulerTaskState({ store: deps.files("bitfs-journal"), ownerPublicKeyHex: owner, network: deps.network(), taskId: match[1]! });
+      if (!state) continue;
+      const task = (await (await purchaseTasksFor(owner, state.seedHash)).list()).find(item => item.taskId === state.taskId);
+      const members = snapshots.filter(item => item.taskId === state.taskId || task?.sessionIds.includes(item.sessionId));
+      const fields = schedulerTaskFields(state);
+      traceBitfs("scheduler.history.project", () => ({ taskId: state.taskId, members: members.map(item => item.sessionId), failure: state.failure }));
+      for (const item of members) {
+        item.taskId = state.taskId;
+        item.taskState = task?.state;
+        item.taskEndReason = task?.endReason;
+        item.createdAt ??= task?.createdAt;
+        item.updatedAt ??= task?.endedAt;
+        item.schedulerState = fields.schedulerState;
+        if (state.failure) {
+          item.message = fields.message;
+          item.discoveryOnly = false;
+          item.canCancel = false;
+          if (!Object.values(state.pools).length) item.fundingState = "not-opened";
+        }
+      }
+      if (members.length || !state.failure || Object.values(state.pools).some(pool => pool.funding !== "failed")) continue;
+      const hidden = await readBitfsHiddenHistory(deps.files("bitfs-journal"), state.seedHash);
+      const blocks = Object.values(state.content).filter(item => item.kind === "block");
+      const completedBlocks = blocks.filter(item => state.completed[item.id]);
+      snapshots.push({
+        taskId: state.taskId, taskState: task?.state, taskEndReason: task?.endReason,
+        sessionId: task?.sessionIds[0] ?? state.taskId, seedHashHex: state.seedHash,
+        createdAt: task?.createdAt, updatedAt: task?.endedAt,
+        historyDeleted: !!task?.sessionIds.length && task.sessionIds.every(id => hidden.has(id)),
+        phase: "failed", fundingState: "not-opened", openingAmountSatoshis: null,
+        verifiedBlockCount: completedBlocks.length,
+        verifiedBytes: state.manifestKnown ? String(completedBlocks.reduce((sum, item) => sum + item.bytes, 0)) : null,
+        totalBlockCount: state.manifestKnown ? blocks.length : null,
+        sellerPublicKeyHex: state.failure.sellerId, recommendedFilename: null, fileSizeBytes: null, fullBlockPriceSatoshis: null,
+        paidSatoshis: "0", minerFeeSatoshis: "0", lockedSatoshis: "0", pendingReturnSatoshis: "0",
+        discoveryOnly: false, canCancel: false, ...fields,
+      });
+    }
+    schedulerCursor = page.nextCursor;
+  } while (schedulerCursor !== undefined);
   return snapshots.sort((left, right) => left.seedHashHex.localeCompare(right.seedHashHex));
 }
 
@@ -1241,11 +1321,11 @@ async function msfileBitfsBuyerDemandSnapshot(
     seedHashHex: normalizedSeed,
     requestMessageId: entry.requestMessageId ?? null,
     expiresAtMs: entry.expiresAtMs > 0 ? entry.expiresAtMs : null,
-    quotes: await addMsfileBitfsRecentSellerSpeeds(
+    quotes: entry.requestMessageId && entry.expiresAtMs > Date.now() ? await addMsfileBitfsRecentSellerSpeeds(
       entry.ownerPublicKeyHex,
       normalizedSeed,
       await task.listDiscoveredQuotes(),
-    ),
+    ) : [],
     purchase: currentPurchase ? { ...currentPurchase, feeBreakdown: entry.feeBreakdowns?.get(currentPurchase.sessionId) } : null,
     existingPurchaseSessionId: activeTask?.taskId ?? null,
     currentMaxFullBlockPriceSatoshis: null,
@@ -1256,8 +1336,26 @@ async function msfileBitfsBuyerDemandSnapshot(
 async function ensureMsfileBitfsBuyerProtocol(
   webrtcSessionId: string,
   link: NonNullable<ReturnType<typeof msfileBitfsWebRtcBuyerLinks.get>>,
+  poolSessionId?: string,
 ): Promise<BitfsBuyerProtocol> {
-  if (link.protocol) return link.protocol;
+  if (!poolSessionId) {
+    if (link.protocol) return link.protocol;
+    return createMsfileBitfsBuyerProtocol(webrtcSessionId, link);
+  }
+  const protocols = link.poolProtocols ??= new Map();
+  const existing = protocols.get(poolSessionId);
+  if (existing) return existing;
+  const pending = createMsfileBitfsBuyerProtocol(webrtcSessionId, link, poolSessionId);
+  protocols.set(poolSessionId, pending);
+  try { return await pending; }
+  catch (error) { if (protocols.get(poolSessionId) === pending) protocols.delete(poolSessionId); throw error; }
+}
+
+async function createMsfileBitfsBuyerProtocol(
+  webrtcSessionId: string,
+  link: NonNullable<ReturnType<typeof msfileBitfsWebRtcBuyerLinks.get>>,
+  poolSessionId?: string,
+): Promise<BitfsBuyerProtocol> {
   const owner = deps.session().activePublicKeyHex?.trim().toLowerCase();
   if (!owner || deps.session().vaultStatus !== "unlocked" || link.ownerSessionEpoch !== deps.session().sessionEpoch) {
     throw new Error("BitFS 买方 Key 已锁定或会话已切换");
@@ -1271,7 +1369,7 @@ async function ensureMsfileBitfsBuyerProtocol(
       || deps.session().activePublicKeyHex?.toLowerCase() !== owner
       || deps.session().sessionEpoch !== sessionEpoch
       || deps.session().runGeneration !== runGeneration
-      || msfileBitfsWebRtcBuyerLinks.get(webrtcSessionId) !== link) {
+      || (!link.settlementObserved && !(poolSessionId && link.settledPoolSessions?.has(poolSessionId)) && msfileBitfsWebRtcBuyerLinks.get(webrtcSessionId) !== link)) {
       throw new Error("BitFS 买方购买期间 Key、存储或 DataChannel 已变化");
     }
   };
@@ -1280,12 +1378,14 @@ async function ensureMsfileBitfsBuyerProtocol(
   const cryptoPort = await deps.crypto(owner);
   assertCurrentContext();
   const journalStore = deps.files( "bitfs-journal");
-  const quoteSessionId = link.quoteSessionId;
+  const quoteSessionId = poolSessionId ?? link.quoteSessionId;
   if (!quoteSessionId) throw new Error("BitFS 下载计划需要先持久化已验签报价");
   const contentStore = buyerContentStore(owner, link.seedHashHex, quoteSessionId);
-  const quoteViews = (await link.task.listDiscoveredQuotes()).sort((left, right) => left.sessionId.localeCompare(right.sessionId));
-  const quoteView = quoteViews.find((item) => item.sessionId === quoteSessionId);
-  const canonicalQuote = quoteViews[0];
+  const sessions = createBitfsSessionJournal(journalStore);
+  const poolQuote = poolSessionId ? await readPoolQuoteContext(sessions, poolSessionId) : undefined;
+  const quoteViews = poolQuote ? [] : (await link.task.listDiscoveredQuotes()).sort((left, right) => left.sessionId.localeCompare(right.sessionId));
+  const quoteView = poolQuote ?? quoteViews.find((item) => item.sessionId === link.quoteSessionId);
+  const canonicalQuote = poolQuote ?? quoteViews[0];
   if (!quoteView || !canonicalQuote || quoteViews.some((item) => item.fileSizeBytes !== canonicalQuote.fileSizeBytes)) {
     throw new Error("BitFS 同 Seed 报价缺少统一文件大小，不能创建共享下载计划");
   }
@@ -1320,7 +1420,9 @@ async function ensureMsfileBitfsBuyerProtocol(
       }
     },
   };
-  const reserve = await arbitrationReserve(runtime, quoteView.supportedArbiterPublicKeys);
+  const savedOpening = await sessions.getEvidence(quoteSessionId, "opening-configuration");
+  // 既有池的金额、费率和预留由 configureOpeningBudget 恢复，关池不依赖重新询价。
+  const reserve = savedOpening ? undefined : await arbitrationReserve(runtime, quoteView.supportedArbiterPublicKeys);
   const buyerArbitration = (await runtime.getSettingsSnapshot()).arbitrationServices.length > 0 ? await arbitrationWorkflow(runtime) : undefined;
   const kernelRuntime = msfileBitfsKernelRuntimeFor(owner, link.seedHashHex);
   const protocol = new BitfsBuyerProtocol({
@@ -1335,6 +1437,7 @@ async function ensureMsfileBitfsBuyerProtocol(
     selectionPriority: "recent-speed",
     refundDelayBlocks: buyerSettings.refundDelayBlocks,
     onDownloadPlanChanged() {
+      if (kernelRuntime) return;
       setTimeout(() => {
         for (const [candidateSessionId, candidateLink] of msfileBitfsWebRtcBuyerLinks) {
           if (candidateLink.ownerPublicKeyHex.toLowerCase() !== owner
@@ -1359,6 +1462,7 @@ async function ensureMsfileBitfsBuyerProtocol(
        stack: error instanceof Error ? error.stack : undefined,
      }),
     async onContentCommitted(seedHashHex) {
+      traceBitfs("content.committed", () => ({ seedHashHex, sessionId: quoteSessionId }));
       if ((await readBitfsDeletedHistory(journalStore, seedHashHex)).has(quoteSessionId)) return;
       const index = msfileSellerIndex;
       if (!index) return;
@@ -1375,18 +1479,18 @@ async function ensureMsfileBitfsBuyerProtocol(
         setTimeout(() => {
           void (async () => {
             const state = kernelRuntime.adapter.snapshot();
-            const pool = Object.values(state.pools).find((item) => item.sessionId === sessionId && item.funding === "opening");
+            const pool = Object.values(state.pools).find((item) => (schedulerPoolSessionId(item.id) === sessionId || item.sessionId === sessionId) && item.funding === "opening");
             if (!pool) return;
             await msfileBitfsKernelFeed(kernelRuntime, {
               eventId: `opened-${pool.id}`, payload: { type: "opened", poolId: pool.id, commandId: pool.openCommandId },
             });
             await kernelRuntime.adapter.settle(pool.openCommandId);
             kernelRuntime.executor.forget(pool.openCommandId);
-          })().catch(() => undefined);
+          })().catch(error => traceBitfs("scheduler.pool-usable.callback.failed", () => ({ sessionId, taskId: kernelRuntime.hostTaskId, error })));
         }, 0);
       },
       onPoolClosed: ({ sessionId }: { sessionId: string }) => {
-        setTimeout(() => { void msfileBitfsKernelFeedCloseSettled(kernelRuntime, sessionId).catch(() => undefined); }, 0);
+        setTimeout(() => { void msfileBitfsKernelFeedCloseSettled(kernelRuntime, sessionId).catch(error => traceBitfs("scheduler.pool-closed.callback.failed", () => ({ sessionId, taskId: kernelRuntime.hostTaskId, error }))); }, 0);
       },
       onDispatchedDelivery: ({ sessionId, accepted, paidSatoshis, startedAt, endedAt }: {
         sessionId: string; contentIds: string[]; accepted: string[]; paidSatoshis: string; startedAt: number; endedAt: number;
@@ -1394,7 +1498,7 @@ async function ensureMsfileBitfsBuyerProtocol(
         setTimeout(() => {
           void (async () => {
             const state = kernelRuntime.adapter.snapshot();
-            const pool = Object.values(state.pools).find((item) => item.sessionId === sessionId && item.requestId !== null);
+            const pool = Object.values(state.pools).find((item) => (schedulerPoolSessionId(item.id) === sessionId || item.sessionId === sessionId) && item.requestId !== null);
             const requestId = pool?.requestId ?? null;
             if (!requestId) return;
             const request = state.requests[requestId];
@@ -1412,11 +1516,12 @@ async function ensureMsfileBitfsBuyerProtocol(
             msfileBitfsKernelLastReceivedAt.delete(sessionId);
             if (request) { await kernelRuntime.adapter.settle(request.commandId); kernelRuntime.executor.forget(request.commandId); }
             await msfileBitfsKernelEnsureManifest(kernelRuntime, sessionId);
-          })().catch(() => undefined);
+          })().catch(error => traceBitfs("scheduler.delivery.callback.failed", () => ({ sessionId, taskId: kernelRuntime.hostTaskId, error })));
         }, 0);
       },
     } : {}),
     onProgress(progress) {
+      traceBitfs("purchase.progress", () => ({ taskId: kernelRuntime?.hostTaskId, seedHashHex: link.seedHashHex, progress }));
       if (["completed", "cancelled", "refunded", "failed"].includes(progress.phase)) void finishPurchaseTask(owner, link.seedHashHex, progress.sessionId).catch(error => console.error("[msfile] 采购生命周期写入失败", error));
       void writeBitfsDiagnostic("buyer-purchase-progress.json", progress);
       const taskEntry = msfileBitfsBuyerTasks.get(msfileBitfsBuyerTaskKey(owner, link.seedHashHex));
@@ -1436,7 +1541,7 @@ async function ensureMsfileBitfsBuyerProtocol(
   });
   await protocol.configureOpeningBudget({ sessionId: quoteSessionId });
   link.downloadPlan = downloadPlan;
-  link.protocol = protocol;
+  if (!poolSessionId) link.protocol = protocol;
   return protocol;
 }
 
@@ -1459,10 +1564,6 @@ const msfileBitfsKernelWakes = new Map<string, ReturnType<typeof setTimeout>>();
 const msfileBitfsKernelClock = new MonotonicClock();
 /** 流级进度基线：meter 的累计字节 → 本次内核请求已传字节。 */
 const msfileBitfsKernelProgress = new Map<string, { base: number; fed: number }>();
-/** 正在为某卖家刷新报价（旧协议会话已用完）的集合，避免重复取消/重发。 */
-const msfileBitfsKernelQuoteRefreshes = new Set<string>();
-/** 已用完的报价会话 → 等待关池结清后再刷新报价的卖家。 */
-const msfileBitfsKernelPendingRefreshes = new Map<string, string>();
 /** 最内侧帧时刻（买方会话编号 → 本地毫秒）：交付墙钟用。 */
 const msfileBitfsKernelLastReceivedAt = new Map<string, number>();
 const msfileBitfsKernelLastSentAt = new Map<string, number>();
@@ -1484,7 +1585,7 @@ function msfileBitfsKernelLinksFor(ownerPublicKeyHex: string, seedHashHex: strin
   const seed = seedHashHex.toLowerCase();
   const links = new Map<string, { webrtcSessionId: string; link: NonNullable<ReturnType<typeof msfileBitfsWebRtcBuyerLinks.get>> }>();
   for (const [webrtcSessionId, link] of msfileBitfsWebRtcBuyerLinks) {
-    if (link.quoteSessionId && link.ownerPublicKeyHex.toLowerCase() === owner
+    if (!link.transportClosed && link.quoteSessionId && link.ownerPublicKeyHex.toLowerCase() === owner
       && link.seedHashHex.toLowerCase() === seed
       && link.ownerSessionEpoch === deps.session().sessionEpoch) {
       links.set(link.quoteSessionId, { webrtcSessionId, link });
@@ -1495,6 +1596,12 @@ function msfileBitfsKernelLinksFor(ownerPublicKeyHex: string, seedHashHex: strin
 
 function msfileBitfsKernelLinks(runtime: MsfileBitfsKernelRuntime) {
   return msfileBitfsKernelLinksFor(runtime.ownerPublicKeyHex, runtime.seedHashHex);
+}
+
+/** 池不跟随旧物理连接消失；重连只替换同一交易对手的传输，不替换请求报价。 */
+function msfileBitfsKernelPoolLink(runtime: MsfileBitfsKernelRuntime, pool: SchedulerState["pools"][string]) {
+  const links = msfileBitfsKernelLinks(runtime);
+  return links.get(pool.sessionId) ?? [...links.values()].find(target => target.link.peerPublicKeyHex.toLowerCase() === pool.sellerId.toLowerCase());
 }
 
 /** 选一个当前已配置且报价支持的仲裁方；与开池时的选择一致。 */
@@ -1533,6 +1640,7 @@ async function msfileBitfsKernelQuote(quoteView: import("@keymaster/contracts").
     id: quoteView.sessionId, version, sellerId: quoteView.sellerPublicKeyHex, sessionId: quoteView.sessionId,
     expiresAt: Number.isSafeInteger(expiresAtSeconds) && expiresAtSeconds > 0 ? expiresAtSeconds * 1_000 : Date.now() + 300_000,
     blockPrice: quoteView.fullBlockPriceSatoshis, seedPrice: quoteView.seedPriceSatoshis, blockBytes: 262_144,
+    tailPrice: schedulerTailPrice(quoteView.fullBlockPriceSatoshis, quoteView.fileSizeBytes),
     maxBlocks: quoteView.maxBlocksPerBatch, fees: await msfileBitfsKernelQuoteFees(quoteView),
   };
 }
@@ -1541,47 +1649,13 @@ async function msfileBitfsKernelQuote(quoteView: import("@keymaster/contracts").
 async function msfileBitfsKernelFeedQuote(runtime: MsfileBitfsKernelRuntime, quoteView: import("@keymaster/contracts").MsFileBitfsQuoteView): Promise<void> {
   const previous = runtime.adapter.snapshot().sellers[quoteView.sellerPublicKeyHex]?.quote?.version ?? 0;
   const quote = await msfileBitfsKernelQuote(quoteView, previous + 1);
-  msfileBitfsKernelQuoteRefreshes.delete(quoteView.sellerPublicKeyHex.toLowerCase());
   await msfileBitfsKernelFeed(runtime, { eventId: `quote-${quoteView.sessionId}`, payload: { type: "quote", quote } });
-}
-
-/** 让内核立即忽略某卖家已用过的报价（版本递增 + 过期）。 */
-async function msfileBitfsKernelExpireQuote(runtime: MsfileBitfsKernelRuntime, sellerId: string): Promise<void> {
-  const seller = runtime.adapter.snapshot().sellers[sellerId];
-  if (!seller?.quote) return;
-  await msfileBitfsKernelFeed(runtime, {
-    eventId: `quote-expire-${sellerId}-${seller.quote.version}`,
-    payload: { type: "quote", quote: { ...seller.quote, version: seller.quote.version + 1, expiresAt: Date.now() - 1 } },
-  });
-}
-
-/**
- * 协议报价会话一次采购一份费用池；内核“一池一批”需要下一批时，
- * 宿主取消旧需求并重发，让卖家给出版本更新的新报价（新 session）。
- * 必须在旧池关闭结清后调用，否则会打断 Kind 12/13 关池流程。
- */
-async function msfileBitfsKernelRefreshQuote(runtime: MsfileBitfsKernelRuntime, sellerId: string, sessionId: string): Promise<void> {
-  const sellerKey = sellerId.toLowerCase();
-  if (msfileBitfsKernelQuoteRefreshes.has(sellerKey)) return;
-  msfileBitfsKernelQuoteRefreshes.add(sellerKey);
-  try {
-    const target = msfileBitfsKernelLinks(runtime).get(sessionId);
-    if (!target) { msfileBitfsKernelQuoteRefreshes.delete(sellerKey); return; }
-    await target.link.task.cancelDemand().catch(() => undefined);
-    const messageId = await target.link.task.publishDemand();
-    if (runtime.entry) runtime.entry.requestMessageId = messageId;
-  } catch (error) {
-    msfileBitfsKernelQuoteRefreshes.delete(sellerKey);
-    await writeBitfsDiagnostic("buyer-scheduler-quote-refresh-error.json", {
-      seedHashHex: runtime.seedHashHex, sellerId, sessionId,
-      message: error instanceof Error ? error.message : String(error),
-    });
-  }
 }
 
 /** 普通钱包快照 → 内核 wallet；已准备开池（Kind 2 已落盘）的命令视为占用已反映。 */
 async function msfileBitfsKernelWallet(runtime: MsfileBitfsKernelRuntime): Promise<{ revision: number; available: string; reflectedCommands: string[] }> {
   const snapshot = await deps.funding.walletView({ ownerPublicKeyHex: runtime.ownerPublicKeyHex, network: deps.network() });
+  traceBitfs("funding.wallet-view", () => ({ taskId: runtime.hostTaskId, seedHashHex: runtime.seedHashHex, snapshot }));
   if (!snapshot.hasResult) throw new Error("Manager wallet result has not been obtained");
   const available = snapshot.items.filter((item) => !item.isSpentInMempoolTx).reduce((sum, item) => sum + BigInt(item.value), 0n);
   const sessions = createBitfsSessionJournal(deps.files("bitfs-journal"));
@@ -1593,7 +1667,7 @@ async function msfileBitfsKernelWallet(runtime: MsfileBitfsKernelRuntime): Promi
   }
   const state = runtime.adapter.snapshot();
   const reflectedCommands = Object.values(state.pools)
-    .filter((pool) => prepared.has(pool.sessionId))
+    .filter((pool) => prepared.has(schedulerPoolSessionId(pool.id)) || prepared.has(pool.sessionId))
     .map((pool) => pool.openCommandId);
   const revision = typeof snapshot.seq === "number" && Number.isSafeInteger(snapshot.seq) ? snapshot.seq : state.wallet.revision + 1;
   return { revision, available: available.toString(10), reflectedCommands };
@@ -1601,16 +1675,31 @@ async function msfileBitfsKernelWallet(runtime: MsfileBitfsKernelRuntime): Promi
 
 /** 内核事件投递：推进适配器、按 commandId 幂等执行命令并重排唤醒。 */
 async function msfileBitfsKernelFeed(runtime: MsfileBitfsKernelRuntime, input: { eventId: string; payload: SchedulerPayload; occurredAt?: number }): Promise<void> {
+  if (msfileBitfsKernelRuntimeFor(runtime.ownerPublicKeyHex, runtime.seedHashHex) !== runtime) return;
+  traceBitfs("scheduler.event.received", () => ({ taskId: runtime.hostTaskId, seedHashHex: runtime.seedHashHex, input }));
   const commands = await runtime.adapter.handle(input);
+  if (msfileBitfsKernelRuntimeFor(runtime.ownerPublicKeyHex, runtime.seedHashHex) !== runtime) return;
+  if (schedulerFailureSettled(runtime.adapter.view())) {
+    const tasks = await purchaseTasksFor(runtime.ownerPublicKeyHex, runtime.seedHashHex);
+    await tasks.end(runtime.hostTaskId, "failed", Date.now());
+  } else if (schedulerSuccessSettled(runtime.adapter.view())) {
+    await finishPurchaseTask(runtime.ownerPublicKeyHex, runtime.seedHashHex, runtime.hostTaskId);
+  }
+  traceBitfs("scheduler.decision", () => ({ taskId: runtime.hostTaskId, seedHashHex: runtime.seedHashHex, commands, state: runtime.adapter.snapshot(), nextWakeAt: runtime.adapter.nextWakeAt() }));
   for (const command of commands) await msfileBitfsKernelRunCommand(runtime, command);
   msfileBitfsKernelArmWake(runtime);
 }
 
 /** 命令失败按资金状态回灌错误事实，不静默吞掉。 */
 async function msfileBitfsKernelRunCommand(runtime: MsfileBitfsKernelRuntime, command: SchedulerCommand): Promise<void> {
+  if (msfileBitfsKernelRuntimeFor(runtime.ownerPublicKeyHex, runtime.seedHashHex) !== runtime) return;
+  const startedAt = performance.now();
+  traceBitfs("scheduler.command.start", () => ({ taskId: runtime.hostTaskId, seedHashHex: runtime.seedHashHex, command }));
   try {
     await runtime.executor.run(command);
+    traceBitfs("scheduler.command.completed", () => ({ commandId: command.commandId, elapsedMs: performance.now() - startedAt }));
   } catch (cause) {
+    traceBitfs("scheduler.command.failed", () => ({ taskId: runtime.hostTaskId, command, elapsedMs: performance.now() - startedAt, error: cause }));
     const message = cause instanceof Error ? cause.message : "下载策略器命令执行失败";
     await writeBitfsDiagnostic("buyer-scheduler-command-error.json", {
       seedHashHex: runtime.seedHashHex, commandId: command.commandId, type: command.type, message,
@@ -1619,22 +1708,41 @@ async function msfileBitfsKernelRunCommand(runtime: MsfileBitfsKernelRuntime, co
     const eventId = `command-error-${command.commandId}`;
     if (command.type === "open") {
       const pool = runtime.adapter.snapshot().pools[command.poolId];
-      const record = pool ? await createBitfsSessionJournal(deps.files("bitfs-journal")).get(pool.sessionId) : undefined;
+      const sessions = createBitfsSessionJournal(deps.files("bitfs-journal"));
+      const record = pool ? await sessions.get(await readSchedulerPoolSessionId(sessions, pool)) : undefined;
       const funded = record ? record.evidence.includes("kind2-opening-request") || record.evidence.includes("funding-transaction") : false;
       if (funded) await msfileBitfsKernelFeed(runtime, { eventId, payload: { type: "unknown", poolId: command.poolId, commandId: command.commandId } });
-      else await msfileBitfsKernelFeed(runtime, { eventId, payload: { type: "open-failed", poolId: command.poolId, commandId: command.commandId, released: true } });
+      else {
+        // 明确失败不无限重试同一报价，尤其不能在文件任务已结束后反复补池。
+        await msfileBitfsKernelFeed(runtime, { eventId: `seller-unavailable-${command.commandId}`,
+          payload: { type: "seller", sellerId: command.sellerId, online: false } });
+        await msfileBitfsKernelFeed(runtime, { eventId, payload: { type: "open-failed", poolId: command.poolId, commandId: command.commandId, released: true } });
+      }
     } else if (command.type === "download") {
-      await msfileBitfsKernelFeed(runtime, { eventId, payload: { type: "request-rejected", requestId: command.requestId, safeToRetry: true } });
+      const pool = runtime.adapter.snapshot().pools[command.poolId];
+      const sessions = createBitfsSessionJournal(deps.files("bitfs-journal"));
+      const sessionId = pool ? await readSchedulerPoolSessionId(sessions, pool) : undefined;
+      const record = sessionId ? await sessions.get(sessionId) : undefined;
+      // Kind 5 在登记 pendingAuthorizationId 后才发送。已发、部分写出或
+      // 无法读出责任事实都不能冒充可重试，交付/签名证据继续保留。
+      const safeToRetry = !!record && record.phase === "funded" && !record.pendingAuthorizationId;
+      if (safeToRetry && sessionId) {
+        await (await openMsfileBitfsBuyerDownloadPlan(runtime.ownerPublicKeyHex, runtime.seedHashHex, sessionId)).releaseDispatch(sessionId, []);
+      }
+      await msfileBitfsKernelFeed(runtime, { eventId, payload: { type: "request-rejected", requestId: command.requestId, safeToRetry } });
     } else if (command.type === "close") {
       await msfileBitfsKernelFeed(runtime, { eventId, payload: { type: "unknown", poolId: command.poolId, commandId: command.commandId } });
     } else {
       await msfileBitfsKernelFeed(runtime, { eventId, payload: { type: "tick" } });
     }
+    await runtime.adapter.settle(command.commandId);
+    runtime.executor.forget(command.commandId);
   }
 }
 
 /** 按 nextWakeAt 安排下一次 tick；重启后由恢复的 state 重建。 */
 function msfileBitfsKernelArmWake(runtime: MsfileBitfsKernelRuntime): void {
+  if (msfileBitfsKernelRuntimeFor(runtime.ownerPublicKeyHex, runtime.seedHashHex) !== runtime) return;
   const key = msfileBitfsKernelRuntimeKey(runtime.ownerPublicKeyHex, runtime.seedHashHex);
   const existing = msfileBitfsKernelWakes.get(key);
   if (existing) clearTimeout(existing);
@@ -1644,7 +1752,7 @@ function msfileBitfsKernelArmWake(runtime: MsfileBitfsKernelRuntime): void {
   const revision = runtime.adapter.snapshot().revision;
   const timer = setTimeout(() => {
     msfileBitfsKernelWakes.delete(key);
-    void msfileBitfsKernelFeed(runtime, { eventId: `wake-${at}-${revision}`, payload: { type: "tick" } }).catch(() => undefined);
+    void msfileBitfsKernelFeed(runtime, { eventId: `wake-${at}-${revision}`, payload: { type: "tick" } }).catch(error => traceBitfs("scheduler.wake.failed", () => ({ taskId: runtime.hostTaskId, at, revision, error })));
   }, delay);
   msfileBitfsKernelWakes.set(key, timer);
 }
@@ -1659,11 +1767,12 @@ async function msfileBitfsKernelFeedStreamProgress(webrtcSessionId: string, byte
   const state = runtime.adapter.snapshot();
   const pool = Object.values(state.pools).find((item) => item.sessionId === quoteSessionId && item.requestId !== null);
   const requestId = pool?.requestId ?? null;
-  if (!requestId) { msfileBitfsKernelProgress.delete(quoteSessionId); return; }
+  if (!requestId || !pool) return;
+  const poolSessionId = await readSchedulerPoolSessionId(createBitfsSessionJournal(deps.files("bitfs-journal")), pool);
   const request = state.requests[requestId];
   if (!request || request.state !== "pending") return;
-  let record = msfileBitfsKernelProgress.get(quoteSessionId);
-  if (!record) { record = { base: bytesIn, fed: 0 }; msfileBitfsKernelProgress.set(quoteSessionId, record); return; }
+  let record = msfileBitfsKernelProgress.get(poolSessionId);
+  if (!record) { record = { base: bytesIn, fed: 0 }; msfileBitfsKernelProgress.set(poolSessionId, record); return; }
   const transferred = Math.max(0, bytesIn - record.base);
   if (transferred <= record.fed) return;
   try {
@@ -1675,24 +1784,20 @@ async function msfileBitfsKernelFeedStreamProgress(webrtcSessionId: string, byte
   } catch { /* 进度只用于停摆判定；写入失败不中断下载。 */ }
 }
 
-/** 内核 open：按执行层真实费率复算开池金额并启动协议会话。 */
+/** 内核 open：核对执行层费率，按调度命令冻结的金额启动协议会话。 */
 async function msfileBitfsKernelOpenPool(runtime: MsfileBitfsKernelRuntime, command: Extract<SchedulerCommand, { type: "open" }>): Promise<void> {
   const target = msfileBitfsKernelLinks(runtime).get(command.sessionId);
   if (!target) throw new Error("内核所选卖家的 DataChannel 已关闭");
   await target.link.quoteAccepted;
-  const protocol = await ensureMsfileBitfsBuyerProtocol(target.webrtcSessionId, target.link);
   const quoteView = (await target.link.task.listDiscoveredQuotes()).find((item) => item.sessionId === command.sessionId);
   if (!quoteView) throw new Error("找不到内核所选卖家的已验签报价");
-  // 协议会话只服务一份费用池；已用完时刷新报价，让内核用新 session 重开。
-  const sessionRecord = await createBitfsSessionJournal(deps.files("bitfs-journal")).get(command.sessionId);
-  const consumed = sessionRecord !== undefined
-    && !["quote-selected", "opening-presign", "funding-prepared"].includes(sessionRecord.phase)
-    && (sessionRecord.evidence.includes("kind2-opening-request") || sessionRecord.evidence.includes("purchase-manifest") || sessionRecord.evidence.includes("download-plan"));
-  if (consumed) {
-    msfileBitfsKernelPendingRefreshes.set(command.sessionId, command.sellerId);
-    await msfileBitfsKernelExpireQuote(runtime, command.sellerId);
-    throw new Error("该报价会话已用于上一批采购；等待关池结清后刷新报价");
-  }
+  const sessions = createBitfsSessionJournal(deps.files("bitfs-journal"));
+  const record = await createSchedulerPoolSession({ sessions, poolId: command.poolId, quoteSessionId: command.sessionId, nowMs: Date.now() });
+  const sessionId = record.sessionId;
+  // 先固定池归属，再创建协议及共享计划。一个报价可成为多个池的原始来源。
+  await (await purchaseTasksFor(runtime.ownerPublicKeyHex, runtime.seedHashHex)).attach(runtime.hostTaskId, sessionId);
+  runtime.entry?.currentDemandPurchases?.add(sessionId);
+  const protocol = await ensureMsfileBitfsBuyerProtocol(target.webrtcSessionId, target.link, sessionId);
   const state = runtime.adapter.snapshot();
   const seedPurchased = state.completed[state.seedHash] === "purchased";
   const contentBudget = BigInt(command.contentBudget);
@@ -1701,25 +1806,24 @@ async function msfileBitfsKernelOpenPool(runtime: MsfileBitfsKernelRuntime, comm
   const blockBudget = contentBudget - seedBudget;
   const feeRate = BigInt(deps.effectiveFeeRate());
   if (feeRate < 1n) throw new Error("BitFS 池内手续费率配置无效");
-  const arbitrationDisplay: { base?: string; perItem?: string } = {};
-  const arbitrationBudget = await arbitrationReserve(await deps.ensureService(), quoteView.supportedArbiterPublicKeys, arbitrationDisplay);
-  const feeReserve = await protocol.configureOpeningBudget({ sessionId: command.sessionId, feeRate, arbitrationReserve: arbitrationBudget });
-  const openingAmount = contentBudget + feeReserve;
+  const budget = schedulerOpeningBudget(command);
+  const arbitrationBudget = budget.arbitrationReserve;
+  const feeReserve = await protocol.configureOpeningBudget({ sessionId, feeRate, arbitrationReserve: arbitrationBudget });
+  const openingAmount = budget.amount;
+  if (contentBudget + feeReserve !== openingAmount) throw new Error("BitFS 开池费率已变化，不能改变已确定的调度预算");
   if (runtime.entry) {
-    (runtime.entry.feeBreakdowns ??= new Map()).set(command.sessionId, {
+    (runtime.entry.feeBreakdowns ??= new Map()).set(sessionId, {
       contentBudgetSatoshis: contentBudget.toString(10),
-      arbitrationBaseSatoshis: arbitrationDisplay.base!,
-      arbitrationPerItemSatoshis: arbitrationDisplay.perItem!,
-      arbitrationItemCount: 1,
+      arbitrationBaseSatoshis: command.quote.fees.arbitrationBase,
+      arbitrationPerItemSatoshis: command.quote.fees.arbitrationPerItem,
+      arbitrationItemCount: budget.arbitrationItemCount,
       arbitrationReserveSatoshis: arbitrationBudget.toString(10),
       settlementReserveSatoshis: (feeReserve - arbitrationBudget).toString(10),
     });
   }
-  await (await purchaseTasksFor(runtime.ownerPublicKeyHex, runtime.seedHashHex)).attach(runtime.hostTaskId, command.sessionId);
-  runtime.entry?.currentDemandPurchases?.add(command.sessionId);
   const progress = await protocol.startPurchase({
-    sessionId: command.sessionId,
-    stream: createMsfileBitfsBuyerStream(target.webrtcSessionId, target.link),
+    sessionId,
+    stream: createMsfileBitfsBuyerStream(target.webrtcSessionId, target.link, sessionId),
     openingAmountSatoshis: openingAmount.toString(10),
     contentBudgetSatoshis: contentBudget.toString(10),
     seedBudgetSatoshis: seedBudget.toString(10),
@@ -1740,36 +1844,35 @@ async function msfileBitfsKernelOpenPool(runtime: MsfileBitfsKernelRuntime, comm
 async function msfileBitfsKernelDispatchDownload(runtime: MsfileBitfsKernelRuntime, command: Extract<SchedulerCommand, { type: "download" }>): Promise<void> {
   const pool = runtime.adapter.snapshot().pools[command.poolId];
   if (!pool) throw new Error("内核下载命令缺少费用池");
-  const target = msfileBitfsKernelLinks(runtime).get(pool.sessionId);
+  const target = msfileBitfsKernelPoolLink(runtime, pool);
   if (!target) throw new Error("内核下载命令的卖家连接已关闭");
   await target.link.quoteAccepted;
-  const protocol = await ensureMsfileBitfsBuyerProtocol(target.webrtcSessionId, target.link);
-  const plan = target.link.downloadPlan ?? await openMsfileBitfsBuyerDownloadPlan(runtime.ownerPublicKeyHex, runtime.seedHashHex, pool.sessionId);
-  const outcome = await plan.dispatchContent(pool.sessionId, command.contentIds);
-  if (outcome === "conflict") throw new Error("内核派发与下载计划冲突");
-  // 新请求重新建立流进度基线。
-  msfileBitfsKernelProgress.delete(pool.sessionId);
-  await protocol.continueSharedDownload({ sessionId: pool.sessionId, stream: createMsfileBitfsBuyerStream(target.webrtcSessionId, target.link) });
+  const sessionId = await readSchedulerPoolSessionId(createBitfsSessionJournal(deps.files("bitfs-journal")), pool);
+  const protocol = await ensureMsfileBitfsBuyerProtocol(target.webrtcSessionId, target.link, sessionId);
+  const quoteRaw = await createBitfsSessionJournal(deps.files("bitfs-journal")).getEvidence(command.quote.sessionId, "kind1-quote");
+  if (!quoteRaw) throw new Error("内核本次请求缺少对应已验签报价证据");
+  // 新请求重新建立流进度基线，不把池的初始报价代替本次报价。
+  msfileBitfsKernelProgress.delete(sessionId);
+  await protocol.dispatchRequest({ sessionId, quoteRaw, contentIds: command.contentIds,
+    maxPayment: command.maxPayment, stream: createMsfileBitfsBuyerStream(target.webrtcSessionId, target.link, sessionId) });
 }
 
 /** 内核 drain：停止该池新派发，在途请求继续。 */
 async function msfileBitfsKernelDrainPool(runtime: MsfileBitfsKernelRuntime, command: Extract<SchedulerCommand, { type: "drain" }>): Promise<void> {
-  const pool = runtime.adapter.snapshot().pools[command.poolId];
-  if (!pool) return;
-  const target = msfileBitfsKernelLinks(runtime).get(pool.sessionId);
-  if (!target) return;
-  const plan = target.link.downloadPlan ?? await openMsfileBitfsBuyerDownloadPlan(runtime.ownerPublicKeyHex, runtime.seedHashHex, pool.sessionId);
-  await plan.retirePool(pool.sessionId);
+  // dispatch 模式不会自主领下一批，drain 已由内核持久化。不能额外
+  // retire 共享计划，否则会拦掉同次决策保留的可支付工作。
+  await runtime.adapter.settle(command.commandId);
 }
 
 /** 内核 close：由宿主按意图请求Kind 12/13 关池。 */
 async function msfileBitfsKernelClosePool(runtime: MsfileBitfsKernelRuntime, command: Extract<SchedulerCommand, { type: "close" }>): Promise<void> {
   const pool = runtime.adapter.snapshot().pools[command.poolId];
   if (!pool) return;
-  const target = msfileBitfsKernelLinks(runtime).get(pool.sessionId);
+  const target = msfileBitfsKernelPoolLink(runtime, pool);
   if (!target) throw new Error("内核关池命令的卖家连接已关闭");
-  const protocol = await ensureMsfileBitfsBuyerProtocol(target.webrtcSessionId, target.link);
-  await protocol.closeDispatchedPool({ sessionId: pool.sessionId, stream: createMsfileBitfsBuyerStream(target.webrtcSessionId, target.link) });
+  const sessionId = await readSchedulerPoolSessionId(createBitfsSessionJournal(deps.files("bitfs-journal")), pool);
+  const protocol = await ensureMsfileBitfsBuyerProtocol(target.webrtcSessionId, target.link, sessionId);
+  await protocol.closeDispatchedPool({ sessionId, stream: createMsfileBitfsBuyerStream(target.webrtcSessionId, target.link, sessionId) });
 }
 
 function msfileBitfsKernelPorts(getRuntime: () => MsfileBitfsKernelRuntime): SchedulerCommandPorts {
@@ -1786,7 +1889,8 @@ async function msfileBitfsKernelEnsureManifest(runtime: MsfileBitfsKernelRuntime
   const state = runtime.adapter.snapshot();
   if (state.manifestKnown && state.completed[state.seedHash] === "purchased") return;
   if (state.completed[state.seedHash] !== "purchased") return;
-  const target = msfileBitfsKernelLinks(runtime).get(sessionId);
+  const pool = Object.values(state.pools).find(item => schedulerPoolSessionId(item.id) === sessionId || item.sessionId === sessionId);
+  const target = pool ? msfileBitfsKernelPoolLink(runtime, pool) : msfileBitfsKernelLinks(runtime).get(sessionId);
   const plan = target?.link.downloadPlan ? await target.link.downloadPlan.snapshot() : undefined;
   const hashes = plan?.blockHashesHex;
   if (!hashes || hashes.length === 0) return;
@@ -1801,7 +1905,7 @@ async function msfileBitfsKernelEnsureManifest(runtime: MsfileBitfsKernelRuntime
 /** 关池交易已观察：从专款账本算出 returned/spent 并回灌内核 `closed`（含退款可用）。 */
 async function msfileBitfsKernelFeedCloseSettled(runtime: MsfileBitfsKernelRuntime, sessionId: string): Promise<void> {
   const state = runtime.adapter.snapshot();
-  const pool = Object.values(state.pools).find((item) => item.sessionId === sessionId
+  const pool = Object.values(state.pools).find((item) => (schedulerPoolSessionId(item.id) === sessionId || item.sessionId === sessionId)
     && (item.funding === "closing" || item.funding === "open" || item.funding === "problem"));
   if (!pool || !pool.closeCommandId) return;
   const commandId = pool.closeCommandId;
@@ -1820,28 +1924,35 @@ async function msfileBitfsKernelFeedCloseSettled(runtime: MsfileBitfsKernelRunti
   }
   const amount = BigInt(opening.valueSatoshis);
   const outputs = closeTx.expectedOutputs.reduce((sum, output) => sum + BigInt(output.valueSatoshis), 0n);
-  const committed = BigInt(pool.committed);
-  const spent = amount - outputs;
-  const returned = outputs - committed;
-  if (spent < 0n || returned < 0n || returned + spent + committed !== amount) {
+  const amounts = schedulerCloseAmounts({
+    amount: BigInt(pool.amount), openingAmount: amount,
+    returned: outputs, committed: BigInt(pool.committed),
+  });
+  if (!amounts) {
     // 账本金额与内核承诺对不上：不冒充事实，留问题池追溯。
     await msfileBitfsKernelFeed(runtime, { eventId: `close-mismatch-${pool.id}`, payload: { type: "unknown", poolId: pool.id, commandId } });
     return;
   }
+  for (const link of msfileBitfsWebRtcBuyerLinks.values()) {
+    if (link.poolProtocols?.has(sessionId)) (link.settledPoolSessions ??= new Set()).add(sessionId);
+    if (link.quoteSessionId === sessionId) link.settlementObserved = true;
+  }
   await msfileBitfsKernelFeed(runtime, {
     eventId: `closed-${pool.id}`,
-    payload: { type: "closed", poolId: pool.id, commandId, returned: returned.toString(10), spent: spent.toString(10) },
+    payload: { type: "closed", poolId: pool.id, commandId, ...amounts },
   });
   await msfileBitfsKernelFeed(runtime, { eventId: `refund-${pool.id}`, payload: { type: "refund-available", poolId: pool.id } });
   await runtime.adapter.settle(commandId);
   runtime.executor.forget(commandId);
   msfileBitfsKernelProgress.delete(sessionId);
-  // 旧池已结清：现在可以安全地让卖家给下一批新报价。
-  const pendingSeller = msfileBitfsKernelPendingRefreshes.get(sessionId);
-  if (pendingSeller !== undefined) {
-    msfileBitfsKernelPendingRefreshes.delete(sessionId);
-    await msfileBitfsKernelRefreshQuote(runtime, pendingSeller, sessionId);
-  }}
+  for (const [id, link] of msfileBitfsWebRtcBuyerLinks) {
+    const allPoolsSettled = !!link.poolProtocols?.size && [...link.poolProtocols.keys()].every(key => link.settledPoolSessions?.has(key));
+    if (link.transportClosed && ((link.quoteSessionId === sessionId && link.settlementObserved) || allPoolsSettled)) {
+      msfileBitfsWebRtcBuyerLinks.delete(id);
+      msfileBitfsBuyerOfferCounts.set(link.requestMessageId, Math.max(0, (msfileBitfsBuyerOfferCounts.get(link.requestMessageId) ?? 1) - 1));
+    }
+  }
+}
 
 /** 重启恢复：按购买任务的调度器快照重建内核运行态、喂钱包/唤醒并重放未决命令。 */
 async function recoverMsfileBitfsKernelRuntimes(ownerPublicKeyHex: string): Promise<void> {
@@ -2097,6 +2208,16 @@ async function deleteMsfilePurchaseData(seed: string, sessionId?: string): Promi
       if (await journal.get(path)) await (await openMsfileBitfsBuyerDownloadPlan(owner, seed, task.sessionIds[0])).requestStop();
       if (task.state === "active") await tasks.end(task.taskId, "cancelled", Date.now());
     }
+    // 撤销所删任务的调度运行态和唤醒，避免迟到回调重新分配或复活快照。
+    const kernelKey = msfileBitfsKernelRuntimeKey(owner, seed);
+    const kernel = msfileBitfsKernelRuntimes.get(kernelKey);
+    if (kernel && rows.some(task => task.taskId === kernel.hostTaskId && (!selectedIds || task.sessionIds.some(id => selectedIds.has(id))))) {
+      const timer = msfileBitfsKernelWakes.get(kernelKey);
+      if (timer) clearTimeout(timer);
+      msfileBitfsKernelWakes.delete(kernelKey);
+      msfileBitfsKernelRuntimes.delete(kernelKey);
+      await kernel.adapter.retire();
+    }
     // 断开所删采购的内容通道；不会发送取消关池、付款或退款请求。
     for (const [id, link] of msfileBitfsWebRtcBuyerLinks) {
       if (link.ownerPublicKeyHex.toLowerCase() !== owner || link.seedHashHex !== seed
@@ -2106,7 +2227,8 @@ async function deleteMsfilePurchaseData(seed: string, sessionId?: string): Promi
     }
     const entry = msfileBitfsBuyerTasks.get(lockKey);
     // 清空已删任务的需求状态，杜绝调度回调把历史再次拉回普通采购。
-    if (entry && (!selectedIds || (entry.purchase && selectedIds.has(entry.purchase.sessionId)))) {
+    if (entry && (!selectedIds || (entry.purchase && selectedIds.has(entry.purchase.sessionId))
+      || [...(entry.currentDemandPurchases ?? [])].some(id => selectedIds.has(id)))) {
       await (await entry.taskPromise).cancelDemand();
       msfileBitfsBuyerTasks.delete(lockKey);
     }
@@ -2233,9 +2355,11 @@ async function cancelOneMsfileBitfsBuyerPurchase(input: {
 function createMsfileBitfsBuyerStream(
   webrtcSessionId: string,
   link: NonNullable<ReturnType<typeof msfileBitfsWebRtcBuyerLinks.get>>,
+  poolSessionId?: string,
 ) {
   return {
     async send(frame: Uint8Array) {
+      traceBitfs("transport.frame.send", () => ({ webrtcSessionId, sessionId: link.quoteSessionId, requestMessageId: link.requestMessageId, seedHashHex: link.seedHashHex, frame }));
       if (msfileBitfsWebRtcBuyerLinks.get(webrtcSessionId) !== link) throw new Error("BitFS 买方 DataChannel 已关闭");
       try {
         await deps.executor({
@@ -2245,7 +2369,7 @@ function createMsfileBitfsBuyerStream(
         });
         // 内核路径：记录授权帧实际写出完成时刻（最内侧，白名单失败不影响发送）。
         if (link.quoteSessionId) {
-          try { if (parse(frame).kind === 5) msfileBitfsKernelLastSentAt.set(link.quoteSessionId, Date.now()); }
+          try { if (parse(frame).kind === 5) msfileBitfsKernelLastSentAt.set(poolSessionId ?? link.quoteSessionId, Date.now()); }
           catch { /* 非规范帧由协议按错误处理 */ }
         }
       } catch (error) {
@@ -2887,13 +3011,7 @@ async function configureMsfileSellerRuntime(
  * 静默。报价只在协议端口就绪时产生，且报价字节由 journal 先落盘。
  */
 async function writeBitfsDiagnostic(path: string, value: unknown): Promise<void> {
-  if (!deps.diagnosticsEnabled()) return;
-  try {
-    const store = deps.files( "");
-    await store.put(`bitfs-diagnostics/${path}`, new TextEncoder().encode(JSON.stringify(value)));
-  } catch (error) {
-    console.warn("[msfile] BitFS diagnostic write failed", error instanceof Error ? error.message : String(error));
-  }
+  traceBitfs(path.replace(/\.json$/u, ""), () => value);
 }
 
 async function drainMsfilePendingSellerHashRequests(): Promise<void> {
@@ -3061,7 +3179,7 @@ async function acceptMsfileBitfsWebRtcOffer(input: {
   offerSdp: string;
 }): Promise<void> {
   const request = msfileBitfsBuyerRequests.get(input.requestMessageId);
-  await writeBitfsDiagnostic("buyer-webrtc-offer.json", {
+  void writeBitfsDiagnostic("buyer-webrtc-offer.json", {
     requestMessageId: input.requestMessageId,
     webrtcSessionId: input.webrtcSessionId,
     peerPublicKeyHex: input.peerPublicKeyHex,
@@ -3101,6 +3219,9 @@ async function acceptMsfileBitfsWebRtcOffer(input: {
   };
   // 在创建 PeerConnection 和发布 answer 前登记，容纳 DataChannel 立即回传的 Kind 1。
   msfileBitfsWebRtcBuyerLinks.set(input.webrtcSessionId, link);
+  // SSP 的 offer 回执不能等待 ICE/连接完成：网关收到回执后才会投递后续
+  // candidate。连接建立在后台继续，原 owner/世代和失败清理仍绑定此 link。
+  void (async () => {
   try {
     await deps.executor({
       type: "lane",
@@ -3133,6 +3254,7 @@ async function acceptMsfileBitfsWebRtcOffer(input: {
     }).catch(() => undefined);
     throw error;
   }
+  })().catch(error => console.warn("[msfile] BitFS buyer offer setup failed", error instanceof Error ? error.message : String(error)));
 }
 
 function bitfsWebRtcEnvelopeBody(requestMessageId: string, webrtcSessionId: string, envelope: WebRTCInterconnectEnvelope): ReturnType<typeof newOffer> | undefined {
@@ -3293,13 +3415,38 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: BitfsExecutorLea
       msfileBitfsWebRtcSellerLinks.delete(event.webrtcSessionId);
     }
     if (typeof event.webrtcSessionId === "string") {
-      const buyerLink = msfileBitfsWebRtcBuyerLinks.get(event.webrtcSessionId);
-      if (buyerLink) msfileBitfsBuyerWebRtcFailure(
-        buyerLink,
-        event.webrtcSessionId,
-        event.sessionId,
-        typeof event.reason === "string" ? event.reason : "stream_error",
-      );
+      const webrtcSessionId = event.webrtcSessionId;
+      const transportSessionId = event.sessionId;
+      const buyerLink = msfileBitfsWebRtcBuyerLinks.get(webrtcSessionId);
+      if (buyerLink) void (async () => {
+        // DataChannel close can arrive while the preceding Kind 13 is still
+        // verifying/persisting. Judge closure only after received frames drain.
+        await buyerLink.quoteAccepted;
+        await buyerLink.receivedFrames;
+        const sessions = createBitfsSessionJournal(deps.files("bitfs-journal"));
+        const poolIds = buyerLink.poolProtocols?.size ? [...buyerLink.poolProtocols.keys()]
+          : [buyerLink.resumedPurchaseSessionId ?? buyerLink.quoteSessionId].filter((id): id is string => !!id);
+        const records = await Promise.all(poolIds.map(id => sessions.get(id)));
+        if (msfileBitfsWebRtcBuyerLinks.get(webrtcSessionId) !== buyerLink) return;
+        if (event.reason === "remote_closed" && records.some(record => record?.evidence.includes("kind13-close-response"))) {
+          // 合法回执后的链上核对继续；其他池不能因一个池结清而被当作无责任。
+          buyerLink.transportClosed = true;
+          for (const record of records) if (record && ["completed", "cancelled", "refunded"].includes(record.phase)) {
+            (buyerLink.settledPoolSessions ??= new Set()).add(record.sessionId);
+          }
+          if (records.every(record => record && ["completed", "cancelled", "refunded"].includes(record.phase))) {
+            buyerLink.settlementObserved = true;
+            msfileBitfsWebRtcBuyerLinks.delete(webrtcSessionId);
+            msfileBitfsBuyerOfferCounts.set(buyerLink.requestMessageId, Math.max(0, (msfileBitfsBuyerOfferCounts.get(buyerLink.requestMessageId) ?? 1) - 1));
+          }
+        } else msfileBitfsBuyerWebRtcFailure(
+          buyerLink, webrtcSessionId, transportSessionId,
+          typeof event.reason === "string" ? event.reason : "stream_error",
+        );
+      })().catch(error => {
+        void writeBitfsDiagnostic("buyer-close-state-error.json", { message: error instanceof Error ? error.message : String(error) });
+        msfileBitfsBuyerWebRtcFailure(buyerLink, webrtcSessionId, transportSessionId, "stream_error");
+      });
       else msfileBitfsWebRtcBuyerLinks.delete(event.webrtcSessionId);
     }
     void manager?.close(event.sessionId, typeof event.reason === "string" ? event.reason : "stream_error").catch(() => undefined);
@@ -3327,14 +3474,18 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: BitfsExecutorLea
     if (buyerLink.quoteSessionId) {
       // 公开需求只负责发现卖家。报价已验签后，后续开池、交付和付款在同一条
       // 已关联的 DataChannel 上继续，即使公开 Hash 请求到期也不切断购买会话。
-      void (async () => {
+      buyerLink.receivedFrames = (buyerLink.receivedFrames ?? Promise.resolve()).then(async () => {
         await buyerLink.quoteAccepted;
-        const protocol = await ensureMsfileBitfsBuyerProtocol(event.webrtcSessionId as string, buyerLink);
-        if (buyerLink.quoteSessionId) {
-          msfileBitfsKernelLastReceivedAt.set(buyerLink.quoteSessionId, typeof event.receivedAt === "number" ? event.receivedAt : Date.now());
-        }
+        const rawArtifact = (event.frame as Uint8Array).slice();
+        const kernel = msfileBitfsKernelRuntimeFor(buyerLink.ownerPublicKeyHex, buyerLink.seedHashHex);
+        const sessionId = kernel && parse(rawArtifact).kind !== 1
+          ? await findBuyerPoolResponseSession({ sessions: createBitfsSessionJournal(deps.files("bitfs-journal")), raw: rawArtifact,
+            owner: buyerLink.ownerPublicKeyHex, counterparty: buyerLink.peerPublicKeyHex, seed: buyerLink.seedHashHex })
+          : buyerLink.resumedPurchaseSessionId ?? buyerLink.quoteSessionId!;
+        const protocol = await ensureMsfileBitfsBuyerProtocol(event.webrtcSessionId as string, buyerLink, kernel || buyerLink.resumedPurchaseSessionId ? sessionId : undefined);
+        msfileBitfsKernelLastReceivedAt.set(sessionId, typeof event.receivedAt === "number" ? event.receivedAt : Date.now());
         await protocol.onFrame({
-          sessionId: buyerLink.quoteSessionId!,
+          sessionId,
           rawArtifact: (event.frame as Uint8Array).slice(),
           stream: {
             send: async (frame) => {
@@ -3347,7 +3498,7 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: BitfsExecutorLea
             },
           },
         });
-       })().catch(async (error) => {
+       }).catch(async (error) => {
          const message = error instanceof Error ? error.message : String(error);
          console.warn("[msfile] BitFS buyer protocol frame failed", message);
          await writeBitfsDiagnostic("buyer-protocol-frame-error.json", {
@@ -3381,6 +3532,10 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: BitfsExecutorLea
     buyerLink.quoteSessionId = freshQuoteSessionId;
     buyerLink.quoteAccepted = (async () => {
       const sessions = createBitfsSessionJournal(deps.files( "bitfs-journal"));
+      // 新连接始终验收它实际发送的新报价；历史池报价只作原始签名证据。
+      await buyerLink.task.acceptDiscoveredQuote({ sessionId: freshQuoteSessionId,
+        requestMessageId: buyerLink.requestMessageId, counterpartyPublicKeyHex: buyerLink.peerPublicKeyHex,
+        rawKind1: event.frame as Uint8Array });
       const resumablePhases = new Set([
         "opening-presign", "funding-prepared", "funding-unknown", "funded", "request-prepared",
         "delivery-verified", "payment-unknown", "content-committing", "close-required", "close-requested",
@@ -3399,20 +3554,7 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: BitfsExecutorLea
       }
       if (matches.length === 1) {
         const resumedSessionId = matches[0]!;
-        buyerLink.quoteSessionId = resumedSessionId;
         buyerLink.resumedPurchaseSessionId = resumedSessionId;
-        await buyerLink.task.acceptQuote({
-          sessionId: resumedSessionId,
-          counterpartyPublicKeyHex: buyerLink.peerPublicKeyHex,
-          rawKind1: (await sessions.getEvidence(resumedSessionId, "kind1-quote"))!,
-        });
-      } else {
-        await buyerLink.task.acceptDiscoveredQuote({
-          sessionId: freshQuoteSessionId,
-          requestMessageId: buyerLink.requestMessageId,
-          counterpartyPublicKeyHex: buyerLink.peerPublicKeyHex,
-          rawKind1: event.frame as Uint8Array,
-        });
       }
      })().then(() => undefined).catch(async (error) => {
        void writeBitfsDiagnostic("buyer-webrtc-quote-error.json", {
@@ -3433,12 +3575,15 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: BitfsExecutorLea
     });
     void buyerLink.quoteAccepted.then(async () => {
       if (buyerLink.resumedPurchaseSessionId) {
-        await ensureMsfileBitfsBuyerProtocol(event.webrtcSessionId as string, buyerLink);
+        await ensureMsfileBitfsBuyerProtocol(event.webrtcSessionId as string, buyerLink, buyerLink.resumedPurchaseSessionId);
         const sessions = createBitfsSessionJournal(deps.files("bitfs-journal"));
         const originalOpening = await sessions.getEvidence(buyerLink.resumedPurchaseSessionId, "kind2-opening-request");
         if (!originalOpening) throw new Error("旧池恢复缺少原始开池证据");
         // 先用 exact Kind 2 绑定旧资金会话；Kind 3 重放随后驱动已有恢复状态机。
-        await createMsfileBitfsBuyerStream(event.webrtcSessionId as string, buyerLink).send(originalOpening);
+        await createMsfileBitfsBuyerStream(event.webrtcSessionId as string, buyerLink, buyerLink.resumedPurchaseSessionId).send(originalOpening);
+        const kernelRuntime = msfileBitfsKernelRuntimeFor(buyerLink.ownerPublicKeyHex, buyerLink.seedHashHex);
+        const fresh = (await buyerLink.task.listDiscoveredQuotes()).find(item => item.sessionId === freshQuoteSessionId);
+        if (kernelRuntime && fresh) await msfileBitfsKernelFeedQuote(kernelRuntime, fresh);
         return;
       }
       const service = await deps.ensureService();
@@ -3531,11 +3676,21 @@ async function executeMsfileControl(
   request: Extract<CoordinatorClientRequest, { kind: "msfile.control" }>,
   signal?: AbortSignal,
 ): Promise<CoordinatorResponse> {
-  if (!isMsfileMutationControl(request.control)) {
-    return executeMsfileControlNow(request, signal);
-  }
+  const execute = async () => {
+    const startedAt = performance.now();
+    traceBitfs("control.start", () => ({ requestId: request.requestId, type: request.control.type, sessionEpoch: request.expectedSessionEpoch }));
+    try {
+      const result = await executeMsfileControlNow(request, signal);
+      traceBitfs("control.finish", () => ({ requestId: request.requestId, type: request.control.type, ack: result.ack, elapsedMs: performance.now() - startedAt }));
+      return result;
+    } catch (error) {
+      traceBitfs("control.failed", () => ({ requestId: request.requestId, type: request.control.type, error, elapsedMs: performance.now() - startedAt }));
+      throw error;
+    }
+  };
+  if (!isMsfileMutationControl(request.control)) return execute();
   // mutation 进串行尾；前一个失败不阻塞后续。
-  const run = msfileMutationTail.then(() => executeMsfileControlNow(request, signal), () => executeMsfileControlNow(request, signal));
+  const run = msfileMutationTail.then(execute, execute);
   msfileMutationTail = run.then(() => undefined, () => undefined);
   return run;
 }
@@ -3881,6 +4036,11 @@ function clearBuyerState(): void {
 }
 
 async function handleInboxWebRtc(webrtcBody: import("bsv8-channel-protocol/webrtc-signal").WebRTCSignalV1Body, opened: import("bsv8-channel-protocol/inbox").VerifiedPrivateMessage, seedHashHex?: string): Promise<void> {
+  void writeBitfsDiagnostic(`webrtc-inbound-${webrtcBody.signal.type}.json`, {
+    sessionId: webrtcBody.session_id, requestMessageId: webrtcBody.request_message_id,
+    hasBuyerLink: msfileBitfsWebRtcBuyerLinks.has(webrtcBody.session_id),
+    hasSellerLink: msfileBitfsWebRtcSellerLinks.has(webrtcBody.session_id),
+  });
   if (webrtcBody.signal.type === "offer") {
             if (msfileBitfsBuyerRequests.has(webrtcBody.request_message_id)) {
               if (!seedHashHex) throw new Error("BitFS offer is missing verified Hash request evidence");
@@ -3939,7 +4099,7 @@ async function handleInboxWebRtc(webrtcBody: import("bsv8-channel-protocol/webrt
     executeMsfileControl,
     handleInboxWebRtc,
     isMsfileMutationControl,
-    revoke: () => { demandMonitor.clear(); arbitrationScope?.controller.abort(); arbitrationScope = undefined; stopMsfileSellerRuntime(); clearBuyerState(); msfileFundingRuntime.clear(); },
+    revoke: () => { traceBitfs("runtime.revoked", () => deps.session()); demandMonitor.clear(); arbitrationScope?.controller.abort(); arbitrationScope = undefined; stopMsfileSellerRuntime(); clearBuyerState(); msfileFundingRuntime.clear(); },
     clearBuyerState,
     resetControlQueue: () => { msfileMutationTail = Promise.resolve(); },
     createMsfileBitfsBuyerTask,

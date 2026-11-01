@@ -8,6 +8,8 @@ import type { Command } from "keymaster-trade-scheduler";
  * - 执行前核对命令归属、合同、费用版本、资金与内容授权，不能简单要求任务 revision 永不变化。
  */
 export interface SchedulerCommandPorts {
+  /** 仅在宿主已报告 quote-source 可用时由策略发出。 */
+  discoverQuotes?(command: Extract<Command, { type: "discover" }>): Promise<void>;
   /** 内核 open 意图：按执行层真实输入复算金额；与内核意图不一致时拒绝并回灌纠正。 */
   openPool(command: Extract<Command, { type: "open" }>): Promise<void>;
   /** 内核 download：把批次登记到下载计划并请求内容。 */
@@ -29,6 +31,9 @@ export class SchedulerCommandExecutor {
     this.executed.add(command.commandId);
     try {
       switch (command.type) {
+        case "discover":
+          if (!this.ports.discoverQuotes) throw new Error("报价查询端口不可用");
+          await this.ports.discoverQuotes(command); break;
         case "open": await this.ports.openPool(command); break;
         case "download": await this.ports.dispatchDownload(command); break;
         case "drain": await this.ports.drainPool(command); break;

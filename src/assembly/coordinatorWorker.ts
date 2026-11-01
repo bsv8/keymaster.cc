@@ -874,8 +874,8 @@ const msfileFundingRuntime = createWorkerFundingRuntime({
   previousTransaction: input => p2pkhWorkerRuntime.transfer.previousTransaction(input),
   observeBusinessReceipt: input => p2pkhWorkerRuntime.transfer.observeBusinessReceipt(input),
   walletView: async input => {
-    const response = await p2pkhWorkerOperations.snapshot(generateRequestId(), input, true);
-    if (response.ack.status !== "ok") throw new Error("Manager wallet projection unavailable");
+    const response = await p2pkhWorkerOperations.snapshot(generateRequestId(), input, false);
+    if (response.ack.status !== "ok") throw new Error("message" in response.ack ? response.ack.message : "Manager wallet projection unavailable");
     return response.operationResult as P2pkhUtxoSnapshotResult;
   },
   ensureResources: ensureWorkerP2pkhResources,
@@ -950,7 +950,7 @@ const msfileBitfsRuntime = createBitfsWorkerRuntime({
   deriveAddress: deriveP2pkhAddress,
   addressScript: p2pkhAddressToScriptHex,
   maxFeeSatoshis: bitfsFundingMaxFeeSatoshis,
-  diagnosticsEnabled: () => false,
+  diagnosticsEnabled: () => devServicesEnabled,
   bytesToHex,
   hexToBytes: cryptoHexToBytes,
 });

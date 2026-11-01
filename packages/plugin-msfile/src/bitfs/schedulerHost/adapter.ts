@@ -29,6 +29,22 @@ export interface SchedulerEventInput {
 }
 
 export class SchedulerAdapter {
+  private mutationTail: Promise<void> = Promise.resolve();
+  private retired = false;
+
+  /** 撤销运行代际并等已进入的原子写完成；不删除任何责任或 outbox。 */
+  retire(): Promise<void> {
+    this.retired = true;
+    return this.mutationTail;
+  }
+
+  /** 只串行化状态提交，不在锁内执行会回灌事件的协议命令。 */
+  private mutate<T>(run: () => Promise<T>): Promise<T> {
+    const result = this.mutationTail.then(run);
+    this.mutationTail = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
   private constructor(
     private readonly store: SchedulerSnapshotStore,
     private readonly clock: MonotonicClock,
@@ -59,27 +75,35 @@ export class SchedulerAdapter {
    * 投递一个事实并推进内核；命令登记进 outbox 后与状态一起原子保存。
    * 返回本次新产生的命令，由执行层按 commandId 幂等执行。
    */
-  async handle(input: SchedulerEventInput): Promise<Command[]> {
-    const receivedAt = this.clock.now();
-    const times = schedulerEventTimes(input.occurredAt ?? receivedAt, receivedAt);
-    const event = { ...input.payload, eventId: input.eventId, taskId: this.state.taskId, ...times } as Event;
-    const result = step(this.state, event);
-    this.state = result.state;
-    for (const command of result.commands) {
-      if (!this.outbox.some((entry) => entry.commandId === command.commandId)) {
-        this.outbox.push({ commandId: command.commandId, type: command.type, revision: command.revision, command });
+  handle(input: SchedulerEventInput): Promise<Command[]> {
+    return this.mutate(async () => {
+      if (this.retired) return [];
+      const receivedAt = this.clock.now();
+      const times = schedulerEventTimes(input.occurredAt ?? receivedAt, receivedAt);
+      const event = { ...input.payload, eventId: input.eventId, taskId: this.state.taskId, ...times } as Event;
+      const result = step(this.state, event);
+      const next = [...this.outbox];
+      for (const command of result.commands) {
+        if (!next.some((entry) => entry.commandId === command.commandId)) {
+          next.push({ commandId: command.commandId, type: command.type, revision: command.revision, command });
+        }
       }
-    }
-    await this.store.save({ state: this.state, outbox: this.outbox });
-    return result.commands;
+      await this.store.save({ state: result.state, outbox: next });
+      this.state = result.state;
+      this.outbox = next;
+      return result.commands;
+    });
   }
 
   /** 命令对应的执行结果已经作为事实落盘后，从 outbox 移除。 */
-  async settle(commandId: string): Promise<void> {
-    const next = this.outbox.filter((entry) => entry.commandId !== commandId);
-    if (next.length === this.outbox.length) return;
-    this.outbox = next;
-    await this.store.save({ state: this.state, outbox: next });
+  settle(commandId: string): Promise<void> {
+    return this.mutate(async () => {
+      if (this.retired) return;
+      const next = this.outbox.filter((entry) => entry.commandId !== commandId);
+      if (next.length === this.outbox.length) return;
+      await this.store.save({ state: this.state, outbox: next });
+      this.outbox = next;
+    });
   }
 
   view(): View { return view(this.state); }

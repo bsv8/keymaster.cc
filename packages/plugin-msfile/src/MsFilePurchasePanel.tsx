@@ -123,7 +123,8 @@ function PurchaseProgress({ demand }: { demand: MsFileBitfsDemandSnapshot }) {
         ["结算矿工费预留", demand.purchase.feeBreakdown.settlementReserveSatoshis],
       ] as const).map(([label, amount]) => <div className="msfile-bill__row" key={label}><dt>{label}</dt><dd>{money(amount)}</dd></div>)}
     </dl> : null}
-    <div className="msfile-execution__summary"><div><span>内容验收</span><strong>{progress?.verifiedBlockCount ?? "—"} / {progress?.totalBlockCount ?? "—"} Block</strong></div><div><span>资金结算</span><strong>{records.length && records.every(item => item.fundingState === "closed") ? "费用池已结清" : "逐池核对中"}</strong></div></div>
+    {current?.schedulerState?.failure ? <p role="alert">资金不足，已停止新增购买。已发授权／未决责任：{current.schedulerState.inFlight}；充值不会自动恢复本任务。</p> : null}
+    <div className="msfile-execution__summary"><div><span>内容验收</span><strong>{progress?.verifiedBlockCount ?? "—"} / {progress?.totalBlockCount ?? "—"} Block</strong></div><div><span>资金结算</span><strong>{current?.schedulerState?.funds === "none" ? "尚无费用池" : records.length && records.every(item => item.fundingState === "closed") ? "费用池已结清" : "逐池核对中"}</strong></div></div>
     {demand.purchase?.openingAmountSatoshis != null ? <p>本池开池金额：{money(demand.purchase.openingAmountSatoshis)}</p> : null}
     <p className="msfile-checkout__help">内容验收与资金结算分别记录；池外找零和已到账退款可正常使用。</p>
     {error ? <p role="status">资金明细暂不可读：{error}</p> : null}

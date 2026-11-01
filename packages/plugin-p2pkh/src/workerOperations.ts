@@ -210,15 +210,6 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
           async managerProtocolIntent(input: { ownerPublicKeyHex: string; network: "main" | "test"; allocationId: string; txid: string; inputOutpointKeys: readonly string[] }) {
             return manager.protocolIntentProof(input);
           },
-          async assertInputsUnspent(network: "main" | "test", outpointKeys: readonly string[]) {
-            const query = ports.domain.query();
-            if (!query) throw new Error("P2PKH spent-output reader is unavailable");
-            await Promise.all(outpointKeys.map(async (key: string) => {
-              const [txid, voutText] = key.split(":");
-              if (await requireWocNetwork(query, network).getSpentOutput(txid!, Number(voutText)) !== null) throw new Error(`P2PKH input is already spent: ${key}`);
-            }));
-            captured.assertFresh();
-          },
           abortNotDispatched, refresh, publishChanged: ports.changed,
         };
         const allocationId = request.submission?.managerAllocationId;

@@ -24,3 +24,4 @@ minimumReleaseAgeExclude:
 
 patchedDependencies:
   bitcoin-libp2p@0.3.1: patches/bitcoin-libp2p@0.3.1.patch
+  go-bitfs@0.5.0: patches/go-bitfs@0.5.0.patch

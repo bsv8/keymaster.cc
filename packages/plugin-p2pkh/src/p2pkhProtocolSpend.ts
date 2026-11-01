@@ -95,8 +95,6 @@ export interface P2pkhProtocolManagerPort {
 export interface P2pkhProtocolSpendDeps {
   vault: Pick<VaultService, "status" | "createActiveKeyCrypto">;
   previousTransactions(network: BsvNetwork, inputs: readonly ProtocolSpendInput[]): Promise<string[]>;
-  /** Production query: reject spent/unknown inputs immediately before claiming/signing. */
-  assertInputsUnspent?(network:BsvNetwork,inputs:readonly ProtocolSpendInput[]):Promise<void>;
   /** 生产广播入口；协议 spend 不直接依赖 WOC 或其它 Provider。 */
   centralBroadcastService?: CentralBroadcastService;
   getKeyForOwner: (ownerPublicKeyHex: string) => Promise<{ publicKeyHex: string }>;
@@ -256,7 +254,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
             estimatedFeeSatoshis:plan.feeSatoshis,serializedSizeBytes:serializeTx(unsigned).length+input.inputs.reduce((n,u)=>n+(u.lockingScriptHex===undefined?108:74),0),txid:"",rawTxHex};
           tickets.set(preview.previewId!,{input:structuredClone(input),expires:now+120000});return preview;
         }
-        await deps.assertInputsUnspent?.(input.network,input.inputs);
+        // 选币、占用与签名前状态由唯一 UTXO manager 决定；宿主不重复查 spent。
         // 输入占用先于额度批准/签名，竞争失败不产生第二份可花费签名。
         // New wallet occupations belong exclusively to the manager. The
         // claim store remains readable only for historical signed records.

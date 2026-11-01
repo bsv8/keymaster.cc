@@ -3,6 +3,7 @@
 // 本文件只准备交易，不广播。调用方必须先把 exact bytes 写入 BitFS outbox；
 // 只有 Worker 的交易广播器可以把已保存交易交给节点。
 
+import { traceBitfs } from "./debug.js";
 import type {
   BsvNetwork,
   ProtocolSpendPreview,
@@ -318,6 +319,7 @@ export function createBitfsFundingLedger(store: BorrowedModuleFileStore): BitfsF
       if (!committed || committed.account.revision !== next.revision || !equal(encodeAccount(committed.account), bytes)) {
         throw new BitfsFundingError("storage", "BitFS 资金账本写入后回读校验失败");
       }
+      traceBitfs("funding.ledger.committed", () => ({ account: committed.account }));
       return committed.account;
     });
   }

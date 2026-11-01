@@ -258,7 +258,7 @@ const probe = (value: unknown) => fields(value, "supplierPublicKeyHex peerId con
 const quote = (value: unknown) => fields(value, "sessionId seedHashHex fileSizeBytes sellerPublicKeyHex seedPriceSatoshis fullBlockPriceSatoshis maxBlocksPerBatch quoteExpiresAtUnixSeconds recommendedFilename mediaType recentBytesPerSecond", { supportedArbiterPublicKeys: copy });
 const purchaseFields = "sessionId phase openingAmountSatoshis currentMaxFullBlockPriceSatoshis verifiedBlockCount verifiedBytes totalBlockCount message";
 const purchase = (value: unknown) => fields(value, purchaseFields);
-const purchaseTask = (value: unknown) => ({ ...fields(value, `${purchaseFields} historyDeleted taskId taskState taskEndReason createdAt updatedAt fundingState fundingTxid poolOutpoint refundLockTime seedHashHex sellerPublicKeyHex recommendedFilename fileSizeBytes fullBlockPriceSatoshis paidSatoshis minerFeeSatoshis lockedSatoshis pendingReturnSatoshis discoveryOnly canCancel canReconnect`),
+const purchaseTask = (value: unknown) => ({ ...fields(value, `${purchaseFields} historyDeleted taskId taskState taskEndReason createdAt updatedAt fundingState fundingTxid poolOutpoint refundLockTime seedHashHex sellerPublicKeyHex recommendedFilename fileSizeBytes fullBlockPriceSatoshis paidSatoshis minerFeeSatoshis lockedSatoshis pendingReturnSatoshis discoveryOnly canCancel canReconnect`, { schedulerState: copy }),
   verifiedBytes: (value as Row).verifiedBytes ?? null, availableQuotes: ((value as Row).availableQuotes as unknown[] | undefined)?.map(quote) ?? [],
 });
 const demand = (value: unknown) => fields(value, "seedHashHex requestMessageId expiresAtMs existingPurchaseSessionId currentMaxFullBlockPriceSatoshis", { quotes: each(quote), purchase });

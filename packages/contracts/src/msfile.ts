@@ -571,6 +571,15 @@ export interface MsFileBitfsTaskSnapshot extends MsFileBitfsPurchaseSnapshot {
   taskState?: "active" | "ended";
   /** 已结束原因；结束后资金仍可能待回收。 */
   taskEndReason?: "completed" | "cancelled" | "failed" | "replaced";
+  /** 持久调度状态；协议单池完成不能覆盖文件任务错误。 */
+  schedulerState?: {
+    execution: "ready" | "running" | "waiting" | "paused" | "stopping" | "stopped" | "finished";
+    content: "manifest-unknown" | "incomplete" | "complete";
+    funds: "none" | "pending" | "settled" | "problem";
+    /** 已发授权（含未决责任）的数量，不含准备资金中的工作。 */
+    inFlight: number;
+    failure: { code: "insufficient-funds"; required: string; available: string } | null;
+  };
   createdAt?: string;
   updatedAt?: string;
   /** 资金真值来自账本；保存了开池参数不代表已开池。 */

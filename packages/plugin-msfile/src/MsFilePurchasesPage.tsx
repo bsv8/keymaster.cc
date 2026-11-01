@@ -63,8 +63,8 @@ function PurchaseRecords({ service, sessionId }: { service: MsFileBucketService;
   const selected = sessionId ? records.find(item => item.sessionId === sessionId) : undefined;
   const history = records.filter(item => !item.historyDeleted);
   const phase = (item: MsFileBitfsTaskSnapshot) => t(`msfile.bucket.bitfs.phase.${item.phase}`, { defaultValue: item.phase });
-  const taskLabel = (item: MsFileBitfsTaskSnapshot) => item.taskState === "active" ? t("msfile.purchases.task.active", { defaultValue: "进行中" }) : item.taskState === "ended" ? t("msfile.purchases.task.ended", { defaultValue: "已结束" }) : "—";
-  const reasonLabel = (item: MsFileBitfsTaskSnapshot) => item.taskEndReason ? t(`msfile.purchases.task.reason.${item.taskEndReason}`, { defaultValue: item.taskEndReason }) : "—";
+  const taskLabel = (item: MsFileBitfsTaskSnapshot) => item.schedulerState?.failure ? (item.schedulerState.execution === "stopping" ? "已停止新增，已有工作收尾" : "已停止新增") : item.taskState === "active" ? t("msfile.purchases.task.active", { defaultValue: "进行中" }) : item.taskState === "ended" ? t("msfile.purchases.task.ended", { defaultValue: "已结束" }) : "—";
+  const reasonLabel = (item: MsFileBitfsTaskSnapshot) => item.schedulerState?.failure ? "资金不足" : item.taskEndReason ? t(`msfile.purchases.task.reason.${item.taskEndReason}`, { defaultValue: item.taskEndReason }) : "—";
   const fundingLabel = (item: MsFileBitfsTaskSnapshot) => t(`msfile.purchases.funding.${item.fundingState ?? "unknown"}`, { defaultValue: "资金状态待核对" });
   const money = (value: string | null | undefined) => value == null ? "—" : `${value} sats`;
   return <section className="msfile-purchases">
@@ -117,7 +117,12 @@ function PurchaseRecords({ service, sessionId }: { service: MsFileBucketService;
       {selected.historyDeleted ? <p role="status">采购历史已删除；这里只保留原费用池的资金恢复记录和必要证据。</p> : null}
       <h3>{selected.recommendedFilename ?? selected.seedHashHex}</h3>
       <p>{taskLabel(selected)} · {reasonLabel(selected)} · {phase(selected)} · {fundingLabel(selected)}</p>
-      {selected.message ? <p>{selected.message}</p> : null}
+      {selected.message ? <p role={selected.schedulerState?.failure ? "alert" : undefined}>{selected.message}</p> : null}
+      {selected.schedulerState ? <dl aria-label="任务、内容与资金状态">
+        <dt>内容状态</dt><dd>{({ "manifest-unknown": "Seed 清单未知", incomplete: "内容未完整", complete: "内容已完整" })[selected.schedulerState.content]}</dd>
+        <dt>已发授权／未决责任</dt><dd>{selected.schedulerState.inFlight}</dd>
+        <dt>资金结算</dt><dd>{({ none: "尚无费用池", pending: "仍在结算", settled: "已结清", problem: "存在未决资金，需核对" })[selected.schedulerState.funds]}</dd>
+      </dl> : null}
       <table className="msfile-purchases__table msfile-purchases__fields"><tbody>
         <tr><th scope="row">{t("msfile.purchases.id", { defaultValue: "购买编号" })}</th><td><code>{selected.sessionId}</code></td></tr>
         <tr><th scope="row">{t("msfile.purchases.taskId", { defaultValue: "文件任务编号" })}</th><td><code>{selected.taskId ?? "—"}</code></td></tr>

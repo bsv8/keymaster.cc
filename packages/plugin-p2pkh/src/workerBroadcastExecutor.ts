@@ -18,8 +18,6 @@ export interface WorkerBroadcastDependencies {
   sessionEpoch(): string;
   listProtectedOutpoints(input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<readonly { txid: string; vout: number }[]>;
   listProtocolProtectedOutpoints?(input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<readonly { txid: string; vout: number; kind?: string; source?: string; submissionId?: string }[]>;
-  /** Final per-input chain-spend check for Manager-authorized ordinary transfers. */
-  assertInputsUnspent?(network: "main" | "test", outpointKeys: readonly string[]): Promise<void>;
   /**
    * Manager proof for a protocol-bound broadcast: the frozen manager intent
    * must bind the same exact transaction and the same inputs, with a
@@ -155,11 +153,7 @@ export async function executeWorkerP2pkhBroadcast(
     }
   }
 
-  if (!deps.recoveringExact) {
-    if (!deps.assertInputsUnspent) throw new Error("Manager input spend checker is unavailable");
-    await deps.assertInputsUnspent(request.network, parsedInputOutpointKeys);
-    deps.assertFresh();
-  }
+  // 调用者已通过 manager 的 allocation/exact 派发入口；不另建链上花费门禁。
 
   // The manager owns exact input occupations and dispatch. A notification
   // cursor is never a spend authorization and cannot be consumed or reset.

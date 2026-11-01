@@ -1,14 +1,14 @@
-import { inspectBitfsPresignCapacity, assertBitfsDeliveryCapacity } from "./sellerFundingPolicy.js";
+import { assertBitfsDeliveryCapacity } from "./sellerFundingPolicy.js";
+import { findBitfsSellerRequestQuote, readBitfsRequestQuote } from "./requestQuote.js";
 // Keymaster 自有的 BitFS 卖方状态机。
 // SDK 只负责每一步的协议验证/签名；本文件负责进度、证据、I/O 与恢复。
 
 import {
-  acceptBuyerQuote,
-  buildArbitrationPaymentFromClaim,
   completeSellerCloseArtifact,
   completeSellerPayment,
   buildRefundSubmission,
   inspectSellerDeliveryRequest,
+  inspectPoolArtifactReference,
   prepareSellerDelivery,
   prepareSellerPresign,
   refundTemplateLockTime,
@@ -89,7 +89,6 @@ export interface BitfsSellerProtocolDeps {
 /** 生产卖方端口；每条输出字节均在返回前已持久化。 */
 export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
   readonly ready: boolean;
-  private readonly recoverySessions = new Map<string, string>();
   private readonly locks = new Map<string, Promise<void>>();
   private readonly poolStateCache = new Map<string, {
     pool: SellerPoolEvidence;
@@ -152,7 +151,10 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
     });
   }
 
-  async onFrameSent(sessionId: string, kind: number): Promise<void> { if (kind === 6) await this.deps.onDelivered?.(this.recoverySessions.get(sessionId) ?? sessionId); }
+  async onFrameSent(sessionId: string, frame: Uint8Array): Promise<void> {
+    const reference = inspectPoolArtifactReference(frame);
+    if (reference.paymentAuthorizationID) await this.deps.onDelivered?.(await this.routePool(sessionId, frame));
+  }
 
   async onFrame(input: { sessionId: string; kind: import("go-bitfs").WireKind; bytes: Uint8Array }): Promise<BitfsSellerProtocolResult> {
     let result: BitfsSellerProtocolResult = { type: "none" };
@@ -165,29 +167,53 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
   }
 
   private async onFrameNow(input: { sessionId: string; kind: import("go-bitfs").WireKind; bytes: Uint8Array }): Promise<BitfsSellerProtocolResult> {
-    const transportSessionId = input.sessionId;
-    if (input.kind === 2 && !this.recoverySessions.has(transportSessionId)) {
-      const fresh = await this.requiredRecord(transportSessionId);
-      if (fresh.phase === "quoted" && !fresh.evidence.includes("kind2-opening-request")) {
-        for (const old of await this.deps.sessions.list()) {
-          if (old.sessionId === fresh.sessionId || old.role !== "seller"
-            || old.ownerPublicKeyHex !== fresh.ownerPublicKeyHex || old.counterpartyPublicKeyHex !== fresh.counterpartyPublicKeyHex
-            || old.seedHashHex !== fresh.seedHashHex) continue;
-          const original = await this.deps.sessions.getEvidence(old.sessionId, "kind2-opening-request");
-          if (!original || !equalBytes(original, input.bytes)) continue;
-          if (["closed", "failed"].includes(old.phase)) return { type: "close", reason: "pool_closed" };
-          const quoteBytes = await this.requiredEvidence(old.sessionId, "kind1-quote");
-          await this.openSession({ sessionId: old.sessionId, quoteBytes, seedHashHex: old.seedHashHex,
-            counterpartyPublicKeyHex: old.counterpartyPublicKeyHex });
-          this.recoverySessions.set(transportSessionId, old.sessionId);
-          break;
-        }
+    input = { ...input, sessionId: await this.routePool(input.sessionId, input.bytes) };
+    let result: BitfsSellerProtocolResult = { type: "none" };
+    await this.serial(input.sessionId, async () => {
+      const record = await this.requiredRecord(input.sessionId);
+      if (input.kind === 2 && ["closed", "failed"].includes(record.phase)) {
+        result = { type: "close", reason: "pool_closed" }; return;
+      }
+      result = await this.handle(input);
+      if ((await this.deps.sessions.get(input.sessionId))?.phase === "paid") this.deps.onPaid?.(input.sessionId);
+    });
+    return result;
+  }
+
+  /** 连接只证明交易对手身份；每帧按自身池/授权引用恢复，不固定到“最近一个池”。 */
+  private async routePool(connectionId: string, raw: Uint8Array): Promise<string> {
+    const connection = await this.requiredRecord(connectionId);
+    this.assertCurrent(connection);
+    const ref = inspectPoolArtifactReference(raw);
+    const matches: BitfsSessionRecord[] = [];
+    for (const record of await this.deps.sessions.list()) {
+      if (record.role !== "seller" || record.ownerPublicKeyHex !== connection.ownerPublicKeyHex
+        || record.counterpartyPublicKeyHex !== connection.counterpartyPublicKeyHex) continue;
+      if (ref.paymentAuthorizationID && !ref.refundTemplateTxID) {
+        if (await this.deps.sessions.getEvidence(record.sessionId, `kind5-content-request-${toHex(ref.paymentAuthorizationID)}`)) matches.push(record);
+      } else if (ref.refundTemplateTxID) {
+        const request = await this.deps.sessions.getEvidence(record.sessionId, "kind2-opening-request");
+        if (request && equalBytes(inspectPoolArtifactReference(request).refundTemplateTxID!, ref.refundTemplateTxID)) matches.push(record);
       }
     }
-    input = { ...input, sessionId: this.recoverySessions.get(transportSessionId) ?? transportSessionId };
-    let result: BitfsSellerProtocolResult = { type: "none" };
-    await this.serial(input.sessionId, async () => { result = await this.handle(input); if ((await this.deps.sessions.get(input.sessionId))?.phase === "paid") this.deps.onPaid?.(input.sessionId); });
-    return result;
+    if (matches.length > 1) throw new Error("BitFS 卖方池引用存在多个历史责任归属");
+    let record = matches[0];
+    if (!record) {
+      if (!ref.buyerPublicKey || !ref.sellerPublicKey || !ref.refundTemplateTxID) throw new Error("BitFS 卖方找不到报文对应的池证据");
+      if (toHex(ref.buyerPublicKey) !== connection.counterpartyPublicKeyHex || toHex(ref.sellerPublicKey) !== connection.ownerPublicKeyHex) {
+        throw new Error("BitFS 开池角色与连接身份不一致");
+      }
+      const id = `seller-pool-${toHex(ref.refundTemplateTxID)}`;
+      const quoteBytes = await this.requiredEvidence(connectionId, "kind1-quote");
+      await this.openSession({ sessionId: id, quoteBytes, seedHashHex: connection.seedHashHex,
+        counterpartyPublicKeyHex: connection.counterpartyPublicKeyHex });
+      record = await this.requiredRecord(id);
+    } else if (record.generation !== this.deps.generation() || record.runtimeInstanceId !== this.deps.runtimeInstanceId?.()) {
+      // 重启显式接管原日志；只更新运行代际，不重建或迁移 exact 历史。
+      await this.openSession({ sessionId: record.sessionId, quoteBytes: await this.requiredEvidence(record.sessionId, "kind1-quote"),
+        seedHashHex: record.seedHashHex, counterpartyPublicKeyHex: record.counterpartyPublicKeyHex });
+    }
+    return record.sessionId;
   }
 
   private async handle(input: { sessionId: string; kind: import("go-bitfs").WireKind; bytes: Uint8Array }): Promise<BitfsSellerProtocolResult> {
@@ -222,14 +248,8 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
             const height = await this.deps.blockHeight();
             this.assertCurrent(record);
             assertBitfsSellerRefundWindow(refundTemplateLockTime(request.transactionRaw), height, this.deps.minRefundDelayBlocks());
-            const capacity = await inspectBitfsPresignCapacity(input.bytes);
-            const quote = acceptBuyerQuote(bitfsWorkflowFacts(this.deps.nowMs()), await this.requiredEvidence(record.sessionId, "kind1-quote"));
-            if (!quote.allowsArbiter(capacity.arbiterPublicKey)) throw new Error("费用池仲裁方不在本报价允许列表");
-            const fee = await this.deps.arbitrationFee(toHex(capacity.arbiterPublicKey), 1);
-            // 只审核一个计费单元；文件块数、卖家数量和批次上限均不提高最低额度。
-            const minimumPrice = quote.terms.seedPriceSatoshis < quote.terms.fullBlockPriceSatoshis
-              ? quote.terms.seedPriceSatoshis : quote.terms.fullBlockPriceSatoshis;
-            buildArbitrationPaymentFromClaim(capacity.poolAmount, capacity.script, capacity.refundTemplateRaw, capacity.firstPaymentSequence, minimumPrice, fee);
+            // 开池只验证池合同、角色签名和退款窗口，不以任何文件最低价
+            // 或仲裁计件费用准入；实际交付前才按该次授权验证完整容量。
             this.assertCurrent(record);
             return await this.deps.signer.sign(request, signal);
           } catch (error) { presignFailure = error; throw error; }
@@ -263,13 +283,16 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
         break;
       }
       if (record.phase !== "funded" && record.phase !== "paid") return { type: "close", reason: "state_conflict" };
-      const quoteRaw = await this.requiredEvidence(record.sessionId, "kind1-quote");
+      const selectedQuote = await findBitfsSellerRequestQuote(this.deps.sessions, record, input.bytes);
+      const quoteRaw = selectedQuote.raw;
       const pool = await this.poolEvidence(record);
       const summary = await inspectSellerDeliveryRequest(await this.facts(), { quoteRaw, pool, requestRaw: input.bytes });
       const fee = await this.deps.arbitrationFee(toHex(pool.opening.arbiterPublicKey), summary.contentHashes.length);
       await assertBitfsDeliveryCapacity(pool, summary, fee);
       this.assertCurrent(record);
-      const content = await this.deps.content.resolve({ quoteRaw, pool, requestRaw: input.bytes, seedHashHex: record.seedHashHex });
+      record = await this.deps.sessions.putEvidence(record.sessionId, record.revision,
+        `kind1-request-quote-${toHex(summary.paymentAuthorizationID)}`, quoteRaw, this.deps.nowMs());
+      const content = await this.deps.content.resolve({ quoteRaw, pool, requestRaw: input.bytes, seedHashHex: selectedQuote.seedHashHex });
       assertHash(content.authorizationIdHex);
       const requestName = `kind5-content-request-${content.authorizationIdHex}` as const;
       const deliveryName = `kind6-content-delivery-${content.authorizationIdHex}` as const;
@@ -311,7 +334,7 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
       const transactionName = `latest-payment-transaction-${authorizationIdHex}` as const;
       const requestRaw = await this.requiredEvidence(record.sessionId, requestName);
       const deliveryRaw = await this.requiredEvidence(record.sessionId, deliveryName);
-      const quoteRaw = await this.requiredEvidence(record.sessionId, "kind1-quote");
+      const quoteRaw = await readBitfsRequestQuote(this.deps.sessions, record.sessionId, authorizationIdHex);
       const delivery: SellerDeliveryEvidence = { rawKind1: quoteRaw, rawKind5: requestRaw, rawKind6: deliveryRaw };
       const priorPayment = record.evidence.includes(paymentName)
         ? await this.requiredEvidence(record.sessionId, paymentName)

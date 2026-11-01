@@ -90,7 +90,11 @@ export async function deleteBitfsPurchaseData(input: {
     for (const task of taskRows) {
       if (!task.sessionIds.some(id => removedIds.has(id) || selected.some(s => s.sessionId === id))) continue;
       if (task.state === "active") await tasks.end(task.taskId, "cancelled", Date.now());
-      if (task.sessionIds.every(id => removedIds.has(id)) && !task.legacyPlan) await journal.delete(`download-plans/${seed}/${task.taskId}.json`);
+      if (task.sessionIds.every(id => removedIds.has(id))) {
+        if (!task.legacyPlan) await journal.delete(`download-plans/${seed}/${task.taskId}.json`);
+        // 已无未结成员的任务可清理调度快照；否则失败读模型会把已删历史复活。
+        await journal.delete(`scheduler/tasks/${task.taskId}.json`);
+      }
     }
     await tasks.forgetSessions([...removedIds]);
     if (!(await tasks.list()).some(t => t.legacyPlan)) await journal.delete(`download-plans/${seed}.json`);
