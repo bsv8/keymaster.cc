@@ -2592,7 +2592,7 @@ async function createMsfileBitfsBuyerTask(input: {
   }
   assertCurrentContext();
 
-  const protocolSpend = createMsfileBitfsProtocolSpend(transactions);
+  const protocolSpend = createMsfileBitfsProtocolSpend();
   const fundingDeps: BitfsFundingPrepareDeps = {
     protocolSpend,
     planFunding: request => deps.funding.planFunding(request),

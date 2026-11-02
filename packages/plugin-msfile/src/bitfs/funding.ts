@@ -783,7 +783,7 @@ export async function recoverBitfsFundingSplits(input: {
       || !sameOutputs(planned.expectedOutputs, actualOutputs)) {
       throw new BitfsFundingError("integrity", `拆分交易 ${planned.txid} 与 ledger 计划不一致，输入继续受保护`);
     }
-    if (!outboxRecord) await deps.transactions.putTransaction(planned.txid, rawTransaction, deps.nowMs());
+    if (!outboxRecord) await deps.transactions.putTransaction(planned.txid, rawTransaction, deps.nowMs(), "wallet");
     if (outboxRecord?.state === "result-unknown" && planned.state === "prepared") {
       account = await deps.ledger.markTransactionUnknown({ ownerPublicKeyHex: owner, seedHashHex: seed, network, txid: planned.txid, nowMs: deps.nowMs() });
     } else if (outboxRecord?.state === "confirmed" && planned.state !== "observed") {
@@ -896,7 +896,7 @@ export async function prepareBitfsFunding(input: {
     const stored = await deps.transactions.getTransaction(txid);
     if (stored && !equal(stored, priorEvidence)) throw new BitfsFundingError("integrity", "会话证据与交易 outbox 的 exact bytes 不一致");
     deps.assertCurrentContext({ ownerPublicKeyHex: owner, network, generation: input.generation });
-    if (!stored) await deps.transactions.putTransaction(txid, priorEvidence, deps.nowMs());
+    if (!stored) await deps.transactions.putTransaction(txid, priorEvidence, deps.nowMs(), "wallet");
     const expectedOutput = {
       txid,
       vout: 0,
@@ -1061,7 +1061,7 @@ export async function prepareBitfsFunding(input: {
     const withEvidence = await deps.sessions.putEvidence(input.sessionId, latestSession.revision, "funding-transaction", rawTransaction, deps.nowMs());
 
     // exact 交易进入独立 outbox；putTransaction 会回读并比较全部交易字节。
-    await deps.transactions.putTransaction(preview.txid, rawTransaction, deps.nowMs());
+    await deps.transactions.putTransaction(preview.txid, rawTransaction, deps.nowMs(), "wallet");
     outboxDurable = true;
     const committed = await deps.sessions.update(input.sessionId, withEvidence.revision, { phase: "funding-prepared", pendingTxid: preview.txid }, deps.nowMs());
     if (committed.pendingTxid !== preview.txid || committed.phase !== "funding-prepared") throw new BitfsFundingError("storage", "FundingTx 会话状态回读校验失败");

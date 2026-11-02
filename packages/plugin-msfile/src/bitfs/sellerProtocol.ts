@@ -403,7 +403,7 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
           record = await this.deps.sessions.update(record.sessionId, record.revision, { phase: "close-unknown", pendingTxid: txid }, this.deps.nowMs());
         }
         if (record.phase !== "closed") {
-          let outcome = await this.deps.broadcaster.resume(closeTransaction);
+          let outcome = await this.deps.broadcaster.resume(closeTransaction, "pool");
           if (outcome.status === "result-unknown" && outcome.retryable) {
             // 节点明确查不到时只重放相同双签交易，不重新构造或签名。
             outcome = await this.deps.broadcaster.retry(txid);
@@ -441,7 +441,7 @@ export class BitfsSellerProtocol implements BitfsSellerProtocolPort {
       }
       const txid = bitfsTxidHex(closeTransaction);
       record = await this.deps.sessions.update(record.sessionId, record.revision, { phase: "close-unknown", pendingTxid: txid }, this.deps.nowMs());
-      let outcome = await this.deps.broadcaster.submit(closeTransaction);
+      let outcome = await this.deps.broadcaster.submit(closeTransaction, "pool");
       if (outcome.status === "result-unknown") outcome = await this.deps.broadcaster.reconcile(txid);
       if (outcome.status === "result-unknown" && outcome.retryable) outcome = await this.deps.broadcaster.retry(txid);
       if (outcome.status === "confirmed") {

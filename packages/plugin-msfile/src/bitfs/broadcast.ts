@@ -25,8 +25,12 @@ export type BitfsTransactionState =
   /** 确定未派发；允许重放同一 exact bytes。 */
   | "failed";
 
+export type BitfsSubmissionPath = "wallet" | "pool";
+
 /** 交易 outbox 的恢复索引；不包含交易原文。 */
 export interface BitfsTransactionRecord {
+  /** Bound before dispatch; retries reuse this business context, never inspect parents. */
+  submissionPath?: BitfsSubmissionPath;
   /** canonical txid（64 位小写 hex）。 */
   txid: string;
   /** 当前本地状态。 */
@@ -42,7 +46,7 @@ export interface BitfsTransactionRecord {
 /** 交易 outbox 持久化端口；与协议 Artifact journal 共用独立 purpose。 */
 export interface BitfsTransactionJournal {
   /** 先写入 exact 交易原文与 canonical txid；同一 txid 绑定不同字节时拒绝。 */
-  putTransaction(txid: string, rawTx: Uint8Array, nowMs: number): Promise<void>;
+  putTransaction(txid: string, rawTx: Uint8Array, nowMs: number, submissionPath?: BitfsSubmissionPath): Promise<void>;
   /** 读取 exact 交易原文副本。 */
   getTransaction(txid: string): Promise<Uint8Array | undefined>;
   /** 读取恢复索引。 */
@@ -75,7 +79,7 @@ export function createBitfsTransactionJournal(store: BorrowedModuleFileStore): B
     return parseRecord(value, txid);
   };
   return {
-    async putTransaction(txid, rawTx, nowMs) {
+    async putTransaction(txid, rawTx, nowMs, submissionPath) {
       assertId(txid);
       if (!(rawTx instanceof Uint8Array) || rawTx.byteLength === 0) throw new TypeError("BitFS 交易原文不能为空");
       const prior = await store.get(rawPath(txid));
@@ -84,8 +88,11 @@ export function createBitfsTransactionJournal(store: BorrowedModuleFileStore): B
       const committed = await store.get(rawPath(txid));
       if (!committed || !equal(committed.bytes, rawTx)) throw new Error("BitFS 交易 outbox 持久化校验失败");
       const existing = await readRecord(txid);
+      if (existing?.submissionPath && submissionPath && existing.submissionPath !== submissionPath) throw new Error("BitFS submission path conflicts with retained business context");
       if (!existing) {
-        await store.put(recordPath(txid), encodeRecord({ txid, state: "prepared", attempts: 0, updatedAt: iso(nowMs) }), { ifNoneMatch: true });
+        await store.put(recordPath(txid), encodeRecord({ txid, state: "prepared", attempts: 0, updatedAt: iso(nowMs), ...(submissionPath ? {submissionPath} : {}) }), { ifNoneMatch: true });
+      } else if (submissionPath && !existing.submissionPath) {
+        await store.put(recordPath(txid), encodeRecord({...existing, submissionPath}));
       }
     },
     async getTransaction(txid) {
@@ -98,6 +105,7 @@ export function createBitfsTransactionJournal(store: BorrowedModuleFileStore): B
       if (!existing) throw new Error("BitFS 交易尚未进入 outbox");
       await store.put(recordPath(input.txid), encodeRecord({
         txid: input.txid,
+        ...(existing.submissionPath ? {submissionPath: existing.submissionPath} : {}),
         state: input.state,
         attempts: input.attempts,
         updatedAt: iso(input.nowMs),
@@ -130,6 +138,7 @@ export interface BitfsChainPort {
     txid: string;
     /** 已签名原始交易 hex。 */
     rawTxHex: string;
+    submissionPath: BitfsSubmissionPath;
   }): Promise<{ outcome: "accepted" | "already-known" }>;
   /** 按 txid 查询链上/内存池状态；查询失败或超时必须返回 unknown，不得当作 absent。 */
   lookupTransaction(txid: string): Promise<"confirmed" | "mempool" | "absent" | "unknown">;
@@ -160,12 +169,12 @@ export class BitfsTransactionBroadcaster {
   constructor(private readonly deps: BitfsTransactionBroadcasterDeps) {}
 
   /** 先持久化再广播一笔新交易；同 txid 已存在时只重放已保存字节。 */
-  async submit(rawTx: Uint8Array, signal?: AbortSignal): Promise<BitfsBroadcastOutcome> {
+  async submit(rawTx: Uint8Array, submissionPath: BitfsSubmissionPath, signal?: AbortSignal): Promise<BitfsBroadcastOutcome> {
     if (!(rawTx instanceof Uint8Array) || rawTx.byteLength === 0) throw new TypeError("BitFS 广播需要非空交易原文");
     const txid = canonicalTxid(rawTx);
     const existing = await this.deps.journal.getTransaction(txid);
     if (existing && !equal(existing, rawTx)) throw new Error("BitFS txid 已绑定不同交易字节");
-    await this.deps.journal.putTransaction(txid, rawTx, this.deps.nowMs());
+    await this.deps.journal.putTransaction(txid, rawTx, this.deps.nowMs(), submissionPath);
     const record = await this.deps.journal.getTransactionRecord(txid);
     if (record?.state === "confirmed") return { status: "confirmed", txid, attempts: record.attempts };
     return this.dispatch(txid, rawTx, signal);
@@ -207,25 +216,27 @@ export class BitfsTransactionBroadcaster {
    * 从已持久化的会话交易恢复：新交易或尚未派发状态可发送 exact bytes；
    * 已派发状态只查询 txid，避免重启时盲目重放。
    */
-  async resume(rawTx: Uint8Array, signal?: AbortSignal): Promise<BitfsBroadcastOutcome> {
+  async resume(rawTx: Uint8Array, submissionPath: BitfsSubmissionPath, signal?: AbortSignal): Promise<BitfsBroadcastOutcome> {
     if (!(rawTx instanceof Uint8Array) || rawTx.byteLength === 0) throw new TypeError("BitFS 恢复需要非空交易原文");
     const txid = canonicalTxid(rawTx);
     const existing = await this.deps.journal.getTransactionRecord(txid);
-    if (!existing || existing.state === "prepared" || existing.state === "failed") return this.submit(rawTx, signal);
+    if (!existing || existing.state === "prepared" || existing.state === "failed") return this.submit(rawTx, submissionPath, signal);
     const stored = await this.deps.journal.getTransaction(txid);
     if (!stored || !equal(stored, rawTx)) throw new Error("BitFS 恢复交易与 outbox exact bytes 不一致");
+    await this.deps.journal.putTransaction(txid, rawTx, this.deps.nowMs(), submissionPath);
     return this.reconcile(txid, signal);
   }
 
   private async dispatch(txid: string, rawTx: Uint8Array, signal?: AbortSignal): Promise<BitfsBroadcastOutcome> {
     const record = await this.deps.journal.getTransactionRecord(txid);
-    const attempts = (record?.attempts ?? 0) + 1;
+    if (!record?.submissionPath) throw new Error("BitFS dispatch requires retained submission path");
+    const attempts = record.attempts + 1;
     if (signal?.aborted) {
       await this.mark(txid, "failed", attempts, "cancelled-before-dispatch");
       return { status: "failed", txid, attempts, reason: "cancelled" };
     }
     try {
-      await this.deps.chain.broadcast({ txid, rawTxHex: toHex(rawTx) });
+      await this.deps.chain.broadcast({ txid, rawTxHex: toHex(rawTx), submissionPath: record.submissionPath });
       // 链端口已验证 WOC 成功回执与 canonical txid；业务可立即花费其输出。
       // confirmed 是 outbox 的确定成功状态，不要求交易已经进块。
       await this.mark(txid, "confirmed", attempts);
@@ -256,11 +267,12 @@ export class BitfsTransactionBroadcaster {
 function parseRecord(value: unknown, expectedTxid: string): BitfsTransactionRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("BitFS 交易 outbox 索引格式错误");
   const row = value as Record<string, unknown>;
-  const keys = ["format", "version", "txid", "state", "attempts", "updatedAt", "lastError"];
+  const keys = ["format", "version", "txid", "state", "attempts", "updatedAt", "lastError", "submissionPath"];
   if (Object.keys(row).some((key) => !keys.includes(key))
     || row.format !== TX_FORMAT
     || row.version !== TX_VERSION
     || row.txid !== assertId(expectedTxid)) throw new Error("BitFS 交易 outbox 索引格式错误");
+  if (row.submissionPath !== undefined && row.submissionPath !== "wallet" && row.submissionPath !== "pool") throw new Error("BitFS submission path invalid");
   const states: BitfsTransactionState[] = ["prepared", "result-unknown", "confirmed", "failed"];
   if (!states.includes(row.state as BitfsTransactionState)) throw new Error("BitFS 交易 outbox 状态错误");
   if (!Number.isSafeInteger(row.attempts) || (row.attempts as number) < 0) throw new Error("BitFS 交易 outbox 尝试次数错误");
@@ -270,6 +282,7 @@ function parseRecord(value: unknown, expectedTxid: string): BitfsTransactionReco
   if (lastError !== undefined && lastError.length > 256) throw new Error("BitFS 交易 outbox 诊断文本过长");
   return {
     txid: expectedTxid,
+    ...(row.submissionPath ? {submissionPath: row.submissionPath as BitfsSubmissionPath} : {}),
     state: row.state as BitfsTransactionState,
     attempts: row.attempts as number,
     updatedAt,

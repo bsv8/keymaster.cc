@@ -10,11 +10,10 @@ import { p2pkScriptFromPublicKey, publisherMatchesPaymentScript } from "./p2pkhP
 import type { P2pkhStateRepositoryHandle } from "./storage/p2pkhStateRepository.js";
 import { calcTxidFromRawTxHex, type UnsignedTx, rawTxHexByteLength, signP2pkhTx } from "./p2pkhSigner.js";
 import { p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
-import type { P2pkhManagerInputEvidence, P2pkhUtxoManager } from "./p2pkhUtxoManager.js";
+import type { P2pkhUtxoManager } from "./p2pkhUtxoManager.js";
 
 export interface P2pkhTransferServiceDeps {
   vault: Pick<VaultService, "status" | "createActiveKeyCrypto">;
-  previousTransactions(network: "main" | "test", inputs: readonly P2pkhUtxo[]): Promise<string[]>;
   messageBus: MessageBus;
   getStore: (publicKeyHex: string) => Promise<P2pkhStateRepositoryHandle>;
   centralBroadcastService?: CentralBroadcastService;
@@ -142,8 +141,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       const frozen = recall(remembered.previewId, true);
       const selected = managerInputs.map(row => row.utxo);
       try {
-        // 已由 manager 选定并占用；错误由 manager/提交结果报告，不在此重复查链。
-        await loadPreviousTransactions(network, selected, managerInputs, deps.previousTransactions);
+        // Manager already supplies trusted prevout parameters; signing needs no parent bytes.
         if (options?.signal?.aborted) throw new Error("Transfer signing cancelled");
       } catch (error) {
         await manager.release({ ownerPublicKeyHex: owner.publicKeyHex, network, allocationId: frozen.managerAllocationId! });
@@ -206,14 +204,6 @@ function unsignedFromExact(rawTxHex: string): UnsignedTx {
     inputs: parsed.inputs.map(row => ({ prevTxid: row.txid, prevVout: row.vout, scriptSig: bytes(row.scriptSigHex), sequence: row.sequence })),
     outputs: parsed.outputs.map(row => ({ value: Number(row.value), script: bytes(row.scriptHex) })),
   };
-}
-async function loadPreviousTransactions(network: "main" | "test", selected: readonly P2pkhUtxo[], evidence: readonly P2pkhManagerInputEvidence[], fetch: P2pkhTransferServiceDeps["previousTransactions"]): Promise<string[]> {
-  const byOutpoint = new Map(evidence.map(row => [`${row.utxo.txid.toLowerCase()}:${row.utxo.vout}`, row]));
-  const missing = selected.filter(row => !byOutpoint.get(`${row.txid.toLowerCase()}:${row.vout}`)?.previousTransactionHex);
-  const fetched = missing.length > 0 ? await fetch(network, missing) : [];
-  if (fetched.length !== missing.length) throw new Error("Previous transaction evidence count does not match Manager inputs");
-  let fetchedIndex = 0;
-  return selected.map(row => byOutpoint.get(`${row.txid.toLowerCase()}:${row.vout}`)?.previousTransactionHex ?? fetched[fetchedIndex++]!);
 }
 /** Preserve the original task's wallet ownership, never switch an old task to a new key. */
 async function resolveOwnerKeyIdentity(deps: P2pkhTransferServiceDeps, ownerPublicKeyHex: string): Promise<ReadyKeyIdentity> {

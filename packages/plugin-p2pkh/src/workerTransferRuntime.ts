@@ -77,7 +77,6 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
         allocationId: planned.allocationId,
         selected: planned.selectedInputs.map(row => ({
           txid: row.utxo.txid, vout: row.utxo.vout, value: row.utxo.value, address: row.utxo.address,
-          ...(row.previousTransactionHex === undefined ? {} : { previousTransactionHex: row.previousTransactionHex }),
         })),
         totalInputSatoshis: planned.totalInputSatoshis,
       };
@@ -188,7 +187,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     const assertActive = () => { deps.assertActive(); const now = deps.session(); const current = requireUnlockedWalletIdentity(deps.walletState().snapshot()); if (generation !== token || !now.unlocked || now.owner !== owner || now.epoch !== epoch || current.publicKeyHex.toLowerCase() !== owner.toLowerCase() || current.bsvNetwork !== network) throw new Error("Protocol wallet instance revoked"); };
     const run = createWorkerProtocolRuntime({
        assertActive, owner, network, storage: deps.storage(), crypto: deps.crypto,
-      central: central!, query: () => deps.query?.(),
+      central: central!,
       protocolManager: protocolManagerPort,
     });
     protocolStarting = run;
@@ -253,7 +252,5 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     await utxoManager!.observeAcceptedExact({ ...input, resource });
     deps.fundsChanged(input);
   }
-  async function ownsWalletExact(input: SnapshotInput & { txid: string; rawTxHex: string }) { await ensure(); return utxoManager!.ownsWalletExact(input); }
-  async function previousTransaction(input: SnapshotInput & { txid: string }) { await ensure(); return utxoManager!.previousTransaction(input); }
-  return { ensure, ensureProtocol, identityFor, release, occupyDeliveredArtifact, submitWalletExact, ownsWalletExact, previousTransaction, observeBusinessReceipt, protectedOutpoints: () => protocol?.protectedOutpoints };
+  return { ensure, ensureProtocol, identityFor, release, occupyDeliveredArtifact, submitWalletExact, observeBusinessReceipt, protectedOutpoints: () => protocol?.protectedOutpoints };
 }

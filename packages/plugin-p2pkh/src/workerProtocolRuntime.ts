@@ -1,5 +1,4 @@
-import { requireWocNetwork } from "@keymaster/contracts";
-import type { ActiveKeyCrypto, BorrowedModuleFileStore, CentralBroadcastService, ProtectedOutpoint, ProtocolSubmissionObservation, WocService } from "@keymaster/contracts";
+import type { ActiveKeyCrypto, BorrowedModuleFileStore, CentralBroadcastService, ProtectedOutpoint, ProtocolSubmissionObservation } from "@keymaster/contracts";
 import { createP2pkhProtocolSpendService, type P2pkhProtocolManagerPort } from "./p2pkhProtocolSpend.js";
 import { createProtectedOutpointRegistry } from "./registries/protectedOutpointRegistry.js";
 import { createWalletProtectedOutpoints } from "./registries/walletProtectedOutpoints.js";
@@ -12,8 +11,7 @@ export interface WorkerProtocolDependencies {
   storage: BorrowedModuleFileStore;
   crypto(owner: string): Promise<ActiveKeyCrypto>;
   central: CentralBroadcastService;
-  query(): WocService | undefined;
-  /** UTXO manager port: durable pre-sign intent and exact-byte ownership. */
+  /** UTXO manager port: runtime input allocation and caller-owned exact records. */
   protocolManager?: P2pkhProtocolManagerPort;
 }
 
@@ -56,7 +54,6 @@ export async function createWorkerProtocolRuntime(deps: WorkerProtocolDependenci
     }
   };
   const executor = createP2pkhProtocolSpendService({
-    previousTransactions: async (network, inputs) => { const q = deps.query(); if (!q?.getRawTransaction) throw new Error("Complete previous transaction reader unavailable"); const raw = await Promise.all(inputs.map(i => requireWocNetwork(q, network).getRawTransaction!(i.txid))); check(); return raw; },
     vault: { status: () => { check(); return "unlocked"; }, createActiveKeyCrypto: async () => { check(); const crypto = await deps.crypto(deps.owner); check(); return crypto; } },
     centralBroadcastService: deps.central,
     getKeyForOwner: async () => { check(); return { publicKeyHex: deps.owner }; },

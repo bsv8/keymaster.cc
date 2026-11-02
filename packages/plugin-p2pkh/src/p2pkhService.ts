@@ -312,15 +312,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
   }
 
   const transfer = createP2pkhTransferService({
-    async previousTransactions(network, inputs) {
-      if (!deps.woc?.getRawTransaction) throw new Error("Previous transaction evidence is unavailable");
-      const fetched = new Map<string, Promise<string>>();
-      return Promise.all(inputs.map(input => {
-        let raw = fetched.get(input.txid);
-        if (!raw) { raw = requireWocNetwork(deps.woc!, network).getRawTransaction(input.txid); fetched.set(input.txid, raw); }
-        return raw;
-      }));
-    },
     vault: deps.vault,
     utxoManager: deps.utxoManager,
     centralBroadcastService: deps.centralBroadcastService,

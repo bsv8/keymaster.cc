@@ -23,7 +23,7 @@ import {
   type UnsignedTx,
 } from "./p2pkhSigner.js";
 import { resourceIdFor } from "./storage/p2pkhStateRepository.js";
-import { parseP2pkhTransaction, p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
+import { p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
 
 // value 必须随协议 claim 一起写入，供协议资产自身的审计与恢复使用；
 // 普通 P2PKH 余额不读取这些 claim，避免把协议资产保护混入 P2PKH 选币。
@@ -70,7 +70,6 @@ export interface P2pkhProtocolManagerPort {
 
 export interface P2pkhProtocolSpendDeps {
   vault: Pick<VaultService, "status" | "createActiveKeyCrypto">;
-  previousTransactions(network: BsvNetwork, inputs: readonly ProtocolSpendInput[]): Promise<string[]>;
   /** 生产广播入口；协议 spend 不直接依赖 WOC 或其它 Provider。 */
   centralBroadcastService?: CentralBroadcastService;
   getKeyForOwner: (ownerPublicKeyHex: string) => Promise<{ publicKeyHex: string }>;
@@ -233,16 +232,11 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
         // 输入占用先于额度批准/签名，竞争失败不产生第二份可花费签名。
         // New wallet occupations belong exclusively to the manager. The
         // claim store remains readable only for historical signed records.
-        // Decode external parent evidence exactly once. Whether cached or
-        // fetched, its txid/vout/value must match the intended chain input.
-        // The manager's script/value facts come from these bytes.
-        const prevoutFacts = await Promise.all(input.inputs.map(async item => {
-          const raw = item.previousTransactionHex ?? (await deps.previousTransactions(input.network, [item]))[0];
-          if (!raw) throw new Error("Complete previous transaction reader unavailable");
-          const previous = parseP2pkhTransaction(raw, item.txid);
-          const output = previous.outputs[item.vout];
-          if (!output || output.value !== item.value) throw new Error("Protocol previous transaction output does not match input");
-          return { outpoint: `${item.txid.toLowerCase()}:${item.vout}`, value: String(output.value), scriptHex: output.scriptHex.toLowerCase() };
+        // Internal callers supply trusted prevout facts. Do not load a whole
+        // parent transaction to repeat amount/ownership checks at signing.
+        const prevoutFacts = input.inputs.map(item => ({
+          outpoint: `${item.txid.toLowerCase()}:${item.vout}`,
+          scriptHex: (item.lockingScriptHex ?? p2pkhAddressToScriptHex(item.address, input.network)).toLowerCase(),
         }));
         const walletScriptHex = p2pkhScriptForPublicKey(resolvedOwner.publicKeyHex);
         const managerIntent = await deps.protocolManager!.allocateInputs({

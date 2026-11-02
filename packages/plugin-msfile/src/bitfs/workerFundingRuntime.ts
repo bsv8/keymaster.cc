@@ -1,4 +1,3 @@
-import { requireWocNetwork } from "@keymaster/contracts";
 import type { BorrowedModuleFileStore, ProtocolSpendService, ProtocolSpendInput, WocService } from "@keymaster/contracts";
 import { createBitfsFundingLedger, recoverBitfsFundingSplits, type BitfsFundingLedger, type BitfsFundingTransactionView } from "./funding.js";
 import { createBitfsTransactionJournal, type BitfsTransactionJournal, type BitfsChainPort } from "./broadcast.js";
@@ -12,8 +11,6 @@ export interface WorkerFundingDependencies {
   walletView(input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<import("@keymaster/contracts").P2pkhUtxoSnapshotResult>;
   protocol(): Promise<{ readonly identity: Readonly<import("@keymaster/contracts").NetworkIdentity>; spend: ProtocolSpendService; planFunding(input: import("@keymaster/contracts").ProtocolFundingPlanRequest): Promise<{ allocationId: string; selected: ProtocolSpendInput[]; totalInputSatoshis: number }> }>;
   submitWalletExact(input: { ownerPublicKeyHex: string; network: "main" | "test"; txid: string; rawTxHex: string }): Promise<{ outcome: "accepted" | "already-known" }>;
-  ownsWalletExact(input: { ownerPublicKeyHex: string; network: "main" | "test"; txid: string; rawTxHex: string }): Promise<boolean>;
-  previousTransaction(input: { ownerPublicKeyHex: string; network: "main" | "test"; txid: string }): Promise<string | null>;
   observeBusinessReceipt(input: { ownerPublicKeyHex: string; network: "main" | "test"; rawTxHex: string }): Promise<void>;
   ensureResources(owner: string, bsvNetwork: "main" | "test"): Promise<FundingResource[]>;
   walletIdentity(): Readonly<import("@keymaster/contracts").NetworkIdentity>;
@@ -37,16 +34,12 @@ export function createWorkerFundingRuntime(deps: WorkerFundingDependencies) {
     }
     return ledger;
   }
-  function protocolSpend(transactions?: BitfsTransactionJournal): ProtocolSpendService {
+  function protocolSpend(): ProtocolSpendService {
     return {
       async prepare() { throw new Error("BitFS funding requires explicit presign"); },
       async presign(input) {
         const service = await deps.protocol();
-        const inputs = await Promise.all(input.inputs.map(async item => {
-          const raw = await transactions?.getTransaction(item.txid);
-          return raw ? { ...item, previousTransactionHex: hex(raw) } : item;
-        }));
-        return service.spend.presign({ ...input, inputs, deferDispatch: true });
+        return service.spend.presign({ ...input, deferDispatch: true });
       },
       async submit() { throw new Error("BitFS funding dispatch requires verified Kind 3 and durable business evidence"); },
       async releasePrepared(preview) { await (await deps.protocol()).spend.releasePrepared!(preview); },
@@ -77,27 +70,10 @@ export function createWorkerFundingRuntime(deps: WorkerFundingDependencies) {
     return {
       async broadcast(input) {
         check();
-        const parsed = deps.parseTransaction(input.rawTxHex, input.txid);
-        const owned = await deps.ownsWalletExact({ ownerPublicKeyHex: owner, network, ...input });
-        check();
-        if (owned) return deps.submitWalletExact({ ownerPublicKeyHex: owner, network, ...input });
-        const walletScript = deps.addressScript(deps.deriveAddress(owner, network), network).toLowerCase();
-        let walletInput = false;
-        for (const row of parsed.inputs) {
-          const [txid, vout] = row.outpointKey.split(":");
-          const managerParent = await deps.previousTransaction({ ownerPublicKeyHex: owner, network, txid: txid! });
-          check();
-          const retained = managerParent ? undefined : await transactions.getTransaction(txid!);
-          if (!managerParent && !retained && !woc.getRawTransaction) throw new Error("BitFS previous transaction reader unavailable");
-          const raw = managerParent ?? (retained ? hex(retained) : await requireWocNetwork(woc, network).getRawTransaction!(txid!));
-          check();
-          const previous = deps.parseTransaction(raw, txid);
-          const output = previous.outputs.find(item => item.vout === Number(vout));
-          if (!output) throw new Error("BitFS input has no trusted prevout");
-          walletInput ||= output.scriptHex.toLowerCase() === walletScript;
-        }
-        check();
-        if (walletInput) return deps.submitWalletExact({ ownerPublicKeyHex: owner, network, ...input });
+        deps.parseTransaction(input.rawTxHex, input.txid);
+        // Trusted business context is retained by the outbox for retries/recovery.
+        // Wallet dispatch still requires the current manager allocation.
+        if (input.submissionPath === "wallet") return deps.submitWalletExact({ ownerPublicKeyHex: owner, network, ...input });
         const result = await businessChain.broadcast(input);
         check();
         // Pool business is already authorized. Feed the verified receipt back

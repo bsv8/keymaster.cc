@@ -16,8 +16,6 @@ export const P2PKH_PROTOCOL_SPEND_CAPABILITY = defineCapability<ProtocolSpendSer
 });
 
 export interface ProtocolSpendInput {
-  /** 本实例成功交易的完整前序原文，避免等待 WoC 原文索引。 */
-  previousTransactionHex?: string;
   txid: string;
   vout: number;
   value: number;

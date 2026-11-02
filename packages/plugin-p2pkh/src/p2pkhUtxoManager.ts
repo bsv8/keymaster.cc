@@ -8,7 +8,7 @@ import type { P2pkhKeyResource, P2pkhUtxo } from "./p2pkhContracts.js";
 
 type Resource = Pick<P2pkhKeyResource, "resourceId" | "network" | "address">;
 type Identity = { ownerPublicKeyHex: string; network: "main" | "test" };
-export interface P2pkhManagerInputEvidence { utxo: P2pkhUtxo; previousTransactionHex?: string }
+export interface P2pkhManagerInputEvidence { utxo: P2pkhUtxo }
 export interface P2pkhManagerReservation {
  allocationId: string; unsignedTxHex: string; businessSats: string; feeSats: string; changeSats: string; totalInSats: string;
  selectedOutpoints: string[]; selectedInputs: P2pkhManagerInputEvidence[];
@@ -40,10 +40,10 @@ export function createP2pkhUtxoManager(input: {files: BorrowedModuleFileStore}):
  }
  function scoped(request: Identity) {return state(request.ownerPublicKeyHex, {resourceId: `p2pkh:${request.network}`, network: request.network, address: deriveP2pkhAddress(request.ownerPublicKeyHex, request.network)});}
  function evidence(s: State, keys: readonly string[]): P2pkhManagerInputEvidence[] {
-  return keys.map(key => {const row = s.pool.lookup(key); const raw = s.pool.previousTransaction(row.txid);
+  return keys.map(key => {const row = s.pool.lookup(key);
    return {utxo: {id: key, resourceId: s.resource.resourceId, publicKeyHex: s.owner, network: s.resource.network, address: s.resource.address,
     txid: row.txid, vout: row.vout, value: Number(row.value), script: row.scriptHex, height: row.height, status: row.status,
-    isSpentInMempoolTx: false, syncedAt: new Date().toISOString()}, ...(raw ? {previousTransactionHex: raw} : {})};});
+    isSpentInMempoolTx: false, syncedAt: new Date().toISOString()}};});
  }
  const manager = {
   dispose() {disposed = true; states.clear(); if (instances.get(input.files) === manager) instances.delete(input.files);},
@@ -102,10 +102,12 @@ export function createP2pkhUtxoManager(input: {files: BorrowedModuleFileStore}):
    return {txid: tx.canonicalTxid};
   },
   async observeAcceptedExact(request: {ownerPublicKeyHex: string; resource: Resource; rawTxHex: string}) {
-   state(request.ownerPublicKeyHex, request.resource).pool.acceptTransaction(request.rawTxHex);
+   const tx = parseTx(request.rawTxHex);
+   state(request.ownerPublicKeyHex, request.resource).pool.acceptTransaction({
+    txid: tx.canonicalTxid, spentOutpoints: tx.inputs.map(row => row.outpointKey),
+    outputs: tx.outputs.map((row, vout) => ({vout, value: String(row.value), scriptHex: row.scriptHex})),
+   });
   },
-  async previousTransaction(request: Identity & {txid: string}) {return scoped(request).pool.previousTransaction(request.txid);},
-  async ownsWalletExact(request: Identity & {txid: string; rawTxHex: string}) {return [...scoped(request).records.values()].some(row => row.txid === request.txid && row.rawTxHex === request.rawTxHex);},
   async walletTransaction(request: Identity & {txid: string}) {return [...scoped(request).records.values()].find(row => row.txid === request.txid);},
   async paymentStatus(request: Identity & {paymentId: string}): Promise<P2pkhPaymentLookupResult> {
    const s = scoped(request), record = [...s.records.values()].find(row => row.paymentId === request.paymentId);
@@ -126,8 +128,6 @@ export interface P2pkhUtxoManager {
  allocateInputs(request: InputAllocation): Promise<{allocationId: string}>;
  rememberTransaction(request: {ownerPublicKeyHex: string; resource: Resource; allocationId: string; signedTxHex: string}): Promise<{txid: string}>;
  observeAcceptedExact(request: {ownerPublicKeyHex: string; resource: Resource; rawTxHex: string}): Promise<void>;
- previousTransaction(request: Identity & {txid: string}): Promise<string | null>;
- ownsWalletExact(request: Identity & {txid: string; rawTxHex: string}): Promise<boolean>;
  walletTransaction(request: Identity & {txid: string}): Promise<TransactionRecord | undefined>;
  paymentStatus(request: Identity & {paymentId: string}): Promise<P2pkhPaymentLookupResult>;
 }

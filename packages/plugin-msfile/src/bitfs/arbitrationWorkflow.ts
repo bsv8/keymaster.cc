@@ -165,7 +165,7 @@ export class BitfsArbitrationWorkflow {
           await this.save(id, "kind9-arbitration-response", response);
           await this.save(id, "arbitrated-payment-transaction", transaction);
         }
-        let outcome = await this.deps.broadcaster.resume(transaction, this.deps.signal);
+        let outcome = await this.deps.broadcaster.resume(transaction, "pool", this.deps.signal);
         if (outcome.status === "result-unknown" && outcome.retryable) outcome = await this.deps.broadcaster.retry(outcome.txid, this.deps.signal);
         this.deps.assertActive();
         const latest = await this.record(id);

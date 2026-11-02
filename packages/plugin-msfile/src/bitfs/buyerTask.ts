@@ -639,7 +639,7 @@ export function createBitfsBuyerTask(deps: BitfsBuyerTaskDeps): BitfsBuyerTask {
           ? await deps.broadcaster.reconcile(fundingTxid)
           : record?.state === "failed"
             ? { status: "failed" as const, txid: fundingTxid, attempts: record.attempts, reason: "funding-transaction-already-failed" }
-            : await deps.broadcaster.submit(evidence.fundingTransactionRaw);
+            : await deps.broadcaster.submit(evidence.fundingTransactionRaw, "wallet");
       deps.assertCurrentContext();
 
       if (outcome.status === "result-unknown") {
@@ -964,7 +964,7 @@ export function createBitfsBuyerTask(deps: BitfsBuyerTaskDeps): BitfsBuyerTask {
       deps.assertCurrentContext();
       let outcome = outboxRecord?.state === "result-unknown" || outboxRecord?.state === "confirmed"
         ? await deps.broadcaster.reconcile(recoveryTxid)
-        : await deps.broadcaster.submit(recoveryRaw);
+        : await deps.broadcaster.submit(recoveryRaw, "pool");
       if (outcome.status === "result-unknown" && outcome.retryable && outboxRecord
         && deps.nowMs() - Date.parse(outboxRecord.updatedAt) >= POOL_RECOVERY_RETRY_INTERVAL_MS) {
         outcome = await deps.broadcaster.retry(recoveryTxid);
