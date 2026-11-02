@@ -28,11 +28,10 @@ export interface WorkerBroadcastDependencies {
     txid: string; inputOutpointKeys: readonly string[];
   }): Promise<{ ok: boolean; protectedInputs: string[] }>;
   abortNotDispatched(request: BroadcastRequest, reason: string): Promise<void>;
-  refresh(): Promise<{ main?: number; test?: number }>;
   publishChanged(event: { type: "asset.data-changed"; providerId: string; publicKeyHex: string; kinds: string[]; utxoSeqs?: { main?: number; test?: number } }): void;
 }
 
-/** Owns submission validation, write-ahead audit, snapshot consumption and provider result reconciliation. */
+/** Owns submission validation, write-ahead audit and provider result reconciliation. */
 export async function executeWorkerP2pkhBroadcast(
   requestId: string,
   request: BroadcastRequest,
@@ -200,13 +199,9 @@ export async function executeWorkerP2pkhBroadcast(
     }
     const finishedAt = new Date().toISOString();
     await repository.finishLocalSubmission({ submissionId: local.id, localState: "local-confirmed", attempt: { id: `${local.id}:${startedAt}`, submissionId: local.id, providerId: provider.descriptor.id, startedAt, finishedAt, status: result.status, providerReference: result.providerReference, providerCode: result.providerCode, providerMessage: result.providerMessage } });
-    // Refresh chain observations after dispatch. The manager, not the snapshot
-    // cursor or display journal, owns spendability and input responsibility.
-    void deps.refresh().then((utxoSeqs) => {
-      deps.publishChanged( { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "submission", "balance"], ...(Object.keys(utxoSeqs).length === 0 ? {} : { utxoSeqs }) });
-    }).catch(() => {
-      deps.publishChanged( { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["submission", "balance"] });
-    });
+    // Funds notifications belong to the caller after manager settlement is durable.
+    // Broadcasting itself never refreshes UTXOs.
+    deps.publishChanged({ type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["submission"] });
     return {
       requestId,
       sessionEpoch: deps.sessionEpoch(),

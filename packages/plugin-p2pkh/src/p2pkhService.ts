@@ -300,19 +300,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
     return result.value;
   }
 
-  /** 从快照得到该 owner/network 的可花费 UTXO（只排除内存池已花费输出）。 */
-  async function listSpendableUtxosFromSnapshot(input: {
-    resource: P2pkhKeyResource;
-    snapshot: P2pkhUtxoSnapshotResult;
-    ownerPublicKeyHex: string;
-  }): Promise<P2pkhUtxo[]> {
-    if (!input.snapshot.hasResult) return [];
-    const candidates = input.snapshot.items
-      .filter((item) => !item.isSpentInMempoolTx)
-      .map((item) => snapshotItemToUtxo({ item, resource: input.resource }));
-    return canonicalizeP2pkhUtxos(candidates);
-  }
-
   /** 同一身份、同一 manager 投影；读取和刷新共享 DTO 与映射规则。 */
   async function readAvailableUtxos(mode: "get" | "refresh"): Promise<P2pkhAvailableUtxos> {
     assertWalletSession();
@@ -355,21 +342,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
     broadcastWithCoordinator: deps.broadcastWithCoordinator,
     messageBus: deps.messageBus,
     getStore: (publicKeyHex) => ensureRepositoryForOwner(publicKeyHex),
-    loadSpendableUtxos: async ({ ownerPublicKeyHex, resource, purpose }) => {
-      // 转账与其它花 UTXO 的入口共用同一道门禁。
-      await protectionGate(deps)();
-      if (!deps.utxoManager) throw new Error("Wallet funding requires the Worker manager");
-      let snapshot: P2pkhUtxoSnapshotResult;
-      try {
-        snapshot = await requireUtxoSnapshot({ ownerPublicKeyHex, network: resource.network }, "refresh");
-      } catch (error) {
-        // A failed provider observation cannot erase durable manager facts.
-        // The manager still independently validates the held inputs and spend proofs.
-        return { utxos: [] };
-      }
-      const utxos = await listSpendableUtxosFromSnapshot({ resource, snapshot, ownerPublicKeyHex });
-      return { utxos };
-    },
     getActiveKey: () => {
       const state = getVaultLifecycleSnapshot();
       if (!state.activePublicKeyHex) {
@@ -758,6 +730,8 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
       const feeRateSatoshisPerKb = input.feeRateSatoshisPerKb ?? requireWorkerEffectiveFeeRate();
       if (!Number.isSafeInteger(feeRateSatoshisPerKb) || feeRateSatoshisPerKb < 1) throw new Error("P2PKH effective fee rate is invalid");
       const preparedInput = { ...input, feeRateSatoshisPerKb, ownerPublicKeyHex: walletIdentity.publicKeyHex, assetId: walletIdentity.bsvNetwork === "test" ? "bsvtest" as const : "bsv" as const };
+      await protectionGate(deps)();
+      assertWalletSession();
       const result: P2pkhTransferPreview = await transfer.prepare(preparedInput);
       assertWalletSession();
       return result;
@@ -773,6 +747,8 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
       const controller = new AbortController();
       transferRetryControllers.add(controller);
       try {
+        await protectionGate(deps)();
+        assertWalletSession();
         const result = await transfer.submit(preview, { signal: controller.signal });
         assertWalletSession();
         return result;

@@ -147,8 +147,6 @@ export interface P2pkhProtocolIntentInput {
   feeRateSatPerKb: string;
   feeCapSats: string;
   feePolicy: "rate" | "exact";
-  /** Current WoC-derived spendable UTXOs, used to refresh the Manager facts. */
-  utxos: readonly P2pkhUtxo[];
   /** Trusted prevout evidence for external inputs. */
   externalProofs?: Record<string, { value: string; scriptHex: string }>;
   /**
@@ -188,7 +186,6 @@ export interface P2pkhUtxoManager {
   selectProtocolFunding(input: {
     ownerPublicKeyHex: string;
     resource: Pick<P2pkhKeyResource, "resourceId" | "network" | "address">;
-    utxos: readonly P2pkhUtxo[];
     amountSatoshis: number;
     feeRateSatoshisPerKb: number;
     outputs?: Array<{ scriptHex: string; value: string }>;
@@ -196,7 +193,6 @@ export interface P2pkhUtxoManager {
   reserve(input: {
     ownerPublicKeyHex: string;
     resource: P2pkhKeyResource;
-    utxos: readonly P2pkhUtxo[];
     feeRateSatoshisPerKb: number;
     /** Legacy P2PKH recipient. Kept for the existing ordinary transfer path. */
     recipientAddress?: string;
@@ -209,12 +205,11 @@ export interface P2pkhUtxoManager {
     amountSatoshis: number;
     sendAll: boolean;
   }): Promise<P2pkhManagerReservation>;
-  /** Refresh Manager facts/protections, then return the exact held inputs and local parent bytes. */
+  /** Read manager-held inputs and local parent bytes with current protections. No chain refresh. */
   refreshAllocationInputs(input: {
     ownerPublicKeyHex: string;
     resource: Pick<P2pkhKeyResource, "resourceId" | "network" | "address">;
     allocationId: string;
-    utxos: readonly P2pkhUtxo[];
   }): Promise<P2pkhManagerInputEvidence[]>;
   prepareSigning(input: { ownerPublicKeyHex: string; resource: Pick<P2pkhKeyResource, "resourceId" | "network" | "address">; allocationId: string; unsignedTxHex: string }): Promise<void>;
   release(input: { ownerPublicKeyHex: string; network: "main" | "test"; allocationId: string }): Promise<void>;
@@ -595,7 +590,6 @@ async function refreshCandidate(input: {
   state: LoadedState;
   owner: string;
   resource: Pick<P2pkhKeyResource, "resourceId" | "network" | "address">;
-  utxos: readonly P2pkhUtxo[];
   listProtectedOutpoints?: (owner: string, network: "main" | "test") => Promise<readonly { txid: string; vout: number; kind?: string; source?: string; submissionId?: string }[]>;
 }): Promise<{ candidate: FundingKernel; revision: number }> {
   const candidate = input.state.kernel.clone();
@@ -757,7 +751,7 @@ export function createP2pkhUtxoManager(input: {
     async observe(request) {
       const owner = request.ownerPublicKeyHex.toLowerCase();
       const state = await readState(input.files, owner, request.resource);
-      const { candidate } = await refreshCandidate({ files: input.files, state, owner, resource: request.resource, utxos: [], listProtectedOutpoints: input.listProtectedOutpoints });
+      const { candidate } = await refreshCandidate({ files: input.files, state, owner, resource: request.resource, listProtectedOutpoints: input.listProtectedOutpoints });
       const revision = state.value.snapshotRevision + 1;
       if (!Number.isSafeInteger(revision)) throw new Error("UTXO manager observation revision exhausted");
       candidate.applySnapshot({ generation: 1, revision, utxos: snapshotUtxosFor(request.resource, request.utxos) });
@@ -893,7 +887,7 @@ export function createP2pkhUtxoManager(input: {
     async available(request) {
       const owner = request.ownerPublicKeyHex.toLowerCase();
       const state = await readState(input.files, owner, request.resource);
-      const { candidate } = await refreshCandidate({ files: input.files, state, owner, resource: request.resource, utxos: [], listProtectedOutpoints: input.listProtectedOutpoints });
+      const { candidate } = await refreshCandidate({ files: input.files, state, owner, resource: request.resource, listProtectedOutpoints: input.listProtectedOutpoints });
       const outpoints = candidate.spendableOutpoints();
       return { observed: state.value.snapshotRevision > 0 || outpoints.length > 0, inputs: managerInputsEvidence(candidate, outpoints, owner, request.resource) };
     },
@@ -930,7 +924,7 @@ export function createP2pkhUtxoManager(input: {
       const resource = request.resource;
       const state = await readState(input.files, owner, resource);
       const { candidate } = await refreshCandidate({
-        files: input.files, state, owner, resource, utxos: request.utxos,
+        files: input.files, state, owner, resource,
         listProtectedOutpoints: input.listProtectedOutpoints,
       });
       // Use the SAME kernel's selection, fees, ancestry and protected-input
@@ -952,7 +946,7 @@ export function createP2pkhUtxoManager(input: {
       const resource = request.resource;
       const state = await readState(input.files, owner, resource);
       const { candidate, revision } = await refreshCandidate({
-        files: input.files, state, owner, resource, utxos: request.utxos,
+        files: input.files, state, owner, resource,
         listProtectedOutpoints: input.listProtectedOutpoints,
       });
 
@@ -1032,7 +1026,7 @@ export function createP2pkhUtxoManager(input: {
       const resource = request.resource;
       const state = await readState(input.files, owner, resource);
       const { candidate, revision } = await refreshCandidate({
-        files: input.files, state, owner, resource, utxos: request.utxos,
+        files: input.files, state, owner, resource,
         listProtectedOutpoints: input.listProtectedOutpoints,
       });
       const allocation = candidate.allocationView(request.allocationId);
@@ -1358,7 +1352,7 @@ export function createP2pkhUtxoManager(input: {
         return { allocationId: existing.allocationId };
       }
       const { candidate, revision } = await refreshCandidate({
-        files: input.files, state, owner, resource: request.resource, utxos: request.utxos,
+        files: input.files, state, owner, resource: request.resource,
         listProtectedOutpoints: input.listProtectedOutpoints,
       });
       const allocationId = `protocol-${crypto.randomUUID()}`;

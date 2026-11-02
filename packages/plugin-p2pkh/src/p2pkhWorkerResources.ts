@@ -49,7 +49,7 @@ export async function refreshWorkerP2pkhResources(deps: P2pkhWorkerRefreshDepend
     // Refresh ingests provider facts into the manager; it never releases
     // signed/unknown responsibilities based on elapsed time or missing txids.
     deps.assertFresh();
-    const result = await deps.snapshots.refresh(resource, signal ? { signal } : {}).catch(() => undefined);
+    const result = await deps.snapshots.refresh(resource, signal ? { signal } : {});
     deps.assertFresh();
     if (result?.hasResult) utxoSeqs[resource.network] = result.seq;
   }

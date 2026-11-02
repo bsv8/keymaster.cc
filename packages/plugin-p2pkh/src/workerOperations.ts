@@ -156,7 +156,7 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
             listProtectedOutpoints: ports.funding.protected, listProtocolProtectedOutpoints: protocolProtection,
             managerProtocolIntent: request => manager.protocolIntentProof(request),
             abortNotDispatched: async () => { /* Signed recovery NEVER releases an original responsibility. */ },
-            refresh, publishChanged: ports.changed,
+            publishChanged: ports.changed,
           });
           assertFresh();
           const outcome = response.operationResult as { status?: string; canonicalTxid?: string; txid?: string; reason?: string; providerCode?: string } | undefined;
@@ -192,6 +192,7 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
   async function conclusion(requestId: string, request: Extract<CoordinatorClientRequest, { kind: "p2pkh.conclusion" }>): Promise<CoordinatorResponse> {
     try {
       const result = await conclusions.execute(request.input);
+      ports.changed({ type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.input.ownerPublicKeyHex, kinds: ["utxo", "balance", "submission"] });
       return { requestId, sessionEpoch: epoch(), ack: { status: "ok" }, operationResult: result };
     } catch (error) { return { requestId, sessionEpoch: epoch(), ack: { status: "error", message: error instanceof Error ? error.message : String(error) } }; }
   }
@@ -210,7 +211,7 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
           async managerProtocolIntent(input: { ownerPublicKeyHex: string; network: "main" | "test"; allocationId: string; txid: string; inputOutpointKeys: readonly string[] }) {
             return manager.protocolIntentProof(input);
           },
-          abortNotDispatched, refresh, publishChanged: ports.changed,
+          abortNotDispatched, publishChanged: ports.changed,
         };
         const allocationId = request.submission?.managerAllocationId;
         const protocolSubmission = await createWorkerProtocolEvidence(ports.storage()).getProtocolSubmission(request.submissionId);
@@ -351,7 +352,9 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
   }
   const route = defineWorkerRequestRoute<Extract<CoordinatorClientRequest, { kind: "p2pkh.utxos.get" | "p2pkh.utxos.refresh" | "p2pkh.broadcast" | "p2pkh.transfer.prepare" | "p2pkh.transfer.submit" | "p2pkh.artifact.occupy" | "p2pkh.conclusion" | "p2pkh.payment.status" | "p2pkh.protocol.command" }>>({
     kinds: ["p2pkh.utxos.get", "p2pkh.utxos.refresh", "p2pkh.broadcast", "p2pkh.transfer.prepare", "p2pkh.transfer.submit", "p2pkh.artifact.occupy", "p2pkh.conclusion", "p2pkh.payment.status", "p2pkh.protocol.command"],
-    policy: () => ({ scheduling: "serial", validateEpoch: true }),
+    // Refresh has its own bounded FIFO. Do not hide requests in the unbounded
+    // Coordinator serial lane before its admission check.
+    policy: request => ({ scheduling: request.kind === "p2pkh.utxos.refresh" ? "parallel" : "serial", validateEpoch: true }),
     execute: (request, call) => {
       if (request.kind === "p2pkh.payment.status") return paymentStatus(call.requestId, request);
       if (request.kind === "p2pkh.conclusion") return conclusion(call.requestId, request);

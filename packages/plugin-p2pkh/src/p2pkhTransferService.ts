@@ -1,9 +1,9 @@
 // Ordinary transfers use the manager's allocation and unsigned exact directly.
 // Internal DTOs are trusted; spendability, single-use previews, durable intent,
 // cancellation, fee size and unknown broadcast responsibility remain business state.
-import type { CentralBroadcastService, CoordinatorP2pkhBroadcastResult, CoordinatorValueResult, P2pkhBroadcastSubmission, P2pkhUtxoBinding, VaultService } from "@keymaster/contracts";
+import type { CentralBroadcastService, CoordinatorP2pkhBroadcastResult, CoordinatorValueResult, P2pkhBroadcastSubmission, VaultService } from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
-import type { P2pkhKeyResource, P2pkhLocalTransaction, P2pkhTransferInput, P2pkhTransferPreview, P2pkhTransferResult, P2pkhUtxo, ReadyKeyIdentity } from "./p2pkhContracts.js";
+import type { P2pkhLocalTransaction, P2pkhTransferInput, P2pkhTransferPreview, P2pkhTransferResult, P2pkhUtxo, ReadyKeyIdentity } from "./p2pkhContracts.js";
 import { assetIdToNetwork, makeResourceId } from "./p2pkhContracts.js";
 import { parseTx, p2pkScriptFromPublicKey, publisherMatchesPaymentScript } from "keymaster-utxo-manager";
 import type { P2pkhStateRepositoryHandle } from "./storage/p2pkhStateRepository.js";
@@ -16,9 +16,6 @@ export interface P2pkhTransferServiceDeps {
   previousTransactions(network: "main" | "test", inputs: readonly P2pkhUtxo[]): Promise<string[]>;
   messageBus: MessageBus;
   getStore: (publicKeyHex: string) => Promise<P2pkhStateRepositoryHandle>;
-  loadSpendableUtxos: (input: {
-    ownerPublicKeyHex: string; resource: P2pkhKeyResource; purpose?: "prepare" | "submit" | "retry"; signal?: AbortSignal;
-  }) => Promise<P2pkhUtxo[] | { utxos: P2pkhUtxo[]; utxoBinding?: P2pkhUtxoBinding }>;
   centralBroadcastService?: CentralBroadcastService;
   broadcastWithCoordinator?: (input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; submission?: P2pkhBroadcastSubmission }) => Promise<CoordinatorValueResult<unknown>>;
   utxoManager?: P2pkhUtxoManager;
@@ -32,10 +29,6 @@ export interface P2pkhTransferService {
   /** Submit the Worker's remembered allocation; never rebuild from caller metadata. */
   submitPrepared(previewId: string, options?: { signal?: AbortSignal }): Promise<P2pkhTransferResult>;
 }
-function loadedUtxos(value: P2pkhUtxo[] | { utxos: P2pkhUtxo[] }): P2pkhUtxo[] {
-  return Array.isArray(value) ? value : value.utxos;
-}
-
 export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pkhTransferService {
   const prepared = new Map<string, { preview: P2pkhTransferPreview; expires: number; timer?: ReturnType<typeof setTimeout> }>();
   const releaseReservation = (preview: P2pkhTransferPreview): void => {
@@ -89,10 +82,9 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       const recipientOwnership = payment && recipientScriptHex
         ? publisherMatchesPaymentScript(recipientScriptHex, payment.publisherPublicKeyHex) ? "app-publisher" as const : "third-party" as const
         : "unknown" as const;
-      const candidates = loadedUtxos(await deps.loadSpendableUtxos({ ownerPublicKeyHex: owner.publicKeyHex, resource, purpose: context?.retry ? "retry" : "prepare", signal: context?.signal }));
       const { address: changeAddress } = await activeCrypto.deriveP2pkhAddress();
       const reservation = await manager.reserve({
-        ownerPublicKeyHex: owner.publicKeyHex, resource, utxos: candidates,
+        ownerPublicKeyHex: owner.publicKeyHex, resource,
         feeRateSatoshisPerKb: input.feeRateSatoshisPerKb!,
         ...(payment ? { recipientScriptHex, paymentType: payment.paymentType, paymentId: payment.paymentId } : { recipientAddress: input.recipientAddress }),
         amountSatoshis: sendAll ? 0 : input.amountSatoshis, sendAll,
@@ -140,8 +132,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       const resource = await stateRepository.getResource(makeResourceId(network));
       if (!resource) throw new Error(`P2PKH resource not found for owner ${owner.publicKeyHex} (${network})`);
       if (!deps.centralBroadcastService && !deps.broadcastWithCoordinator) throw new Error("Coordinator broadcast is required for ordinary P2PKH transfers");
-      const candidates = loadedUtxos(await deps.loadSpendableUtxos({ ownerPublicKeyHex: owner.publicKeyHex, resource, purpose: "submit", signal: options?.signal }));
-      const managerInputs = await manager.refreshAllocationInputs({ ownerPublicKeyHex: owner.publicKeyHex, resource, allocationId: remembered.managerAllocationId, utxos: candidates });
+      const managerInputs = await manager.refreshAllocationInputs({ ownerPublicKeyHex: owner.publicKeyHex, resource, allocationId: remembered.managerAllocationId });
       const activeCrypto = await deps.vault.createActiveKeyCrypto();
       const { address: currentChangeAddress } = await activeCrypto.deriveP2pkhAddress();
       // This checks a real asynchronous wallet replacement, not an internal

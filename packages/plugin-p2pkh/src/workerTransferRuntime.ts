@@ -7,7 +7,6 @@ import { createP2pkhService } from "./p2pkhService.js";
 import { createWorkerProtocolRuntime, readWorkerProtocolProtection } from "./workerProtocolRuntime.js";
 import type { P2pkhProtocolManagerPort } from "./p2pkhProtocolSpend.js";
 
-import { p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
 import { createP2pkhUtxoManager, type P2pkhUtxoManager } from "./p2pkhUtxoManager.js";
 import type { P2pkhService } from "./p2pkhContracts.js";
 import { createWocInputObserver } from "./wocInputObserver.js";
@@ -60,24 +59,14 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
    * UTXO manager port for the protocol services: durable pre-signature
    * intent, exclusive input responsibility and exact-byte ownership.
    */
-  async function protocolContext(request: { ownerPublicKeyHex: string; network: "main" | "test" }, refresh = false) {
+  function protocolContext(request: { ownerPublicKeyHex: string; network: "main" | "test" }) {
     const manager = utxoManager;
     if (!manager) throw new Error("P2PKH UTXO manager is not ready");
     const session = deps.session();
     if (!session.unlocked || session.owner?.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase()) throw new Error("Protocol manager owner mismatch");
     const address = deriveP2pkhAddress(request.ownerPublicKeyHex, request.network);
     const resource = { resourceId: `p2pkh:${request.network}`, network: request.network, address };
-    const snapshot = await deps.snapshot({ ownerPublicKeyHex: request.ownerPublicKeyHex, network: request.network }, refresh);
-    if (manager !== utxoManager) throw new Error("Protocol manager instance revoked");
-    const utxos = snapshot.status === "ok" && snapshot.value.hasResult
-      ? snapshot.value.items.filter(item => !item.isSpentInMempoolTx).map(item => ({
-        id: `utxo:${resource.resourceId}:${item.txid}:${item.vout}`, resourceId: resource.resourceId,
-        publicKeyHex: request.ownerPublicKeyHex, network: request.network, address,
-        txid: item.txid, vout: item.vout, value: item.value, height: item.height,
-        script: p2pkhAddressToScriptHex(address, request.network), status: item.status,
-        isSpentInMempoolTx: item.isSpentInMempoolTx, syncedAt: new Date(0).toISOString(),
-      })) : [];
-    return { manager, resource, utxos };
+    return { manager, resource };
   }
   const protocolManagerPort: P2pkhProtocolManagerPort = {
     async cancelProtocolSubmission(request) {
@@ -87,8 +76,8 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
       deps.fundsChanged(request);
     },
     async selectFundingInputs(request) {
-      const { manager, resource, utxos } = await protocolContext(request, true);
-      const planned = await manager.selectProtocolFunding({ ...request, resource, utxos });
+      const { manager, resource } = protocolContext(request);
+      const planned = await manager.selectProtocolFunding({ ...request, resource });
       return {
         selected: planned.selectedInputs.map(row => ({
           txid: row.utxo.txid, vout: row.utxo.vout, value: row.utxo.value, address: row.utxo.address,
@@ -98,8 +87,8 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
       };
     },
     async beginProtocolIntent(request) {
-      const { manager, resource, utxos } = await protocolContext(request);
-      const result = await manager.beginProtocolIntent({ ...request, resource, utxos });
+      const { manager, resource } = protocolContext(request);
+      const result = await manager.beginProtocolIntent({ ...request, resource });
       deps.fundsChanged(request);
       return result;
     },
