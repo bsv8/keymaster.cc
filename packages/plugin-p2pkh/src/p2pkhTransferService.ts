@@ -5,7 +5,8 @@ import type { CentralBroadcastService, CoordinatorP2pkhBroadcastResult, Coordina
 import type { MessageBus } from "webloom-framework";
 import type { P2pkhLocalTransaction, P2pkhTransferInput, P2pkhTransferPreview, P2pkhTransferResult, P2pkhUtxo, ReadyKeyIdentity } from "./p2pkhContracts.js";
 import { assetIdToNetwork, makeResourceId } from "./p2pkhContracts.js";
-import { parseTx, p2pkScriptFromPublicKey, publisherMatchesPaymentScript } from "keymaster-utxo-manager";
+import { parseTx } from "keymaster-utxo-manager";
+import { p2pkScriptFromPublicKey, publisherMatchesPaymentScript } from "./p2pkhPaymentTemplate.js";
 import type { P2pkhStateRepositoryHandle } from "./storage/p2pkhStateRepository.js";
 import { calcTxidFromRawTxHex, type UnsignedTx, rawTxHexByteLength, signP2pkhTx } from "./p2pkhSigner.js";
 import { p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
@@ -66,7 +67,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
   return {
     async prepare(input, context) {
       const manager = deps.utxoManager;
-      if (!manager) throw new Error("Transfer requires the durable UTXO manager");
+      if (!manager) throw new Error("Transfer requires the UTXO allocation pool");
       const network = assetIdToNetwork(input.assetId);
       const owner = await resolveOwnerKeyIdentity(deps, input.ownerPublicKeyHex);
       const stateRepository = await deps.getStore(owner.publicKeyHex);
@@ -140,15 +141,12 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       if (currentChangeAddress !== remembered.changeAddress) throw new Error("Transfer owner session changed");
       const frozen = recall(remembered.previewId, true);
       const selected = managerInputs.map(row => row.utxo);
-      let durableIntent = false;
       try {
         // 已由 manager 选定并占用；错误由 manager/提交结果报告，不在此重复查链。
         await loadPreviousTransactions(network, selected, managerInputs, deps.previousTransactions);
         if (options?.signal?.aborted) throw new Error("Transfer signing cancelled");
-        await manager.prepareSigning({ ownerPublicKeyHex: owner.publicKeyHex, resource, allocationId: frozen.managerAllocationId!, unsignedTxHex: frozen.rawTxHex });
-        durableIntent = true;
       } catch (error) {
-        if (!durableIntent) await manager.release({ ownerPublicKeyHex: owner.publicKeyHex, network, allocationId: frozen.managerAllocationId! }).catch(() => undefined);
+        await manager.release({ ownerPublicKeyHex: owner.publicKeyHex, network, allocationId: frozen.managerAllocationId! });
         throw error;
       }
       if (options?.signal?.aborted) throw new Error("Transfer signing cancelled");
@@ -156,6 +154,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         const result = await activeCrypto.signDigest({ digest: new Uint8Array(digest).buffer as ArrayBuffer, format: "der" });
         return new Uint8Array(result.signature);
       }, owner.publicKeyHex);
+      await manager.rememberTransaction({ ownerPublicKeyHex: owner.publicKeyHex, resource, allocationId: frozen.managerAllocationId!, signedTxHex: rawTxHex });
       const signedSize = rawTxHexByteLength(rawTxHex);
       if (signedSize > frozen.serializedSizeBytes) throw new Error("P2PKH signature exceeded fee size bound");
       const signed = { ...frozen, rawTxHex, txid: calcTxidFromRawTxHex(rawTxHex), serializedSizeBytes: signedSize };
@@ -193,7 +192,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
 }
 function mapTransferResult(result: CoordinatorP2pkhBroadcastResult, preview: P2pkhTransferPreview, submissionId: string): P2pkhTransferResult {
   const common = { rawTxHex: preview.rawTxHex, submissionId, localInputClaimIds: [], attempts: 1 };
-  if (result.status === "isolated") return { ...common, status: "isolated", txid: result.txid, error: result.reason, reason: "isolated" };
+  if (result.status === "isolated") return { ...common, status: "isolated", txid: result.txid, error: result.reason, reason: result.providerCode === "woc-tx-rejected" ? "transaction-rejected" : "isolated" };
   if (result.status === "not-dispatched") return { ...common, status: "not-dispatched", txid: preview.txid, error: result.reason,
     reason: result.reason === "cancelled" ? "cancelled" : result.reason === "snapshot-binding-required" || result.reason === "snapshot-input-invalid" ? "snapshot-binding" : undefined };
   return { ...common, status: "local-confirmed", delivery: result.status === "already-known" ? "already-known" : "accepted", txid: preview.txid };

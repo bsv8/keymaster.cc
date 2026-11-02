@@ -2,8 +2,7 @@
 //
 // 只删除可明确归属旧论坛的记录，不触碰 BitFS、普通转账与公共协议账本。
 // 幂等：缺失视为已清理，不计入删除；读取失败、删除失败明确抛错，不计成功。
-// 顺序：收集完整关联 → manager 硬删除 → 硬删对应内存 → 删协议文件 → 删 funding 文件。
-// manager 清理成功前保留全部关联证据；失败抛错，不静默。
+// 顺序：收集完整关联 → 硬删对应内存 → 删协议文件 → 删 funding 文件。
 
 import type { BorrowedModuleFileStore } from "@keymaster/contracts";
 import { sha256 } from "@noble/hashes/sha256";
@@ -15,14 +14,9 @@ export interface RetiredForumPurgeResult {
   deletedProtocolFiles: string[];
   deletedSubmissionIds: string[];
   deletedClaimIds: string[];
-  cancelledManagerSubmissionIds: string[];
   keptProtocolFiles: number;
   /** 成功时恒为空；无法确定关联的损坏文件会在删除前抛错。 */
   unreadableProtocolFiles: string[];
-}
-
-export interface RetiredForumManagerPort {
-  retireForumProtocolSubmission(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string }): Promise<{ deleted: boolean; allocationId?: string }>;
 }
 
 function isForumFundingId(fundingId: string): boolean {
@@ -48,13 +42,11 @@ async function fileExists(files: BorrowedModuleFileStore, path: string): Promise
 
 export async function purgeRetiredForumProtocolData(
   files: BorrowedModuleFileStore,
-  manager?: RetiredForumManagerPort,
 ): Promise<RetiredForumPurgeResult> {
   const deletedFundingFiles: string[] = [];
   const deletedProtocolFiles: string[] = [];
   const deletedSubmissionIds: string[] = [];
   const deletedClaimIds: string[] = [];
-  const cancelledManagerSubmissionIds: string[] = [];
   const unreadableProtocolFiles: string[] = [];
 
   // ---- 阶段 1：收集论坛专款归属（不删除，先确定完整关联集合）。 ----
@@ -167,20 +159,7 @@ export async function purgeRetiredForumProtocolData(
     if (fallback && (fallback.submissionId !== submissionId || fallback.ownerPublicKeyHex !== ownerPublicKeyHex || fallback.network !== network)) invalid(path);
     forumHits.push({ path, submissionId, ownerPublicKeyHex, network });
   }
-  // Funding may survive a prior journal deletion failure/restart. Its original
-  // scope is sufficient to retry manager retirement even without the journal.
-  const managerHits = new Map<string, Scope>([...fundingScopes.values(), ...forumHits].map(hit => [hit.submissionId, hit]));
-  const forumSubmissionIds = new Set(managerHits.keys());
-
-  // ---- 阶段 3：manager 退役硬删除（经一致性边界，普通取消不动）。 ----
-  // 先于文件删除执行：关联证据仍完整；失败抛错，文件保留可重试。
-  // 缺失（无责任）视为已清理，不计入；歧义抛错，不是清理成功。
-  if (manager) {
-    for (const hit of managerHits.values()) {
-      const outcome = await manager.retireForumProtocolSubmission({ ownerPublicKeyHex: hit.ownerPublicKeyHex, network: hit.network, submissionId: hit.submissionId });
-      if (outcome.deleted) cancelledManagerSubmissionIds.push(hit.submissionId);
-    }
-  }
+  const forumSubmissionIds = new Set([...fundingScopes.values(), ...forumHits].map(hit => hit.submissionId));
 
   // ---- 阶段 4：在最后一份 journal 归属证据消失前硬删对应内存责任。 ----
   // 文件删除部分成功后，重试未必能重新发现发布 submission，不能把内存清理
@@ -222,5 +201,5 @@ export async function purgeRetiredForumProtocolData(
     } while (cursor);
   }
 
-  return { deletedFundingFiles, deletedProtocolFiles, deletedSubmissionIds, deletedClaimIds, cancelledManagerSubmissionIds, keptProtocolFiles, unreadableProtocolFiles };
+  return { deletedFundingFiles, deletedProtocolFiles, deletedSubmissionIds, deletedClaimIds, keptProtocolFiles, unreadableProtocolFiles };
 }

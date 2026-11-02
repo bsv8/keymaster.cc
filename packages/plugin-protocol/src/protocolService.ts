@@ -4468,6 +4468,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       const status: import("@keymaster/contracts").ConnectPaymentStatus =
         submitted.status === "local-confirmed" && submitted.txid
           ? submitted.delivery === "already-known" ? "already_known" : "accepted"
+          : submitted.reason === "transaction-rejected" ? "failed"
           : submitted.status === "not-dispatched" && reason === "cancelled"
             ? "not_signed"
             : "unknown";
@@ -4497,7 +4498,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
   }
 
-  /** Pure manager/outbox lookup plus protocol CAS; no signing, query start or chain I/O. */
+  /** Runtime allocation lookup plus business CAS; no signing or chain I/O. */
   private async refreshConnectPaymentFromManager(rec: RequestRecord, record: ProtocolConnectPaymentRecord): Promise<ProtocolConnectPaymentRecord> {
     const assertAuthorized = async () => {
       const session = await this.requireConnectSession(rec, record.ownerPublicKeyHex);
@@ -4515,17 +4516,11 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (manager.status === "pending" && record.txid) throw protocolError("id_conflict", "Signed payment lost its manager exact");
     if (manager.status === "not_signed" && (record.txid || record.status === "signed_not_dispatched" || record.release)) throw protocolError("id_conflict", "Unsigned release contradicts signed payment facts");
     if ((record.allocationId && manager.allocationId && manager.allocationId !== record.allocationId) || (record.txid && manager.txid && manager.txid !== record.txid.toLowerCase())) throw protocolError("id_conflict", "Manager payment identity/exact mismatch");
-    const release = manager.conclusion ? {
-      releasedSatoshis: manager.conclusion.releasedSats,
-      releasedInputCount: manager.conclusion.releasedInputs.length,
-      spentInputCount: manager.conclusion.spentInputs.length,
-      heldInputCount: manager.conclusion.heldInputs.length,
-    } : undefined;
     const updated = await storeConnectPaymentRecord(this.deps.storageRepository!, {
       ...record, status: manager.status,
       allocationId: manager.allocationId ?? record.allocationId,
       ...(manager.txid ? { txid: manager.txid } : {}),
-      ...(release ? { release, reason: "input-conflict" } : manager.status === "not_signed" ? { reason: "cancelled" } : manager.status === "accepted" ? { reason: undefined } : {}),
+      ...(manager.status === "not_signed" ? { reason: "cancelled" } : manager.status === "accepted" ? { reason: undefined } : {}),
       updatedAt: Date.now(),
     });
     await assertAuthorized();

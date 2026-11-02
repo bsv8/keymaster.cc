@@ -118,7 +118,7 @@ export function createP2pkhUtxoSnapshotStore(deps: {
         advance();
       });
     },
-    clearOwner(owner) { epoch++; for (const key of cursors.keys()) if (key.startsWith(`${owner.toLowerCase()}:`)) cursors.delete(key); cancelQueued(); },
-    clearAll() { epoch++; cursors.clear(); cancelQueued(); },
+    clearOwner(owner) { epoch++; for (const key of cursors.keys()) if (key.startsWith(`${owner.toLowerCase()}:`)) cursors.delete(key); cancelQueued(); deps.manager.dispose(); },
+    clearAll() { epoch++; cursors.clear(); cancelQueued(); deps.manager.dispose(); },
   };
 }

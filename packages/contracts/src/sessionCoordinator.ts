@@ -1,5 +1,5 @@
 import type { NetworkIdentity } from "./networkIdentity.js";
-import type { P2pkhConclusionInput, P2pkhConclusionResult, P2pkhPaymentLookupInput, P2pkhPaymentLookupResult } from "./p2pkhConclusion.js";
+import type { P2pkhPaymentLookupInput, P2pkhPaymentLookupResult } from "./p2pkhPaymentLookup.js";
 // packages/contracts/src/sessionCoordinator.ts
 // Session Coordinator 契约：SharedWorker 作为唯一会话协调器的 RPC 协议定义。
 //
@@ -408,7 +408,6 @@ export type CoordinatorClientRequest =
     | { kind: "p2pkh.utxos.refresh"; clientId: string; requestId: string; ownerPublicKeyHex: string; network: "main" | "test"; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.broadcast"; clientId: string; requestId: string; ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; submission?: P2pkhBroadcastSubmission; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.payment.status"; clientId: string; requestId: string; input: P2pkhPaymentLookupInput; expectedSessionEpoch: SessionEpoch }
-    | { kind: "p2pkh.conclusion"; clientId: string; requestId: string; input: P2pkhConclusionInput; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.transfer.prepare"; clientId: string; requestId: string; input: P2pkhTransferPrepareInput; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.transfer.submit"; clientId: string; requestId: string; input: P2pkhTransferSubmitInput; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.artifact.occupy"; clientId: string; requestId: string; input: P2pkhArtifactOccupyInput; expectedSessionEpoch: SessionEpoch }
@@ -842,7 +841,6 @@ export interface SessionCoordinatorClient {
    * 请求交给 Worker 的 UTXO Manager，拿到可序列化的冻结预览。
    */
   p2pkhPaymentStatus(input: P2pkhPaymentLookupInput): Promise<CoordinatorValueResult<P2pkhPaymentLookupResult>>;
-  p2pkhConclusion(input: P2pkhConclusionInput): Promise<CoordinatorValueResult<P2pkhConclusionResult>>;
   /** Wallet-owned protocol operations, executed only by the current Worker. */
   p2pkhProtocolCommand(input: import("./protocolSpendRpc.js").P2pkhProtocolCommand): Promise<CoordinatorValueResult<import("./protocolSpendRpc.js").P2pkhProtocolCommandResult>>;
   p2pkhTransferPrepare(input: P2pkhTransferPrepareInput): Promise<CoordinatorValueResult<P2pkhTransferPreviewPayload>>;
@@ -903,7 +901,7 @@ export type BackgroundCoordinatorControl = Pick<SessionCoordinatorClient,
 export type P2pkhCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
   "p2pkhProviderConfigGet" | "p2pkhProviderConfigUpdate" |
   "p2pkhUtxosGet" | "p2pkhUtxosRefresh" |
-  "p2pkhTransferPrepare" | "p2pkhTransferSubmit" | "p2pkhArtifactOccupy" | "p2pkhConclusion" | "p2pkhPaymentStatus" | "p2pkhProtocolCommand"
+  "p2pkhTransferPrepare" | "p2pkhTransferSubmit" | "p2pkhArtifactOccupy" | "p2pkhPaymentStatus" | "p2pkhProtocolCommand"
 >;
 
 /** 手续费策略写 RPC 的窄面，仅提供给 chain-fee.policy-writer 装配。 */

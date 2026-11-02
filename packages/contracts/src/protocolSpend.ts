@@ -16,7 +16,7 @@ export const P2PKH_PROTOCOL_SPEND_CAPABILITY = defineCapability<ProtocolSpendSer
 });
 
 export interface ProtocolSpendInput {
-  /** 本地 exact outbox 的完整前序交易；签名前必须按 txid、输出金额和脚本复核。 */
+  /** 本实例成功交易的完整前序原文，避免等待 WoC 原文索引。 */
   previousTransactionHex?: string;
   txid: string;
   vout: number;
@@ -56,10 +56,8 @@ export interface ProtocolSpendPreview {
   inputClaimIds?: string[];
   submissionId?: string;
   /**
-   * UTXO manager allocation that owns this signed transaction. When present
-   * the manager holds the durable pre-signature intent, the exclusive input
-   * responsibility and the exact bytes, and the broadcast must run through
-   * the manager's dispatch path.
+   * Current runtime allocation of wallet inputs. Submission is owned by the
+   * caller; every success actively injects own outputs into the memory pool.
    */
   managerAllocationId?: string;
   /** 花费钱包 P2PKH UTXO 时捕获的快照绑定；纯代币输入可省略。 */
@@ -94,7 +92,7 @@ export interface ProtocolSpendService {
   /** Pure unsigned preview: no signature, payment reservation or input claim. */
   prepare(input: ProtocolSpendPrepareInput): Promise<ProtocolSpendPreview>;
   /** Explicit signature for workflows whose next stage depends on signed txid.
-   * It consumes payment authorization and persists input claims immediately. */
+   * Wallet inputs are allocated/frozen before signing; no manager authorization. */
   presign(input: ProtocolSpendPrepareInput): Promise<ProtocolSpendPreview>;
   submit(preview: ProtocolSpendPreview): Promise<ProtocolSpendResult>;
   /** 释放尚未广播的预签名及其输入占用；未知或已派发交易不得调用。 */
@@ -109,6 +107,8 @@ export interface ProtocolSpendService {
 }
 
 export interface ProtocolSpendPrepareInput {
+  /** Existing runtime allocation returned by funding selection. */
+  managerAllocationId?: string;
   requestingPluginId?: string;
   inputs: ProtocolSpendInput[];
   outputs: ProtocolSpendOutput[];

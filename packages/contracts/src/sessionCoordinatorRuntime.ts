@@ -24,7 +24,7 @@ import type {
 import type { CoordinatorMsFileStateEvent } from "./sessionCoordinator.js";
 import type { CoordinatorSatOperation, SatSubscriptionSettingsSnapshot, SatBillingPage, SatSpiInformation, SatTopUpPreview, SatTopUpResult, SatCollectResult } from "./satSubscription.js";
 import type { P2pkhBroadcastResult, P2pkhUtxoSnapshotResult, P2pkhTransferPreviewPayload, P2pkhTransferResultPayload, P2pkhArtifactOccupyResult } from "./bsvP2pkhProviders.js";
-import { projectP2pkhConclusionResult, projectP2pkhPaymentLookupResult, type P2pkhConclusionResult, type P2pkhPaymentLookupResult } from "./p2pkhConclusion.js";
+import { projectP2pkhPaymentLookupResult, type P2pkhPaymentLookupResult } from "./p2pkhPaymentLookup.js";
 import type { P2pkhProtocolCommandResult } from "./protocolSpendRpc.js";
 
 export interface CoordinatorSessionOpenRequest { kind: "session.open"; leaseId: string; }
@@ -94,7 +94,7 @@ export type CoordinatorPlatformStorageResult = CoordinatorOwnerStorageResult;
 export type CoordinatorCryptoResultFor<O extends CoordinatorCryptoOperation> = Extract<CoordinatorCryptoResult, { type: O["type"] }>;
 export type CoordinatorP2pkhBroadcastResult = P2pkhBroadcastResult |
   { status: "not-dispatched"; reason: "cancelled" | "stale-provider-generation" | "broadcast-provider-unavailable" | "coordinator-not-dispatched" | "stale-session-epoch" | "snapshot-stale" | "snapshot-consumed" | "snapshot-binding-required" | "snapshot-input-invalid"; currentSeq?: number } |
-  { status: "isolated"; txid: string; reason: string; canonicalTxid?: string; providerReturnedTxidRaw?: string; providerReturnedTxidNormalized?: string; txidIntegrity?: "exact" | "reversed" | "mismatch" | "missing"; providerId?: string } |
+  { status: "isolated"; txid: string; reason: string; providerCode?: string; canonicalTxid?: string; providerReturnedTxidRaw?: string; providerReturnedTxidNormalized?: string; txidIntegrity?: "exact" | "reversed" | "mismatch" | "missing"; providerId?: string } |
   { status: "local-confirmed" | "already-known"; txid: string; canonicalTxid?: string; providerReturnedTxidRaw?: string; providerReturnedTxidNormalized?: string; txidIntegrity?: "exact" | "reversed" | "mismatch" | "missing"; providerId?: string; providerReference?: string; providerCode?: string; providerMessage?: string };
 export type CoordinatorRpcResultForRequest<R extends CoordinatorRpcRequest> =
   R extends { kind: "session.open" } ? CoordinatorSessionOpenResult :
@@ -112,7 +112,7 @@ export type CoordinatorRpcResultForRequest<R extends CoordinatorRpcRequest> =
   R extends { kind: "channel.operation"; operation: infer O extends CoordinatorChannelOperation } ? CoordinatorChannelOperationResultFor<O> :
   R extends { kind: "p2pkh.utxos.get" | "p2pkh.utxos.refresh" } ? P2pkhUtxoSnapshotResult : R extends { kind: "p2pkh.provider-config.get" } ? P2pkhProviderConfig :
   R extends { kind: "p2pkh.broadcast" } ? CoordinatorP2pkhBroadcastResult : R extends { kind: "p2pkh.payment.status" } ? P2pkhPaymentLookupResult :
-  R extends { kind: "p2pkh.conclusion" } ? P2pkhConclusionResult : R extends { kind: "p2pkh.transfer.prepare" } ? P2pkhTransferPreviewPayload :
+  R extends { kind: "p2pkh.transfer.prepare" } ? P2pkhTransferPreviewPayload :
   R extends { kind: "p2pkh.transfer.submit" } ? P2pkhTransferResultPayload : R extends { kind: "p2pkh.artifact.occupy" } ? P2pkhArtifactOccupyResult :
   R extends { kind: "p2pkh.protocol.command" } ? P2pkhProtocolCommandResult : undefined;
 export type CoordinatorRpcResultFor<K extends CoordinatorRpcRequestKind> = CoordinatorRpcResultForRequest<CoordinatorRpcRequestFor<K>>;
@@ -365,7 +365,6 @@ function resultFor(request: CoordinatorRpcRequest, value: unknown): unknown {
     case "p2pkh.provider-config.get": return copy(value);
     case "p2pkh.broadcast": return broadcast(value);
     case "p2pkh.payment.status": return projectP2pkhPaymentLookupResult(value as P2pkhPaymentLookupResult);
-    case "p2pkh.conclusion": return projectP2pkhConclusionResult(value as P2pkhConclusionResult);
     case "p2pkh.transfer.prepare": return transferPreview(value);
     case "p2pkh.transfer.submit": return transferResult(value);
     case "p2pkh.artifact.occupy": return fields(value, "allocationId txid");

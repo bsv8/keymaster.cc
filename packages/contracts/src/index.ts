@@ -35,7 +35,7 @@ export * from "./protocolSpendRpc.js";
 export * from "./i18n.js";
 export * from "./keyDisplay.js";
 export * from "./p2pkhConnectPayment.js";
-export * from "./p2pkhConclusion.js";
+export * from "./p2pkhPaymentLookup.js";
 export * from "./protocol.js";
 export * from "./applicationConnections.js";
 export * from "./aiTools.js";

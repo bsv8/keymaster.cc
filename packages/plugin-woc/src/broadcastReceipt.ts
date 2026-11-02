@@ -23,9 +23,9 @@ export function normalizeWocBroadcastReceipt(
     // This response belongs to the POST of these exact bytes, not a text search or a txid lookup.
     return { accepted: true, canonicalTxid, txidIntegrity: "missing", conclusion: "already-in-mempool", evidence };
   }
-  const code = evidence.status === 400 && receipt === "unexpected response code 500: 258: txn-mempool-conflict"
-    ? "woc-mempool-conflict" : "woc-broadcast-unknown";
-  // Conflict is NOT evidence of which input/spender and is never a release marker.
+  const code = evidence.status === 400 && typeof receipt === "string" && /^unexpected response code 500: [0-9]+: .+/.test(receipt)
+    ? "woc-tx-rejected" : "woc-broadcast-unknown";
+  // An explicit node transaction rejection is distinct from HTTP/transport failure.
   throw Object.assign(new Error(`WOC ${evidence.status} ${evidence.statusText} /tx/raw: ${evidence.body}`), {
     code, canonicalTxid, evidence,
   });

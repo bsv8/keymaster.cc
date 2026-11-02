@@ -48,48 +48,24 @@ export interface P2pkhProtocolSpendSubmissionStore {
 }
 
 /**
- * UTXO manager port for protocol spends. The manager freezes a durable
- * pre-signature intent (classified inputs, fee cap, business cap) before the
- * signer runs and owns the exact bytes afterwards. The protocol service keeps
- * its own WAL as business/history evidence; the manager is the money truth.
+ * Runtime allocation port for protocol callers. The pool only freezes wallet
+ * inputs; protocol validation, signing and submission belong to this service.
  */
 export interface P2pkhProtocolManagerPort {
-  /** Host-only read projection of common kernel selection. Not a reservation
-   * or approval; beginProtocolIntent must still claim before private-key use. */
+  /** Selection immediately freezes inputs and returns the allocation ID. */
   selectFundingInputs?(input: {
     ownerPublicKeyHex: string;
     network: BsvNetwork;
     amountSatoshis: number;
     feeRateSatoshisPerKb: number;
     outputs?: Array<{ scriptHex: string; value: string }>;
-  }): Promise<{ selected: ProtocolSpendInput[]; totalInputSatoshis: number }>;
-  beginProtocolIntent(input: {
-    ownerPublicKeyHex: string;
-    network: BsvNetwork;
-    binding: { kind: "refund" | "close" | "fund" | "state"; poolId: string };
-    unsignedTxHex: string;
-    inputs: Array<{ outpoint: string; class: "wallet" | "protected" | "external"; value: string; scriptHex: string; claimId: string | null }>;
-    outputs: Array<{ scriptHex: string; value: string }>;
-    businessAmountSats: string;
-    feeRateSatPerKb: string;
-    feeCapSats: string;
-    feePolicy: "rate" | "exact";
-    externalProofs?: Record<string, { value: string; scriptHex: string }>;
-    /** Protection sources this intent takes over (the submission's own claim). */
-    claims?: string[];
-    /** Q04: stable identity of a delivered artifact (idempotent replay). */
-    artifactId?: string;
-    deferDispatch?: boolean;
-    executionId?: string;
-  }): Promise<{ allocationId: string }>;
-  cancelProtocolSubmission(input: { ownerPublicKeyHex: string; network: BsvNetwork; submissionId: string; allocationId?: string; txid?: string; reason?: "cancelled" | "execution-failed"; proof?: { executionId: string; allocationId: string; submissionId: string; owner: string; network: BsvNetwork; unsignedTxHex: string; state: "cancelled_before_sign"; version: number } | null }): Promise<void>;
-  completeProtocolIntent(input: {
-    ownerPublicKeyHex: string;
-    network: BsvNetwork;
-    allocationId: string;
-    signedTxHex: string;
-    delivery: "wallet" | "external";
-  }): Promise<{ txid: string; feeSats: string }>;
+  }): Promise<{ allocationId: string; selected: ProtocolSpendInput[]; totalInputSatoshis: number }>;
+  allocateInputs(input: {
+    ownerPublicKeyHex: string; network: BsvNetwork; allocationId?: string;
+    outpoints: string[]; submissionId: string; artifactId?: string;
+  }): Promise<{allocationId: string}>;
+  release(input: {ownerPublicKeyHex: string; network: BsvNetwork; submissionId?: string; allocationId?: string}): Promise<void>;
+  rememberTransaction(input: {ownerPublicKeyHex: string; network: BsvNetwork; allocationId: string; signedTxHex: string}): Promise<{txid: string}>;
 }
 
 export interface P2pkhProtocolSpendDeps {
@@ -101,7 +77,7 @@ export interface P2pkhProtocolSpendDeps {
   claimStore: P2pkhProtocolSpendClaimStore;
   submissionStore?: P2pkhProtocolSpendSubmissionStore;
   protectedOutpoints?: ProtectedOutpointStore;
-  /** UTXO manager: durable pre-sign intent and exact-byte responsibility. */
+  /** Shared runtime wallet-input allocation pool. */
   protocolManager?: P2pkhProtocolManagerPort;
 }
 
@@ -215,14 +191,13 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
 
   const tickets=new Map<string,{input:ProtocolSpendExecutionInput;expires:number}>();
   const build=async(input:ProtocolSpendExecutionInput,sign:boolean):Promise<ProtocolSpendPreview>=>{
-      if (!deps.protocolManager) throw new Error("Protocol spend requires the durable UTXO manager");
+      if (!deps.protocolManager) throw new Error("Protocol spend requires the runtime UTXO allocation pool");
       let protectedClaimIds: string[] = [];
       let inputClaimIds: string[] = [];
       const submissionId = crypto.randomUUID();
-      let managerAllocationId: string | undefined;
+      let managerAllocationId = input.managerAllocationId;
       // 本次提交是否已产生签名：仅当能证明尚未签名时才可安全释放，否则保责。
       let signingStarted = false;
-      let signingUnsignedTxHex: string | undefined;
       // 放在 try 之前：签名闭包要读它，而闭包定义在 owner 解析之前。
       const resolvedOwner = await resolveOwnerKeyIdentity(deps, input.ownerPublicKeyHex);
 
@@ -269,57 +244,13 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           if (!output || output.value !== item.value) throw new Error("Protocol previous transaction output does not match input");
           return { outpoint: `${item.txid.toLowerCase()}:${item.vout}`, value: String(output.value), scriptHex: output.scriptHex.toLowerCase() };
         }));
-        // Classification is by trusted script, never by the caller's label:
-        // the wallet's own P2PKH is a wallet input, a protocol-protected
-        // wallet output is a protected input, everything else is external and
-        // needs a trusted prevout proof.
         const walletScriptHex = p2pkhScriptForPublicKey(resolvedOwner.publicKeyHex);
-        const classifiedInputs = prevoutFacts.map((fact) => {
-          if (fact.scriptHex !== walletScriptHex) {
-            return { ...fact, class: "external" as const, claimId: null };
-          }
-          const protectedInput = deps.protectedOutpoints?.isProtected({
-            txid: fact.outpoint.split(":")[0]!,
-            vout: Number(fact.outpoint.split(":")[1]),
-            network: input.network,
-            publicKeyHex: resolvedOwner.publicKeyHex,
-          }) === true;
-          if (protectedInput) {
-            const ownerPluginId = input.requestingPluginId;
-            if (!ownerPluginId) throw new Error("Protocol spend requires requestingPluginId for protected inputs");
-            return {
-              ...fact,
-              class: "protected" as const,
-              claimId: `${input.network}:${fact.outpoint}:${ownerPluginId}`,
-            };
-          }
-          return { ...fact, class: "wallet" as const, claimId: null };
-        });
-        const managerIntent = await deps.protocolManager!.beginProtocolIntent({
-          ownerPublicKeyHex: resolvedOwner.publicKeyHex,
-          network: input.network,
-          binding: { kind: input.protocolKind ?? "refund", poolId: submissionId },
-          deferDispatch: input.deferDispatch === true,
-          executionId: submissionId,
-          unsignedTxHex: Array.from(serializeTx(unsigned), b => b.toString(16).padStart(2, "0")).join(""),
-          inputs: classifiedInputs,
-          outputs: plan.outputs.map((output) => ({ scriptHex: output.scriptHex.toLowerCase(), value: String(output.value) })),
-          businessAmountSats: String(plan.outputs.reduce((sum, output) => sum + output.value, 0)),
-          feeRateSatPerKb: String(input.feeRateSatoshisPerKb),
-          feeCapSats: String(plan.feeSatoshis),
-          feePolicy: plan.feePolicy,
-          // The manager takes over exactly the input claim this submission
-          // just created; any other protection keeps blocking the input.
-          claims: [`occupation:${submissionId}`],
-          externalProofs: Object.fromEntries(
-            classifiedInputs
-              .filter((fact) => fact.class === "external")
-              .map((fact) => [fact.outpoint, { value: fact.value, scriptHex: fact.scriptHex }]),
-          ),
+        const managerIntent = await deps.protocolManager!.allocateInputs({
+          ownerPublicKeyHex: resolvedOwner.publicKeyHex, network: input.network,
+          allocationId: input.managerAllocationId, submissionId,
+          outpoints: prevoutFacts.filter(row => row.scriptHex === walletScriptHex).map(row => row.outpoint),
         });
         managerAllocationId = managerIntent.allocationId;
-        const unsignedTxHex = Array.from(serializeTx(unsigned), b => b.toString(16).padStart(2, "0")).join("");
-        signingUnsignedTxHex = unsignedTxHex;
         // 无审批直签：按实际输入锁定脚本选择 scriptCode/解锁结构（P2PKH 缺省，裸公钥按脚本本身）。
         const activeCrypto = await deps.vault.createActiveKeyCrypto();
         const signingInputs = plan.inputs.map((utxo, index) => {
@@ -344,12 +275,11 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           },
           { publicKey: Uint8Array.from(Buffer.from(resolvedOwner.publicKeyHex, "hex")) },
         );
-        await deps.protocolManager!.completeProtocolIntent({
+        await deps.protocolManager!.rememberTransaction({
           ownerPublicKeyHex: resolvedOwner.publicKeyHex,
           network: input.network,
           allocationId: managerIntent.allocationId,
           signedTxHex: rawTxHex,
-          delivery: "wallet",
         });
         const serializedSizeBytes = rawTxHexByteLength(rawTxHex);
 
@@ -492,26 +422,10 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
         }
         throw new Error("Protocol spend fee failed to converge");
       } catch (err) {
-        if (managerAllocationId) {
-          if (!signingStarted && signingUnsignedTxHex) {
-            // 能证明尚未签名（如 Vault 能力获取失败）：安全释放，避免卡住资金。
-            const owner = await resolveOwnerKeyIdentity(deps, input.ownerPublicKeyHex).catch(() => undefined);
-            if (owner) {
-              await deps.protocolManager!.cancelProtocolSubmission({
-                ownerPublicKeyHex: input.ownerPublicKeyHex, network: input.network, submissionId, allocationId: managerAllocationId, reason: "cancelled",
-                proof: {
-                  executionId: submissionId, allocationId: managerAllocationId, submissionId,
-                  owner: owner.publicKeyHex, network: input.network, unsignedTxHex: signingUnsignedTxHex.toLowerCase(),
-                  state: "cancelled_before_sign", version: 1,
-                },
-              });
-            } else {
-              await deps.protocolManager!.cancelProtocolSubmission({ ownerPublicKeyHex: input.ownerPublicKeyHex, network: input.network, submissionId, allocationId: managerAllocationId, reason: "execution-failed" });
-            }
-          } else {
-            // 已签、部分签或结果未知：不得误释放，保留可见责任，已保存 exact 可经 Manager 对账恢复。
-            await deps.protocolManager!.cancelProtocolSubmission({ ownerPublicKeyHex: input.ownerPublicKeyHex, network: input.network, submissionId, allocationId: managerAllocationId, reason: "execution-failed" });
-          }
+        // The caller decides release. An uncertain signing attempt is not an
+        // explicit transaction rejection and must leave its allocation frozen.
+        if (managerAllocationId && !signingStarted) {
+          await deps.protocolManager!.release({ ownerPublicKeyHex: input.ownerPublicKeyHex, network: input.network, submissionId, allocationId: managerAllocationId });
         }
         if (protectedClaimIds.length > 0 && deps.protectedOutpoints) {
           await deps.protectedOutpoints.releaseClaims(protectedClaimIds);
@@ -545,7 +459,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           || existing.inputs.some((input, index) => input.txid !== preview.inputs[index]?.txid || input.vout !== preview.inputs[index]?.vout)) {
           throw new Error("Only a matching undispatched protocol spend can be released");
         }
-        await deps.protocolManager!.cancelProtocolSubmission({ ownerPublicKeyHex: preview.ownerPublicKeyHex, network: preview.network, submissionId, allocationId: preview.managerAllocationId, txid: preview.txid });
+        await deps.protocolManager!.release({ ownerPublicKeyHex: preview.ownerPublicKeyHex, network: preview.network, submissionId, allocationId: preview.managerAllocationId });
         const protectedClaimIds = existing.protectedClaimIds;
         const inputClaimIds = existing.localInputClaimIds;
         if (existing.status === "prepared") {
@@ -588,7 +502,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           || existing.resourceId !== resourceIdFor(input.network)) {
           throw new Error("Only a matching definitely undispatched protocol submission can be released");
         }
-        await deps.protocolManager!.cancelProtocolSubmission({ ownerPublicKeyHex: input.ownerPublicKeyHex, network: input.network, submissionId, txid: input.txid });
+        await deps.protocolManager!.release({ ownerPublicKeyHex: input.ownerPublicKeyHex, network: input.network, submissionId });
         if (existing.status === "prepared") {
           // 先持久化拒绝状态，之后即使释放过程被中断也不能再提交原交易。
           await deps.submissionStore!.putProtocolSubmission(buildProtocolSubmissionRecord({
@@ -623,7 +537,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
         // and external prevouts at signing; display metadata is not a plan.
         preview=await build(ticket.input,true);
       }
-      if (!preview.managerAllocationId) throw new Error("Protocol submission requires a manager allocation; legacy exacts must use manager recovery");
+      if (!preview.managerAllocationId) throw new Error("Protocol submission requires a current runtime allocation");
       if(!preview.txid||calcTxidFromRawTxHex(preview.rawTxHex)!==preview.txid)throw Error("Protocol signed transaction bytes do not match txid");
       const submissionIdForLock = preview.submissionId ?? preview.txid;
       return serializeSubmissionOperation(submissionIdForLock, async () => {
@@ -653,13 +567,13 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
             ...(preview.utxoBinding === undefined ? {} : { utxoBinding: preview.utxoBinding }),
             ...(preview.managerAllocationId === undefined ? {} : { managerAllocationId: preview.managerAllocationId }),
           });
-          if (result.status === "isolated") {
+          if (result.status === "isolated" && result.providerCode !== "woc-tx-rejected") {
             isolated = true;
             canonicalTxid = result.canonicalTxid ?? preview.txid;
             providerReturnedTxidRaw = result.providerReturnedTxidRaw;
             providerReturnedTxidNormalized = result.providerReturnedTxidNormalized;
             txidIntegrity = result.txidIntegrity;
-          } else if (result.status === "not-dispatched") {
+          } else if (result.status === "not-dispatched" || (result.status === "isolated" && result.providerCode === "woc-tx-rejected")) {
             // 中文：Worker 已明确证明未派发时，协议输入占用和保护 claim
             // 必须在这里立即释放；不能把它当成 unknown 留到后台观察。
             const existing = deps.submissionStore && preview.submissionId

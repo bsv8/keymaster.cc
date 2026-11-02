@@ -170,21 +170,6 @@ export interface P2pkhServiceDeps {
    * 缺省/非法/未装配一律报错停止，不做 `?? 100` 降级；100 fallback 只在 chainFees 解析逻辑中保留。
    */
   effectiveFeeRate?: (network: "main" | "test") => number;
-  /**
-   * 选币前的门禁：等待受保护输出登记恢复完成。
-   *
-   * 专用资金的保护是**内存态**，重启后需要从磁盘记录重建。在这个恢复完成之前放行
-   * 选币，一次普通转账就可能把仍属于用户的专用 UTXO 当成可用余额花掉。因此每个
-   * 会消费 UTXO 的入口都必须先过这道门禁；拒绝（抛错）比放行安全。
-   */
-  awaitProtectionRestore?(): Promise<void>;
-}
-
-/** 门禁缺席时按「没有待恢复的保护」处理：不阻塞既有行为。 */
-function protectionGate(deps: P2pkhServiceDeps): () => Promise<void> {
-  return async () => {
-    await deps.awaitProtectionRestore?.();
-  };
 }
 
 export function createP2pkhService(deps: P2pkhServiceDeps): {
@@ -730,7 +715,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
       const feeRateSatoshisPerKb = input.feeRateSatoshisPerKb ?? requireWorkerEffectiveFeeRate();
       if (!Number.isSafeInteger(feeRateSatoshisPerKb) || feeRateSatoshisPerKb < 1) throw new Error("P2PKH effective fee rate is invalid");
       const preparedInput = { ...input, feeRateSatoshisPerKb, ownerPublicKeyHex: walletIdentity.publicKeyHex, assetId: walletIdentity.bsvNetwork === "test" ? "bsvtest" as const : "bsv" as const };
-      await protectionGate(deps)();
       assertWalletSession();
       const result: P2pkhTransferPreview = await transfer.prepare(preparedInput);
       assertWalletSession();
@@ -747,7 +731,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
       const controller = new AbortController();
       transferRetryControllers.add(controller);
       try {
-        await protectionGate(deps)();
         assertWalletSession();
         const result = await transfer.submit(preview, { signal: controller.signal });
         assertWalletSession();

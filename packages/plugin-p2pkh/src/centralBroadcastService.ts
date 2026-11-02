@@ -1,6 +1,6 @@
 import type { CentralBroadcastService, CoordinatorP2pkhBroadcastResult, OneShotBroadcastInput, P2pkhBroadcastAssemblyControl } from "@keymaster/contracts";
 
-/** Transport only. Selection, durable dispatch and exact recovery belong to manager. */
+/** One-shot caller transport. The Worker handles success injection and explicit failure release. */
 export interface CentralBroadcastServiceDeps {
   coordinator: P2pkhBroadcastAssemblyControl;
   binding: { readonly identity: { publicKeyHex: string; bsvNetwork: "main" | "test" }; assertActive(): void };

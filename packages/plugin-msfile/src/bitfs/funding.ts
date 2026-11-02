@@ -828,7 +828,7 @@ export interface BitfsFundingPrepareDeps {
   /** 每次都必须提供已绑定当前 Key 的受限协议交易准备器。 */
   protocolSpend: ProtocolSpendService;
   /** Wallet inputs and fee policy are planned by the manager, never by BitFS. */
-  planFunding(input: { ownerPublicKeyHex: string; network: BsvNetwork; amountSatoshis: number; feeRateSatoshisPerKb: number; outputs: Array<{ scriptHex: string; value: string }> }): Promise<{ selected: import("@keymaster/contracts").ProtocolSpendInput[]; totalInputSatoshis: number }>;
+  planFunding(input: { ownerPublicKeyHex: string; network: BsvNetwork; amountSatoshis: number; feeRateSatoshisPerKb: number; outputs: Array<{ scriptHex: string; value: string }> }): Promise<{ allocationId: string; selected: import("@keymaster/contracts").ProtocolSpendInput[]; totalInputSatoshis: number }>;
   /** 当前 Key 与网络对应的唯一找零地址和锁定脚本。 */
   resolveOwnerAddress(input: { ownerPublicKeyHex: string; network: BsvNetwork }): Promise<{ address: string; scriptHex: string }>;
   /** 共识交易解析器；必须从 raw transaction 计算 txid 与 outputs。 */
@@ -990,6 +990,7 @@ export async function prepareBitfsFunding(input: {
   let outboxDurable = false;
   try {
     preview = await deps.protocolSpend.presign({
+      managerAllocationId: selection.allocationId,
       requestingPluginId: "msfile",
       inputs: selectedInputs,
       outputs: [{ value: outputAmountNumber, scriptHex: outputScript, label: "BitFS 开池资金" }],
@@ -1020,7 +1021,7 @@ export async function prepareBitfsFunding(input: {
       actualFee,
       maxFeeSatoshis: BigInt(input.maxFeeSatoshis),
     });
-    if (!preview.managerAllocationId) throw new BitfsFundingError("input_unavailable", "FundingTx 缺少持久化 manager 输入占用");
+    if (!preview.managerAllocationId) throw new BitfsFundingError("input_unavailable", "FundingTx 缺少运行期 manager 输入分配");
     if (!preview.submissionId) throw new BitfsFundingError("input_unavailable", "FundingTx 预签缺少 P2PKH 持久化提交编号");
     const opening = { txid: preview.txid, vout: 0, valueSatoshis: outputAmount, scriptHex: outputScript } as const;
     const poolId = input.sessionId;

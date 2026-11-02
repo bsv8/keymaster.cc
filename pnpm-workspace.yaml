@@ -20,4 +20,4 @@ minimumReleaseAgeExclude:
   - bitfs-protocol@0.5.1
   - webloom-framework@0.6.0
   - keymaster-trade-scheduler@0.1.0
-  - keymaster-utxo-manager@0.1.0
+  - keymaster-utxo-manager@0.2.0

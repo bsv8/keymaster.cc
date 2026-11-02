@@ -18,7 +18,7 @@ export type P2pkhProtocolCommandResult =
   | { type: "prepare" | "presign"; value: ProtocolSpendPreview }
   | { type: "submit"; value: ProtocolSpendResult }
   | { type: "release" | "release-submission"; value: { released: true } }
-  | { type: "funding-plan"; value: { selected: ProtocolSpendInput[]; totalInputSatoshis: number } };
+  | { type: "funding-plan"; value: { allocationId: string; selected: ProtocolSpendInput[]; totalInputSatoshis: number } };
 
 /** Associate the internal command with its result; no second runtime protocol. */
 export type P2pkhProtocolResultFor<T extends P2pkhProtocolCommand["type"]> =

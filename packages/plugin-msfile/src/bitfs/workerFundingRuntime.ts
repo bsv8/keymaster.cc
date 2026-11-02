@@ -10,7 +10,7 @@ export interface WorkerFundingDependencies {
   session(): { vaultStatus: string; activePublicKeyHex?: string; sessionEpoch: string };
   journalStore(): BorrowedModuleFileStore;
   walletView(input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<import("@keymaster/contracts").P2pkhUtxoSnapshotResult>;
-  protocol(): Promise<{ readonly identity: Readonly<import("@keymaster/contracts").NetworkIdentity>; spend: ProtocolSpendService; planFunding(input: import("@keymaster/contracts").ProtocolFundingPlanRequest): Promise<{ selected: ProtocolSpendInput[]; totalInputSatoshis: number }> }>;
+  protocol(): Promise<{ readonly identity: Readonly<import("@keymaster/contracts").NetworkIdentity>; spend: ProtocolSpendService; planFunding(input: import("@keymaster/contracts").ProtocolFundingPlanRequest): Promise<{ allocationId: string; selected: ProtocolSpendInput[]; totalInputSatoshis: number }> }>;
   submitWalletExact(input: { ownerPublicKeyHex: string; network: "main" | "test"; txid: string; rawTxHex: string }): Promise<{ outcome: "accepted" | "already-known" }>;
   ownsWalletExact(input: { ownerPublicKeyHex: string; network: "main" | "test"; txid: string; rawTxHex: string }): Promise<boolean>;
   previousTransaction(input: { ownerPublicKeyHex: string; network: "main" | "test"; txid: string }): Promise<string | null>;

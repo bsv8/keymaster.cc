@@ -10,7 +10,6 @@ import { createP2pkhProviderRegistry, createP2pkhUtxoSnapshotStore, type P2pkhUt
 import { createWorkerTransferRuntime, type WorkerTransferDependencies } from "./workerTransferRuntime.js";
 import { createP2pkhWorkerTaskDefinitions } from "./p2pkhWorkerTasks.js";
 import { createP2pkhUtxoManager } from "./p2pkhUtxoManager.js";
-import { readWorkerProtocolProtection } from "./workerProtocolRuntime.js";
 import { purgeRetiredForumProtocolData } from "./retiredForumCleanup.js";
 
 interface InstanceBinding {
@@ -66,16 +65,9 @@ export function createP2pkhWorkerRuntime(ports: P2pkhWorkerPorts) {
     const own = binding;
     if (!own) throw new Error("Manager projection requires an active P2PKH binding");
     const assertActive = () => { own.assertActive(); if (binding !== own) throw new Error("P2PKH manager projection revoked"); };
-    const manager = createP2pkhUtxoManager({ files: own.storage, async listProtectedOutpoints(owner, network) {
-      assertActive();
-      const persisted = await readWorkerProtocolProtection(own.storage, owner, network);
-      const business = await ports.protectedOutpoints(owner, network);
-      assertActive();
-      const registry = transfer.protectedOutpoints()?.list({ publicKeyHex: owner, network }) ?? [];
-      return [...persisted, ...business, ...registry];
-    } });
+    const manager = createP2pkhUtxoManager({ files: own.storage });
     // 退役论坛统一清理：文件+内存+manager 同一次受控清理，普通转账/协议业务激活前完成；失败抛错阻断，不静默。
-    await purgeRetiredForumProtocolData(own.storage, manager);
+    await purgeRetiredForumProtocolData(own.storage);
     snapshots = createP2pkhUtxoSnapshotStore({ woc: ports.snapshotSource(source), manager, assertActive });
   }
   const plugin = defineBuiltinWorkerPlugin("p2pkh", [P2PKH_WORKER_TRANSFER_CAPABILITY], async context => {

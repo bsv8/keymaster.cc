@@ -1049,15 +1049,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
   }
 
-  async p2pkhConclusion(input: import("@keymaster/contracts").P2pkhConclusionInput): Promise<import("@keymaster/contracts").CoordinatorValueResult<import("@keymaster/contracts").P2pkhConclusionResult>> {
-    const request = { kind: "p2pkh.conclusion" as const, clientId: this.clientId, requestId: this.generateRequestId(), input, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
-    try {
-      const response = await this.sendRequest(request);
-      if (response.ack.status !== "ok") return response.ack;
-      return { status: "ok", value: requiredCoordinatorOperationResult(response, request.kind), sessionEpoch: response.sessionEpoch };
-    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
-  }
-
   async p2pkhProtocolCommand(input: import("@keymaster/contracts").P2pkhProtocolCommand): Promise<import("@keymaster/contracts").CoordinatorValueResult<import("@keymaster/contracts").P2pkhProtocolCommandResult>> {
     const request = { kind: "p2pkh.protocol.command" as const, clientId: this.clientId, requestId: this.generateRequestId(), input, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
     try {

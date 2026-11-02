@@ -637,7 +637,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
             canonicalTxid: txid,
             network
           } satisfies WocUtxoResponse;
-        });
+        }).filter(row => !row.isSpentInMempoolTx);
       }
     });
   }

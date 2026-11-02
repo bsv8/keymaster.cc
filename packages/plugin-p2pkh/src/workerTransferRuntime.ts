@@ -1,15 +1,13 @@
 import { deriveP2pkhAddress, requireUnlockedWalletIdentity } from "@keymaster/contracts";
-import { requireWocNetwork } from "@keymaster/contracts";
 import type { ActiveKeyCrypto, AssetDataChangedEvent, BorrowedModuleFileStore, CoordinatorValueResult, VaultWalletState, P2pkhBroadcastSubmission, P2pkhUtxoSnapshotResult, VaultStatus, CentralBroadcastService, WocService } from "@keymaster/contracts";
 import { createMessageBus } from "webloom-framework";
 import { createCentralBroadcastService } from "./centralBroadcastService.js";
 import { createP2pkhService } from "./p2pkhService.js";
-import { createWorkerProtocolRuntime, readWorkerProtocolProtection } from "./workerProtocolRuntime.js";
+import { createWorkerProtocolRuntime } from "./workerProtocolRuntime.js";
 import type { P2pkhProtocolManagerPort } from "./p2pkhProtocolSpend.js";
 
 import { createP2pkhUtxoManager, type P2pkhUtxoManager } from "./p2pkhUtxoManager.js";
 import type { P2pkhService } from "./p2pkhContracts.js";
-import { createWocInputObserver } from "./wocInputObserver.js";
 
 type SnapshotInput = { ownerPublicKeyHex: string; network: "main" | "test" };
 export interface WorkerTransferDependencies {
@@ -55,10 +53,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     try { old?.dispose?.(); } catch { /* cleanup remains idempotent */ }
     return { starting, protocolStarting: pendingProtocol };
   }
-  /**
-   * UTXO manager port for the protocol services: durable pre-signature
-   * intent, exclusive input responsibility and exact-byte ownership.
-   */
+  /** Protocol caller access to the shared runtime wallet-input pool. */
   function protocolContext(request: { ownerPublicKeyHex: string; network: "main" | "test" }) {
     const manager = utxoManager;
     if (!manager) throw new Error("P2PKH UTXO manager is not ready");
@@ -69,16 +64,17 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     return { manager, resource };
   }
   const protocolManagerPort: P2pkhProtocolManagerPort = {
-    async cancelProtocolSubmission(request) {
+    async release(request) {
       const manager = utxoManager;
       if (!manager) throw new Error("Protocol manager unavailable");
-      await manager.cancelProtocolSubmission({ ...request, proof: null });
+      await manager.release(request);
       deps.fundsChanged(request);
     },
     async selectFundingInputs(request) {
       const { manager, resource } = protocolContext(request);
       const planned = await manager.selectProtocolFunding({ ...request, resource });
       return {
+        allocationId: planned.allocationId,
         selected: planned.selectedInputs.map(row => ({
           txid: row.utxo.txid, vout: row.utxo.vout, value: row.utxo.value, address: row.utxo.address,
           ...(row.previousTransactionHex === undefined ? {} : { previousTransactionHex: row.previousTransactionHex }),
@@ -86,17 +82,17 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
         totalInputSatoshis: planned.totalInputSatoshis,
       };
     },
-    async beginProtocolIntent(request) {
+    async allocateInputs(request) {
       const { manager, resource } = protocolContext(request);
-      const result = await manager.beginProtocolIntent({ ...request, resource });
+      const result = await manager.allocateInputs({ ...request, resource });
       deps.fundsChanged(request);
       return result;
     },
-    async completeProtocolIntent(request) {
+    async rememberTransaction(request) {
       const manager = utxoManager;
       if (!manager) throw new Error("P2PKH UTXO manager is not ready");
       const address = deriveP2pkhAddress(request.ownerPublicKeyHex, request.network);
-      const result = await manager.completeProtocolIntent({
+      const result = await manager.rememberTransaction({
         ...request,
         resource: { resourceId: `p2pkh:${request.network}`, network: request.network, address },
       });
@@ -156,46 +152,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
         binding: { identity, assertActive: assertFresh },
         coordinator: { p2pkhBroadcast: broadcast },
       });
-      utxoManager = createP2pkhUtxoManager({
-        files: deps.storage(),
-        async listProtectedOutpoints(protectedOwner, network) {
-          assertFresh();
-          // Every protection keeps its source so the manager can take over
-          // its own protocol claim without dropping somebody else's
-          // protection on the same outpoint.
-          const persisted = await readWorkerProtocolProtection(deps.storage(), protectedOwner, network);
-          assertFresh();
-          const activeProtocol = protocol ?? await ensureProtocol();
-          assertFresh();
-          const registry = activeProtocol.protectedOutpoints.list({ publicKeyHex: protectedOwner, network });
-          return [
-            ...persisted,
-            ...await deps.protectedOutpoints(protectedOwner, network),
-            ...registry.map((row) => ({
-              txid: row.txid,
-              vout: row.vout,
-              kind: row.kind,
-              source: row.source ?? `fund:${row.ownerPluginId ?? "unknown"}`,
-            })),
-          ];
-        },
-        chain: {
-          async observeInputs(network, keys, diagnostic) {
-            assertFresh();
-            const woc = deps.query?.();
-            if (!woc) return [];
-            const facts = await createWocInputObserver(woc, network, diagnostic).observeInputs(keys);
-            assertFresh();
-            return facts;
-          },
-          async observe(network, txid) {
-            const woc = deps.query?.();
-            if (!woc?.getRawTransaction) return null;
-            const raw = await requireWocNetwork(woc, network).getRawTransaction(txid);
-            return raw.replace(/^0x/i, "").toLowerCase();
-          },
-        },
-      });
+      utxoManager = createP2pkhUtxoManager({ files: deps.storage() });
       void utxoManager; void network;
       const { service } = createP2pkhService({
         vault: { status: deps.vaultStatus, createActiveKeyCrypto: async () => { assertFresh(); const crypto = await deps.crypto(owner); assertFresh(); return crypto; } },
@@ -208,18 +165,6 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
       try {
         await service.onVaultUnlocked();
         assertFresh();
-        // D05: settle outstanding exact transactions against the chain before
-        // any new request is served. A failure keeps the responsibility.
-        for (const network of ["main", "test"] as const) {
-          try {
-            await utxoManager!.reconcile({ ownerPublicKeyHex: owner, network });
-          } catch (error) {
-            // An unreadable ledger is not an empty ledger: the outstanding
-            // responsibility stays unknown and must be visible.
-            console.warn("[p2pkh] UTXO manager recovery failed", error instanceof Error ? error.message : String(error));
-          }
-          assertFresh();
-        }
         central = centralService;
         currentIdentity = Object.freeze({ ...identity });
         current = service; currentOwner = owner; currentEpoch = epoch;
@@ -257,10 +202,8 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
   /**
    * 占用一件**已签名、即将外露**的 artifact 的钱包输入。
    *
-   * 中文说明：Connect/费用池把已签名的 artifact 交给站点之前，钱包输入的
-   * 责任必须先落到 UTXO Manager——否则同一枚输入仍会被当作可花余额。占用
-   * 以 delivery="external" 完成：字节离开钱包后，exact 处于 unknown 状态，
-   * 只能由可信观察结算，找零也随之投影。
+   * 在当前内存池冻结钱包输入；交付字节并不等于提交成功，不注入找零。
+   * 后续调用者确认成功才主动注入；实例销毁不恢复这项冻结。
    */
   async function occupyDeliveredArtifact(input: {
     ownerPublicKeyHex: string;
@@ -278,38 +221,24 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     // 冷实例直接占用也必须可用：先走受控初始化（建立 manager 与当前会话），
     // 再占用；不能要求先做过一次普通转账来预热。
     await ensure();
-    const begun = await protocolManagerPort.beginProtocolIntent({
-      ownerPublicKeyHex: input.ownerPublicKeyHex,
-      network: input.network,
-      binding: { kind: input.protocolKind, poolId: input.artifactId },
-      unsignedTxHex: input.unsignedTxHex,
-      inputs: input.inputs.map((row) => ({
-        outpoint: `${row.txid}:${row.vout}`, class: "wallet", value: row.value, scriptHex: row.scriptHex, claimId: null,
-      })),
-      outputs: input.outputs,
-      artifactId: input.artifactId,
-      businessAmountSats: input.businessAmountSatoshis,
-      feeRateSatPerKb: input.feeRateSatoshisPerKb,
-      feeCapSats: input.feeCapSats,
-      feePolicy: "exact",
-      externalProofs: {},
-      claims: [],
+    const begun = await protocolManagerPort.allocateInputs({
+      ownerPublicKeyHex: input.ownerPublicKeyHex, network: input.network,
+      submissionId: input.artifactId, artifactId: input.artifactId,
+      outpoints: input.inputs.map(row => `${row.txid}:${row.vout}`),
     });
-    const completed = await protocolManagerPort.completeProtocolIntent({
+    const completed = await protocolManagerPort.rememberTransaction({
       ownerPublicKeyHex: input.ownerPublicKeyHex,
       network: input.network,
       allocationId: begun.allocationId,
       signedTxHex: input.signedTxHex,
-      delivery: "external",
     });
     return { allocationId: begun.allocationId, txid: completed.txid };
   }
   async function submitWalletExact(input: SnapshotInput & { txid: string; rawTxHex: string }) {
     await ensure();
     const manager = utxoManager!;
-    const entry = (await manager.listConclusions(input)).find(row => row.txid === input.txid);
-    if (!entry) throw new Error("Wallet exact has no durable manager allocation");
-    await manager.allowBusinessDispatch({ ...input, allocationId: entry.allocationId });
+    const entry = await manager.walletTransaction(input);
+    if (!entry) throw new Error("Wallet transaction has no current allocation");
     const result = await deps.broadcast({ ...input, submissionId: `manager:${entry.allocationId}`, submission: { resourceId: `p2pkh:${input.network}`, txid: input.txid, rawTxHex: input.rawTxHex, managerAllocationId: entry.allocationId } });
     if (result.status !== "ok") throw new Error("Wallet exact dispatch failed");
     const outcome = result.value as { status?: string; reason?: string };
@@ -324,19 +253,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     await utxoManager!.observeAcceptedExact({ ...input, resource });
     deps.fundsChanged(input);
   }
-  async function recoverSigning(input: SnapshotInput & { allocationId: string }) {
-    await ensure();
-    const manager = utxoManager!;
-    const session = deps.session();
-    if (!session.unlocked || session.owner?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) throw new Error("Protocol recovery scope mismatch");
-    // 已保存 exact 经 Manager 对账恢复（持久化在派发前完成）；未签名已在 presign 失败时释放，此处不再重签。
-    const identity = await manager.protocolExecutionIdentity(input).catch(() => null);
-    if (!identity) throw new Error("No verifiable protocol execution identity; responsibility retained");
-    await manager.reconcile({ ownerPublicKeyHex: input.ownerPublicKeyHex, network: input.network }).catch(() => undefined);
-    deps.fundsChanged(input);
-    return identity;
-  }
   async function ownsWalletExact(input: SnapshotInput & { txid: string; rawTxHex: string }) { await ensure(); return utxoManager!.ownsWalletExact(input); }
   async function previousTransaction(input: SnapshotInput & { txid: string }) { await ensure(); return utxoManager!.previousTransaction(input); }
-  return { ensure, ensureProtocol, identityFor, release, occupyDeliveredArtifact, submitWalletExact, ownsWalletExact, previousTransaction, recoverSigning, observeBusinessReceipt, protectedOutpoints: () => protocol?.protectedOutpoints };
+  return { ensure, ensureProtocol, identityFor, release, occupyDeliveredArtifact, submitWalletExact, ownsWalletExact, previousTransaction, observeBusinessReceipt, protectedOutpoints: () => protocol?.protectedOutpoints };
 }
