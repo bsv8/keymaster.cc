@@ -18,20 +18,6 @@ import {
 /** `FINAL_LOCKTIME`：close_and_recreate 的 close 部分用。 */
 export const FINAL_LOCKTIME = 0xffffffff;
 
-/** 适配 tx 输入。 */
-export interface FeepoolSdkUtxo {
-  txid: string;
-  vout: number;
-  satoshis: number;
-}
-
-export interface FeepoolSdkBaseTxResponse {
-  txHex: string;
-  txid: string;
-  outputIndex: number;
-  amount: number;
-}
-
 export interface FeepoolSdkDraftTxResponse {
   txHex: string;
 }
@@ -245,42 +231,6 @@ export function feePoolOutputFacts(rawTxHex: string): Array<{ value: number; scr
 }
 /** 接口只能接收整个未签名交易；钱包负责脚本/金额核验及一次额度预占。 */
 export type FeePoolTransactionSigner = (rawTxHex: string) => Promise<string[]>;
-async function signP2pkhInputs(unsigned: UnsignedTx, signTransaction: FeePoolTransactionSigner, publicKeyHex: string): Promise<string> {
-  const signatures=await signTransaction(bytesToHex(serializeTx(unsigned)));
-  if(signatures.length!==unsigned.inputs.length)throw new Error('Invalid wallet signature count');
-  const pub=hexToBytes(publicKeyHex);
-  const inputs=unsigned.inputs.map((input,i)=>{
-    const signature=hexToBytes(signatures[i]!);
-    if(signature.length<9 || signature[0]!==0x30 || signature.at(-1)!==SIGHASH_ALL_FORKID)throw new Error('Invalid wallet transaction signature');
-    return {...input,scriptSig:concatBytes(encodeVarInt(signature.length),signature,Uint8Array.of(pub.length),pub)};
-  });
-  return bytesToHex(serializeTx({...unsigned,inputs}));
-}
-
-function buildUnsignedBaseTx(params: {
-  clientUtxos: FeepoolSdkUtxo[];
-  clientPublicKeyHex: string;
-  serverPublicKeyHex: string;
-  feepoolAmount: number;
-  changeAmount: number;
-}): UnsignedTx {
-  const inputs = params.clientUtxos.map((u) => ({
-    prevTxid: u.txid,
-    prevVout: u.vout,
-    scriptSig: new Uint8Array(0),
-    sequence: 0xfffffffe
-  }));
-  return {
-    version: 1,
-    inputs,
-    outputs: [
-      { value: params.feepoolAmount, script: dualMultisigScript(params.serverPublicKeyHex, params.clientPublicKeyHex) },
-      { value: params.changeAmount, script: p2pkhLockScript(params.clientPublicKeyHex) }
-    ],
-    lockTime: 0
-  };
-}
-
 function buildUnsignedSpendTx(params: {
   prevTxId: string;
   totalAmount: number;
@@ -304,41 +254,6 @@ function buildUnsignedSpendTx(params: {
       { value: params.totalAmount - params.serverAmount, script: p2pkhLockScript(params.clientPublicKeyHex) }
     ],
     lockTime: params.endHeight
-  };
-}
-
-export async function sdkBuildBaseTx(params: {
-  clientUtxos: FeepoolSdkUtxo[];
-  clientPublicKeyHex: string;
-  signTransaction: FeePoolTransactionSigner;
-  serverPublicKeyHex: string;
-  feepoolAmount: number;
-  feeRate: number;
-}): Promise<FeepoolSdkBaseTxResponse> {
-  const totalValue = params.clientUtxos.reduce((sum, u) => sum + u.satoshis, 0);
-  if (params.feepoolAmount <= 0) throw new Error("feepoolAmount must be positive");
-  if (totalValue < params.feepoolAmount) {
-    throw new Error("Insufficient UTXO balance for fee pool base tx");
-  }
-  const initialChange = totalValue - params.feepoolAmount;
-  let unsigned = buildUnsignedBaseTx({
-    clientUtxos: params.clientUtxos,
-    clientPublicKeyHex: params.clientPublicKeyHex,
-    serverPublicKeyHex: params.serverPublicKeyHex,
-    feepoolAmount: params.feepoolAmount,
-    changeAmount: initialChange
-  });
-  // DER 长度变化不应导致多次签名、多次预占额度。108 是单个 P2PKH 解锁脚本的上界。
-  const upperSize=serializeTx(unsigned).length+108*unsigned.inputs.length;
-  const fee=Math.max(1,Math.ceil(upperSize*params.feeRate/1000));
-  if(totalValue<params.feepoolAmount+fee)throw new Error('Insufficient balance for fee pool funding fee');
-  unsigned.outputs[1]!.value=totalValue-params.feepoolAmount-fee;
-  const signedHex=await signP2pkhInputs(unsigned,params.signTransaction,params.clientPublicKeyHex);
-  return {
-    txHex: signedHex,
-    txid: calcTxidFromRawTxHex(signedHex),
-    outputIndex: 0,
-    amount: params.feepoolAmount
   };
 }
 

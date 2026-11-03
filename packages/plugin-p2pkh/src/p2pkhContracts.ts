@@ -384,11 +384,6 @@ export interface P2pkhService {
    * previewId，选币、金额、找零与 manager allocation 以 Worker 的记录为准。
    */
   submitPreparedTransfer?(previewId: string): Promise<P2pkhTransferResult>;
-  /**
-   * 外露 artifact 的占用：Connect/费用池交付已签名 artifact 之前，先让
-   * UTXO Manager 占住它的钱包输入（跨 Runtime 路径，经受限 Coordinator）。
-   */
-  occupyDeliveredArtifact?(input: import("@keymaster/contracts").P2pkhArtifactRequest): Promise<import("@keymaster/contracts").P2pkhArtifactOccupyResult>;
 
   /** 当前绑定钱包的资料已就绪，补齐派生资源。 */
   onKeyImported(): Promise<void>;

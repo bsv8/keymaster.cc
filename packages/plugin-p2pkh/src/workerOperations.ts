@@ -55,6 +55,8 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
     const submission = request.submission; if (!submission?.managerAllocationId) throw new Error("Wallet allocation required");
     const manager = createP2pkhUtxoManager({files: ports.storage()});
     const ownResource = await resource(request.ownerPublicKeyHex, request.network); captured.assertFresh(); if (!ownResource) throw new Error("Wallet resource unavailable");
+    await manager.validateTransaction({ownerPublicKeyHex: request.ownerPublicKeyHex, resource: ownResource, allocationId: submission.managerAllocationId, rawTxHex: submission.rawTxHex});
+    captured.assertFresh();
     const response = await executeWorkerP2pkhBroadcast(requestId, {...request, submission: {...submission, managerAllocationId: submission.managerAllocationId}}, {
      assertFresh: captured.assertFresh, provider: ports.provider() ?? ports.domain.registry()?.getBroadcastProvider("woc", request.network),
      storage: ports.storage, sessionEpoch: epoch, abortNotDispatched, publishChanged: ports.changed,
@@ -110,14 +112,8 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
    return {requestId, sessionEpoch: epoch(), ack: {status: "ok"}, operationResult: result};
   } catch (error) {return {requestId, sessionEpoch: epoch(), ack: {status: "error", message: String(error)}};}
  }
- async function occupyArtifact(requestId: string, request: Request<"p2pkh.artifact.occupy">): Promise<CoordinatorResponse> {
-  if (!ports.available()) return ports.blocked(requestId);
-  try {const captured = capture(request.input.ownerPublicKeyHex); captured.assertFresh(); const result = await ports.domain.transfer.occupyDeliveredArtifact({...request.input, inputs: request.input.inputs.map(row => ({...row})), outputs: request.input.outputs.map(row => ({...row}))}); captured.assertFresh();
-   return {requestId, sessionEpoch: epoch(), ack: {status: "ok"}, operationResult: result};
-  } catch (error) {return {requestId, sessionEpoch: epoch(), ack: {status: "error", message: String(error)}};}
- }
- type Kinds = "p2pkh.utxos.get" | "p2pkh.utxos.refresh" | "p2pkh.broadcast" | "p2pkh.transfer.prepare" | "p2pkh.transfer.submit" | "p2pkh.artifact.occupy" | "p2pkh.payment.status" | "p2pkh.protocol.command";
- const route = defineWorkerRequestRoute<Request<Kinds>>({kinds: ["p2pkh.utxos.get", "p2pkh.utxos.refresh", "p2pkh.broadcast", "p2pkh.transfer.prepare", "p2pkh.transfer.submit", "p2pkh.artifact.occupy", "p2pkh.payment.status", "p2pkh.protocol.command"],
+ type Kinds = "p2pkh.utxos.get" | "p2pkh.utxos.refresh" | "p2pkh.broadcast" | "p2pkh.transfer.prepare" | "p2pkh.transfer.submit" | "p2pkh.payment.status" | "p2pkh.protocol.command";
+ const route = defineWorkerRequestRoute<Request<Kinds>>({kinds: ["p2pkh.utxos.get", "p2pkh.utxos.refresh", "p2pkh.broadcast", "p2pkh.transfer.prepare", "p2pkh.transfer.submit", "p2pkh.payment.status", "p2pkh.protocol.command"],
   policy: request => ({scheduling: request.kind === "p2pkh.utxos.refresh" ? "parallel" : "serial", validateEpoch: true}),
   execute(request, call) {
    if (request.kind === "p2pkh.broadcast") return broadcast(call.requestId, request);
@@ -125,7 +121,6 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
    if (request.kind === "p2pkh.protocol.command") return protocolCommand(call.requestId, request);
    if (request.kind === "p2pkh.transfer.prepare") return transferPrepare(call.requestId, request);
    if (request.kind === "p2pkh.transfer.submit") return transferSubmit(call.requestId, request);
-   if (request.kind === "p2pkh.artifact.occupy") return occupyArtifact(call.requestId, request);
    return snapshot(call.requestId, request, request.kind === "p2pkh.utxos.refresh");
   },
   async stale(request, call) {if (request.kind !== "p2pkh.broadcast") return undefined; await abortNotDispatched(request, "stale-session-epoch");

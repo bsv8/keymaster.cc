@@ -2235,15 +2235,6 @@ export interface P2pkhProtocolAdapter {
     payment?: import("./p2pkhConnectPayment.js").P2pkhConnectPaymentPreview;
   }>;
   /**
-   * 外露 artifact 的占用：Connect/费用池把**已签名**的 artifact 交给站点
-   * 之前，先让 UTXO Manager 占住它花费的钱包输入。
-   *
-   * 中文说明：没有这一步，被交付 artifact 花掉的输入仍会被 manager 当作可花
-   * 余额——同一枚输入可能被再花一次。返回的 allocation id 是稳定身份：
-   * ledger 与 manager 两侧指向同一笔占用。
-   */
-  occupyDeliveredArtifact?(input: import("./bsvP2pkhProviders.js").P2pkhArtifactRequest): Promise<import("./bsvP2pkhProviders.js").P2pkhArtifactOccupyResult>;
-  /**
    * 广播已签名 transfer preview。
    *
    * `ownerPublicKeyHex` 必填：plugin-p2pkh 在 submit 阶段会校验 resource

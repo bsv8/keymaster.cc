@@ -146,7 +146,7 @@ export function calculateP2pkhBalanceBreakdown(input: {
 
 export interface P2pkhServiceDeps {
   vault: Pick<VaultService, "status" | "createActiveKeyCrypto">;
-  coordinator?: Pick<P2pkhCoordinatorControl, "p2pkhUtxosGet" | "p2pkhUtxosRefresh" | "p2pkhArtifactOccupy">
+  coordinator?: Pick<P2pkhCoordinatorControl, "p2pkhUtxosGet" | "p2pkhUtxosRefresh">
     & Partial<Pick<P2pkhCoordinatorControl, "subscribeTopic" | "p2pkhPaymentStatus">>;
   messageBus: MessageBus;
   /** Issuing runtime instance; fences publications before asynchronous cleanup. */
@@ -727,23 +727,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
         assertWalletSession();
         return result;
       } finally { transferRetryControllers.delete(controller); }
-    },
-
-    /**
-     * 外露 artifact 的占用（跨 Runtime 路径）。
-     *
-     * 中文说明：Window 不直接持有 Worker 的能力，只能经受限 Coordinator 请求
-     * Worker 让 UTXO Manager 占住这件 artifact 的钱包输入。
-     */
-    async occupyDeliveredArtifact(input) {
-      assertWalletSession();
-      if ("ownerPublicKeyHex" in input || "network" in input) throw new TypeError("Artifact request cannot select a wallet");
-      const occupy = deps.coordinator?.p2pkhArtifactOccupy;
-      if (!occupy) throw new Error("P2PKH artifact occupation is unavailable");
-      const result = await occupy({ ...input, ownerPublicKeyHex: walletIdentity.publicKeyHex, network: walletIdentity.bsvNetwork });
-      assertWalletSession();
-      if (result.status !== "ok") throw new Error(`P2PKH artifact occupation failed: ${result.status}`);
-      return result.value;
     },
 
     /**

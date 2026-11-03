@@ -23,7 +23,7 @@ import type {
 } from "./msfile.js";
 import type { CoordinatorMsFileStateEvent } from "./sessionCoordinator.js";
 import type { CoordinatorSatOperation, SatSubscriptionSettingsSnapshot, SatBillingPage, SatSpiInformation, SatTopUpPreview, SatTopUpResult, SatCollectResult } from "./satSubscription.js";
-import type { P2pkhBroadcastResult, P2pkhUtxoSnapshotResult, P2pkhTransferPreviewPayload, P2pkhTransferResultPayload, P2pkhArtifactOccupyResult } from "./bsvP2pkhProviders.js";
+import type { P2pkhBroadcastResult, P2pkhUtxoSnapshotResult, P2pkhTransferPreviewPayload, P2pkhTransferResultPayload } from "./bsvP2pkhProviders.js";
 import { projectP2pkhPaymentLookupResult, type P2pkhPaymentLookupResult } from "./p2pkhPaymentLookup.js";
 import type { P2pkhProtocolCommandResult } from "./protocolSpendRpc.js";
 
@@ -113,7 +113,7 @@ export type CoordinatorRpcResultForRequest<R extends CoordinatorRpcRequest> =
   R extends { kind: "p2pkh.utxos.get" | "p2pkh.utxos.refresh" } ? P2pkhUtxoSnapshotResult : R extends { kind: "p2pkh.provider-config.get" } ? P2pkhProviderConfig :
   R extends { kind: "p2pkh.broadcast" } ? CoordinatorP2pkhBroadcastResult : R extends { kind: "p2pkh.payment.status" } ? P2pkhPaymentLookupResult :
   R extends { kind: "p2pkh.transfer.prepare" } ? P2pkhTransferPreviewPayload :
-  R extends { kind: "p2pkh.transfer.submit" } ? P2pkhTransferResultPayload : R extends { kind: "p2pkh.artifact.occupy" } ? P2pkhArtifactOccupyResult :
+  R extends { kind: "p2pkh.transfer.submit" } ? P2pkhTransferResultPayload :
   R extends { kind: "p2pkh.protocol.command" } ? P2pkhProtocolCommandResult : undefined;
 export type CoordinatorRpcResultFor<K extends CoordinatorRpcRequestKind> = CoordinatorRpcResultForRequest<CoordinatorRpcRequestFor<K>>;
 type ResponseBase = Omit<CoordinatorRpcResponse, "operationResult" | "cryptoResult">;
@@ -367,7 +367,6 @@ function resultFor(request: CoordinatorRpcRequest, value: unknown): unknown {
     case "p2pkh.payment.status": return projectP2pkhPaymentLookupResult(value as P2pkhPaymentLookupResult);
     case "p2pkh.transfer.prepare": return transferPreview(value);
     case "p2pkh.transfer.submit": return transferResult(value);
-    case "p2pkh.artifact.occupy": return fields(value, "allocationId txid");
     case "p2pkh.protocol.command": return copy(value);
     default: return undefined;
   }

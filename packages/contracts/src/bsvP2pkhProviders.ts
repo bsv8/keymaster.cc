@@ -142,44 +142,6 @@ export interface P2pkhTransferPreviewPayload {
   };
 }
 
-/**
- * 跨 Runtime 的“外露 artifact 占用”请求。
- *
- * 中文说明：Connect/费用池把**已签名**的 artifact 交给站点之前，钱包输入的
- * 责任必须先落到 UTXO Manager——否则同一枚输入仍会被当作可花余额。artifact
- * 身份必须稳定：ledger 与 manager 两侧指向同一笔占用。
- */
-export interface P2pkhArtifactOccupyInput {
-  readonly ownerPublicKeyHex: string;
-  readonly network: "main" | "test";
-  /** 稳定 artifact 身份（与 ledger 的责任 ID 一致）。 */
-  readonly artifactId: string;
-  /** 未签名模板：manager 冻结 intent 用（形状必须与已签字节一致）。 */
-  readonly unsignedTxHex: string;
-  /** 已签名的 artifact 原文（即将外露给站点的那份）。 */
-  readonly signedTxHex: string;
-  /** artifact 真实花费的钱包输入。 */
-  readonly inputs: ReadonlyArray<{
-    readonly txid: string; readonly vout: number; readonly value: string; readonly scriptHex: string;
-  }>;
-  /** artifact 的自有输出（找零投影用）。 */
-  readonly outputs: ReadonlyArray<{ readonly scriptHex: string; readonly value: string }>;
-  /** 业务金额（矿工费 = 输入总额 − 输出总额）。 */
-  readonly businessAmountSatoshis: string;
-  readonly feeRateSatoshisPerKb: string;
-  readonly feeCapSats: string;
-  readonly protocolKind: "refund" | "close" | "fund" | "state";
-}
-
-/** 当前钱包的业务请求；身份仅在受信边界自动补入持久意图。 */
-export type P2pkhArtifactRequest = Omit<P2pkhArtifactOccupyInput, "ownerPublicKeyHex" | "network">;
-
-/** 外露 artifact 的占用结果：manager 的 allocation 与交易身份。 */
-export interface P2pkhArtifactOccupyResult {
-  readonly allocationId: string;
-  readonly txid: string;
-}
-
 /** 跨 Runtime 的普通转账结果。 */
 export interface P2pkhTransferResultPayload {
   readonly status: "local-confirmed" | "isolated" | "not-dispatched";

@@ -15,12 +15,12 @@ export interface P2pkhManagerReservation {
  outputs: Array<{vout: number; scriptHex: string; valueSats: string; role: PaymentOutputRole}>;
  businessScriptHex: string; changeScriptHex: string | null; planDigest?: string;
 }
-interface InputAllocation {
- ownerPublicKeyHex: string; resource: Resource; allocationId?: string;
- outpoints: string[]; submissionId: string; artifactId?: string;
+interface AllocationBinding {
+ ownerPublicKeyHex: string; resource: Resource; allocationId: string;
+ inputs: Array<{outpoint: string; value: number; scriptHex: string}>; submissionId: string;
 }
 interface TransactionRecord {
- allocationId: string; paymentId?: string; submissionId?: string; artifactId?: string; rawTxHex?: string; txid?: string;
+ allocationId: string; paymentId?: string; submissionId?: string; rawTxHex?: string; txid?: string;
 }
 interface State { pool: FundingKernel; revision: number; resource: Resource; owner: string; records: Map<string, TransactionRecord> }
 const instances = new WeakMap<object, P2pkhUtxoManager>();
@@ -44,6 +44,28 @@ export function createP2pkhUtxoManager(input: {files: BorrowedModuleFileStore}):
    return {utxo: {id: key, resourceId: s.resource.resourceId, publicKeyHex: s.owner, network: s.resource.network, address: s.resource.address,
     txid: row.txid, vout: row.vout, value: Number(row.value), script: row.scriptHex, height: row.height, status: row.status,
     isSpentInMempoolTx: false, syncedAt: new Date().toISOString()}};});
+ }
+ function held(s: State, id: string, allowUsed = false) {
+  const view = s.pool.allocationView(id);
+  if ((view.state !== "held" && !(allowUsed && view.state === "used")) || !view.inputs.length) throw new Error("Wallet allocation is not held");
+  for (const key of view.inputs) {
+   const row = s.pool.lookup(key);
+   if ((!allowUsed && row.used) || row.occupiedBy !== id) throw new Error("Wallet allocation is no longer available");
+  }
+  return view;
+ }
+ function checkTransaction(s: State, id: string, rawTxHex: string, allowUsed = false) {
+  const view = held(s, id, allowUsed), tx = parseTx(rawTxHex);
+  const keys = tx.inputs.map(row => row.outpointKey);
+  if (new Set(keys).size !== keys.length || view.inputs.some(key => !keys.includes(key))) throw new Error("Transaction inputs do not match wallet allocation");
+  for (const key of keys) {
+   let row; try { row = s.pool.lookup(key); } catch (error) {
+    if ((error as {code?: string}).code === "unknown-input") continue;
+    throw error;
+   }
+   if (row.scriptHex === s.pool.config.walletScriptHex && !view.inputs.includes(key)) throw new Error("Transaction contains an unallocated wallet input");
+  }
+  return tx;
  }
  const manager = {
   dispose() {disposed = true; states.clear(); if (instances.get(input.files) === manager) instances.delete(input.files);},
@@ -78,7 +100,7 @@ export function createP2pkhUtxoManager(input: {files: BorrowedModuleFileStore}):
    if (id) s.pool.release(id);
   },
   async refreshAllocationInputs(request: {ownerPublicKeyHex: string; resource: Resource; allocationId: string}) {
-   const s = state(request.ownerPublicKeyHex, request.resource); return evidence(s, s.pool.allocationView(request.allocationId).inputs);
+   const s = state(request.ownerPublicKeyHex, request.resource); return evidence(s, held(s, request.allocationId).inputs);
   },
   async selectProtocolFunding(request: {ownerPublicKeyHex: string; resource: Resource; amountSatoshis: number; feeRateSatoshisPerKb: number; outputs?: Array<{scriptHex: string; value: string}>}) {
    const s = state(request.ownerPublicKeyHex, request.resource), allocationId = crypto.randomUUID();
@@ -87,18 +109,29 @@ export function createP2pkhUtxoManager(input: {files: BorrowedModuleFileStore}):
    s.records.set(allocationId, {allocationId});
    return {allocationId, selectedInputs: evidence(s, view.inputs), totalInputSatoshis: Number(view.totalInSats)};
   },
-  async allocateInputs(request: InputAllocation) {
+  async bindAllocation(request: AllocationBinding) {
+   const s = state(request.ownerPublicKeyHex, request.resource), view = held(s, request.allocationId);
+   const keys = request.inputs.map(row => row.outpoint.toLowerCase());
+   if (keys.length !== view.inputs.length || new Set(keys).size !== keys.length || view.inputs.some(key => !keys.includes(key))) throw new Error("Wallet inputs do not match allocation");
+   for (const input of request.inputs) {
+    const row = s.pool.lookup(input.outpoint);
+    if (BigInt(input.value) !== BigInt(row.value) || input.scriptHex.toLowerCase() !== row.scriptHex.toLowerCase()) throw new Error("Wallet prevout facts do not match allocation");
+   }
+   const record = s.records.get(request.allocationId);
+   if (!record || record.rawTxHex || (record.submissionId && record.submissionId !== request.submissionId)) throw new Error("Wallet allocation is already bound");
+   record.submissionId = request.submissionId;
+   return {allocationId: request.allocationId};
+  },
+  async validateTransaction(request: {ownerPublicKeyHex: string; resource: Resource; allocationId: string; rawTxHex: string}) {
    const s = state(request.ownerPublicKeyHex, request.resource);
-   const existing = request.artifactId ? [...s.records.values()].find(row => row.artifactId === request.artifactId) : undefined;
-   if (existing) return {allocationId: existing.allocationId};
-   const allocationId = request.allocationId ?? crypto.randomUUID();
-   if (!request.allocationId) s.pool.allocate(allocationId, request.outpoints);
-   s.records.set(allocationId, {allocationId, submissionId: request.submissionId, artifactId: request.artifactId});
-   return {allocationId};
+   checkTransaction(s, request.allocationId, request.rawTxHex, true);
+   if (s.records.get(request.allocationId)?.rawTxHex !== request.rawTxHex) throw new Error("Transaction does not match the signed allocation");
   },
   async rememberTransaction(request: {ownerPublicKeyHex: string; resource: Resource; allocationId: string; signedTxHex: string}) {
-   const s = state(request.ownerPublicKeyHex, request.resource), tx = parseTx(request.signedTxHex);
-   const record = s.records.get(request.allocationId)!; record.rawTxHex = request.signedTxHex; record.txid = tx.canonicalTxid;
+   const s = state(request.ownerPublicKeyHex, request.resource), tx = checkTransaction(s, request.allocationId, request.signedTxHex);
+   const record = s.records.get(request.allocationId);
+   if (!record || (record.rawTxHex && record.rawTxHex !== request.signedTxHex)) throw new Error("Wallet allocation is bound to another transaction");
+   record.rawTxHex = request.signedTxHex; record.txid = tx.canonicalTxid;
    return {txid: tx.canonicalTxid};
   },
   async observeAcceptedExact(request: {ownerPublicKeyHex: string; resource: Resource; rawTxHex: string}) {
@@ -125,7 +158,8 @@ export interface P2pkhUtxoManager {
  release(request: Identity & {allocationId?: string; submissionId?: string}): Promise<void>;
  refreshAllocationInputs(request: {ownerPublicKeyHex: string; resource: Resource; allocationId: string}): Promise<P2pkhManagerInputEvidence[]>;
  selectProtocolFunding(request: {ownerPublicKeyHex: string; resource: Resource; amountSatoshis: number; feeRateSatoshisPerKb: number; outputs?: Array<{scriptHex: string; value: string}>}): Promise<{allocationId: string; selectedInputs: P2pkhManagerInputEvidence[]; totalInputSatoshis: number}>;
- allocateInputs(request: InputAllocation): Promise<{allocationId: string}>;
+ bindAllocation(request: AllocationBinding): Promise<{allocationId: string}>;
+ validateTransaction(request: {ownerPublicKeyHex: string; resource: Resource; allocationId: string; rawTxHex: string}): Promise<void>;
  rememberTransaction(request: {ownerPublicKeyHex: string; resource: Resource; allocationId: string; signedTxHex: string}): Promise<{txid: string}>;
  observeAcceptedExact(request: {ownerPublicKeyHex: string; resource: Resource; rawTxHex: string}): Promise<void>;
  walletTransaction(request: Identity & {txid: string}): Promise<TransactionRecord | undefined>;

@@ -81,9 +81,9 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
         totalInputSatoshis: planned.totalInputSatoshis,
       };
     },
-    async allocateInputs(request) {
+    async bindAllocation(request) {
       const { manager, resource } = protocolContext(request);
-      const result = await manager.allocateInputs({ ...request, resource });
+      const result = await manager.bindAllocation({ ...request, resource });
       deps.fundsChanged(request);
       return result;
     },
@@ -145,7 +145,6 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
         p2pkhUtxosGet: (input: SnapshotInput) => deps.snapshot(input, false),
         p2pkhUtxosRefresh: (input: SnapshotInput) => deps.snapshot(input, true),
         // 占用是 Worker 内部动作：Window 只能经 Coordinator 请求它发生。
-        p2pkhArtifactOccupy: async () => { throw new Error("P2PKH artifact occupation is worker-internal"); },
       };
       const centralService = createCentralBroadcastService({
         binding: { identity, assertActive: assertFresh },
@@ -198,41 +197,6 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     if (current !== service || !currentIdentity) throw new Error("P2PKH transfer identity is no longer active");
     return currentIdentity;
   }
-  /**
-   * 占用一件**已签名、即将外露**的 artifact 的钱包输入。
-   *
-   * 在当前内存池冻结钱包输入；交付字节并不等于提交成功，不注入找零。
-   * 后续调用者确认成功才主动注入；实例销毁不恢复这项冻结。
-   */
-  async function occupyDeliveredArtifact(input: {
-    ownerPublicKeyHex: string;
-    network: "main" | "test";
-    artifactId: string;
-    unsignedTxHex: string;
-    signedTxHex: string;
-    inputs: Array<{ txid: string; vout: number; value: string; scriptHex: string }>;
-    outputs: Array<{ scriptHex: string; value: string }>;
-    businessAmountSatoshis: string;
-    feeRateSatoshisPerKb: string;
-    feeCapSats: string;
-    protocolKind: "refund" | "close" | "fund" | "state";
-  }): Promise<{ allocationId: string; txid: string }> {
-    // 冷实例直接占用也必须可用：先走受控初始化（建立 manager 与当前会话），
-    // 再占用；不能要求先做过一次普通转账来预热。
-    await ensure();
-    const begun = await protocolManagerPort.allocateInputs({
-      ownerPublicKeyHex: input.ownerPublicKeyHex, network: input.network,
-      submissionId: input.artifactId, artifactId: input.artifactId,
-      outpoints: input.inputs.map(row => `${row.txid}:${row.vout}`),
-    });
-    const completed = await protocolManagerPort.rememberTransaction({
-      ownerPublicKeyHex: input.ownerPublicKeyHex,
-      network: input.network,
-      allocationId: begun.allocationId,
-      signedTxHex: input.signedTxHex,
-    });
-    return { allocationId: begun.allocationId, txid: completed.txid };
-  }
   async function submitWalletExact(input: SnapshotInput & { txid: string; rawTxHex: string }) {
     await ensure();
     const manager = utxoManager!;
@@ -252,5 +216,5 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     await utxoManager!.observeAcceptedExact({ ...input, resource });
     deps.fundsChanged(input);
   }
-  return { ensure, ensureProtocol, identityFor, release, occupyDeliveredArtifact, submitWalletExact, observeBusinessReceipt, protectedOutpoints: () => protocol?.protectedOutpoints };
+  return { ensure, ensureProtocol, identityFor, release, submitWalletExact, observeBusinessReceipt, protectedOutpoints: () => protocol?.protectedOutpoints };
 }

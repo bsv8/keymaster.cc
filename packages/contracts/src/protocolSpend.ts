@@ -105,7 +105,8 @@ export interface ProtocolSpendService {
 }
 
 export interface ProtocolSpendPrepareInput {
-  /** Existing runtime allocation returned by funding selection. */
+  /** Required for wallet inputs: existing held allocation returned by manager
+   * funding selection. Inputs/amounts/scripts must match; never allocated here. */
   managerAllocationId?: string;
   requestingPluginId?: string;
   inputs: ProtocolSpendInput[];
@@ -125,8 +126,8 @@ export interface ProtocolSpendPrepareInput {
    */
   noChangeRule?: ProtocolSpendNoChangeRule;
   /**
-   * Protocol role recorded in the UTXO manager's durable intent. Optional so
-   * existing callers keep their behaviour; the default is "refund".
+   * Protocol role supplied by the caller. The manager has no durable intent
+   * or protocol authorization state.
    */
   protocolKind?: "refund" | "close" | "fund" | "state";
 }

@@ -228,7 +228,7 @@ export function createPluginCoordinatorFacade(client: SessionCoordinatorClient, 
       "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainFeeSnapshots", "getChainHeightSnapshot", "subscribeTopic", "sendActivity",
       "p2pkhProviderConfigGet", "p2pkhProviderConfigUpdate",
       "p2pkhUtxosGet", "p2pkhUtxosRefresh", "p2pkhBroadcast",
-      "p2pkhTransferPrepare", "p2pkhTransferSubmit", "p2pkhArtifactOccupy", "p2pkhPaymentStatus", "p2pkhProtocolCommand"
+      "p2pkhTransferPrepare", "p2pkhTransferSubmit", "p2pkhPaymentStatus", "p2pkhProtocolCommand"
     ]);
     case "woc": return bindCoordinatorMethods<WocCoordinatorControl>(client, [
       "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainFeeSnapshots", "getChainHeightSnapshot", "subscribeTopic", "sendActivity",

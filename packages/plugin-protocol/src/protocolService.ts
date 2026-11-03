@@ -197,7 +197,6 @@ import {
   feePoolInputTxids,
   feePoolOutputFacts,
   type FeePoolTransactionSigner,
-  sdkBuildBaseTx,
   sdkBuildInitialDraftSpendTx,
   sdkClientSignInitialSpendTx,
   sdkClientSignUpdatedSpendTx,
@@ -4704,11 +4703,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       // poolKey 补 ownerPublicKeyHex 维度（不再仅按 origin + counterparty）。
       const session = await this.requireConnectSession(rec, params.walletPublicKeyHex);
       const ownerPublicKeyHex = session.ownerPublicKeyHex;
-      // 硬切换 002 收尾：feepool.prepare 会通过 `buildAndMaybeBuildBaseTx`
-      // 走 `p2pkhService.listUtxos({ ownerPublicKeyHex })` 取 value。协议
-      // 层必须先校验 session owner == 当前 active key，否则底层硬门禁
-      // 挡掉时只会冒出「Key storage is not ready」这种偶发错误，不适
-      // 合作为协议失败语义。
+      // Validate the original Connect owner before protocol processing.
       this.assertSessionOwnerIsActive(session);
       const publicAssetId = params.assetId ?? (session.networkIdentity.bsvNetwork === "test" ? "bsv-testnet" : "bsv-mainnet");
       const internalAssetId = toInternalP2pkhAssetId(publicAssetId);
@@ -5165,44 +5160,10 @@ export class ProtocolServiceImpl implements ProtocolService {
         reason: "partial close signature delivered outside the wallet",
       });
     }
-    // F08：交付前先让 UTXO Manager 占住 artifact 花费的钱包输入。否则被
-    // 交付的 artifact 花掉的输入仍会被当作可花余额。占用失败即拒绝交付。
-    for (const record of records) {
-      // 只有**完整交易**能进 manager 的占用责任：部分签名草稿的最终字节与
-      // txid 会在补齐签名后变化，不能拿草稿 txid 当 exact 的结算身份；草稿的
-      // 责任留在 E01 账本（外露签名责任模型）。
-      if (record.kind !== "base-transaction") continue;
-      const artifact = this.deps.getP2pkhService?.() ?? this.deps.p2pkhService;
-      const occupy = artifact?.occupyDeliveredArtifact?.bind(artifact);
-      if (!occupy) throw new Error("P2PKH artifact occupation is unavailable; refusing to deliver");
-      // 输入的金额与脚本来自**可信前序原文**；输出清单来自 artifact 本身。
-      const outputs = feePoolOutputFacts(record.rawTxHex);
-      const totalOut = outputs.reduce((sum, output) => sum + output.value, 0);
-      const fee = record.totalInSatoshis - totalOut;
-      if (fee < 0) throw new Error(`Fee pool delivery ${record.id} spends more than its inputs`);
-
-      const wallet = bindWalletIdentity(this.deps.walletState);
-      if (wallet.identity.publicKeyHex !== record.ownerPublicKeyHex || wallet.identity.bsvNetwork !== (record.assetId === "bsv-testnet" ? "test" : "main")) throw new Error("Artifact responsibility belongs to another wallet");
-      const verifiedInputs = await artifactInputs(record.rawTxHex);
-      wallet.assertActive();
-      const occupied = await occupy({
-        artifactId: record.id,
-        // 形状以已签字节为准：manager 冻结的是交易骨架（不含 scriptSig）。
-        unsignedTxHex: record.rawTxHex,
-        signedTxHex: record.rawTxHex,
-        inputs: verifiedInputs.map((row) => ({ txid: row.txid, vout: row.vout, value: String(row.value), scriptHex: row.scriptHex })),
-        outputs: outputs.map((output) => ({ scriptHex: output.scriptHex, value: String(output.value) })),
-        businessAmountSatoshis: String(record.totalInSatoshis),
-        // 不再按实际消耗反推费率（Q05：3 sats / 192 bytes 曾被反推成
-        // 16 sat/kB，与 manager 的取整叠加后判需 4 sats）。这里传 SDK 构建
-        // 这些 artifact 时使用的基础费率 1 sat/kB，作为**下界**；费用授权
-        // 仍由 feeCapSats（真实费用）承担，内核的签前下界检查保持原样。
-        feeRateSatoshisPerKb: "1",
-        feeCapSats: String(fee),
-        protocolKind: record.action === "close_and_recreate" ? "close" : "state",
-      });
-      wallet.assertActive();
-      record.managerAllocationId = occupied.allocationId;
+    // Fee-pool signing is unavailable. Never admit a pre-signed wallet
+    // transaction through a post-signing allocation/occupation fallback.
+    if (records.some(record => record.kind === "base-transaction")) {
+      throw new Error("Connect fee-pool signing removed (approval deleted)");
     }
     for (const record of records) {
       const existing = await repository.getFeePoolDelivery(record.id);
@@ -5220,19 +5181,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
   }
 
-  /**
-   * 建 A-Tx（client P2PKH UTXO → 2-of-2 multisig output）；create /
-   * close_and_recreate 复用。返回 `baseTxHex` / `baseTxOutputIndex` /
-   * `baseTxid` / `amount`（multisig output 大小）。
-   *
-   * 设计缘由（施工单 2026-06-28 002 硬切换）：
-   *   - UTXO 选币按 `ownerPublicKeyHex`（session 绑定 owner）走，**不**
-   *     读全局 active key 的 namespace。`clientPrivateKeyHex` 由调用方
-   *     在 plugin-p2pkh 内部必须同源。
-   *   - 旧实现读 `listUtxos({ assetId: "bsv" })` 等于"取当前 active key
-   *     namespace"——会与签名 key 错位。本实现强制传 owner 让 plugin-p2pkh
-   *     内部按 owner 过滤 UTXO。
-   */
+  /** Fee-pool funding is unavailable; no business-side wallet selection. */
   private async buildAndMaybeBuildBaseTx(
     prior: ProtocolFeePoolRecord | null,
     signTransaction: FeePoolTransactionSigner,
@@ -5248,47 +5197,11 @@ export class ProtocolServiceImpl implements ProtocolService {
     amount: number;
     inputs: Array<{ txid: string; vout: number; value: number }>;
   }> {
-    const p2pkhService = this.currentP2pkhService();
-    if (!p2pkhService) {
-      throw localFailure("internal_error", "p2pkh service required for fee pool base tx");
-    }
-    // 关键（002 硬切换）：UTXO 选币按 owner 走，**不**读全局 active key。
-    // plugin-p2pkh 内部 `listUtxos` filter 已支持 `ownerPublicKeyHex`。
-    // 施工单 2026-09-18 001：assetId 由调用方按公开资产映射后传入。
-    const captured = this.deps.walletState.snapshot();
-    const assertIdentity = () => {
-      const now = this.deps.walletState.snapshot();
-      if (now.sessionEpoch !== captured.sessionEpoch || !this.requireCurrentOwnerKey(ownerPublicKeyHex)
-        || now.activeKeyIdentity?.bsvNetwork !== (assetId === "bsvtest" ? "test" : "main")) {
-        throw localFailure("session_owner_mismatch", "Wallet identity revoked during UTXO lookup");
-      }
-    };
-    assertIdentity();
-    const projection = await p2pkhService.getAvailableUtxos();
-    assertIdentity();
-    if (!projection.hasResult) throw localFailure("internal_error", "Wallet UTXO result has not been obtained");
-    const utxos = projection.utxos;
-    if (utxos.length === 0) {
-      throw localFailure(
-        "internal_error",
-        `No P2PKH UTXOs to fund fee pool for owner ${ownerPublicKeyHex}`
-      );
-    }
-    const resp = await sdkBuildBaseTx({
-      clientUtxos: utxos.map((u) => ({ txid: u.txid, vout: u.vout, satoshis: u.value })),
-      signTransaction,
-      clientPublicKeyHex,
-      serverPublicKeyHex,
-      feepoolAmount: poolAmount,
-      feeRate: 1
-    });
-    return {
-      baseTxHex: resp.txHex,
-      baseTxOutputIndex: resp.outputIndex,
-      baseTxid: resp.txid,
-      amount: resp.amount,
-      inputs: utxos.map((u) => ({ txid: u.txid, vout: u.vout, value: u.value })),
-    };
+    // This unavailable signer must fail before reading or selecting wallet
+    // UTXOs. Any future implementation must request funding before signing.
+    void prior; void signTransaction; void clientPublicKeyHex; void serverPublicKeyHex;
+    void poolAmount; void ownerPublicKeyHex; void assetId;
+    throw new Error("Connect fee-pool signing removed (approval deleted)");
   }
 
   /* ============== feepool.commit ============== */

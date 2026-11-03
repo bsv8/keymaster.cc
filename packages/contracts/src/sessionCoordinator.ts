@@ -35,8 +35,6 @@ import type {
 } from "./storage/runtime.js";
 import type { WalletInitializePlan } from "./storage/wallet.js";
 import type {
-  P2pkhArtifactOccupyInput,
-  P2pkhArtifactOccupyResult,
   P2pkhBroadcastSubmission,
   P2pkhTransferPrepareInput,
   P2pkhTransferPreviewPayload,
@@ -410,7 +408,6 @@ export type CoordinatorClientRequest =
     | { kind: "p2pkh.payment.status"; clientId: string; requestId: string; input: P2pkhPaymentLookupInput; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.transfer.prepare"; clientId: string; requestId: string; input: P2pkhTransferPrepareInput; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.transfer.submit"; clientId: string; requestId: string; input: P2pkhTransferSubmitInput; expectedSessionEpoch: SessionEpoch }
-    | { kind: "p2pkh.artifact.occupy"; clientId: string; requestId: string; input: P2pkhArtifactOccupyInput; expectedSessionEpoch: SessionEpoch }
     | { kind: "p2pkh.protocol.command"; clientId: string; requestId: string; input: import("./protocolSpendRpc.js").P2pkhProtocolCommand; expectedSessionEpoch: SessionEpoch }
     | { kind: "activity"; clientId: string });
 
@@ -849,11 +846,6 @@ export interface SessionCoordinatorClient {
    * 签名事实复核后广播；页面自报的状态与预览内容都不构成授权。
    */
   p2pkhTransferSubmit(input: P2pkhTransferSubmitInput): Promise<CoordinatorValueResult<P2pkhTransferResultPayload>>;
-  /**
-   * 外露 artifact 的占用：Connect/费用池把已签名 artifact 交给站点之前，
-   * 先让 UTXO Manager 占住它的钱包输入（并投影找零）。
-   */
-  p2pkhArtifactOccupy(input: P2pkhArtifactOccupyInput): Promise<CoordinatorValueResult<P2pkhArtifactOccupyResult>>;
   /** 页面活动心跳；不包含任何业务 RPC 权限。 */
   sendActivity(): void;
   /** 记录可恢复的 transport/业务失败，不抛到全局 UI。 */
@@ -901,7 +893,7 @@ export type BackgroundCoordinatorControl = Pick<SessionCoordinatorClient,
 export type P2pkhCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
   "p2pkhProviderConfigGet" | "p2pkhProviderConfigUpdate" |
   "p2pkhUtxosGet" | "p2pkhUtxosRefresh" |
-  "p2pkhTransferPrepare" | "p2pkhTransferSubmit" | "p2pkhArtifactOccupy" | "p2pkhPaymentStatus" | "p2pkhProtocolCommand"
+  "p2pkhTransferPrepare" | "p2pkhTransferSubmit" | "p2pkhPaymentStatus" | "p2pkhProtocolCommand"
 >;
 
 /** 手续费策略写 RPC 的窄面，仅提供给 chain-fee.policy-writer 装配。 */

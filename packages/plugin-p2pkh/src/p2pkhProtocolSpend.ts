@@ -60,9 +60,9 @@ export interface P2pkhProtocolManagerPort {
     feeRateSatoshisPerKb: number;
     outputs?: Array<{ scriptHex: string; value: string }>;
   }): Promise<{ allocationId: string; selected: ProtocolSpendInput[]; totalInputSatoshis: number }>;
-  allocateInputs(input: {
-    ownerPublicKeyHex: string; network: BsvNetwork; allocationId?: string;
-    outpoints: string[]; submissionId: string; artifactId?: string;
+  bindAllocation(input: {
+    ownerPublicKeyHex: string; network: BsvNetwork; allocationId: string;
+    inputs: Array<{outpoint: string; value: number; scriptHex: string}>; submissionId: string;
   }): Promise<{allocationId: string}>;
   release(input: {ownerPublicKeyHex: string; network: BsvNetwork; submissionId?: string; allocationId?: string}): Promise<void>;
   rememberTransaction(input: {ownerPublicKeyHex: string; network: BsvNetwork; allocationId: string; signedTxHex: string}): Promise<{txid: string}>;
@@ -194,7 +194,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
       let protectedClaimIds: string[] = [];
       let inputClaimIds: string[] = [];
       const submissionId = crypto.randomUUID();
-      let managerAllocationId = input.managerAllocationId;
+      let managerAllocationId: string | undefined;
       // 本次提交是否已产生签名：仅当能证明尚未签名时才可安全释放，否则保责。
       let signingStarted = false;
       // 放在 try 之前：签名闭包要读它，而闭包定义在 owner 解析之前。
@@ -228,23 +228,6 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
             estimatedFeeSatoshis:plan.feeSatoshis,serializedSizeBytes:serializeTx(unsigned).length+input.inputs.reduce((n,u)=>n+(u.lockingScriptHex===undefined?108:74),0),txid:"",rawTxHex};
           tickets.set(preview.previewId!,{input:structuredClone(input),expires:now+120000});return preview;
         }
-        // 选币、占用与签名前状态由唯一 UTXO manager 决定；宿主不重复查 spent。
-        // 输入占用先于额度批准/签名，竞争失败不产生第二份可花费签名。
-        // New wallet occupations belong exclusively to the manager. The
-        // claim store remains readable only for historical signed records.
-        // Internal callers supply trusted prevout facts. Do not load a whole
-        // parent transaction to repeat amount/ownership checks at signing.
-        const prevoutFacts = input.inputs.map(item => ({
-          outpoint: `${item.txid.toLowerCase()}:${item.vout}`,
-          scriptHex: (item.lockingScriptHex ?? p2pkhAddressToScriptHex(item.address, input.network)).toLowerCase(),
-        }));
-        const walletScriptHex = p2pkhScriptForPublicKey(resolvedOwner.publicKeyHex);
-        const managerIntent = await deps.protocolManager!.allocateInputs({
-          ownerPublicKeyHex: resolvedOwner.publicKeyHex, network: input.network,
-          allocationId: input.managerAllocationId, submissionId,
-          outpoints: prevoutFacts.filter(row => row.scriptHex === walletScriptHex).map(row => row.outpoint),
-        });
-        managerAllocationId = managerIntent.allocationId;
         // 无审批直签：按实际输入锁定脚本选择 scriptCode/解锁结构（P2PKH 缺省，裸公钥按脚本本身）。
         const activeCrypto = await deps.vault.createActiveKeyCrypto();
         const signingInputs = plan.inputs.map((utxo, index) => {
@@ -269,10 +252,10 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           },
           { publicKey: Uint8Array.from(Buffer.from(resolvedOwner.publicKeyHex, "hex")) },
         );
-        await deps.protocolManager!.rememberTransaction({
+        if (managerAllocationId) await deps.protocolManager!.rememberTransaction({
           ownerPublicKeyHex: resolvedOwner.publicKeyHex,
           network: input.network,
-          allocationId: managerIntent.allocationId,
+          allocationId: managerAllocationId,
           signedTxHex: rawTxHex,
         });
         const serializedSizeBytes = rawTxHexByteLength(rawTxHex);
@@ -305,12 +288,31 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           protectedClaimIds,
           inputClaimIds,
           submissionId,
-          managerAllocationId: managerIntent.allocationId,
+          managerAllocationId,
 
         };
       };
 
       try {
+        if (sign) {
+          // Bind only a prior request allocation, before construction/signing.
+          // A mismatched ID must never be released by this attempt's catch.
+          const walletScriptHex = p2pkhScriptForPublicKey(resolvedOwner.publicKeyHex);
+          const walletInputs = input.inputs.map(item => ({
+            outpoint: `${item.txid.toLowerCase()}:${item.vout}`, value: item.value,
+            scriptHex: (item.lockingScriptHex ?? p2pkhAddressToScriptHex(item.address, input.network)).toLowerCase(),
+          })).filter(row => row.scriptHex === walletScriptHex);
+          if (walletInputs.length) {
+            if (!input.managerAllocationId) throw new Error("Wallet inputs require prior manager funding selection");
+            const binding = await deps.protocolManager!.bindAllocation({
+              ownerPublicKeyHex: resolvedOwner.publicKeyHex, network: input.network,
+              allocationId: input.managerAllocationId, submissionId, inputs: walletInputs,
+            });
+            managerAllocationId = binding.allocationId;
+          } else if (input.managerAllocationId) {
+            throw new Error("Protocol-only inputs must not carry a wallet allocation");
+          }
+        }
         if (deps.protectedOutpoints) {
           const hasProtectedInputs = input.inputs.some((u) => deps.protectedOutpoints?.isProtected({
             txid: u.txid,
