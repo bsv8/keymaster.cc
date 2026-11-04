@@ -95,7 +95,7 @@ export function serializeTx(tx: UnsignedTx): Uint8Array {
 /** 签名并返回 raw tx hex。 */
 export async function signP2pkhTx(
   unsigned: UnsignedTx,
-  utxos: P2pkhUtxo[],
+  utxos: readonly Pick<P2pkhUtxo, "address" | "value">[],
   signDigest: (digest: Uint8Array) => Promise<Uint8Array>,
   publicKeyHex: string
 ): Promise<string> {

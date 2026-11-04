@@ -1,4 +1,4 @@
-/** Runtime allocation lookup for the caller's payment-status service. */
+/** Caller-owned transaction outcome lookup; never inferred from allocation state. */
 export interface P2pkhPaymentLookupInput {ownerPublicKeyHex: string; network: "main" | "test"; paymentId: string}
 export interface P2pkhPaymentLookupResult {
  status: "not_found" | "not_signed" | "pending" | "signed_not_dispatched" | "unknown" | "accepted" | "failed";

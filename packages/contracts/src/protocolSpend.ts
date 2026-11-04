@@ -106,7 +106,8 @@ export interface ProtocolSpendService {
 
 export interface ProtocolSpendPrepareInput {
   /** Required for wallet inputs: existing held allocation returned by manager
-   * funding selection. Inputs/amounts/scripts must match; never allocated here. */
+   * funding selection. The original plan owns inputs, outputs and change;
+   * caller display fields never replace it. No allocation is created here. */
   managerAllocationId?: string;
   requestingPluginId?: string;
   inputs: ProtocolSpendInput[];
@@ -188,16 +189,18 @@ export const P2PKH_SUBMISSION_OBSERVER_CAPABILITY = defineCapability<ProtocolSub
   version: "1",
 });
 
-/**
- * 专用资金能力。
- *
- * 协议交易不能直接花钱包的大额余额：差额会成为矿工费。因此协议插件先通过这个
- * 能力准备一笔**普通** P2PKH 资金准备交易（含正常找零），产出一个金额已知的
- * 单输入专用 UTXO，之后的协议交易只花这一个 UTXO 且不带找零。
- *
- * 选币、资金准备交易、找零与专用 UTXO 的保护登记全部在 P2PKH 内完成；调用方
- * 只拿到 outpoint 与金额。
- */
+/** Wallet funding request. Manager selects/freezes inputs; the protocol caller
+ * retains the complete original construction plan through presign/submission. */
+export interface ProtocolFundingPlan {
+  allocationId: string;
+  submissionId: string;
+  selected: ProtocolSpendInput[];
+  totalInputSatoshis: number;
+  businessSats: string;
+  feeSats: string;
+  changeSats: string;
+  unsignedTxHex: string;
+}
 export interface ProtocolFundingPlanRequest {
   amountSatoshis: number;
   feeRateSatoshisPerKb: number;

@@ -243,7 +243,7 @@ export class BitfsTransactionBroadcaster {
       return { status: "confirmed", txid, attempts };
     } catch (error) {
       const reason = errorText(error);
-      if (isDefinitelyNotDispatchedBroadcastError(error)) {
+      if (isDefinitelyNotDispatchedBroadcastError(error) || (error as {code?: string})?.code === "woc-tx-rejected") {
         await this.mark(txid, "failed", attempts, reason);
         return { status: "failed", txid, attempts, reason };
       }

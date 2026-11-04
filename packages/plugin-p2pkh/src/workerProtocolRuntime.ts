@@ -1,8 +1,13 @@
 import type { ActiveKeyCrypto, BorrowedModuleFileStore, CentralBroadcastService, ProtectedOutpoint, ProtocolSubmissionObservation } from "@keymaster/contracts";
-import { createP2pkhProtocolSpendService, type P2pkhProtocolManagerPort } from "./p2pkhProtocolSpend.js";
+import { createP2pkhProtocolSpendService } from "./p2pkhProtocolSpend.js";
 import { createProtectedOutpointRegistry } from "./registries/protectedOutpointRegistry.js";
 import { createWalletProtectedOutpoints } from "./registries/walletProtectedOutpoints.js";
 import { createWorkerProtocolEvidence } from "./workerProtocolEvidence.js";
+import { buildUnsigned } from "keymaster-utxo-manager";
+import { deriveP2pkhAddress } from "@keymaster/contracts";
+import { p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
+import type { P2pkhUtxoManager } from "./p2pkhUtxoManager.js";
+import type { P2pkhSubmissionRuntime } from "./p2pkhSubmissionRuntime.js";
 
 export interface WorkerProtocolDependencies {
   assertActive(): void;
@@ -11,8 +16,8 @@ export interface WorkerProtocolDependencies {
   storage: BorrowedModuleFileStore;
   crypto(owner: string): Promise<ActiveKeyCrypto>;
   central: CentralBroadcastService;
-  /** UTXO manager port: runtime input allocation and caller-owned exact records. */
-  protocolManager?: P2pkhProtocolManagerPort;
+  manager: P2pkhUtxoManager;
+  submissions: P2pkhSubmissionRuntime;
 }
 
 /** Claims protection for UTXO manager; retired forum responsibility excluded (decision B). */
@@ -66,7 +71,8 @@ export async function createWorkerProtocolRuntime(deps: WorkerProtocolDependenci
       async putProtocolSubmission(record) { check(); await (await state()).putProtocolSubmission(record); check(); },
     },
     protectedOutpoints: registry,
-    protocolManager: deps.protocolManager,
+    protocolManager: deps.manager,
+    submissions: deps.submissions,
   });
   const scoped = <T extends object>(input: T) => {
     check();
@@ -81,10 +87,28 @@ export async function createWorkerProtocolRuntime(deps: WorkerProtocolDependenci
   };
   const planFunding = async (input: { ownerPublicKeyHex: string; network: "main" | "test"; amountSatoshis: number; feeRateSatoshisPerKb: number; outputs?: Array<{ scriptHex: string; value: string }> }) => {
     check();
-    if (!deps.protocolManager?.selectFundingInputs) throw new Error("Protocol funding requires manager selection");
-    const result = await deps.protocolManager.selectFundingInputs(input);
-    check();
-    return result;
+    const address = deriveP2pkhAddress(input.ownerPublicKeyHex, input.network);
+    const walletScriptHex = p2pkhAddressToScriptHex(address, input.network);
+    const outputs = input.outputs ?? [{scriptHex: walletScriptHex, value: String(input.amountSatoshis)}];
+    if (outputs.reduce((sum, row) => sum + BigInt(row.value), 0n) !== BigInt(input.amountSatoshis)) throw new Error("Funding amount differs from declared business outputs");
+    const allocation = await deps.manager.request({ownerPublicKeyHex: input.ownerPublicKeyHex,
+      resource: {resourceId: `p2pkh:${input.network}`, network: input.network, address}, amountSats: String(input.amountSatoshis),
+      feeRateSatPerKb: String(input.feeRateSatoshisPerKb), outputs});
+    try {
+      check();
+      const selected = allocation.selectedInputs.map(row => ({txid: row.utxo.txid, vout: row.utxo.vout, value: row.utxo.value, address: row.utxo.address}));
+      const txOutputs = [...outputs, ...(BigInt(allocation.changeSats) > 0n ? [{scriptHex: walletScriptHex, value: allocation.changeSats}] : [])];
+      const unsignedTxHex = buildUnsigned({inputs: selected, outputs: txOutputs});
+      const submissionId = crypto.randomUUID();
+      deps.submissions.prepare({...input, submissionId, allocationId: allocation.allocationId, unsignedTxHex, inputs: selected,
+        outputs: outputs.map(row => ({scriptHex: row.scriptHex, value: Number(row.value)})), feeSatoshis: Number(allocation.feeSats),
+        changeSatoshis: Number(allocation.changeSats), ...(BigInt(allocation.changeSats) > 0n ? {changeAddress: address} : {})});
+      return {allocationId: allocation.allocationId, submissionId, selected, totalInputSatoshis: Number(allocation.totalInSats),
+        businessSats: allocation.businessSats, feeSats: allocation.feeSats, changeSats: allocation.changeSats, unsignedTxHex};
+    } catch (error) {
+      await deps.manager.release({...input, allocationId: allocation.allocationId});
+      throw error;
+    }
   };
   check();
   return Object.freeze({ identity: Object.freeze({ publicKeyHex: deps.owner, bsvNetwork: deps.network }), spend, executor,

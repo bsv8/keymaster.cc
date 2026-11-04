@@ -154,8 +154,9 @@ export interface P2pkhServiceDeps {
   walletState: VaultWalletState;
   /** Host 已按 manifest 声明绑定的当前 owner K-V 句柄。 */
   storage: BorrowedModuleFileStore;
-  /** Worker-created durable UTXO Manager; absent only for Window read-only test fixtures. */
+  /** Worker-owned memory allocation pool; absent on Window facades. */
   utxoManager?: import("./p2pkhUtxoManager.js").P2pkhUtxoManager;
+  submissions?: import("./p2pkhSubmissionRuntime.js").P2pkhSubmissionRuntime;
   /** Window production transfers are executed by the Worker-owned manager/signer path. */
   workerTransfer?: P2pkhWorkerTransferBinding;
   /** 详情页懒加载 raw transaction 的唯一来源。 */
@@ -313,7 +314,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
 
   const transfer = createP2pkhTransferService({
     vault: deps.vault,
-    utxoManager: deps.utxoManager,
+    utxoManager: deps.utxoManager, submissions: deps.submissions,
     centralBroadcastService: deps.centralBroadcastService,
     broadcastWithCoordinator: deps.broadcastWithCoordinator,
     messageBus: deps.messageBus,
@@ -660,12 +661,12 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
       assertWalletSession();
       if (Object.keys(input).some(key => key !== "paymentId")) throw new TypeError("Payment status accepts only paymentId");
       const boundInput = { paymentId: input.paymentId, ownerPublicKeyHex: walletIdentity.publicKeyHex, network: walletIdentity.bsvNetwork };
-      if (deps.utxoManager) {
-        const result = await deps.utxoManager.paymentStatus(boundInput); assertWalletSession(); return result;
+      if (deps.submissions) {
+        const result = deps.submissions.paymentStatus(boundInput); assertWalletSession(); return result;
       }
-      if (!deps.coordinator?.p2pkhPaymentStatus) throw new Error("Payment manager status RPC unavailable");
+      if (!deps.coordinator?.p2pkhPaymentStatus) throw new Error("Payment transaction status RPC unavailable");
       const result = await deps.coordinator.p2pkhPaymentStatus(boundInput); assertWalletSession();
-      if (result.status !== "ok") throw new Error("message" in result ? result.message : `Payment manager status: ${result.status}`);
+      if (result.status !== "ok") throw new Error("message" in result ? result.message : `Payment transaction status: ${result.status}`);
       return result.value;
     },
     async getRawTransaction(txid) {

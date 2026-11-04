@@ -828,7 +828,7 @@ export interface BitfsFundingPrepareDeps {
   /** 每次都必须提供已绑定当前 Key 的受限协议交易准备器。 */
   protocolSpend: ProtocolSpendService;
   /** Wallet inputs and fee policy are planned by the manager, never by BitFS. */
-  planFunding(input: { ownerPublicKeyHex: string; network: BsvNetwork; amountSatoshis: number; feeRateSatoshisPerKb: number; outputs: Array<{ scriptHex: string; value: string }> }): Promise<{ allocationId: string; selected: import("@keymaster/contracts").ProtocolSpendInput[]; totalInputSatoshis: number }>;
+  planFunding(input: { ownerPublicKeyHex: string; network: BsvNetwork; amountSatoshis: number; feeRateSatoshisPerKb: number; outputs: Array<{ scriptHex: string; value: string }> }): Promise<import("@keymaster/contracts").ProtocolFundingPlan>;
   /** 当前 Key 与网络对应的唯一找零地址和锁定脚本。 */
   resolveOwnerAddress(input: { ownerPublicKeyHex: string; network: BsvNetwork }): Promise<{ address: string; scriptHex: string }>;
   /** 共识交易解析器；必须从 raw transaction 计算 txid 与 outputs。 */

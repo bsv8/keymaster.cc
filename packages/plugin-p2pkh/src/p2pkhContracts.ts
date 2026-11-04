@@ -355,7 +355,7 @@ export interface P2pkhTransactionDetail {
 export interface P2pkhService {
   /** 完整前序证据的链上读接口；缺失时费用池不能退回盲签摘要。 */
   getRawTransaction(txid: string): Promise<string>;
-  /** Pure local manager lookup; must never initiate signing/broadcast/chain polling. */
+  /** Pure local transaction outcome lookup; never signs, broadcasts or polls the chain. */
   getPaymentStatus(input: Pick<import("@keymaster/contracts").P2pkhPaymentLookupInput, "paymentId">): Promise<import("@keymaster/contracts").P2pkhPaymentLookupResult>;
 
   /** 同步观察的本地只读投影；不刷新链、不占用或释放输入。 */

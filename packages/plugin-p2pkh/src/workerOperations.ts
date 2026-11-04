@@ -8,6 +8,8 @@ import { ensureWorkerP2pkhResources, refreshWorkerP2pkhResources } from "./p2pkh
 import { createP2pkhStateRepository, openP2pkhStateRepository } from "./storage/p2pkhStateRepository.js";
 import { createP2pkhUtxoManager } from "./p2pkhUtxoManager.js";
 import { readWorkerProtocolProtection } from "./workerProtocolRuntime.js";
+import { acceptedTransaction, createP2pkhSubmissionRuntime } from "./p2pkhSubmissionRuntime.js";
+import { createWorkerProtocolEvidence } from "./workerProtocolEvidence.js";
 
 type Input = {ownerPublicKeyHex: string; network: "main" | "test"};
 type Request<K extends CoordinatorClientRequest["kind"]> = Extract<CoordinatorClientRequest, {kind: K}>;
@@ -54,9 +56,16 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
     const captured = capture(request.ownerPublicKeyHex); captured.assertFresh();
     const submission = request.submission; if (!submission?.managerAllocationId) throw new Error("Wallet allocation required");
     const manager = createP2pkhUtxoManager({files: ports.storage()});
-    const ownResource = await resource(request.ownerPublicKeyHex, request.network); captured.assertFresh(); if (!ownResource) throw new Error("Wallet resource unavailable");
-    await manager.validateTransaction({ownerPublicKeyHex: request.ownerPublicKeyHex, resource: ownResource, allocationId: submission.managerAllocationId, rawTxHex: submission.rawTxHex});
+    const transactions = createP2pkhSubmissionRuntime(ports.storage());
+    const scope = {ownerPublicKeyHex: request.ownerPublicKeyHex, network: request.network, submissionId: request.submissionId};
+    const exact = {...scope, allocationId: submission.managerAllocationId, rawTxHex: submission.rawTxHex};
+    const retained = transactions.assertExact(exact);
+    if (retained.state === "accepted" || retained.state === "already-known") {
+     return {requestId, sessionEpoch: epoch(), ack: {status: "ok"}, operationResult: {status: retained.state === "already-known" ? "already-known" : "local-confirmed", txid: retained.txid}};
+    }
+    await manager.resolveAllocation({...scope, allocationId: submission.managerAllocationId});
     captured.assertFresh();
+    transactions.beginDispatch(exact);
     const response = await executeWorkerP2pkhBroadcast(requestId, {...request, submission: {...submission, managerAllocationId: submission.managerAllocationId}}, {
      assertFresh: captured.assertFresh, provider: ports.provider() ?? ports.domain.registry()?.getBroadcastProvider("woc", request.network),
      storage: ports.storage, sessionEpoch: epoch, abortNotDispatched, publishChanged: ports.changed,
@@ -64,18 +73,35 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
     captured.assertFresh();
     const outcome = response.operationResult as {status?: string; providerCode?: string} | undefined;
     if (outcome?.status === "local-confirmed" || outcome?.status === "already-known") {
-     await manager.observeAcceptedExact({ownerPublicKeyHex: request.ownerPublicKeyHex, resource: ownResource, rawTxHex: submission.rawTxHex});
+     transactions.outcome({...scope, state: outcome.status === "already-known" ? "already-known" : "accepted"});
+     await manager.acceptTransaction({...scope, transaction: acceptedTransaction(submission.rawTxHex)});
+     try {
+      const evidence = createWorkerProtocolEvidence(ports.storage()), protocol = await evidence.getProtocolSubmission(scope.submissionId);
+      if (protocol) await evidence.putProtocolSubmission({...protocol, status: "broadcast-pending-woc", updatedAt: new Date().toISOString()});
+     } catch (error) {console.warn("Successful protocol submission audit failed", error);}
     } else if (outcome?.status === "not-dispatched" || outcome?.providerCode === "woc-tx-rejected") {
+     transactions.outcome({...scope, state: "rejected"});
+     const evidence = createWorkerProtocolEvidence(ports.storage()), protocol = await evidence.getProtocolSubmission(scope.submissionId);
+     if (protocol) await evidence.putProtocolSubmission({...protocol, status: "rejected", droppedReason: outcome.providerCode === "woc-tx-rejected" ? "transaction-rejected" : "not-dispatched", updatedAt: new Date().toISOString()});
      await manager.release({...request, allocationId: submission.managerAllocationId});
+    } else {
+     transactions.outcome({...scope, state: "unknown"});
     }
     ports.changed({type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "balance", "submission"]});
     return response;
-   } catch (error) {return {requestId, sessionEpoch: epoch(), ack: {status: "error", message: `P2PKH broadcast failed: ${error instanceof Error ? error.message : String(error)}`}};}
+   } catch (error) {
+    try {
+     const transactions = createP2pkhSubmissionRuntime(ports.storage());
+     const scope = {ownerPublicKeyHex: request.ownerPublicKeyHex, network: request.network, submissionId: request.submissionId};
+     if (transactions.read(scope).state === "dispatching") transactions.outcome({...scope, state: "unknown"});
+    } catch { /* Revoked runtime or failure before a dispatch attempt. */ }
+    return {requestId, sessionEpoch: epoch(), ack: {status: "error", message: `P2PKH broadcast failed: ${error instanceof Error ? error.message : String(error)}`}};
+   }
   });
  }
  async function paymentStatus(requestId: string, request: Request<"p2pkh.payment.status">): Promise<CoordinatorResponse> {
   try {const captured = capture(request.input.ownerPublicKeyHex); captured.assertFresh();
-   const result = await createP2pkhUtxoManager({files: ports.storage()}).paymentStatus(request.input); captured.assertFresh();
+   const result = createP2pkhSubmissionRuntime(ports.storage()).paymentStatus(request.input); captured.assertFresh();
    return {requestId, sessionEpoch: epoch(), ack: {status: "ok"}, operationResult: result};
   } catch (error) {return {requestId, sessionEpoch: epoch(), ack: {status: "error", message: String(error)}};}
  }

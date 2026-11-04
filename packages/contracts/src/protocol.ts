@@ -2210,7 +2210,7 @@ export const PROTOCOL_SERVICE_CAPABILITY = defineCapability<ProtocolService>({
 export interface P2pkhProtocolAdapter {
   /** 完整前序证据的链上读接口；缺失时费用池不能退回盲签摘要。 */
   getRawTransaction?(txid: string): Promise<string>;
-  /** Local manager lookup only; never implicitly starts conclusion queries. */
+  /** Local transaction outcome lookup only; never starts signing/broadcast/chain polling. */
   getPaymentStatus?(input: Pick<import("./p2pkhPaymentLookup.js").P2pkhPaymentLookupInput, "paymentId">): Promise<import("./p2pkhPaymentLookup.js").P2pkhPaymentLookupResult>;
   /** 只消费当前钱包结果的坐标；hasResult=false 时没有 UTXO 材料。 */
   getAvailableUtxos(): Promise<

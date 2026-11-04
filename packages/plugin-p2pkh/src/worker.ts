@@ -10,6 +10,7 @@ import { createP2pkhProviderRegistry, createP2pkhUtxoSnapshotStore, type P2pkhUt
 import { createWorkerTransferRuntime, type WorkerTransferDependencies } from "./workerTransferRuntime.js";
 import { createP2pkhWorkerTaskDefinitions } from "./p2pkhWorkerTasks.js";
 import { createP2pkhUtxoManager } from "./p2pkhUtxoManager.js";
+import { createP2pkhSubmissionRuntime } from "./p2pkhSubmissionRuntime.js";
 import { purgeRetiredForumProtocolData } from "./retiredForumCleanup.js";
 
 interface InstanceBinding {
@@ -81,11 +82,13 @@ export function createP2pkhWorkerRuntime(ports: P2pkhWorkerPorts) {
     await initialize(query, context.capability(WOC_WORKER_BROADCAST_CAPABILITY));
     const ownedRegistry = registry;
     const ownedSnapshots = snapshots;
+    const ownedSubmissions = createP2pkhSubmissionRuntime(own.storage);
     let released: ReturnType<typeof transfer.release> | undefined;
     context.scope.onRevoke(() => {
       if (binding !== own) return;
       binding = undefined;
       released = transfer.release();
+      ownedSubmissions.dispose();
       if (registry === ownedRegistry) registry = undefined;
       if (snapshots === ownedSnapshots) { snapshots?.clearAll(); snapshots = undefined; }
       query = undefined;
@@ -123,7 +126,7 @@ export function createP2pkhWorkerRuntime(ports: P2pkhWorkerPorts) {
   });
   return {
     subscribeUtxoSeq: subscribeWorkerUtxoSeq, publishUtxoSeq: publishWorkerUtxoSeq, plugin, transfer, initialize, registry: () => registry, snapshots: () => snapshots, binding: () => binding, query: () => query,
-    reset() { transfer.release(); registry = undefined; snapshots?.clearAll(); snapshots = undefined; binding = undefined; query = undefined; },
+    reset() { if (binding) createP2pkhSubmissionRuntime(binding.storage).dispose(); transfer.release(); registry = undefined; snapshots?.clearAll(); snapshots = undefined; binding = undefined; query = undefined; },
   };
 }
 

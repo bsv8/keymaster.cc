@@ -4402,7 +4402,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     if (!claimed.created) {
       if (claimed.record.requestDigest !== requestDigest) throw protocolError("id_conflict", "clientRequestId was already used with different payment facts");
-      const existing = await this.refreshConnectPaymentFromManager(rec, claimed.record);
+      const existing = await this.refreshConnectPaymentFromSubmission(rec, claimed.record);
       rec.paymentStatus = existing.status;
       return paymentResultFromRecord(existing);
     }
@@ -4497,8 +4497,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
   }
 
-  /** Runtime allocation lookup plus business CAS; no signing or chain I/O. */
-  private async refreshConnectPaymentFromManager(rec: RequestRecord, record: ProtocolConnectPaymentRecord): Promise<ProtocolConnectPaymentRecord> {
+  /** Runtime transaction outcome lookup plus business CAS; no signing or chain I/O. */
+  private async refreshConnectPaymentFromSubmission(rec: RequestRecord, record: ProtocolConnectPaymentRecord): Promise<ProtocolConnectPaymentRecord> {
     const assertAuthorized = async () => {
       const session = await this.requireConnectSession(rec, record.ownerPublicKeyHex);
       this.assertSessionOwnerIsActive(session);
@@ -4512,9 +4512,9 @@ export class ProtocolServiceImpl implements ProtocolService {
     await assertAuthorized();
     const manager = value;
     if (manager.status === "not_found") return record;
-    if (manager.status === "pending" && record.txid) throw protocolError("id_conflict", "Signed payment lost its manager exact");
+    if (manager.status === "pending" && record.txid) throw protocolError("id_conflict", "Signed payment lost its transaction exact");
     if (manager.status === "not_signed" && (record.txid || record.status === "signed_not_dispatched" || record.release)) throw protocolError("id_conflict", "Unsigned release contradicts signed payment facts");
-    if ((record.allocationId && manager.allocationId && manager.allocationId !== record.allocationId) || (record.txid && manager.txid && manager.txid !== record.txid.toLowerCase())) throw protocolError("id_conflict", "Manager payment identity/exact mismatch");
+    if ((record.allocationId && manager.allocationId && manager.allocationId !== record.allocationId) || (record.txid && manager.txid && manager.txid !== record.txid.toLowerCase())) throw protocolError("id_conflict", "Payment transaction identity/exact mismatch");
     const updated = await storeConnectPaymentRecord(this.deps.storageRepository!, {
       ...record, status: manager.status,
       allocationId: manager.allocationId ?? record.allocationId,
@@ -4550,11 +4550,11 @@ export class ProtocolServiceImpl implements ProtocolService {
       throw protocolError("payment_not_found", "Connect payment was not found for this identity");
     }
     if (this.currentP2pkhService()?.getPaymentStatus) {
-      // The production adapter always uses the read-only Worker manager RPC.
+      // Production reads caller-owned Worker transaction outcomes, not allocation state.
       // No txid is needed: paymentId locates the original allocation/outbox.
-      return paymentResultFromRecord(await this.refreshConnectPaymentFromManager(rec, record));
+      return paymentResultFromRecord(await this.refreshConnectPaymentFromSubmission(rec, record));
     }
-    // Legacy adapters without manager lookup retain their read-only observation
+    // Legacy adapters without transaction lookup retain their read-only observation
     // compatibility. Production must never fall back here after lookup failure.
     // If the protocol write lost its txid, recover the exact bytes from the
     // Vault journal by paymentId. The exact is persisted before broadcast, so

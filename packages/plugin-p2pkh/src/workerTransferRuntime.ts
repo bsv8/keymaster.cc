@@ -1,10 +1,10 @@
-import { deriveP2pkhAddress, requireUnlockedWalletIdentity } from "@keymaster/contracts";
-import type { ActiveKeyCrypto, AssetDataChangedEvent, BorrowedModuleFileStore, CoordinatorValueResult, VaultWalletState, P2pkhBroadcastSubmission, P2pkhUtxoSnapshotResult, VaultStatus, CentralBroadcastService, WocService } from "@keymaster/contracts";
+import { requireUnlockedWalletIdentity } from "@keymaster/contracts";
+import type { ActiveKeyCrypto, BorrowedModuleFileStore, CoordinatorValueResult, VaultWalletState, P2pkhBroadcastSubmission, P2pkhUtxoSnapshotResult, VaultStatus, CentralBroadcastService, WocService } from "@keymaster/contracts";
 import { createMessageBus } from "webloom-framework";
 import { createCentralBroadcastService } from "./centralBroadcastService.js";
 import { createP2pkhService } from "./p2pkhService.js";
 import { createWorkerProtocolRuntime } from "./workerProtocolRuntime.js";
-import type { P2pkhProtocolManagerPort } from "./p2pkhProtocolSpend.js";
+import { acceptedTransaction, createP2pkhSubmissionRuntime } from "./p2pkhSubmissionRuntime.js";
 
 import { createP2pkhUtxoManager, type P2pkhUtxoManager } from "./p2pkhUtxoManager.js";
 import type { P2pkhService } from "./p2pkhContracts.js";
@@ -53,52 +53,6 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     try { old?.dispose?.(); } catch { /* cleanup remains idempotent */ }
     return { starting, protocolStarting: pendingProtocol };
   }
-  /** Protocol caller access to the shared runtime wallet-input pool. */
-  function protocolContext(request: { ownerPublicKeyHex: string; network: "main" | "test" }) {
-    const manager = utxoManager;
-    if (!manager) throw new Error("P2PKH UTXO manager is not ready");
-    const session = deps.session();
-    if (!session.unlocked || session.owner?.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase()) throw new Error("Protocol manager owner mismatch");
-    const address = deriveP2pkhAddress(request.ownerPublicKeyHex, request.network);
-    const resource = { resourceId: `p2pkh:${request.network}`, network: request.network, address };
-    return { manager, resource };
-  }
-  const protocolManagerPort: P2pkhProtocolManagerPort = {
-    async release(request) {
-      const manager = utxoManager;
-      if (!manager) throw new Error("Protocol manager unavailable");
-      await manager.release(request);
-      deps.fundsChanged(request);
-    },
-    async selectFundingInputs(request) {
-      const { manager, resource } = protocolContext(request);
-      const planned = await manager.selectProtocolFunding({ ...request, resource });
-      return {
-        allocationId: planned.allocationId,
-        selected: planned.selectedInputs.map(row => ({
-          txid: row.utxo.txid, vout: row.utxo.vout, value: row.utxo.value, address: row.utxo.address,
-        })),
-        totalInputSatoshis: planned.totalInputSatoshis,
-      };
-    },
-    async bindAllocation(request) {
-      const { manager, resource } = protocolContext(request);
-      const result = await manager.bindAllocation({ ...request, resource });
-      deps.fundsChanged(request);
-      return result;
-    },
-    async rememberTransaction(request) {
-      const manager = utxoManager;
-      if (!manager) throw new Error("P2PKH UTXO manager is not ready");
-      const address = deriveP2pkhAddress(request.ownerPublicKeyHex, request.network);
-      const result = await manager.rememberTransaction({
-        ...request,
-        resource: { resourceId: `p2pkh:${request.network}`, network: request.network, address },
-      });
-      deps.fundsChanged(request);
-      return result;
-    },
-  };
   async function ensure(): Promise<P2pkhService> {
     deps.assertActive();
     const session = deps.session();
@@ -144,17 +98,15 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
       const coordinator = {
         p2pkhUtxosGet: (input: SnapshotInput) => deps.snapshot(input, false),
         p2pkhUtxosRefresh: (input: SnapshotInput) => deps.snapshot(input, true),
-        // 占用是 Worker 内部动作：Window 只能经 Coordinator 请求它发生。
       };
       const centralService = createCentralBroadcastService({
         binding: { identity, assertActive: assertFresh },
         coordinator: { p2pkhBroadcast: broadcast },
       });
       utxoManager = createP2pkhUtxoManager({ files: deps.storage() });
-      void utxoManager; void network;
       const { service } = createP2pkhService({
         vault: { status: deps.vaultStatus, createActiveKeyCrypto: async () => { assertFresh(); const crypto = await deps.crypto(owner); assertFresh(); return crypto; } },
-        utxoManager,
+        utxoManager, submissions: createP2pkhSubmissionRuntime(deps.storage()),
         woc: deps.query?.(),
         effectiveFeeRate: deps.effectiveFeeRate,
         coordinator, centralBroadcastService: centralService, broadcastWithCoordinator: broadcast,
@@ -187,7 +139,7 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     const run = createWorkerProtocolRuntime({
        assertActive, owner, network, storage: deps.storage(), crypto: deps.crypto,
       central: central!,
-      protocolManager: protocolManagerPort,
+      manager: utxoManager!, submissions: createP2pkhSubmissionRuntime(deps.storage()),
     });
     protocolStarting = run;
     try { const candidate = await run; try { assertActive(); } catch (error) { candidate.dispose(); throw error; } protocol = candidate; return candidate; }
@@ -199,21 +151,38 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
   }
   async function submitWalletExact(input: SnapshotInput & { txid: string; rawTxHex: string }) {
     await ensure();
-    const manager = utxoManager!;
-    const entry = await manager.walletTransaction(input);
-    if (!entry) throw new Error("Wallet transaction has no current allocation");
-    const result = await deps.broadcast({ ...input, submissionId: `manager:${entry.allocationId}`, submission: { resourceId: `p2pkh:${input.network}`, txid: input.txid, rawTxHex: input.rawTxHex, managerAllocationId: entry.allocationId } });
-    if (result.status !== "ok") throw new Error("Wallet exact dispatch failed");
-    const outcome = result.value as { status?: string; reason?: string };
-    if (outcome.status !== "local-confirmed" && outcome.status !== "already-known") throw new Error(outcome.reason ?? "Wallet exact dispatch result unknown");
+    const transactions = createP2pkhSubmissionRuntime(deps.storage());
+    const entry = transactions.byTxid(input);
+    const scope = {ownerPublicKeyHex: input.ownerPublicKeyHex, network: input.network, submissionId: entry.plan.submissionId};
+    if (!entry.plan.allocationId) throw new Error("Wallet transaction has no allocation");
+    if (entry.state === "rejected" || entry.state === "cancelled") throw Object.assign(new Error("Wallet transaction intention has ended"), {code: "definitive-not-dispatched"});
+    let result: CoordinatorValueResult<unknown>;
+    try {
+      result = await deps.broadcast({ ...input, submissionId: entry.plan.submissionId, submission: { resourceId: `p2pkh:${input.network}`, txid: input.txid, rawTxHex: input.rawTxHex, managerAllocationId: entry.plan.allocationId } });
+    } catch (error) {
+      const code = (error as {code?: string})?.code;
+      if (code !== "definitive-not-dispatched" && code !== "woc-tx-rejected") transactions.outcome({...scope, state: "unknown"});
+      throw error;
+    }
+    if (result.status !== "ok") {
+      const definitive = result.status === "transport-error" && result.dispatchStatus === "not-dispatched";
+      if (!definitive) transactions.outcome({...scope, state: "unknown"});
+      throw Object.assign(new Error("Wallet exact dispatch failed"), {code: definitive ? "definitive-not-dispatched" : "broadcast-unknown"});
+    }
+    const outcome = result.value as { status?: string; reason?: string; providerCode?: string };
+    if (outcome.status !== "local-confirmed" && outcome.status !== "already-known") {
+      const code = outcome.status === "not-dispatched" ? "definitive-not-dispatched" : outcome.providerCode === "woc-tx-rejected" ? "woc-tx-rejected" : "broadcast-unknown";
+      if (code === "broadcast-unknown") transactions.outcome({...scope, state: "unknown"});
+      throw Object.assign(new Error(outcome.reason ?? "Wallet exact dispatch result unknown"), {code});
+    }
     return { outcome: outcome.status === "already-known" ? "already-known" as const : "accepted" as const };
   }
   async function observeBusinessReceipt(input: SnapshotInput & { rawTxHex: string }) {
     await ensure();
     const session = deps.session();
     if (!session.unlocked || session.owner?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) throw new Error("Business receipt owner mismatch");
-    const resource = { resourceId: `p2pkh:${input.network}`, network: input.network, address: deriveP2pkhAddress(input.ownerPublicKeyHex, input.network) };
-    await utxoManager!.observeAcceptedExact({ ...input, resource });
+    await utxoManager!.acceptTransaction({...input, transaction: acceptedTransaction(input.rawTxHex)});
+    createP2pkhSubmissionRuntime(deps.storage()).observeAccepted(input);
     deps.fundsChanged(input);
   }
   return { ensure, ensureProtocol, identityFor, release, submitWalletExact, observeBusinessReceipt, protectedOutpoints: () => protocol?.protectedOutpoints };
