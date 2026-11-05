@@ -10,6 +10,9 @@ export type FundingIdentity = {ownerPublicKeyHex: string; network: "main" | "tes
 type ScopedResource = {ownerPublicKeyHex: string; resource: Resource};
 export interface P2pkhManagerInputEvidence { utxo: P2pkhUtxo }
 export interface P2pkhFundingAllocation extends AllocationView { selectedInputs: P2pkhManagerInputEvidence[] }
+export interface P2pkhAllFundingAllocation {
+ allocationId: string; totalInSats: string; selectedInputs: P2pkhManagerInputEvidence[];
+}
 interface State { pool: FundingKernel; revision: number; resource: Resource; owner: string }
 const instances = new WeakMap<object, P2pkhUtxoManager>();
 export function createP2pkhUtxoManager(input: {files: BorrowedModuleFileStore}): P2pkhUtxoManager {
@@ -52,6 +55,11 @@ export function createP2pkhUtxoManager(input: {files: BorrowedModuleFileStore}):
     feeRateSatPerKb: request.feeRateSatPerKb, outputs: request.outputs});
    return material(s, s.pool.resolveAllocation(view.allocationId));
   },
+  async requestAll(request) {
+   const s = state(request.ownerPublicKeyHex, request.resource);
+   const value = s.pool.requestAll({requestId: crypto.randomUUID()});
+   return {allocationId: value.allocationId, totalInSats: value.totalInSats, selectedInputs: evidence(s, value.inputs)};
+  },
   async resolveAllocation(request) {const s = scoped(request); return material(s, s.pool.resolveAllocation(request.allocationId));},
   async release(request) {scoped(request).pool.release(request.allocationId);},
   async acceptTransaction(request) {scoped(request).pool.acceptTransaction(request.transaction);},
@@ -63,6 +71,7 @@ export interface P2pkhUtxoManager {
  observe(request: ScopedResource & {utxos: readonly P2pkhUtxo[]}): Promise<void>;
  available(request: ScopedResource): Promise<{observed: boolean; inputs: P2pkhManagerInputEvidence[]}>;
  request(request: ScopedResource & {amountSats: string; feeRateSatPerKb: string; outputs: Array<{scriptHex: string; value: string}>}): Promise<P2pkhFundingAllocation>;
+ requestAll(request: ScopedResource): Promise<P2pkhAllFundingAllocation>;
  resolveAllocation(request: FundingIdentity & {allocationId: string}): Promise<P2pkhFundingAllocation>;
  release(request: FundingIdentity & {allocationId: string}): Promise<void>;
  acceptTransaction(request: FundingIdentity & {transaction: AcceptedTransaction}): Promise<void>;
