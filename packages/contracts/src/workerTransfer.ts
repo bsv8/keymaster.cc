@@ -15,7 +15,11 @@ export interface P2pkhTransferRequest {
   payment?: import("./p2pkhConnectPayment.js").P2pkhConnectPaymentFacts;
 }
 
+export type P2pkhDirectTransferResult = Omit<import("./bsvP2pkhProviders.js").P2pkhTransferResultPayload, "rawTxHex"> & {
+  amountSatoshis: number; feeSatoshis: number; changeSatoshis: number; serializedSizeBytes: number;
+};
 export interface P2pkhWorkerTransfer {
+  transfer(input: P2pkhTransferRequest): Promise<P2pkhDirectTransferResult>;
   readonly identity: Readonly<import("./networkIdentity.js").NetworkIdentity>;
   prepareTransfer(input: P2pkhTransferRequest): Promise<unknown>;
   submitTransfer(preview: unknown): Promise<{ status: "local-confirmed" | "isolated" | "not-dispatched"; txid?: string; error?: string; rawTxHex: string; submissionId: string; localInputClaimIds: string[]; attempts: number; reason?: string }>;

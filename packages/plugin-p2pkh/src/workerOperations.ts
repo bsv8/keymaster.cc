@@ -62,7 +62,7 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
     if (retained.state === "accepted" || retained.state === "already-known") {
      return {requestId, sessionEpoch: epoch(), ack: {status: "ok"}, operationResult: {status: retained.state === "already-known" ? "already-known" : "local-confirmed", txid: retained.txid}};
     }
-    await manager.resolveAllocation({...scope, allocationId: submission.managerAllocationId});
+    await manager.assertAllocationUsable({...scope, allocationId: submission.managerAllocationId});
     captured.assertFresh();
     transactions.beginDispatch(exact);
     const response = await executeWorkerP2pkhBroadcast(requestId, {...request, submission: {...submission, managerAllocationId: submission.managerAllocationId}}, {
@@ -137,13 +137,24 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
    return {requestId, sessionEpoch: epoch(), ack: {status: "ok"}, operationResult: result};
   } catch (error) {return {requestId, sessionEpoch: epoch(), ack: {status: "error", message: String(error)}};}
  }
- type Kinds = "p2pkh.utxos.get" | "p2pkh.utxos.refresh" | "p2pkh.broadcast" | "p2pkh.transfer.prepare" | "p2pkh.transfer.submit" | "p2pkh.payment.status" | "p2pkh.protocol.command";
- const route = defineWorkerRequestRoute<Request<Kinds>>({kinds: ["p2pkh.utxos.get", "p2pkh.utxos.refresh", "p2pkh.broadcast", "p2pkh.transfer.prepare", "p2pkh.transfer.submit", "p2pkh.payment.status", "p2pkh.protocol.command"],
+ async function transferExecute(requestId: string, request: Request<"p2pkh.transfer.execute">): Promise<CoordinatorResponse> {
+  if (!ports.available()) return ports.blocked(requestId);
+  try {
+   if (request.expectedSessionEpoch !== epoch() || request.input.network !== ports.network()) throw new Error("Transfer RPC scope changed");
+   const captured = capture(request.input.ownerPublicKeyHex); captured.assertFresh();
+   const service = await ports.domain.transfer.ensure(); captured.assertFresh();
+   const result = await service.transfer(request.input); captured.assertFresh();
+   return {requestId, sessionEpoch: epoch(), ack: {status: "ok"}, operationResult: result};
+  } catch (error) {return {requestId, sessionEpoch: epoch(), ack: {status: "error", message: String(error)}};}
+ }
+ type Kinds = "p2pkh.transfer.execute" | "p2pkh.utxos.get" | "p2pkh.utxos.refresh" | "p2pkh.broadcast" | "p2pkh.transfer.prepare" | "p2pkh.transfer.submit" | "p2pkh.payment.status" | "p2pkh.protocol.command";
+ const route = defineWorkerRequestRoute<Request<Kinds>>({kinds: ["p2pkh.transfer.execute", "p2pkh.utxos.get", "p2pkh.utxos.refresh", "p2pkh.broadcast", "p2pkh.transfer.prepare", "p2pkh.transfer.submit", "p2pkh.payment.status", "p2pkh.protocol.command"],
   policy: request => ({scheduling: request.kind === "p2pkh.utxos.refresh" ? "parallel" : "serial", validateEpoch: true}),
   execute(request, call) {
    if (request.kind === "p2pkh.broadcast") return broadcast(call.requestId, request);
    if (request.kind === "p2pkh.payment.status") return paymentStatus(call.requestId, request);
    if (request.kind === "p2pkh.protocol.command") return protocolCommand(call.requestId, request);
+   if (request.kind === "p2pkh.transfer.execute") return transferExecute(call.requestId, request);
    if (request.kind === "p2pkh.transfer.prepare") return transferPrepare(call.requestId, request);
    if (request.kind === "p2pkh.transfer.submit") return transferSubmit(call.requestId, request);
    return snapshot(call.requestId, request, request.kind === "p2pkh.utxos.refresh");

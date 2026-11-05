@@ -1,5 +1,5 @@
 import type { BorrowedModuleFileStore, CoordinatorClientRequest, CoordinatorResponse, P2pkhTransactionBroadcastProvider } from "@keymaster/contracts";
-import { isDefinitelyNotDispatchedBroadcastError } from "@keymaster/contracts";
+import { traceDev, isDefinitelyNotDispatchedBroadcastError } from "@keymaster/contracts";
 import { createP2pkhStateRepository, openP2pkhStateRepository } from "./storage/p2pkhStateRepository.js";
 import { createWorkerProtocolEvidence } from "./workerProtocolEvidence.js";
 import { parseP2pkhTransaction } from "./p2pkhTransactionParser.js";
@@ -32,7 +32,9 @@ export async function executeWorkerP2pkhBroadcast(requestId: string, request: Br
   deps.assertFresh(); const evidence = createWorkerProtocolEvidence(deps.storage()); const protocol = await evidence.getProtocolSubmission(request.submissionId);
   if (protocol) await evidence.putProtocolSubmission({...protocol, status: "unknown", updatedAt: startedAt});
   deps.assertFresh();
+  traceDev("keymaster.p2pkh.broadcast", "provider.start", () => ({requestId, submissionId: request.submissionId, allocationId: submission.managerAllocationId, txid: parsed.canonicalTxid, network: request.network, providerId: provider.descriptor.id, transactionBytes: submission.rawTxHex.length / 2}));
   const result = await provider.broadcast({network: request.network, canonicalTxid: parsed.canonicalTxid, rawTxHex: submission.rawTxHex, signal: deps.signal});
+  traceDev("keymaster.p2pkh.broadcast", "provider.result", () => ({requestId, submissionId: request.submissionId, txid: parsed.canonicalTxid, result}));
   if (result.canonicalTxid !== parsed.canonicalTxid) throw new Error("Broadcast provider returned a different transaction id");
   // Return success even if display-audit I/O fails afterwards. The caller must
   // still inject change: an audit failure is not a transaction failure.
@@ -43,6 +45,7 @@ export async function executeWorkerP2pkhBroadcast(requestId: string, request: Br
    providerReturnedTxidRaw: result.providerReturnedTxidRaw ?? result.canonicalTxid, providerReturnedTxidNormalized: result.providerReturnedTxidNormalized ?? result.canonicalTxid,
    txidIntegrity: result.txidIntegrity ?? "exact", providerId: provider.descriptor.id});
  } catch (error) {
+  traceDev("keymaster.p2pkh.broadcast", "provider.error", () => ({requestId, submissionId: request.submissionId, allocationId: submission.managerAllocationId, txid: parsed.canonicalTxid, error, definitelyNotDispatched: isDefinitelyNotDispatchedBroadcastError(error)}));
   const message = (error instanceof Error ? error.message : String(error)).slice(0, 2048);
   if (isDefinitelyNotDispatchedBroadcastError(error)) {await deps.abortNotDispatched(request, message); return respond({status: "not-dispatched", reason: "coordinator-not-dispatched"});}
   const providerCode = (error as {code?: string})?.code;

@@ -59,8 +59,8 @@ export const P2PKH_TASK_TRANSACTIONS_SYNC = "p2pkh.transactions-sync";
 
 /** 未知余额的占位明细；这些 0 不能直接渲染为真实余额。 */
 const EMPTY_BALANCE_BREAKDOWN: P2pkhBalanceBreakdown = {
-  confirmed: 0,
-  unconfirmed: 0,
+  frozen: 0,
+  version: 0,
   spendable: 0,
 };
 
@@ -98,29 +98,6 @@ function sameGlobalBalanceContent(left: GlobalBalanceSnapshot, right: GlobalBala
   return sameP2pkhBalance(left.balance, right.balance);
 }
 
-/** UTXO 快照项 → service 内部 UTXO 视图（script 由地址确定性生成）。 */
-function snapshotItemToUtxo(input: {
-  item: NonNullable<P2pkhUtxoSnapshotResult["items"]>[number];
-  resource: P2pkhKeyResource;
-}): P2pkhUtxo {
-  const { item, resource } = input;
-  return {
-    id: `utxo:${resource.resourceId}:${item.txid}:${item.vout}`,
-    resourceId: resource.resourceId,
-    publicKeyHex: resource.publicKeyHex,
-    network: resource.network,
-    address: resource.address,
-    txid: item.txid,
-    vout: item.vout,
-    value: item.value,
-    height: item.height,
-    script: p2pkhAddressToScriptHex(resource.address, resource.network),
-    status: item.status,
-    isSpentInMempoolTx: item.isSpentInMempoolTx,
-    syncedAt: new Date().toISOString(),
-  };
-}
-
 /**
  * 余额明细：只由 UTXO 快照现算。
  *
@@ -131,16 +108,9 @@ export function calculateP2pkhBalanceBreakdown(input: {
   snapshot: P2pkhUtxoSnapshotResult;
 }): P2pkhBalanceBreakdown {
   if (!input.snapshot.hasResult) {
-    return { confirmed: 0, unconfirmed: 0, spendable: 0 };
+    return { frozen: 0, version: 0, spendable: 0 };
   }
-  // Spendability is already decided by the manager; only partition for display.
-  const confirmed = input.snapshot.items.filter((item) => item.status === "confirmed").reduce((sum, item) => sum + item.value, 0);
-  const unconfirmed = input.snapshot.items.filter((item) => item.status === "unconfirmed").reduce((sum, item) => sum + item.value, 0);
-  return {
-    confirmed,
-    unconfirmed,
-    spendable: confirmed + unconfirmed,
-  };
+  return {spendable: Number(input.snapshot.funds.availableSats), frozen: Number(input.snapshot.funds.frozenSats), version: input.snapshot.funds.version};
 }
 
 export interface P2pkhServiceDeps {
@@ -290,16 +260,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
     assertWalletSession();
     const snapshot = await requireUtxoSnapshot({ ownerPublicKeyHex: walletIdentity.publicKeyHex, network: walletIdentity.bsvNetwork }, mode);
     assertWalletSession();
-    if (!snapshot.hasResult) return { hasResult: false, utxos: null, seq: null, syncedAt: null };
-    const resource: P2pkhKeyResource = {
-      resourceId: makeResourceId(walletIdentity.bsvNetwork), publicKeyHex: walletIdentity.publicKeyHex,
-      address: p2pkhAddressCodec.deriveAddress(walletIdentity.publicKeyHex, walletIdentity.bsvNetwork),
-      network: walletIdentity.bsvNetwork, label: walletIdentity.label, createdAt: walletIdentity.createdAt, generation: 0,
-    };
-    return {
-      hasResult: true, seq: snapshot.seq, syncedAt: snapshot.syncedAt,
-      utxos: snapshot.items.map(item => snapshotItemToUtxo({ item, resource })),
-    };
+    return snapshot;
   }
 
   // 中文：每次 submit 都有独立取消信号；切 owner、锁仓或销毁 service
@@ -398,13 +359,13 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
 
   async function calculateBalanceBreakdown(network: "main" | "test"): Promise<{ breakdown: P2pkhBalanceBreakdown; available: boolean }> {
     const active = getVaultLifecycleSnapshot().activePublicKeyHex;
-    if (!active) return { breakdown: { confirmed: 0, unconfirmed: 0, spendable: 0 }, available: false };
+    if (!active) return { breakdown: { frozen: 0, version: 0, spendable: 0 }, available: false };
     let snapshot: P2pkhUtxoSnapshotResult;
     try {
       snapshot = await requireUtxoSnapshot({ ownerPublicKeyHex: active, network }, "get");
     } catch {
       // 快照不可用（冷启动/刷新失败）：余额未知，绝不当 0。
-      snapshot = { hasResult: false, items: null, seq: null, syncedAt: null };
+      snapshot = { hasResult: false, funds: null, seq: null, syncedAt: null };
     }
     return { breakdown: calculateP2pkhBalanceBreakdown({ snapshot }), available: snapshot.hasResult };
   }
@@ -675,8 +636,8 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
       assertWalletSession();
       return raw;
     },
-    getAvailableUtxos: () => readAvailableUtxos("get"),
-    refreshUtxos: () => readAvailableUtxos("refresh"),
+    getFunds: () => readAvailableUtxos("get"),
+    refreshFunds: () => readAvailableUtxos("refresh"),
     async listHistory(query) {
       const filter = { ...query };
       const repository = await ensureRepository();
@@ -690,6 +651,18 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
       const page = await repository.listLocalTransactionsPage({ ...filter, resourceId: makeResourceId(walletIdentity.bsvNetwork) });
       assertWalletSession();
       return page;
+    },
+    async transfer(input) {
+      assertWalletSession();
+      if (input.payment) throw new Error("Connect payments use their own business confirmation");
+      if (deps.workerTransfer) {
+        const worker = await deps.workerTransfer.getService(); assertWalletSession();
+        const result = await worker.transfer(input); assertWalletSession(); return result;
+      }
+      const preview = await service.prepareTransfer(input);
+      const {rawTxHex, ...result} = await service.submitTransfer(preview);
+      return {...result, amountSatoshis: preview.amountSatoshis, feeSatoshis: preview.estimatedFeeSatoshis,
+        changeSatoshis: preview.allocation.changeSatoshis, serializedSizeBytes: rawTxHex.length / 2};
     },
     async prepareTransfer(input) {
       assertWalletSession();

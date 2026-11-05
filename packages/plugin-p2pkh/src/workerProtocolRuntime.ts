@@ -111,18 +111,19 @@ export async function createWorkerProtocolRuntime(deps: WorkerProtocolDependenci
     }
   };
   // Cancel the original funding intention, never reconstruct wallet occupancy
-  // from BitFS history. Signing/dispatch uncertainty cannot authorize release.
+  // from BitFS history. Pre-broadcast signing errors cancel and release;
+  // dispatch uncertainty never authorizes release.
   const releaseFundingPlan = async (input: {allocationId: string; submissionId: string}): Promise<boolean> => {
     check();
     const scope = {ownerPublicKeyHex: deps.owner, network: deps.network, submissionId: input.submissionId};
     const current = deps.submissions.read(scope);
     if (current.plan.allocationId !== input.allocationId) throw new Error("Funding cancellation does not match its original allocation");
-    if (current.state === "signed" || current.state === "rejected") {
+    if (current.state === "signed" || (current.state === "rejected" && current.txid)) {
       if (!current.txid) throw new Error("Signed funding intention has no exact txid");
       await executor.releasePreparedSubmission({...scope, txid: current.txid});
       return true;
     }
-    if (current.state !== "prepared" && current.state !== "cancelled") return false;
+    if (!["prepared", "signing", "cancelled", "rejected"].includes(current.state)) return false;
     deps.submissions.cancelUndispatched(scope);
     await deps.manager.release({...scope, allocationId: input.allocationId});
     return true;

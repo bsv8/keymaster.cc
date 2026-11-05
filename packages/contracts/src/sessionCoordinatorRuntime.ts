@@ -112,6 +112,7 @@ export type CoordinatorRpcResultForRequest<R extends CoordinatorRpcRequest> =
   R extends { kind: "channel.operation"; operation: infer O extends CoordinatorChannelOperation } ? CoordinatorChannelOperationResultFor<O> :
   R extends { kind: "p2pkh.utxos.get" | "p2pkh.utxos.refresh" } ? P2pkhUtxoSnapshotResult : R extends { kind: "p2pkh.provider-config.get" } ? P2pkhProviderConfig :
   R extends { kind: "p2pkh.broadcast" } ? CoordinatorP2pkhBroadcastResult : R extends { kind: "p2pkh.payment.status" } ? P2pkhPaymentLookupResult :
+  R extends { kind: "p2pkh.transfer.execute" } ? import("./workerTransfer.js").P2pkhDirectTransferResult :
   R extends { kind: "p2pkh.transfer.prepare" } ? P2pkhTransferPreviewPayload :
   R extends { kind: "p2pkh.transfer.submit" } ? P2pkhTransferResultPayload :
   R extends { kind: "p2pkh.protocol.command" } ? P2pkhProtocolCommandResult : undefined;
@@ -332,7 +333,7 @@ const transferPreview = (value: unknown) => fields(value, "previewId assetId net
   allocation: value => fields(value, "requestedSatoshis feeReserveSatoshis totalInputSatoshis changeSatoshis", { selected: each(value => fields(value, "txid vout value")) }),
 });
 const transferResult = (value: unknown) => fields(value, "status txid rawTxHex error submissionId attempts reason", { localInputClaimIds: copy });
-const utxos = (value: unknown) => fields(value, "hasResult seq syncedAt", { items: each(value => fields(value, "txid vout value height status isSpentInMempoolTx script")) });
+const utxos = (value: unknown) => fields(value, "hasResult seq syncedAt", { funds: value => fields(value, "availableSats frozenSats version") });
 const broadcast = (value: unknown) => fields(value, "status reason currentSeq txid canonicalTxid providerReturnedTxidRaw providerReturnedTxidNormalized txidIntegrity providerId providerReference providerCode providerMessage");
 function cryptoResult(value: unknown): CoordinatorCryptoResult {
   const source = value as CoordinatorCryptoResult;
@@ -365,6 +366,7 @@ function resultFor(request: CoordinatorRpcRequest, value: unknown): unknown {
     case "p2pkh.provider-config.get": return copy(value);
     case "p2pkh.broadcast": return broadcast(value);
     case "p2pkh.payment.status": return projectP2pkhPaymentLookupResult(value as P2pkhPaymentLookupResult);
+    case "p2pkh.transfer.execute": return fields(value, "status txid error submissionId localInputClaimIds attempts reason amountSatoshis feeSatoshis changeSatoshis serializedSizeBytes");
     case "p2pkh.transfer.prepare": return transferPreview(value);
     case "p2pkh.transfer.submit": return transferResult(value);
     case "p2pkh.protocol.command": return copy(value);

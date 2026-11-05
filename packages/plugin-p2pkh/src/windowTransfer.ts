@@ -3,11 +3,18 @@ import type { bindWalletIdentity, P2pkhCoordinatorControl, P2pkhWorkerTransferBi
 /** Window 的私有装配适配：业务请求不传身份，RPC 证据由绑定自动补入。 */
 export function createWindowTransferBinding(input: {
   wallet: ReturnType<typeof bindWalletIdentity>;
-  coordinator: Pick<P2pkhCoordinatorControl, "p2pkhTransferPrepare" | "p2pkhTransferSubmit">;
+  coordinator: Pick<P2pkhCoordinatorControl, "p2pkhTransferExecute" | "p2pkhTransferPrepare" | "p2pkhTransferSubmit">;
 }): P2pkhWorkerTransferBinding {
   const { wallet, coordinator } = input;
   const service = Object.freeze({
     identity: wallet.identity,
+    async transfer(request: import("@keymaster/contracts").P2pkhTransferRequest) {
+      wallet.assertActive();
+      const result = await coordinator.p2pkhTransferExecute({...request, assetId: wallet.identity.bsvNetwork === "test" ? "bsvtest" : "bsv", network: wallet.identity.bsvNetwork, ownerPublicKeyHex: wallet.identity.publicKeyHex});
+      wallet.assertActive();
+      if (result.status !== "ok") throw new Error("message" in result ? result.message : `Transfer failed: ${result.status}`);
+      return result.value;
+    },
     async prepareTransfer(request: import("@keymaster/contracts").P2pkhTransferRequest) {
       wallet.assertActive();
       const result = await coordinator.p2pkhTransferPrepare({

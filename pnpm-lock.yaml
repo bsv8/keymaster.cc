@@ -328,8 +328,8 @@ importers:
         specifier: 5.1.6
         version: 5.1.6
       keymaster-trade-scheduler:
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.2.0
+        version: 0.2.0
       masterseed:
         specifier: 1.1.0
         version: 1.1.0
@@ -358,8 +358,8 @@ importers:
         specifier: ^2.1.0
         version: 2.3.0
       keymaster-utxo-manager:
-        specifier: 0.2.0
-        version: 0.2.0
+        specifier: 0.3.0
+        version: 0.3.0
       lucide-react:
         specifier: ^0.468.0
         version: 0.468.0(react@18.3.1)
@@ -1972,11 +1972,11 @@ packages:
     resolution: {integrity: sha512-/74xS1It1qMd2M6atx9gwCefhjHhXWjHUgV4MX018JuKEe6LcwNj6ryHxXeozqf3PpnK7CzXMyh1Whbm9kGVVQ==}
     engines: {node: '>=18.0.0'}
 
-  keymaster-trade-scheduler@0.1.0:
-    resolution: {integrity: sha512-xvbAIikxFAEE9bdSbbKhjmXguxzC0XeDPduLGoypY59n63sxDH5SpwkcrM4SwYfx48zlry+Wze448JJlu1X8zQ==}
+  keymaster-trade-scheduler@0.2.0:
+    resolution: {integrity: sha512-/FecvcwdduLGXog3w7aX2Y/ISNi5HTsijj8txVZbhSCCk3Pgfqlaq8SvtQtVMUJysLf0SATCDEOUBesIvHE7DA==}
 
-  keymaster-utxo-manager@0.2.0:
-    resolution: {integrity: sha512-zTJVTjalOh2wmwlLmk1uuSsQC6pSEthS4J6a0Y4eUMGvRrzKJLGOi06I/XGSJTEANXfdIt/MPXkUuDphBSuYsA==}
+  keymaster-utxo-manager@0.3.0:
+    resolution: {integrity: sha512-6/6qACTjRjAcHuo22Sd68VAEqPhuJCI2QkSO+VssoMbUhku1ZyOysrNAzp8iVsZ1N2bMX83epZaE5Kldzv0+mQ==}
 
   leven@3.1.0:
     resolution: {integrity: sha512-qsda+H8jTaUaN/x5vzW2rzc+8Rw4TAQ/4KjB46IwK5VH+IlVeeeje/EoZRpiXvIqjFgK84QffqPztGI3VBLG1A==}
@@ -4598,9 +4598,9 @@ snapshots:
     dependencies:
       '@bsv/sdk': 2.1.7
 
-  keymaster-trade-scheduler@0.1.0: {}
+  keymaster-trade-scheduler@0.2.0: {}
 
-  keymaster-utxo-manager@0.2.0: {}
+  keymaster-utxo-manager@0.3.0: {}
 
   leven@3.1.0:
     optional: true

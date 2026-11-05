@@ -2212,11 +2212,6 @@ export interface P2pkhProtocolAdapter {
   getRawTransaction?(txid: string): Promise<string>;
   /** Local transaction outcome lookup only; never starts signing/broadcast/chain polling. */
   getPaymentStatus?(input: Pick<import("./p2pkhPaymentLookup.js").P2pkhPaymentLookupInput, "paymentId">): Promise<import("./p2pkhPaymentLookup.js").P2pkhPaymentLookupResult>;
-  /** 只消费当前钱包结果的坐标；hasResult=false 时没有 UTXO 材料。 */
-  getAvailableUtxos(): Promise<
-    | { hasResult: false; utxos: null }
-    | { hasResult: true; utxos: Array<{ txid: string; vout: number; value: number }> }
-  >;
   /** 当前钱包的业务转账预览；原样保留返回身份供提交时核对。 */
   prepareTransfer(input: import("./workerTransfer.js").P2pkhTransferRequest): Promise<{
     ownerPublicKeyHex: string;

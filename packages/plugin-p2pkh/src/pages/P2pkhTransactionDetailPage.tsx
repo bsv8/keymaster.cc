@@ -11,7 +11,7 @@ import { type WalletSnapshot } from "./P2pkhWalletPage.js";
 
 function emptyWallet(): WalletSnapshot {
   return {
-    resources: [], history: [], locals: [], utxoResult: { hasResult: false, utxos: null, seq: null, syncedAt: null }, sync: [],
+    resources: [], history: [], locals: [], utxoResult: { hasResult: false, funds: null, seq: null, syncedAt: null }, sync: [],
     historyCursors: {}, localCursors: {}
   };
 }

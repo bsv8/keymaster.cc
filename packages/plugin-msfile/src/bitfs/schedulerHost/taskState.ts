@@ -22,9 +22,9 @@ export function schedulerTaskFields(state: State): Pick<MsFileBitfsTaskSnapshot,
     schedulerState: {
       execution: current.execution, content: current.content, funds: current.funds,
       inFlight: current.facts.inFlight,
-      failure: failure ? { code: failure.code, required: failure.required, available: failure.available } : null,
+      failure: failure ? { code: failure.code, required: failure.required } : null,
     },
-    message: failure ? `资金不足：最小有效购买需要 ${failure.required} sats，可用 ${failure.available} sats。已停止新增工作；已安排购买继续验货付款，费用池独立结算。` : null,
+    message: failure ? `资金申请不足：本次需求 ${failure.required} sats。已停止新增工作；已安排购买继续验货付款，费用池独立结算。` : null,
   };
 }
 

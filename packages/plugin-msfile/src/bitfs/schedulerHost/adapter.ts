@@ -4,6 +4,7 @@ import {
   createTask, nextWakeAt, restoreTask, step, view,
   type Command, type Content, type Event, type Payload, type State, type View,
 } from "keymaster-trade-scheduler";
+import { traceDev } from "@keymaster/contracts";
 import { MonotonicClock, schedulerEventTimes } from "./clock.js";
 import { schedulerKernelConfig, type SchedulerHostSettings } from "./settings.js";
 import type { SchedulerOutboxEntry, SchedulerSnapshotStore } from "./store.js";
@@ -81,6 +82,7 @@ export class SchedulerAdapter {
       const receivedAt = this.clock.now();
       const times = schedulerEventTimes(input.occurredAt ?? receivedAt, receivedAt);
       const event = { ...input.payload, eventId: input.eventId, taskId: this.state.taskId, ...times } as Event;
+      traceDev("keymaster.scheduler", "event.start", () => ({taskId: this.state.taskId, revision: this.state.revision, event}));
       const result = step(this.state, event);
       const next = [...this.outbox];
       for (const command of result.commands) {
@@ -91,6 +93,9 @@ export class SchedulerAdapter {
       await this.store.save({ state: result.state, outbox: next });
       this.state = result.state;
       this.outbox = next;
+      traceDev("keymaster.scheduler", "event.committed", () => ({taskId: this.state.taskId, eventId: event.eventId,
+        revision: this.state.revision, failure: this.state.failure, commands: result.commands, pools: this.state.pools, spent: this.state.spent,
+        pendingCommandIds: next.map(entry => entry.commandId)}));
       return result.commands;
     });
   }
@@ -103,6 +108,7 @@ export class SchedulerAdapter {
       if (next.length === this.outbox.length) return;
       await this.store.save({ state: this.state, outbox: next });
       this.outbox = next;
+      traceDev("keymaster.scheduler", "command.settled", () => ({taskId: this.state.taskId, commandId, pendingCommandIds: next.map(entry => entry.commandId)}));
     });
   }
 

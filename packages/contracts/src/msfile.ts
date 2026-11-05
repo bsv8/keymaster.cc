@@ -578,7 +578,7 @@ export interface MsFileBitfsTaskSnapshot extends MsFileBitfsPurchaseSnapshot {
     funds: "none" | "pending" | "settled" | "problem";
     /** 已发授权（含未决责任）的数量，不含准备资金中的工作。 */
     inFlight: number;
-    failure: { code: "insufficient-funds"; required: string; available: string } | null;
+    failure: { code: "insufficient-funds"; required: string } | null;
   };
   createdAt?: string;
   updatedAt?: string;

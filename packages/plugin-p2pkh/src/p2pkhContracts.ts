@@ -153,9 +153,7 @@ export interface P2pkhUtxo {
 }
 
 /** 当前钱包 manager 的查询结果；hasResult 不表示链上同步完整或资金已授权。 */
-export type P2pkhAvailableUtxos =
-  | { hasResult: false; utxos: null; seq: null; syncedAt: null }
-  | { hasResult: true; utxos: P2pkhUtxo[]; seq: number; syncedAt: string };
+export type P2pkhAvailableUtxos = import("@keymaster/contracts").P2pkhUtxoSnapshotResult;
 
 /** 查询始终绑定当前钱包，调用方只指定业务筛选与有界分页。 */
 export interface P2pkhHistoryQuery {
@@ -359,9 +357,11 @@ export interface P2pkhService {
   getPaymentStatus(input: Pick<import("@keymaster/contracts").P2pkhPaymentLookupInput, "paymentId">): Promise<import("@keymaster/contracts").P2pkhPaymentLookupResult>;
 
   /** 同步观察的本地只读投影；不刷新链、不占用或释放输入。 */
-  getAvailableUtxos(): Promise<P2pkhAvailableUtxos>;
+  getFunds(): Promise<P2pkhAvailableUtxos>;
+  /** User already confirmed; allocate, build, sign and dispatch inside the Worker. */
+  transfer(input: import("@keymaster/contracts").P2pkhTransferRequest): Promise<import("@keymaster/contracts").P2pkhDirectTransferResult>;
   /** 主动刷新链上观察，经 manager 返回可用投影。 */
-  refreshUtxos(): Promise<P2pkhAvailableUtxos>;
+  refreshFunds(): Promise<P2pkhAvailableUtxos>;
   /** 当前钱包链上历史，先筛选再分页。 */
   listHistory(query?: P2pkhHistoryQuery): Promise<P2pkhPage<P2pkhHistoryRecord>>;
   /** 当前钱包本地提交，默认仅未链上收敛记录；先筛选再分页。 */

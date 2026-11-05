@@ -7,7 +7,7 @@
 //   - 本模块不持有私钥、不解析池业务状态、不决定业务是否完成。
 
 import type { BorrowedModuleFileStore } from "@keymaster/contracts";
-import { isDefinitelyNotDispatchedBroadcastError } from "@keymaster/contracts";
+import { traceDev, isDefinitelyNotDispatchedBroadcastError } from "@keymaster/contracts";
 import { bitfsTxidHex } from "./txid.js";
 
 const TX_FORMAT = "keymaster.bitfs-tx";
@@ -176,6 +176,7 @@ export class BitfsTransactionBroadcaster {
     if (existing && !equal(existing, rawTx)) throw new Error("BitFS txid 已绑定不同交易字节");
     await this.deps.journal.putTransaction(txid, rawTx, this.deps.nowMs(), submissionPath);
     const record = await this.deps.journal.getTransactionRecord(txid);
+    traceDev("keymaster.bitfs.outbox", "submit.prepared", () => ({txid, submissionPath, transactionBytes: rawTx.byteLength, state: record?.state, attempts: record?.attempts}));
     if (record?.state === "confirmed") return { status: "confirmed", txid, attempts: record.attempts };
     return this.dispatch(txid, rawTx, signal);
   }
@@ -188,9 +189,11 @@ export class BitfsTransactionBroadcaster {
     let lookup: Awaited<ReturnType<BitfsChainPort["lookupTransaction"]>>;
     try {
       lookup = await this.deps.chain.lookupTransaction(txid);
-    } catch {
+    } catch (error) {
+      traceDev("keymaster.bitfs.outbox", "reconcile.error", () => ({txid, state: record.state, attempts: record.attempts, error}));
       return { status: "result-unknown", txid, attempts: record.attempts, retryable: false, reason: "lookup-failed" };
     }
+    traceDev("keymaster.bitfs.outbox", "reconcile.result", () => ({txid, lookup, state: record.state, attempts: record.attempts}));
     if (lookup === "confirmed" || lookup === "mempool") {
       await this.mark(txid, "confirmed", record.attempts);
       return { status: "confirmed", txid, attempts: record.attempts };
@@ -231,6 +234,7 @@ export class BitfsTransactionBroadcaster {
     const record = await this.deps.journal.getTransactionRecord(txid);
     if (!record?.submissionPath) throw new Error("BitFS dispatch requires retained submission path");
     const attempts = record.attempts + 1;
+    traceDev("keymaster.bitfs.outbox", "dispatch.start", () => ({txid, submissionPath: record.submissionPath, attempts, previousState: record.state, transactionBytes: rawTx.byteLength, aborted: signal?.aborted}));
     if (signal?.aborted) {
       await this.mark(txid, "failed", attempts, "cancelled-before-dispatch");
       return { status: "failed", txid, attempts, reason: "cancelled" };
@@ -243,6 +247,7 @@ export class BitfsTransactionBroadcaster {
       return { status: "confirmed", txid, attempts };
     } catch (error) {
       const reason = errorText(error);
+      traceDev("keymaster.bitfs.outbox", "dispatch.error", () => ({txid, attempts, error, definitelyNotDispatched: isDefinitelyNotDispatchedBroadcastError(error)}));
       if (isDefinitelyNotDispatchedBroadcastError(error) || (error as {code?: string})?.code === "woc-tx-rejected") {
         await this.mark(txid, "failed", attempts, reason);
         return { status: "failed", txid, attempts, reason };
@@ -254,6 +259,7 @@ export class BitfsTransactionBroadcaster {
   }
 
   private async mark(txid: string, state: BitfsTransactionState, attempts: number, lastError?: string): Promise<void> {
+    traceDev("keymaster.bitfs.outbox", "state.persist", () => ({txid, state, attempts, lastError}));
     await this.deps.journal.markTransaction({
       txid,
       state,

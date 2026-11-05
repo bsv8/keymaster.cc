@@ -714,7 +714,7 @@ export interface BitfsFundingPrepareDeps {
   protocolSpend: ProtocolSpendService;
   /** 钱包输入由 manager 申请分配，不由 BitFS 根据账本选币或重复保护。 */
   planFunding(input: { ownerPublicKeyHex: string; network: BsvNetwork; amountSatoshis: number; feeRateSatoshisPerKb: number; outputs: Array<{ scriptHex: string; value: string }> }): Promise<import("@keymaster/contracts").ProtocolFundingPlan>;
-  /** 取消原申请；仅确定未成功提交时释放，签名或派发未知／已成功均不释放。 */
+  /** 广播前错误取消原申请后释放；广播未知／已成功均不释放，迟到签名作废。 */
   releaseFundingPlan(input: { ownerPublicKeyHex: string; network: BsvNetwork; allocationId: string; submissionId: string }): Promise<boolean>;
   /** 当前 Key 与网络对应的唯一找零地址和锁定脚本。 */
   resolveOwnerAddress(input: { ownerPublicKeyHex: string; network: BsvNetwork }): Promise<{ address: string; scriptHex: string }>;
@@ -964,8 +964,8 @@ export async function prepareBitfsFunding(input: {
   } catch (error) {
     try {
       // Exact bytes on disk are business evidence, not a second input lock.
-      // Cancel the original intention first; unknown/signing/accepted states
-      // refuse release, regardless of which BitFS persistence step failed.
+      // Cancel the original intention first; only broadcast-unknown/accepted
+      // states refuse release. A late signer result cannot revive cancellation.
       const released = await deps.releaseFundingPlan({ownerPublicKeyHex: owner, network,
         allocationId: selection.allocationId, submissionId: selection.submissionId});
       if (released && preview) {

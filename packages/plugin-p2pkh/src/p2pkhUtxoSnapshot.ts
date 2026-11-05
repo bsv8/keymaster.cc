@@ -71,14 +71,13 @@ export function createP2pkhUtxoSnapshotStore(deps: {
   async function get(resource: P2pkhUtxoSnapshotResource): Promise<P2pkhUtxoSnapshotResult> {
     const captured = epoch;
     check(captured);
-    const view = await deps.manager.available({ ownerPublicKeyHex: resource.publicKeyHex, resource });
+    const funds = await deps.manager.funds({ ownerPublicKeyHex: resource.publicKeyHex, network: resource.network });
     check(captured);
-    const items = view.inputs.map(({ utxo }) => ({ txid: utxo.txid, vout: utxo.vout, value: utxo.value, height: utxo.height ?? 0, status: utxo.status, isSpentInMempoolTx: false, ...(utxo.script ? { script: utxo.script } : {}) }));
-    const fingerprint = JSON.stringify(items);
+    const fingerprint = String(funds.version);
     const key = keyFor(resource), prior = cursors.get(key);
     const seq = prior?.fingerprint === fingerprint ? prior.seq : ++nextSeq;
     cursors.set(key, { fingerprint, seq });
-    return { hasResult: true, seq, syncedAt: deps.now?.() ?? new Date().toISOString(), items };
+    return { hasResult: true, seq, syncedAt: deps.now?.() ?? new Date().toISOString(), funds };
   }
   return {
     get,

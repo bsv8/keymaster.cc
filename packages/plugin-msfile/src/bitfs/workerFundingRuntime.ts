@@ -8,7 +8,6 @@ type FundingPlan = { ownerPublicKeyHex: string; network: "main" | "test"; amount
 export interface WorkerFundingDependencies {
   session(): { vaultStatus: string; activePublicKeyHex?: string; sessionEpoch: string };
   journalStore(): BorrowedModuleFileStore;
-  walletView(input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<import("@keymaster/contracts").P2pkhUtxoSnapshotResult>;
   protocol(): Promise<{ readonly identity: Readonly<import("@keymaster/contracts").NetworkIdentity>; spend: ProtocolSpendService; planFunding(input: import("@keymaster/contracts").ProtocolFundingPlanRequest): Promise<import("@keymaster/contracts").ProtocolFundingPlan>; releaseFundingPlan(input: {allocationId: string; submissionId: string}): Promise<boolean> }>;
   submitWalletExact(input: { ownerPublicKeyHex: string; network: "main" | "test"; txid: string; rawTxHex: string }): Promise<{ outcome: "accepted" | "already-known" }>;
   observeBusinessReceipt(input: { ownerPublicKeyHex: string; network: "main" | "test"; rawTxHex: string }): Promise<void>;
@@ -111,6 +110,6 @@ export function createWorkerFundingRuntime(deps: WorkerFundingDependencies) {
       nowMs: () => Date.now(),
     });
   }
-  return { currentLedger, protocolSpend, planFunding, releaseFundingPlan, chain, walletView: deps.walletView, releasePreparedSubmission, recoverSplit, clear() { ledger = undefined; ledgerOwner = undefined; ledgerEpoch = undefined; } };
+  return { currentLedger, protocolSpend, planFunding, releaseFundingPlan, chain, releasePreparedSubmission, recoverSplit, clear() { ledger = undefined; ledgerOwner = undefined; ledgerEpoch = undefined; } };
 }
 function hex(bytes: Uint8Array) { return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join(""); }

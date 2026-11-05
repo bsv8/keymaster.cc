@@ -192,8 +192,8 @@ export interface P2pkhUtxoSnapshotItem {
  * 未取得结果时全部材料明确为 null；取得结果时空集合也是正常结果。
  */
 export type P2pkhUtxoSnapshotResult =
-  | { hasResult: false; items: null; seq: null; syncedAt: null }
-  | { hasResult: true; items: P2pkhUtxoSnapshotItem[]; seq: number; syncedAt: string };
+  | { hasResult: false; funds: null; seq: null; syncedAt: null }
+  | { hasResult: true; funds: { availableSats: string; frozenSats: string; version: number }; seq: number; syncedAt: string };
 
 export const P2PKH_PROVIDERS_CAPABILITY = defineCapability<P2pkhProviderRegistry>({
   kind: "local",

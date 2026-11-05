@@ -171,7 +171,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         const resource = await stateRepository.getResource(makeResourceId(network));
         if (!resource) throw new Error(`P2PKH resource not found for owner ${owner.publicKeyHex} (${network})`);
         if (!deps.centralBroadcastService && !deps.broadcastWithCoordinator) throw new Error("Coordinator broadcast is required for ordinary P2PKH transfers");
-        await manager.resolveAllocation({...scope, allocationId: remembered.managerAllocationId});
+        await manager.assertAllocationUsable({...scope, allocationId: remembered.managerAllocationId});
         const activeCrypto = await deps.vault.createActiveKeyCrypto();
         const { address: currentChangeAddress } = await activeCrypto.deriveP2pkhAddress();
         // This checks a real asynchronous wallet replacement, not an internal
@@ -236,9 +236,9 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       } catch (error) {
         try {
           const state = transactions.read({...scope, submissionId: plan.submissionId}).state;
-          if (state === "prepared" || (!dispatchAttempted && state === "signed") || state === "cancelled" || state === "rejected") {
-            // Seal the original intention before releasing. An in-flight signing
-            // attempt or uncertain dispatch is never classified as a safe failure.
+          if (state === "prepared" || (!dispatchAttempted && (state === "signing" || state === "signed")) || state === "cancelled" || state === "rejected") {
+            // Seal first so late signer results cannot be dispatched. Only an
+            // uncertain broadcast keeps its allocation frozen.
             transactions.cancelUndispatched({...scope, submissionId: plan.submissionId});
             const entry = prepared.get(remembered.previewId);
             if (entry?.timer) clearTimeout(entry.timer);

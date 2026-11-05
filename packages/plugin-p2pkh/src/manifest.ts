@@ -212,6 +212,7 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.wallet.attempts": "Broadcast attempts",
       "p2pkh.wallet.none": "None",
       "p2pkh.balance.localSpendable": "Local spendable",
+      "p2pkh.balance.frozen": "Frozen",
       "p2pkh.balance.confirmed": "Confirmed (spendable)",
       "p2pkh.balance.unconfirmed": "Unconfirmed (spendable)",
       "p2pkh.balance.unknown": "Unknown (no UTXO result yet)",
@@ -474,6 +475,7 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.wallet.attempts": "广播尝试",
       "p2pkh.wallet.none": "无",
       "p2pkh.balance.localSpendable": "本地可花",
+      "p2pkh.balance.frozen": "冻结金额",
       "p2pkh.balance.confirmed": "已确认（可花费）",
       "p2pkh.balance.unconfirmed": "未确认（可花费）",
       "p2pkh.balance.unknown": "未知（尚未取得 UTXO 结果）",
@@ -813,7 +815,7 @@ const p2pkhPluginDefinition = {
       historyCursors: Record<string, string | undefined>;
       localCursors: Record<string, string | undefined>;
     };
-    const emptyWallet = (): P2pkhWalletResource => ({ resources: [], history: [], locals: [], utxoResult: { hasResult: false, utxos: null, seq: null, syncedAt: null }, sync: [], historyCursors: {}, localCursors: {} });
+    const emptyWallet = (): P2pkhWalletResource => ({ resources: [], history: [], locals: [], utxoResult: { hasResult: false, funds: null, seq: null, syncedAt: null }, sync: [], historyCursors: {}, localCursors: {} });
     const loadWalletResource = async (context: { activePublicKeyHex?: string }): Promise<P2pkhWalletResource> => {
       if (!context.activePublicKeyHex) return emptyWallet();
       const stateRepository = createP2pkhStateRepository(await openP2pkhStateRepository(storage));
@@ -831,7 +833,7 @@ const p2pkhPluginDefinition = {
         readPagePerResource(() => service.listHistory({ limit: walletLimits.history })),
         readPagePerResource(() => service.listLocalTransactions({ limit: walletLimits.locals })),
         stateRepository.listTransactionSyncStates(),
-        service.getAvailableUtxos()
+        service.getFunds()
       ]);
       return {
         resources: resourcesForKey,
@@ -860,9 +862,9 @@ const p2pkhPluginDefinition = {
       invalidation: "microtask"
     });
     resources.register<P2pkhAvailableUtxos, readonly string[]>({
-      id: "p2pkh.coins",
+      id: "p2pkh.funds",
       scope: "active-key",
-      key: (_args, context) => ["p2pkh.coins", context.activePublicKeyHex ?? "none"],
+      key: (_args, context) => ["p2pkh.funds", context.activePublicKeyHex ?? "none"],
       load: async (_args, context) => (await loadWalletResource(context)).utxoResult,
       subscribe: (_args, _ctx, invalidate) => dataChanges.subscribe(invalidate),
       invalidation: "microtask"

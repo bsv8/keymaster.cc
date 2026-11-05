@@ -20,7 +20,7 @@ export async function executeWorkerP2pkhSnapshot(requestId: string, input: Snaps
   const resource = await readWorkerP2pkhResource(ports.storage, input);
   ports.assertFresh();
   const snapshots = ports.snapshots;
-  if (!resource || !snapshots) return { requestId, sessionEpoch: ports.epoch(), ack: { status: "ok" }, operationResult: { hasResult: false, items: null, seq: null, syncedAt: null } satisfies P2pkhUtxoSnapshotResult };
+  if (!resource || !snapshots) return { requestId, sessionEpoch: ports.epoch(), ack: { status: "ok" }, operationResult: { hasResult: false, funds: null, seq: null, syncedAt: null } satisfies P2pkhUtxoSnapshotResult };
   try {
     const snapshot = refresh ? await snapshots.refresh(resource) : await snapshots.get(resource);
     ports.assertFresh();

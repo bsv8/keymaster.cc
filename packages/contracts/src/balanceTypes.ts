@@ -4,10 +4,10 @@
 
 /** 余额明细；所有金额单位都是 sat（聪）。 */
 export interface P2pkhBalanceBreakdown {
-  /** 已确认且仍可计入余额的输出总额。 */
-  confirmed: number;
-  /** 未确认但尚未被内存池花费的输出总额。 */
-  unconfirmed: number;
+  /** manager 当前冻结金额，不含已用输入或协议池。 */
+  frozen: number;
+  /** manager 当前实例内的资金变更版本。 */
+  version: number;
   /** 当前 UTXO 快照中可花费的金额；只排除内存池已花费输出。 */
   spendable: number;
 }

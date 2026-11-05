@@ -1,4 +1,4 @@
-import { parseWocFeeRecommendation } from "@keymaster/contracts";
+import { traceDev, parseWocFeeRecommendation } from "@keymaster/contracts";
 import { observedPropagation } from "./transactionObservation.js";
 import { normalizeWocBroadcastReceipt } from "./broadcastReceipt.js";
 import { parseSpentOutput, parseSpentBatch, validateSpentOutpoints } from "./spentReceipt.js";
@@ -288,11 +288,13 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         }
         inFlight += 1;
         emitSnapshot();
+        const startedAt = performance.now();
+        traceDev("keymaster.woc", "request.start", () => ({label: entry.label, sequence: entry.sequence, priority: entry.priority, inFlight, queued: queue.length, backoffUntil}));
         entry
           .run(entry.signal)
           .then(
-            (v) => entry.resolve(v),
-            (err) => entry.reject(err)
+            (v) => { traceDev("keymaster.woc", "request.finish", () => ({label: entry.label, sequence: entry.sequence, elapsedMs: performance.now() - startedAt})); entry.resolve(v); },
+            (err) => { traceDev("keymaster.woc", "request.error", () => ({label: entry.label, sequence: entry.sequence, elapsedMs: performance.now() - startedAt, aborted: entry.signal.aborted, abortReason: entry.signal.reason, error: err})); entry.reject(err); }
           )
           .finally(() => {
             inFlight -= 1;
@@ -352,6 +354,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
   }
 
   async function fetchJson<T>(network: BsvNetwork, path: string, init: RequestInit, signal: AbortSignal, timeoutMs?: number): Promise<T> {
+    traceDev("keymaster.woc", "http.start", () => ({network, url: fullUrl(network, path), method: init.method ?? "GET", timeoutMs: timeoutMs ?? DEFAULT_TIMEOUT_MS, format: "json"}));
     const ctl = new AbortController();
     const onAbort = () => ctl.abort(signal.reason);
     if (signal.aborted) ctl.abort(signal.reason);
@@ -382,6 +385,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
   }
 
   async function fetchBytes(network: BsvNetwork, path: string, init: RequestInit, signal: AbortSignal, timeoutMs?: number): Promise<{ contentType?: string; data: Uint8Array }> {
+    traceDev("keymaster.woc", "http.start", () => ({network, url: fullUrl(network, path), method: init.method ?? "GET", timeoutMs: timeoutMs ?? DEFAULT_TIMEOUT_MS, format: "bytes"}));
     const ctl = new AbortController();
     const onAbort = () => ctl.abort(signal.reason);
     if (signal.aborted) ctl.abort(signal.reason);
@@ -408,6 +412,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
   }
 
   async function fetchText(network: BsvNetwork, path: string, init: RequestInit, signal: AbortSignal, timeoutMs?: number): Promise<string> {
+    traceDev("keymaster.woc", "http.start", () => ({network, url: fullUrl(network, path), method: init.method ?? "GET", timeoutMs: timeoutMs ?? DEFAULT_TIMEOUT_MS, format: "text"}));
     const ctl = new AbortController();
     const onAbort = () => ctl.abort(signal.reason);
     if (signal.aborted) ctl.abort(signal.reason);
@@ -848,6 +853,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         else signal.addEventListener("abort", onAbort, { once: true });
         const timer = setTimeout(() => ctl.abort(new Error("timeout")), opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
         try {
+          traceDev("keymaster.woc", "broadcast.dispatch", () => ({network, url: fullUrl(network, "/tx/raw"), transactionBytes: rawTxHex.length / 2, timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS}));
           // Read text even for 4xx/5xx: the exact body is part of the funds decision.
           const res = await fetch(fullUrl(network, "/tx/raw"), {
             method: "POST", headers: { "Content-Type": "application/json" },
@@ -856,6 +862,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
           const evidence = { status: res.status, statusText: res.statusText, body: await res.text() };
           if (res.status === 429) applyBackoff(parseRetryAfter(res.headers.get("retry-after")), "429 Too Many Requests");
           const canonicalTxid = await calcCanonicalTxidFromRawTxHex(rawTxHex);
+          traceDev("keymaster.woc", "broadcast.receipt", () => ({network, canonicalTxid, ...evidence}));
           const result = normalizeWocBroadcastReceipt(canonicalTxid, evidence);
           resetBackoff();
           return result;

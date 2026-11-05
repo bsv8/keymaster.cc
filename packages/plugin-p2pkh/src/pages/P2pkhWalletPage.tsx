@@ -38,7 +38,7 @@ function amountLabel(value: number | undefined): string {
 }
 
 const EMPTY_WALLET_SNAPSHOT: WalletSnapshot = {
-  resources: [], history: [], locals: [], utxoResult: { hasResult: false, utxos: null, seq: null, syncedAt: null },
+  resources: [], history: [], locals: [], utxoResult: { hasResult: false, funds: null, seq: null, syncedAt: null },
   sync: [], historyCursors: {}, localCursors: {}
 };
 
@@ -182,7 +182,7 @@ function P2pkhWalletPageInner({
     setActionError(null);
     try {
       // 仅请求当前绑定钱包刷新；已有结果保留到新结果完整交付。
-      await service.refreshUtxos();
+      await service.refreshFunds();
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -274,7 +274,6 @@ function P2pkhWalletPageInner({
       <section className="p2pkh-wallet__sync" aria-label={t("p2pkh.wallet.syncStatus", { defaultValue: "Confirmed synchronization status" })}>
         <p>{t("p2pkh.wallet.lastCompleteSync", { defaultValue: "Last complete sync: {{time}}", time: syncSnapshot?.lastCompletedAt ?? sync?.lastSuccessAt ?? "—" })}</p>
         <p>{t("p2pkh.wallet.taskStatus", { defaultValue: "Task status: {{status}}", status: syncSnapshot ? t(`p2pkh.syncStatus.${syncSnapshot.status}`, { defaultValue: syncSnapshot.status }) : "—" })}</p>
-        {wallet.utxoResult.hasResult ? <p>{t("p2pkh.wallet.utxoSnapshot", { defaultValue: "UTXO 结果：{{time}}（{{count}} 个输出）", time: wallet.utxoResult.syncedAt, count: wallet.utxoResult.utxos.length })}</p> : null}
         {(syncSnapshot?.error ?? sync?.lastError) ? <p role="alert">{t("p2pkh.wallet.syncError", { defaultValue: "Sync error: {{error}}", error: syncSnapshot?.error ?? sync?.lastError })}</p> : null}
         {actionError ? <p role="alert">{actionError}</p> : null}
       </section>
@@ -301,8 +300,7 @@ function BalanceBreakdown({ breakdown }: { breakdown?: P2pkhBalanceBreakdown }) 
   const { t } = usePluginI18n();
   if (!breakdown) return null;
   return <dl className="p2pkh-wallet__balance-breakdown">
-    <dt>{t("p2pkh.balance.confirmed", { defaultValue: "已确认" })}</dt><dd>{formatSats(breakdown.confirmed)}</dd>
-    <dt>{t("p2pkh.balance.unconfirmed", { defaultValue: "未确认" })}</dt><dd>{formatSats(breakdown.unconfirmed)}</dd>
+    <dt>{t("p2pkh.balance.frozen", { defaultValue: "冻结金额" })}</dt><dd>{formatSats(breakdown.frozen)}</dd>
     <dt>{t("p2pkh.balance.localSpendable", { defaultValue: "可花费" })}</dt><dd>{formatSats(breakdown.spendable)}</dd>
   </dl>;
 }

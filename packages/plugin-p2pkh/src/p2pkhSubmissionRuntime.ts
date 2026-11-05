@@ -1,6 +1,7 @@
 // Caller-owned transaction intentions and outcomes, not a UTXO pool. No balances,
 // selection, occupancy, manager-state inference or restoration from disk.
 import type { BorrowedModuleFileStore, P2pkhPaymentLookupResult, ProtocolSpendInput, ProtocolSpendOutput } from "@keymaster/contracts";
+import { traceDev } from "@keymaster/contracts";
 import { parseTx, type AcceptedTransaction } from "keymaster-utxo-manager";
 import type { UnsignedTx } from "./p2pkhSigner.js";
 import type { FundingIdentity } from "./p2pkhUtxoManager.js";
@@ -44,12 +45,19 @@ export function createP2pkhSubmissionRuntime(files: BorrowedModuleFileStore): P2
   if (!row || !sameScope(row, scope)) throw new Error("Transaction intention unavailable in this runtime");
   return row;
  }
+ function transition(row: RuntimeSubmission, state: SubmissionState, reason: string) {
+  const previous = row.state;
+  row.state = state;
+  traceDev("keymaster.submission", "state.transition", () => ({submissionId: row.plan.submissionId, allocationId: row.plan.allocationId,
+   owner: row.plan.ownerPublicKeyHex, network: row.plan.network, previous, state, reason, txid: row.txid}));
+ }
  const runtime: P2pkhSubmissionRuntime = {
   dispose() {disposed = true; submissions.clear(); if (instances.get(files) === runtime) instances.delete(files);},
   prepare(plan: SubmissionPlan) {
    active();
    if (submissions.has(plan.submissionId) || (plan.allocationId && [...submissions.values()].some(row => sameScope(row, plan) && row.plan.allocationId === plan.allocationId))) throw new Error("Allocation already belongs to a transaction intention");
    submissions.set(plan.submissionId, {plan: structuredClone(plan), state: "prepared"});
+   traceDev("keymaster.submission", "prepared", () => ({plan}));
   },
   preparedForAllocation(scope: FundingIdentity & {allocationId: string}) {
    active(); const row = [...submissions.values()].find(row => sameScope(row, scope) && row.plan.allocationId === scope.allocationId);
@@ -68,21 +76,21 @@ export function createP2pkhSubmissionRuntime(files: BorrowedModuleFileStore): P2
   },
   beginSigning(scope: FundingIdentity & {submissionId: string}) {
    const row = get(scope); if (row.state !== "prepared") throw new Error("Transaction signing already started or cancelled");
-   row.state = "signing";
+   transition(row, "signing", "signer-started");
   },
   signed(scope: FundingIdentity & {submissionId: string; rawTxHex: string}) {
    const row = get(scope);
    if (row.state !== "signing") throw new Error("Transaction has no active signing attempt");
-   row.rawTxHex = scope.rawTxHex; row.txid = parseTx(scope.rawTxHex).canonicalTxid; row.state = "signed";
+   row.rawTxHex = scope.rawTxHex; row.txid = parseTx(scope.rawTxHex).canonicalTxid; transition(row, "signed", "signer-returned");
   },
   cancelUnsigned(scope: FundingIdentity & {submissionId: string}) {
    const row = get(scope); if (row.state !== "prepared") return false;
-   row.state = "cancelled"; return true;
+   transition(row, "cancelled", "cancel-unsigned"); return true;
   },
   cancelUndispatched(scope: FundingIdentity & {submissionId: string}) {
    const row = get(scope);
-   if (!["prepared", "signed", "cancelled", "rejected"].includes(row.state)) throw new Error("Transaction may have been signed or dispatched; release refused");
-   row.state = row.rawTxHex ? "rejected" : "cancelled";
+   if (!["prepared", "signing", "signed", "cancelled", "rejected"].includes(row.state)) throw new Error("Transaction may have been dispatched; release refused");
+   if (row.state !== "rejected" && row.state !== "cancelled") transition(row, row.rawTxHex || row.state === "signing" ? "rejected" : "cancelled", "cancel-undispatched");
    return structuredClone(row.plan);
   },
   assertExact(scope: FundingIdentity & {submissionId: string; allocationId: string; rawTxHex: string}) {
@@ -93,18 +101,18 @@ export function createP2pkhSubmissionRuntime(files: BorrowedModuleFileStore): P2
   beginDispatch(scope: FundingIdentity & {submissionId: string; allocationId: string; rawTxHex: string}) {
    const row = runtime.assertExact(scope);
    if (row.state === "accepted" || row.state === "already-known") return row;
-   get(scope).state = "dispatching"; return row;
+   transition(get(scope), "dispatching", "provider-started"); return row;
   },
   outcome(scope: FundingIdentity & {submissionId: string; state: "accepted" | "already-known" | "unknown" | "rejected"}) {
    const row = get(scope);
    if (row.state === scope.state || row.state === "accepted" || row.state === "already-known" || (scope.state === "unknown" && (row.state === "rejected" || row.state === "cancelled"))) return;
    if (row.state !== "signed" && row.state !== "dispatching" && row.state !== "unknown") throw new Error("Transaction has no dispatch attempt");
-   row.state = scope.state;
+   transition(row, scope.state, "provider-result");
   },
   observeAccepted(scope: FundingIdentity & {rawTxHex: string}) {
    active(); const txid = parseTx(scope.rawTxHex).canonicalTxid;
    for (const row of submissions.values()) {
-    if (sameScope(row, scope) && row.txid === txid && row.rawTxHex === scope.rawTxHex) row.state = "accepted";
+    if (sameScope(row, scope) && row.txid === txid && row.rawTxHex === scope.rawTxHex) transition(row, "accepted", "reliable-observation");
    }
   },
   paymentStatus(scope: FundingIdentity & {paymentId: string}): P2pkhPaymentLookupResult {

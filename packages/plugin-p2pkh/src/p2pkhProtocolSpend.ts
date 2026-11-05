@@ -54,7 +54,7 @@ export interface P2pkhProtocolSpendSubmissionStore {
  * inputs; protocol validation, signing and submission belong to this service.
  */
 export interface P2pkhProtocolManagerPort {
-  resolveAllocation(input: FundingIdentity & {allocationId: string}): Promise<P2pkhFundingAllocation>;
+  assertAllocationUsable(input: FundingIdentity & {allocationId: string}): Promise<void>;
   release(input: FundingIdentity & {allocationId: string}): Promise<void>;
 }
 
@@ -188,8 +188,6 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
       const scope = {ownerPublicKeyHex: input.ownerPublicKeyHex, network: input.network};
       let originalPlan: SubmissionPlan | undefined;
       let managerAllocationId: string | undefined;
-      // 本次提交是否已产生签名：仅当能证明尚未签名时才可安全释放，否则保责。
-      let signingStarted = false;
       // 放在 try 之前：签名闭包要读它，而闭包定义在 owner 解析之前。
       const resolvedOwner = await resolveOwnerKeyIdentity(deps, input.ownerPublicKeyHex);
 
@@ -247,9 +245,6 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           unsigned,
           signingInputs,
           async (digest) => {
-            // Entering the signer is already an uncertain private-key attempt;
-            // a lost/rejected result is not proof that no signature was made.
-            signingStarted = true;
             const result = await activeCrypto.signDigest({ digest: new Uint8Array(digest).buffer as ArrayBuffer, format: "der" });
             return new Uint8Array(result.signature);
           },
@@ -297,7 +292,7 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           // The original funding request owns the input/output plan. Caller
           // display fields cannot replace it or force a different change layout.
           const planned = deps.submissions.preparedForAllocation({...scope, allocationId: input.managerAllocationId});
-          await deps.protocolManager!.resolveAllocation({...scope, allocationId: input.managerAllocationId});
+          await deps.protocolManager!.assertAllocationUsable({...scope, allocationId: input.managerAllocationId});
           if (sign) {originalPlan = planned; submissionId = planned.submissionId; managerAllocationId = planned.allocationId;}
           return await signAndRecord({inputs: planned.inputs, outputs: planned.outputs, unsignedTxHex: planned.unsignedTxHex,
             changeAddress: planned.changeAddress, changeSatoshis: planned.changeSatoshis, feeSatoshis: planned.feeSatoshis,
@@ -408,9 +403,10 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
         }
         throw new Error("Protocol spend fee failed to converge");
       } catch (err) {
-        // The caller decides release. An uncertain signing attempt is not an
-        // explicit transaction rejection and must leave its allocation frozen.
-        if (originalPlan && !signingStarted && deps.submissions.cancelUnsigned({...scope, submissionId})) {
+        // build never broadcasts. Seal any failed signing attempt before
+        // release; signed() rejects a late result for this cancelled intention.
+        if (originalPlan) {
+          deps.submissions.cancelUndispatched({...scope, submissionId});
           if (managerAllocationId) await deps.protocolManager!.release({...scope, allocationId: managerAllocationId});
         }
         if (protectedClaimIds.length > 0 && deps.protectedOutpoints) {

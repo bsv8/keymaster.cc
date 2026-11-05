@@ -1652,28 +1652,6 @@ async function msfileBitfsKernelFeedQuote(runtime: MsfileBitfsKernelRuntime, quo
   await msfileBitfsKernelFeed(runtime, { eventId: `quote-${quoteView.sessionId}`, payload: { type: "quote", quote } });
 }
 
-/** 普通钱包快照 → 内核 wallet；已准备开池（Kind 2 已落盘）的命令视为占用已反映。 */
-async function msfileBitfsKernelWallet(runtime: MsfileBitfsKernelRuntime): Promise<{ revision: number; available: string; reflectedCommands: string[] }> {
-  const snapshot = await deps.funding.walletView({ ownerPublicKeyHex: runtime.ownerPublicKeyHex, network: deps.network() });
-  traceBitfs("funding.wallet-view", () => ({ taskId: runtime.hostTaskId, seedHashHex: runtime.seedHashHex, snapshot }));
-  if (!snapshot.hasResult) throw new Error("Manager wallet result has not been obtained");
-  // Consume the manager's complete available projection, without reclassifying inputs.
-  const available = snapshot.items.reduce((sum, item) => sum + BigInt(item.value), 0n);
-  const sessions = createBitfsSessionJournal(deps.files("bitfs-journal"));
-  const prepared = new Set<string>();
-  for (const record of await sessions.list()) {
-    if (record.role !== "buyer" || record.ownerPublicKeyHex !== runtime.ownerPublicKeyHex
-      || record.seedHashHex !== runtime.seedHashHex) continue;
-    if (record.evidence.includes("kind2-opening-request")) prepared.add(record.sessionId);
-  }
-  const state = runtime.adapter.snapshot();
-  const reflectedCommands = Object.values(state.pools)
-    .filter((pool) => prepared.has(schedulerPoolSessionId(pool.id)) || prepared.has(pool.sessionId))
-    .map((pool) => pool.openCommandId);
-  const revision = typeof snapshot.seq === "number" && Number.isSafeInteger(snapshot.seq) ? snapshot.seq : state.wallet.revision + 1;
-  return { revision, available: available.toString(10), reflectedCommands };
-}
-
 /** 内核事件投递：推进适配器、按 commandId 幂等执行命令并重排唤醒。 */
 async function msfileBitfsKernelFeed(runtime: MsfileBitfsKernelRuntime, input: { eventId: string; payload: SchedulerPayload; occurredAt?: number }): Promise<void> {
   if (msfileBitfsKernelRuntimeFor(runtime.ownerPublicKeyHex, runtime.seedHashHex) !== runtime) return;
@@ -1713,7 +1691,9 @@ async function msfileBitfsKernelRunCommand(runtime: MsfileBitfsKernelRuntime, co
       const record = pool ? await sessions.get(await readSchedulerPoolSessionId(sessions, pool)) : undefined;
       const funded = record ? record.evidence.includes("kind2-opening-request") || record.evidence.includes("funding-transaction") : false;
       if (funded) await msfileBitfsKernelFeed(runtime, { eventId, payload: { type: "unknown", poolId: command.poolId, commandId: command.commandId } });
-      else {
+      else if (["insufficient", "no-utxos", "insufficient_funds"].includes((cause as {code?: string})?.code ?? "")) {
+        await msfileBitfsKernelFeed(runtime, {eventId, payload: {type: "open-failed", poolId: command.poolId, commandId: command.commandId, released: true, insufficientFunds: true}});
+      } else {
         // 明确失败不无限重试同一报价，尤其不能在文件任务已结束后反复补池。
         await msfileBitfsKernelFeed(runtime, { eventId: `seller-unavailable-${command.commandId}`,
           payload: { type: "seller", sellerId: command.sellerId, online: false } });
@@ -2001,10 +1981,6 @@ async function recoverMsfileBitfsKernelRuntimes(ownerPublicKeyHex: string): Prom
     };
     msfileBitfsKernelRuntimes.set(msfileBitfsKernelRuntimeKey(owner, seed), created);
     try {
-      await msfileBitfsKernelFeed(created, {
-        eventId: `recover-wallet-${taskId}-${created.adapter.snapshot().wallet.revision + 1}`,
-        payload: { type: "wallet", ...(await msfileBitfsKernelWallet(created)) },
-      });
       await msfileBitfsKernelFeed(created, { eventId: `recover-tick-${taskId}-${created.adapter.snapshot().revision}`, payload: { type: "tick" } });
       for (const outbox of created.adapter.pendingCommands()) {
         if (outbox.command) await msfileBitfsKernelRunCommand(created, outbox.command);
@@ -2112,7 +2088,6 @@ async function startMsfileBitfsKernelPurchase(input: {
   }
   runtime.entry = entry;
   runtime.mediaType = mediaType;
-  await msfileBitfsKernelFeed(runtime, { eventId: `wallet-${newTask.taskId}-${runtime.adapter.snapshot().wallet.revision + 1}`, payload: { type: "wallet", ...(await msfileBitfsKernelWallet(runtime)) } });
   for (const quoteView of quotes) {
     await msfileBitfsKernelFeedQuote(runtime, quoteView);
   }
