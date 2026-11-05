@@ -53,7 +53,6 @@ import { createP2pkhTransferService } from "./p2pkhTransferService.js";
 
 import { P2PKH_MSG } from "./p2pkhMessages.js";
 import { p2pkhAddressCodec } from "./p2pkhAddressCodec.js";
-import { canonicalizeP2pkhUtxos } from "./p2pkhCanonical.js";
 import { parseP2pkhTransaction, p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
 
 export const P2PKH_TASK_TRANSACTIONS_SYNC = "p2pkh.transactions-sync";
@@ -134,9 +133,9 @@ export function calculateP2pkhBalanceBreakdown(input: {
   if (!input.snapshot.hasResult) {
     return { confirmed: 0, unconfirmed: 0, spendable: 0 };
   }
-  const spendableItems = input.snapshot.items.filter((item) => !item.isSpentInMempoolTx);
-  const confirmed = spendableItems.filter((item) => item.status === "confirmed").reduce((sum, item) => sum + item.value, 0);
-  const unconfirmed = spendableItems.filter((item) => item.status === "unconfirmed").reduce((sum, item) => sum + item.value, 0);
+  // Spendability is already decided by the manager; only partition for display.
+  const confirmed = input.snapshot.items.filter((item) => item.status === "confirmed").reduce((sum, item) => sum + item.value, 0);
+  const unconfirmed = input.snapshot.items.filter((item) => item.status === "unconfirmed").reduce((sum, item) => sum + item.value, 0);
   return {
     confirmed,
     unconfirmed,
@@ -299,8 +298,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
     };
     return {
       hasResult: true, seq: snapshot.seq, syncedAt: snapshot.syncedAt,
-      utxos: canonicalizeP2pkhUtxos(snapshot.items.filter(item => !item.isSpentInMempoolTx)
-        .map(item => snapshotItemToUtxo({ item, resource }))),
+      utxos: snapshot.items.map(item => snapshotItemToUtxo({ item, resource })),
     };
   }
 

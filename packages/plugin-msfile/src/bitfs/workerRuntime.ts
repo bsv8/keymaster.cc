@@ -1657,7 +1657,8 @@ async function msfileBitfsKernelWallet(runtime: MsfileBitfsKernelRuntime): Promi
   const snapshot = await deps.funding.walletView({ ownerPublicKeyHex: runtime.ownerPublicKeyHex, network: deps.network() });
   traceBitfs("funding.wallet-view", () => ({ taskId: runtime.hostTaskId, seedHashHex: runtime.seedHashHex, snapshot }));
   if (!snapshot.hasResult) throw new Error("Manager wallet result has not been obtained");
-  const available = snapshot.items.filter((item) => !item.isSpentInMempoolTx).reduce((sum, item) => sum + BigInt(item.value), 0n);
+  // Consume the manager's complete available projection, without reclassifying inputs.
+  const available = snapshot.items.reduce((sum, item) => sum + BigInt(item.value), 0n);
   const sessions = createBitfsSessionJournal(deps.files("bitfs-journal"));
   const prepared = new Set<string>();
   for (const record of await sessions.list()) {
