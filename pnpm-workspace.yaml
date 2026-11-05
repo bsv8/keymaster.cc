@@ -23,3 +23,4 @@ minimumReleaseAgeExclude:
   - keymaster-utxo-manager@0.3.0
   - keymaster-utxo-manager@0.5.0
   - keymaster-utxo-manager@0.6.0
+  - keymaster-utxo-manager@0.7.0

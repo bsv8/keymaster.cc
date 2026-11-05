@@ -20,7 +20,7 @@
     "@bsv/sdk": "^2.1.7",
     "qrcode.react": "^4.2.0",
     "lucide-react": "^0.468.0",
-    "keymaster-utxo-manager": "0.6.0"
+    "keymaster-utxo-manager": "0.7.0"
   },
   "scripts": {}
 }
