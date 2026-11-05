@@ -358,8 +358,8 @@ importers:
         specifier: ^2.1.0
         version: 2.3.0
       keymaster-utxo-manager:
-        specifier: 0.5.0
-        version: 0.5.0
+        specifier: 0.6.0
+        version: 0.6.0
       lucide-react:
         specifier: ^0.468.0
         version: 0.468.0(react@18.3.1)
@@ -1975,8 +1975,8 @@ packages:
   keymaster-trade-scheduler@0.2.0:
     resolution: {integrity: sha512-/FecvcwdduLGXog3w7aX2Y/ISNi5HTsijj8txVZbhSCCk3Pgfqlaq8SvtQtVMUJysLf0SATCDEOUBesIvHE7DA==}
 
-  keymaster-utxo-manager@0.5.0:
-    resolution: {integrity: sha512-d6ZW+r4AGG8X49mpM7q4cnhfjxftQIHNLyxhCxnhtMHpSjEYpfceXbouv2jgSlvBpveuRxO0HDgcbKJLt6kk+Q==}
+  keymaster-utxo-manager@0.6.0:
+    resolution: {integrity: sha512-znyci3hBqfvvs9Ssna/sZI2Qbf8JSenqASw0GdDIi7THr5WA706+/lT/ioFssdqViPiXCyG9Ci7U3zKzC//m0Q==}
 
   leven@3.1.0:
     resolution: {integrity: sha512-qsda+H8jTaUaN/x5vzW2rzc+8Rw4TAQ/4KjB46IwK5VH+IlVeeeje/EoZRpiXvIqjFgK84QffqPztGI3VBLG1A==}
@@ -4600,7 +4600,7 @@ snapshots:
 
   keymaster-trade-scheduler@0.2.0: {}
 
-  keymaster-utxo-manager@0.5.0: {}
+  keymaster-utxo-manager@0.6.0: {}
 
   leven@3.1.0:
     optional: true
