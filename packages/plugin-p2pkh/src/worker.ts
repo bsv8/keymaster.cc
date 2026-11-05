@@ -25,7 +25,6 @@ export interface P2pkhWorkerPorts {
   tasks: WorkerTaskRegistrar;
   registerProviders(registry: P2pkhProviderRegistry, broadcast: WocWorkerBroadcastService): void;
   snapshotSource(query: WocService): WocService;
-  protectedOutpoints(owner: string, network: "main" | "test"): Promise<readonly { txid: string; vout: number }[]>;
   resetSettings(): void;
   refresh(signal: AbortSignal, storage: BorrowedModuleFileStore, assertActive: () => void): Promise<{ main?: number; test?: number }>;
   emit(kinds: import("@keymaster/contracts").AssetDataChangedEvent["kinds"], utxoSeqs?: { main?: number; test?: number }): void;

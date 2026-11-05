@@ -59,7 +59,7 @@ export async function markBitfsDeletedHistory(store: BorrowedModuleFileStore, se
 export function bitfsSessionNeedsFundingRecovery(session: BitfsSessionRecord, accounts: readonly BitfsFundingAccount[]): boolean {
   const pools = accounts.flatMap(a => a.pools).filter(p => p.poolId === session.sessionId);
   const transactions = accounts.flatMap(a => a.transactions).filter(t => t.poolId === session.sessionId);
-  if (transactions.some(t => t.state !== "failed" && (t.state !== "observed" || !t.inputsReconciled))) return true;
+  if (transactions.some(t => t.state !== "failed" && t.state !== "observed")) return true;
   if (pools.length) return pools.some(p => p.state !== "closed" && !(p.state === "funding-failed" && session.phase === "cancelled" && transactions.every(t => t.state === "failed") && !session.pendingAuthorizationId && !session.pendingTxid));
   // 没有账本池不能据此认定未派发；先保留预签、交易和付款责任。
   if (session.pendingTxid || session.pendingAuthorizationId) return true;

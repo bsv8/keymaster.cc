@@ -23,7 +23,6 @@ export interface WorkerTransferDependencies {
   broadcast(input: SnapshotInput & { submissionId: string; submission?: P2pkhBroadcastSubmission }): Promise<CoordinatorValueResult<unknown>>;
   subscribeUtxo(listener: (event: { ownerPublicKeyHex: string; network: "main" | "test"; seq: number }) => void): () => void;
   query?(): WocService | undefined;
-  protectedOutpoints(owner: string, network: "main" | "test"): Promise<readonly { txid: string; vout: number }[]>;
   fundsChanged(input: SnapshotInput): void;
 }
 
@@ -185,5 +184,5 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     createP2pkhSubmissionRuntime(deps.storage()).observeAccepted(input);
     deps.fundsChanged(input);
   }
-  return { ensure, ensureProtocol, identityFor, release, submitWalletExact, observeBusinessReceipt, protectedOutpoints: () => protocol?.protectedOutpoints };
+  return { ensure, ensureProtocol, identityFor, release, submitWalletExact, observeBusinessReceipt };
 }

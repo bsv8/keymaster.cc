@@ -18,7 +18,7 @@ export async function listBitfsFundingPools(input: { journal: BorrowedModuleFile
       const session = await sessions.get(pool.poolId);
       const opening = account.utxos.find(u => `${u.txid}:${u.vout}` === pool.openingOutpoint);
       const transactions = account.transactions.filter(t => t.poolId === pool.poolId);
-      const unsettled = transactions.some(t => t.state !== "failed" && (t.state !== "observed" || !t.inputsReconciled));
+      const unsettled = transactions.some(t => t.state !== "failed" && t.state !== "observed");
       let filename: string | null = null;
       const quote = await sessions.getEvidence(pool.poolId, "quote-summary");
       if (quote) {

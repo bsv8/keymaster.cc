@@ -9,7 +9,7 @@ export interface WorkerFundingDependencies {
   session(): { vaultStatus: string; activePublicKeyHex?: string; sessionEpoch: string };
   journalStore(): BorrowedModuleFileStore;
   walletView(input: { ownerPublicKeyHex: string; network: "main" | "test" }): Promise<import("@keymaster/contracts").P2pkhUtxoSnapshotResult>;
-  protocol(): Promise<{ readonly identity: Readonly<import("@keymaster/contracts").NetworkIdentity>; spend: ProtocolSpendService; planFunding(input: import("@keymaster/contracts").ProtocolFundingPlanRequest): Promise<import("@keymaster/contracts").ProtocolFundingPlan> }>;
+  protocol(): Promise<{ readonly identity: Readonly<import("@keymaster/contracts").NetworkIdentity>; spend: ProtocolSpendService; planFunding(input: import("@keymaster/contracts").ProtocolFundingPlanRequest): Promise<import("@keymaster/contracts").ProtocolFundingPlan>; releaseFundingPlan(input: {allocationId: string; submissionId: string}): Promise<boolean> }>;
   submitWalletExact(input: { ownerPublicKeyHex: string; network: "main" | "test"; txid: string; rawTxHex: string }): Promise<{ outcome: "accepted" | "already-known" }>;
   observeBusinessReceipt(input: { ownerPublicKeyHex: string; network: "main" | "test"; rawTxHex: string }): Promise<void>;
   ensureResources(owner: string, bsvNetwork: "main" | "test"): Promise<FundingResource[]>;
@@ -60,6 +60,12 @@ export function createWorkerFundingRuntime(deps: WorkerFundingDependencies) {
     return service.planFunding(plan);
   }
 
+  async function releaseFundingPlan(input: { ownerPublicKeyHex: string; network: "main" | "test"; allocationId: string; submissionId: string }) {
+    const service = await deps.protocol();
+    if (service.identity.publicKeyHex.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase() || service.identity.bsvNetwork !== input.network) throw new Error("BitFS funding cancellation ownership changed");
+    return service.releaseFundingPlan({allocationId: input.allocationId, submissionId: input.submissionId});
+  }
+
   /** Wallet-input transactions dispatch only through the manager. Pool-only
    * transactions stay in BitFS and do not incur another wallet approval. */
   function chain(woc: WocService & import("@keymaster/contracts").WocWorkerBroadcastService, network: "main" | "test", transactions: BitfsTransactionJournal): BitfsChainPort {
@@ -105,6 +111,6 @@ export function createWorkerFundingRuntime(deps: WorkerFundingDependencies) {
       nowMs: () => Date.now(),
     });
   }
-  return { currentLedger, protocolSpend, planFunding, chain, walletView: deps.walletView, releasePreparedSubmission, recoverSplit, clear() { ledger = undefined; ledgerOwner = undefined; ledgerEpoch = undefined; } };
+  return { currentLedger, protocolSpend, planFunding, releaseFundingPlan, chain, walletView: deps.walletView, releasePreparedSubmission, recoverSplit, clear() { ledger = undefined; ledgerOwner = undefined; ledgerEpoch = undefined; } };
 }
 function hex(bytes: Uint8Array) { return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join(""); }

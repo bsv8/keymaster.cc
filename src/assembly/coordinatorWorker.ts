@@ -972,7 +972,6 @@ const msfileBitfsBuyerTaskKey = msfileBitfsRuntime.msfileBitfsBuyerTaskKey;
 const startMsfileBitfsBuyerPurchase = msfileBitfsRuntime.startMsfileBitfsBuyerPurchase;
 const cancelMsfileBitfsBuyerPurchase = msfileBitfsRuntime.cancelMsfileBitfsBuyerPurchase;
 const listMsfileBitfsBuyerTaskSnapshots = msfileBitfsRuntime.listMsfileBitfsBuyerTaskSnapshots;
-const currentMsfileBitfsFundingLedger = msfileBitfsRuntime.currentMsfileBitfsFundingLedger;
 const sellerKeepsVaultUnlocked = msfileBitfsRuntime.sellerKeepsVaultUnlocked;
 export const recoverMsfileBitfsFundingSplit = msfileFundingRuntime.recoverSplit;
 
@@ -2100,7 +2099,6 @@ const p2pkhWorkerRuntime = createP2pkhWorkerRuntime({
   tasks: coordinatorTaskRegistrar,
   registerProviders: (registry, broadcast) => registerWocP2pkhProviders({ registry, woc: broadcast }),
   snapshotSource: createP2pkhSnapshotWocSource,
-  protectedOutpoints: (ownerPublicKeyHex, network) => currentMsfileBitfsFundingLedger().listProtectedOutpoints({ ownerPublicKeyHex, network }),
   resetSettings: () => p2pkhWorkerSettings.reset(),
   refresh: (signal, storage, assertActive) => refreshP2pkhUtxoSnapshots(signal, storage, assertActive),
   emit: (kinds, utxoSeqs) => { publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: coordinatorState.activePublicKeyHex ?? "", kinds, ...(utxoSeqs ? { utxoSeqs } : {}) }); },
@@ -2130,7 +2128,6 @@ const p2pkhWorkerRuntime = createP2pkhWorkerRuntime({
     },
     subscribeUtxo: listener => p2pkhWorkerRuntime.subscribeUtxoSeq(listener),
     query: () => p2pkhWorkerRuntime.query() ?? p2pkhWocService,
-    protectedOutpoints: (ownerPublicKeyHex, network) => currentMsfileBitfsFundingLedger().listProtectedOutpoints({ ownerPublicKeyHex, network }),
     fundsChanged: ({ ownerPublicKeyHex }) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: ownerPublicKeyHex, kinds: ["utxo", "balance"] }),
   },
 });
@@ -2749,9 +2746,6 @@ const p2pkhWorkerOperations = createP2pkhWorkerOperations({
   blocked: requestId => coordinatorProductBlockedResponse(requestId, "p2pkh"),
   provider: () => testP2pkhBroadcastProvider,
   broadcastLease: execute => withCoordinatorFinalIoLease("write", undefined, execute, { auditOperation: "p2pkh.broadcast" }),
-  funding: {
-    protected: input => currentMsfileBitfsFundingLedger().listProtectedOutpoints(input),
-  },
   changed: event => { publishTopicEvent("asset.data-changed", event); },
 });
 function ensureWorkerP2pkhResources(owner: string, network: "main" | "test") { return p2pkhWorkerOperations.ensureResources(owner, network); }

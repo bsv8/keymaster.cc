@@ -17,7 +17,6 @@ export interface P2pkhWorkerOperationPorts {
  domain: ReturnType<typeof createP2pkhWorkerRuntime>; walletState: VaultWalletState; network(): "main" | "test";
  storage(): BorrowedModuleFileStore; available(): boolean; blocked(requestId: string): CoordinatorResponse;
  broadcastLease<T>(execute: () => Promise<T>): Promise<T>; provider(): P2pkhTransactionBroadcastProvider | undefined;
- funding: {protected(input: Input): Promise<readonly {txid: string; vout: number}[]>};
  changed(event: {type: "asset.data-changed"; providerId: string; publicKeyHex: string; kinds: string[]; utxoSeqs?: {main?: number; test?: number}}): void;
 }
 export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {

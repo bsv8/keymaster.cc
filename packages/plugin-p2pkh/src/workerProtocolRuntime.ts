@@ -110,8 +110,25 @@ export async function createWorkerProtocolRuntime(deps: WorkerProtocolDependenci
       throw error;
     }
   };
+  // Cancel the original funding intention, never reconstruct wallet occupancy
+  // from BitFS history. Signing/dispatch uncertainty cannot authorize release.
+  const releaseFundingPlan = async (input: {allocationId: string; submissionId: string}): Promise<boolean> => {
+    check();
+    const scope = {ownerPublicKeyHex: deps.owner, network: deps.network, submissionId: input.submissionId};
+    const current = deps.submissions.read(scope);
+    if (current.plan.allocationId !== input.allocationId) throw new Error("Funding cancellation does not match its original allocation");
+    if (current.state === "signed" || current.state === "rejected") {
+      if (!current.txid) throw new Error("Signed funding intention has no exact txid");
+      await executor.releasePreparedSubmission({...scope, txid: current.txid});
+      return true;
+    }
+    if (current.state !== "prepared" && current.state !== "cancelled") return false;
+    deps.submissions.cancelUndispatched(scope);
+    await deps.manager.release({...scope, allocationId: input.allocationId});
+    return true;
+  };
   check();
-  return Object.freeze({ identity: Object.freeze({ publicKeyHex: deps.owner, bsvNetwork: deps.network }), spend, executor,
+  return Object.freeze({ identity: Object.freeze({ publicKeyHex: deps.owner, bsvNetwork: deps.network }), spend, executor, releaseFundingPlan,
     planFundingCommand: planFunding,
     planFunding: (input: import("@keymaster/contracts").ProtocolFundingPlanRequest) => planFunding(scoped(input)), observer: { observeProtocolSubmission: (input: { txid: string; submissionId: string }) => observeProtocolSubmission(scoped(input)) }, protectedOutpoints: registry, protectionView,
     dispose() { for (const id of registry._ids()) registry.unregister(id); },

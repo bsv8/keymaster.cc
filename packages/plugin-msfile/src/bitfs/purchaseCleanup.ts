@@ -29,7 +29,7 @@ export async function deleteBitfsPurchaseData(input: {
       const pending = bitfsSessionNeedsFundingRecovery(s, accounts);
       // 上次已经验证结清但清理中断：账本可能已剪除，不能把旧签名误判成新责任。
       const hasLiveLedger = accounts.some(a => a.pools.some(p => p.poolId === s.sessionId && p.state !== "closed" && p.state !== "funding-failed")
-        || a.transactions.some(t => t.poolId === s.sessionId && t.state !== "failed" && (t.state !== "observed" || !t.inputsReconciled)));
+        || a.transactions.some(t => t.poolId === s.sessionId && t.state !== "failed" && t.state !== "observed"));
       return pending && (!previouslyErasable.has(s.sessionId) || hasLiveLedger);
     });
     const removed = selected.filter(s => !retained.includes(s));

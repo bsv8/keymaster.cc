@@ -36,7 +36,6 @@ export {
   type BitfsFundingLedger,
   type BitfsFundingPool,
   type BitfsFundingPrepareDeps,
-  type BitfsFundingInputReservation,
   type BitfsFundingTransaction,
   type BitfsFundingTransactionPurpose,
   type BitfsFundingTransactionState,

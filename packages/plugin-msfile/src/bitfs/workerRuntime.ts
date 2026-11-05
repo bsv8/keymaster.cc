@@ -2597,6 +2597,7 @@ async function createMsfileBitfsBuyerTask(input: {
   const fundingDeps: BitfsFundingPrepareDeps = {
     protocolSpend,
     planFunding: request => deps.funding.planFunding(request),
+    releaseFundingPlan: request => deps.funding.releaseFundingPlan(request),
     async resolveOwnerAddress() {
       assertCurrentContext();
       const address = deps.deriveAddress(owner, input.network);
@@ -2620,9 +2621,6 @@ async function createMsfileBitfsBuyerTask(input: {
         || context.generation !== generation) {
         throw new Error("BitFS FundingTx 的身份、网络或 generation 不匹配");
       }
-    },
-    async releasePrepared(preview) {
-      await protocolSpend.releasePrepared?.(preview);
     },
     nowMs: () => Date.now(),
   };
