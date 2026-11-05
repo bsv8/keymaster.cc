@@ -21,3 +21,4 @@ minimumReleaseAgeExclude:
   - webloom-framework@0.6.0
   - keymaster-trade-scheduler@0.2.0
   - keymaster-utxo-manager@0.3.0
+  - keymaster-utxo-manager@0.5.0

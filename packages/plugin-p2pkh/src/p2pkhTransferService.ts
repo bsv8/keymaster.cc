@@ -95,7 +95,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         ? {kind: "all", allocation: await manager.requestAll({ownerPublicKeyHex: owner.publicKeyHex, resource})} as const
         : {kind: "amount", allocation: await manager.request({ownerPublicKeyHex: owner.publicKeyHex, resource,
           amountSats: String(input.amountSatoshis), feeRateSatPerKb: String(input.feeRateSatoshisPerKb!),
-          outputs: [{scriptHex: businessScriptHex, value: String(input.amountSatoshis)}]})} as const;
+          outputScriptLengths: [businessScriptHex.length / 2]})} as const;
       const funding = requested.allocation;
       // Every error after freezing, including fee calculation and construction,
       // must release this request's ID while the transaction is still unsigned.

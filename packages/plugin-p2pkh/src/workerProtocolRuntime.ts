@@ -93,7 +93,7 @@ export async function createWorkerProtocolRuntime(deps: WorkerProtocolDependenci
     if (outputs.reduce((sum, row) => sum + BigInt(row.value), 0n) !== BigInt(input.amountSatoshis)) throw new Error("Funding amount differs from declared business outputs");
     const allocation = await deps.manager.request({ownerPublicKeyHex: input.ownerPublicKeyHex,
       resource: {resourceId: `p2pkh:${input.network}`, network: input.network, address}, amountSats: String(input.amountSatoshis),
-      feeRateSatPerKb: String(input.feeRateSatoshisPerKb), outputs});
+      feeRateSatPerKb: String(input.feeRateSatoshisPerKb), outputScriptLengths: outputs.map(row => row.scriptHex.length / 2)});
     try {
       check();
       const selected = allocation.selectedInputs.map(row => ({txid: row.utxo.txid, vout: row.utxo.vout, value: row.utxo.value, address: row.utxo.address}));
