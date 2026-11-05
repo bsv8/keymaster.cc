@@ -62,7 +62,6 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
     if (retained.state === "accepted" || retained.state === "already-known") {
      return {requestId, sessionEpoch: epoch(), ack: {status: "ok"}, operationResult: {status: retained.state === "already-known" ? "already-known" : "local-confirmed", txid: retained.txid}};
     }
-    await manager.assertAllocationUsable({...scope, allocationId: submission.managerAllocationId});
     captured.assertFresh();
     transactions.beginDispatch(exact);
     const response = await executeWorkerP2pkhBroadcast(requestId, {...request, submission: {...submission, managerAllocationId: submission.managerAllocationId}}, {

@@ -171,7 +171,6 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         const resource = await stateRepository.getResource(makeResourceId(network));
         if (!resource) throw new Error(`P2PKH resource not found for owner ${owner.publicKeyHex} (${network})`);
         if (!deps.centralBroadcastService && !deps.broadcastWithCoordinator) throw new Error("Coordinator broadcast is required for ordinary P2PKH transfers");
-        await manager.assertAllocationUsable({...scope, allocationId: remembered.managerAllocationId});
         const activeCrypto = await deps.vault.createActiveKeyCrypto();
         const { address: currentChangeAddress } = await activeCrypto.deriveP2pkhAddress();
         // This checks a real asynchronous wallet replacement, not an internal

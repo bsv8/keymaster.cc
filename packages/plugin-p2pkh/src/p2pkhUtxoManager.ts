@@ -78,7 +78,6 @@ export function createP2pkhUtxoManager(input: {files: BorrowedModuleFileStore}):
         return {allocationId: value.allocationId, totalInSats: value.totalInSats, selectedInputs: evidence(s, value.inputs)};
       });
     },
-    async assertAllocationUsable(request) {scoped(request).pool.assertAllocationUsable(request.allocationId);},
     async release(request) {const s = scoped(request); operation(s, "release", request, () => s.pool.release(request.allocationId));},
     async injectP2pkhUtxos(request) {const s = scoped(request); operation(s, "inject-p2pkh-utxos", request, () => s.pool.injectP2pkhUtxos(request.utxos));},
   };
@@ -90,7 +89,6 @@ export interface P2pkhUtxoManager {
   funds(request: FundingIdentity): Promise<Funds>;
   request(request: ScopedResource & {amountSats: string; feeRateSatPerKb: string; outputScriptLengths: number[]}): Promise<P2pkhFundingAllocation>;
   requestAll(request: ScopedResource): Promise<P2pkhAllFundingAllocation>;
-  assertAllocationUsable(request: FundingIdentity & {allocationId: string}): Promise<void>;
   release(request: FundingIdentity & {allocationId: string}): Promise<void>;
   injectP2pkhUtxos(request: FundingIdentity & {utxos: readonly InjectableP2pkhUtxo[]}): Promise<void>;
 }

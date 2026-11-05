@@ -54,7 +54,6 @@ export interface P2pkhProtocolSpendSubmissionStore {
  * inputs; protocol validation, signing and submission belong to this service.
  */
 export interface P2pkhProtocolManagerPort {
-  assertAllocationUsable(input: FundingIdentity & {allocationId: string}): Promise<void>;
   release(input: FundingIdentity & {allocationId: string}): Promise<void>;
 }
 
@@ -292,7 +291,6 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           // The original funding request owns the input/output plan. Caller
           // display fields cannot replace it or force a different change layout.
           const planned = deps.submissions.preparedForAllocation({...scope, allocationId: input.managerAllocationId});
-          await deps.protocolManager!.assertAllocationUsable({...scope, allocationId: input.managerAllocationId});
           if (sign) {originalPlan = planned; submissionId = planned.submissionId; managerAllocationId = planned.allocationId;}
           return await signAndRecord({inputs: planned.inputs, outputs: planned.outputs, unsignedTxHex: planned.unsignedTxHex,
             changeAddress: planned.changeAddress, changeSatoshis: planned.changeSatoshis, feeSatoshis: planned.feeSatoshis,
