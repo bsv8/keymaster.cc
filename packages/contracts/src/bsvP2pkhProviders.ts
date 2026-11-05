@@ -193,7 +193,7 @@ export interface P2pkhUtxoSnapshotItem {
  */
 export type P2pkhUtxoSnapshotResult =
   | { hasResult: false; funds: null; seq: null; syncedAt: null }
-  | { hasResult: true; funds: { availableSats: string; frozenSats: string; version: number }; seq: number; syncedAt: string };
+  | { hasResult: true; funds: { availableSats: string; version: number }; seq: number; syncedAt: string };
 
 export const P2PKH_PROVIDERS_CAPABILITY = defineCapability<P2pkhProviderRegistry>({
   kind: "local",

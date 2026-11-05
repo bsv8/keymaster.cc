@@ -8,7 +8,7 @@ import { ensureWorkerP2pkhResources, refreshWorkerP2pkhResources } from "./p2pkh
 import { createP2pkhStateRepository, openP2pkhStateRepository } from "./storage/p2pkhStateRepository.js";
 import { createP2pkhUtxoManager } from "./p2pkhUtxoManager.js";
 import { readWorkerProtocolProtection } from "./workerProtocolRuntime.js";
-import { acceptedTransaction, createP2pkhSubmissionRuntime } from "./p2pkhSubmissionRuntime.js";
+import { p2pkhUtxosFromTransaction, createP2pkhSubmissionRuntime } from "./p2pkhSubmissionRuntime.js";
 import { createWorkerProtocolEvidence } from "./workerProtocolEvidence.js";
 
 type Input = {ownerPublicKeyHex: string; network: "main" | "test"};
@@ -73,7 +73,8 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
     const outcome = response.operationResult as {status?: string; providerCode?: string} | undefined;
     if (outcome?.status === "local-confirmed" || outcome?.status === "already-known") {
      transactions.outcome({...scope, state: outcome.status === "already-known" ? "already-known" : "accepted"});
-     await manager.acceptTransaction({...scope, transaction: acceptedTransaction(submission.rawTxHex)});
+     const utxos = p2pkhUtxosFromTransaction(submission.rawTxHex, scope);
+     if (utxos.length) await manager.injectP2pkhUtxos({...scope, utxos});
      try {
       const evidence = createWorkerProtocolEvidence(ports.storage()), protocol = await evidence.getProtocolSubmission(scope.submissionId);
       if (protocol) await evidence.putProtocolSubmission({...protocol, status: "broadcast-pending-woc", updatedAt: new Date().toISOString()});

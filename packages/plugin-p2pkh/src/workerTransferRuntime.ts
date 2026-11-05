@@ -4,7 +4,7 @@ import { createMessageBus } from "webloom-framework";
 import { createCentralBroadcastService } from "./centralBroadcastService.js";
 import { createP2pkhService } from "./p2pkhService.js";
 import { createWorkerProtocolRuntime } from "./workerProtocolRuntime.js";
-import { acceptedTransaction, createP2pkhSubmissionRuntime } from "./p2pkhSubmissionRuntime.js";
+import { p2pkhUtxosFromTransaction, createP2pkhSubmissionRuntime } from "./p2pkhSubmissionRuntime.js";
 
 import { createP2pkhUtxoManager, type P2pkhUtxoManager } from "./p2pkhUtxoManager.js";
 import type { P2pkhService } from "./p2pkhContracts.js";
@@ -180,7 +180,8 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
     await ensure();
     const session = deps.session();
     if (!session.unlocked || session.owner?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) throw new Error("Business receipt owner mismatch");
-    await utxoManager!.acceptTransaction({...input, transaction: acceptedTransaction(input.rawTxHex)});
+    const utxos = p2pkhUtxosFromTransaction(input.rawTxHex, input);
+    if (utxos.length) await utxoManager!.injectP2pkhUtxos({...input, utxos});
     createP2pkhSubmissionRuntime(deps.storage()).observeAccepted(input);
     deps.fundsChanged(input);
   }

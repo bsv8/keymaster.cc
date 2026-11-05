@@ -43,7 +43,6 @@ export function P2pkhBalanceWidget() {
         <h3 className="home-widget__eyebrow">{t("p2pkh.balanceWidget.title", { defaultValue: "P2PKH 余额" })}</h3>
         <p className="home-widget__amount">{known ? formatSats(balance.total, locale) : "—"}</p>
         {known && balance.breakdown ? <dl className="home-widget__breakdown">
-          <dt>{t("p2pkh.balance.frozen", { defaultValue: "冻结金额" })}</dt><dd>{formatSats(balance.breakdown.frozen)}</dd>
           <dt>{t("p2pkh.balance.localSpendable", { defaultValue: "可花费" })}</dt><dd>{formatSats(balance.breakdown.spendable)}</dd>
         </dl> : null}
       </div>

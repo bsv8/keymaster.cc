@@ -333,7 +333,7 @@ const transferPreview = (value: unknown) => fields(value, "previewId assetId net
   allocation: value => fields(value, "requestedSatoshis feeReserveSatoshis totalInputSatoshis changeSatoshis", { selected: each(value => fields(value, "txid vout value")) }),
 });
 const transferResult = (value: unknown) => fields(value, "status txid rawTxHex error submissionId attempts reason", { localInputClaimIds: copy });
-const utxos = (value: unknown) => fields(value, "hasResult seq syncedAt", { funds: value => fields(value, "availableSats frozenSats version") });
+const utxos = (value: unknown) => fields(value, "hasResult seq syncedAt", { funds: value => fields(value, "availableSats version") });
 const broadcast = (value: unknown) => fields(value, "status reason currentSeq txid canonicalTxid providerReturnedTxidRaw providerReturnedTxidNormalized txidIntegrity providerId providerReference providerCode providerMessage");
 function cryptoResult(value: unknown): CoordinatorCryptoResult {
   const source = value as CoordinatorCryptoResult;

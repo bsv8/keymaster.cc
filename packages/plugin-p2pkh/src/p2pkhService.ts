@@ -59,7 +59,6 @@ export const P2PKH_TASK_TRANSACTIONS_SYNC = "p2pkh.transactions-sync";
 
 /** 未知余额的占位明细；这些 0 不能直接渲染为真实余额。 */
 const EMPTY_BALANCE_BREAKDOWN: P2pkhBalanceBreakdown = {
-  frozen: 0,
   version: 0,
   spendable: 0,
 };
@@ -108,9 +107,9 @@ export function calculateP2pkhBalanceBreakdown(input: {
   snapshot: P2pkhUtxoSnapshotResult;
 }): P2pkhBalanceBreakdown {
   if (!input.snapshot.hasResult) {
-    return { frozen: 0, version: 0, spendable: 0 };
+    return { version: 0, spendable: 0 };
   }
-  return {spendable: Number(input.snapshot.funds.availableSats), frozen: Number(input.snapshot.funds.frozenSats), version: input.snapshot.funds.version};
+  return {spendable: Number(input.snapshot.funds.availableSats), version: input.snapshot.funds.version};
 }
 
 export interface P2pkhServiceDeps {
@@ -359,7 +358,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
 
   async function calculateBalanceBreakdown(network: "main" | "test"): Promise<{ breakdown: P2pkhBalanceBreakdown; available: boolean }> {
     const active = getVaultLifecycleSnapshot().activePublicKeyHex;
-    if (!active) return { breakdown: { frozen: 0, version: 0, spendable: 0 }, available: false };
+    if (!active) return { breakdown: { version: 0, spendable: 0 }, available: false };
     let snapshot: P2pkhUtxoSnapshotResult;
     try {
       snapshot = await requireUtxoSnapshot({ ownerPublicKeyHex: active, network }, "get");

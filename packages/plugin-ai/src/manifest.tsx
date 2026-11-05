@@ -64,7 +64,7 @@ export const aiSetup: PluginSetup = async ctx => {
   runtime.tools.register({ id: "wallet_available_balance", source: "钱包", description: "查询 UTXO manager 当前可用余额投影（聪）；不主动刷新链。未知不是零。", parameters: object(), available: () => !!p2pkh(), execute: async () => {
     const service = p2pkh(); if (!service) throw new Error("钱包查询不可用");
     const result = await service.getFunds();
-    return result.hasResult ? { hasResult: true, availableSatoshis: result.funds.availableSats, frozenSatoshis: result.funds.frozenSats, fundsVersion: result.funds.version, syncedAt: result.syncedAt } : { hasResult: false, availableSatoshis: null };
+    return result.hasResult ? { hasResult: true, availableSatoshis: result.funds.availableSats, fundsVersion: result.funds.version, syncedAt: result.syncedAt } : { hasResult: false, availableSatoshis: null };
   } });
   runtime.tools.register({ id: "wallet_history", source: "钱包", description: "分页查询当前钱包链上交易历史。cursor 为上一页 nextCursor，不主动刷新。", parameters: object({ cursor: string(1000), limit: { type: "integer", minimum: 1, maximum: 100 } }), available: () => !!p2pkh(), execute: async args => {
     const service = p2pkh(); if (!service) throw new Error("钱包查询不可用");

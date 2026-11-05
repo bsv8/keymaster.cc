@@ -300,7 +300,6 @@ function BalanceBreakdown({ breakdown }: { breakdown?: P2pkhBalanceBreakdown }) 
   const { t } = usePluginI18n();
   if (!breakdown) return null;
   return <dl className="p2pkh-wallet__balance-breakdown">
-    <dt>{t("p2pkh.balance.frozen", { defaultValue: "冻结金额" })}</dt><dd>{formatSats(breakdown.frozen)}</dd>
     <dt>{t("p2pkh.balance.localSpendable", { defaultValue: "可花费" })}</dt><dd>{formatSats(breakdown.spendable)}</dd>
   </dl>;
 }

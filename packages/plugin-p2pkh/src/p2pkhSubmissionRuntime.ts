@@ -1,8 +1,9 @@
 // Caller-owned transaction intentions and outcomes, not a UTXO pool. No balances,
 // selection, occupancy, manager-state inference or restoration from disk.
 import type { BorrowedModuleFileStore, P2pkhPaymentLookupResult, ProtocolSpendInput, ProtocolSpendOutput } from "@keymaster/contracts";
-import { traceDev } from "@keymaster/contracts";
-import { parseTx, type AcceptedTransaction } from "keymaster-utxo-manager";
+import { traceDev, deriveP2pkhAddress } from "@keymaster/contracts";
+import { parseTx, type P2pkhUtxo } from "keymaster-utxo-manager";
+import { p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
 import type { UnsignedTx } from "./p2pkhSigner.js";
 import type { FundingIdentity } from "./p2pkhUtxoManager.js";
 
@@ -24,10 +25,12 @@ export interface RuntimeSubmission {
 }
 const instances = new WeakMap<object, P2pkhSubmissionRuntime>();
 const sameScope = (row: RuntimeSubmission, scope: FundingIdentity) => row.plan.ownerPublicKeyHex.toLowerCase() === scope.ownerPublicKeyHex.toLowerCase() && row.plan.network === scope.network;
-export function acceptedTransaction(rawTxHex: string): AcceptedTransaction {
+// Host boundary: only the bound wallet's nonzero P2PKH outputs enter the pool.
+export function p2pkhUtxosFromTransaction(rawTxHex: string, scope: FundingIdentity): P2pkhUtxo[] {
  const tx = parseTx(rawTxHex);
- return {txid: tx.canonicalTxid, spentOutpoints: tx.inputs.map(row => row.outpointKey),
-  outputs: tx.outputs.map((row, vout) => ({vout, value: String(row.value), scriptHex: row.scriptHex}))};
+ const scriptHex = p2pkhAddressToScriptHex(deriveP2pkhAddress(scope.ownerPublicKeyHex, scope.network), scope.network);
+ return tx.outputs.flatMap((row, vout) => row.scriptHex === scriptHex && BigInt(row.value) !== 0n
+  ? [{txid: tx.canonicalTxid, vout, value: String(row.value)}] : []);
 }
 export function unsignedFromExact(rawTxHex: string): UnsignedTx {
  const tx = parseTx(rawTxHex);
