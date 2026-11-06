@@ -76,7 +76,7 @@
     "@noble/hashes": "^1.8.0",
     "bitcoin-libp2p": "0.3.2",
     "bsv8-channel-protocol": "0.6.0",
-    "bitfs-protocol": "0.5.1",
+    "bitfs-protocol": "0.6.0",
     "buffer": "^6.0.3",
     "keyhold": "2.1.0",
     "sat-subscription-protocol": "0.3.0",

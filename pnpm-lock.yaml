@@ -84,8 +84,8 @@ importers:
         specifier: 0.3.2
         version: 0.3.2(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)))
       bitfs-protocol:
-        specifier: 0.5.1
-        version: 0.5.1(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)))
+        specifier: 0.6.0
+        version: 0.6.0(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)))
       bsv8-channel-protocol:
         specifier: 0.6.0
         version: 0.6.0
@@ -319,8 +319,8 @@ importers:
         specifier: 0.3.2
         version: 0.3.2(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)))
       bitfs-protocol:
-        specifier: 0.5.1
-        version: 0.5.1(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)))
+        specifier: 0.6.0
+        version: 0.6.0(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)))
       bsv8-channel-protocol:
         specifier: 0.6.0
         version: 0.6.0
@@ -1485,6 +1485,9 @@ packages:
 
   bitfs-protocol@0.5.1:
     resolution: {integrity: sha512-93x0+Ay5PmYWhQVQrjhjwCrBc3ofwiHM2dnUZt5lsO8khWiEbqVFlcANvUCPv7WjLFGbpCYsOj9hUZyPHY97Aw==}
+
+  bitfs-protocol@0.6.0:
+    resolution: {integrity: sha512-+QcqRUjCWq2T9yjMl/ijK7VRHvZxvQiUqpseYhvz7jBFePs9V9XP7hDT5MM4d3ERRBSEX75fN83WLoOySZhONQ==}
 
   braces@3.0.3:
     resolution: {integrity: sha512-yQbXgO/OSZVD2IsiLlro+7Hf6Q18EJrKSEsdoMzKePKXct3gvD8oLcOQdIzGupr5Fj+EDe8gO/lxc1BzfMpxvA==}
@@ -4010,6 +4013,19 @@ snapshots:
       - utf-8-validate
 
   bitfs-protocol@0.5.1(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))):
+    dependencies:
+      '@bsv/sdk': 2.0.5
+      '@noble/curves': 2.0.1
+      '@noble/hashes': 2.0.1
+      bitcoin-libp2p: 0.3.2(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)))
+      keymaster-multisig-pool: 4.0.0
+      masterseed: 1.1.0
+    transitivePeerDependencies:
+      - bufferutil
+      - react-native-webrtc
+      - utf-8-validate
+
+  bitfs-protocol@0.6.0(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))):
     dependencies:
       '@bsv/sdk': 2.0.5
       '@noble/curves': 2.0.1
