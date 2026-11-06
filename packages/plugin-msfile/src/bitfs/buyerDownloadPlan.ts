@@ -99,6 +99,12 @@ export interface BitfsBuyerDownloadPlan {
   reserveUnsettledContent(hashes: readonly string[]): Promise<void>;
   /** 新任务仅采用已逐块校验的现存内容；不代表本任务发生过付款。 */
   adoptVerifiedContent(blockHashes: readonly string[], availableHashes: readonly string[]): Promise<void>;
+  /**
+   * Seed 购买成功后增量登记已验证复用块（有序清单未知时首次登记）。
+   * 只填充尚无归属的块：不覆盖已有付款或认领记录，不碰 Seed 状态、
+   * 费用池、派发批次与未决保留。有序清单一旦固定，再次提供必须一致。
+   */
+  adoptReuseBlocks(blockHashes: readonly string[], availableHashes: readonly string[]): Promise<void>;
   /** 读取当前计划快照。 */
   snapshot(): Promise<BitfsBuyerDownloadPlanSnapshot>;
 }
@@ -215,6 +221,21 @@ export function createBitfsBuyerDownloadPlan(input: {
         plan.blockHashesHex = all;
         for (const hash of present) plan.blocks[hash] = { sessionId: "local-content", state: "completed", paidSatoshis: "0", reused: true };
         plan.fileComplete = all.every(hash => plan.blocks[hash]?.state === "completed");
+        return { plan, result: undefined };
+      });
+    },
+    async adoptReuseBlocks(hashes, available) {
+      const all = [...new Set(hashes.map(assertHash))];
+      const present = [...new Set(available.map(assertHash))];
+      if (present.some(hash => !all.includes(hash))) throw new Error("复用内容不属于当前 Seed");
+      await mutate(plan => {
+        if (plan.blockHashesHex && !same(plan.blockHashesHex, all)) throw new Error("BitFS 同 Seed 收到冲突的 Block Hash 清单");
+        plan.blockHashesHex ??= all;
+        for (const hash of present) {
+          // 只填充无归属的块：已有付款、认领或复用记录一律保留，不覆盖。
+          plan.blocks[hash] ??= { sessionId: "local-content", state: "completed", paidSatoshis: "0", reused: true };
+        }
+        plan.fileComplete = (plan.blockHashesHex ?? []).every(hash => plan.blocks[hash]?.state === "completed");
         return { plan, result: undefined };
       });
     },
