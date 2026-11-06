@@ -149,9 +149,9 @@ export function createBitfsBuyerDownloadPlan(input: {
   ownerPublicKeyHex: string;
   /** 文件 Seed Hash。 */
   seedHashHex: string;
-  /** 报价绑定的文件大小，单位字节。 */
+  /** 报价声明的文件大小（展示元数据，不参与身份与决策）。 */
   fileSizeBytes: string;
-  /** 报价绑定的文件名。 */
+  /** 报价声明的文件名（展示元数据，不参与身份与决策）。 */
   recommendedFilename: string;
   /** 文件采购任务编号；新任务独立保存计划，旧资金恢复不触碰新计划。 */
   taskId?: string;
@@ -160,7 +160,8 @@ export function createBitfsBuyerDownloadPlan(input: {
 }): BitfsBuyerDownloadPlan {
   const owner = assertKey(input.ownerPublicKeyHex);
   const seed = assertHash(input.seedHashHex);
-  const size = assertAmount(input.fileSizeBytes, true);
+  // 展示用的声明大小（未知为 "0"），不参与身份与决策；允许零。
+  const size = assertAmount(input.fileSizeBytes, false);
   const path = input.taskId ? `download-plans/${seed}/${assertSession(input.taskId)}.json` : `download-plans/${seed}.json`;
   const lockKey = `${owner}:${seed}:${input.taskId ?? "legacy"}`;
 
@@ -535,8 +536,9 @@ export function createBitfsBuyerDownloadPlan(input: {
 function validate(value: unknown, owner: string, seed: string, size: string, filename: string): StoredPlan {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("BitFS 下载计划格式错误");
   const row = value as Record<string, unknown>;
-  if (row.format !== FORMAT || row.version !== VERSION || row.ownerPublicKeyHex !== owner || row.seedHashHex !== seed
-    || row.fileSizeBytes !== size || row.recommendedFilename !== filename) throw new Error("BitFS 下载计划身份或文件信息冲突");
+  // 计划身份只看 Owner + Seed；文件大小与文件名是展示元数据（首个报价声明），
+  // 卖方声明不一致时跟随最新输入，不阻止任务。
+  if (row.format !== FORMAT || row.version !== VERSION || row.ownerPublicKeyHex !== owner || row.seedHashHex !== seed) throw new Error("BitFS 下载计划身份冲突");
   if (!Number.isSafeInteger(row.revision) || (row.revision as number) < 1 || typeof row.seedCompleted !== "boolean"
     || typeof row.fileComplete !== "boolean" || (row.stopRequested !== undefined && typeof row.stopRequested !== "boolean")
     || (row.priority !== "price" && row.priority !== "recent-speed")

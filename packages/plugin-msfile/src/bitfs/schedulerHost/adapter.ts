@@ -14,13 +14,9 @@ import type { SchedulerOutboxEntry, SchedulerSnapshotStore } from "./store.js";
 export interface SchedulerAdapterInit {
   store: SchedulerSnapshotStore;
   clock: MonotonicClock;
-  /** 宿主任务编号（owner + network + seedHash 级唯一）；内核 taskId 直接使用它。 */
-  taskId: string;
   seedHash: string;
   /** 已按本地字节重验的文件信息；缺省表示种子未知，内核先购买 Seed。 */
   fileInfo?: {
-    fileBytes: number;
-    blockBytes: number;
     blockHashes: string[];
     reusedBlockHashes?: string[];
   };
@@ -79,12 +75,12 @@ export class SchedulerAdapter {
       const state = restoreTask(stored.snapshot.state);
       return new SchedulerAdapter(init.store, init.clock, state, stored.snapshot.outbox.map((entry) => ({ ...entry })));
     }
-    const create: CreateTaskInput = { taskId: init.taskId, seedHash: init.seedHash };
+    const create: CreateTaskInput = { seedHash: init.seedHash };
     if (init.fileInfo) {
-      create.fileBytes = init.fileInfo.fileBytes;
-      create.blockBytes = init.fileInfo.blockBytes;
-      create.blockHashes = init.fileInfo.blockHashes;
-      if (init.fileInfo.reusedBlockHashes !== undefined) create.reusedBlockHashes = init.fileInfo.reusedBlockHashes;
+      create.resume = {
+        blockHashes: init.fileInfo.blockHashes,
+        ...(init.fileInfo.reusedBlockHashes !== undefined ? { reusedBlockHashes: init.fileInfo.reusedBlockHashes } : {}),
+      };
     }
     const state = init.scheduler.createTask(create);
     const saved = await init.store.save({ state, outbox: [] });
@@ -100,8 +96,8 @@ export class SchedulerAdapter {
       if (this.retired) return [];
       const receivedAt = this.clock.now();
       const times = schedulerEventTimes(input.occurredAt ?? receivedAt, receivedAt);
-      const event = { ...input.payload, eventId: input.eventId, taskId: this.state.taskId, ...times } as Event;
-      traceDev("keymaster.scheduler", "event.start", () => ({taskId: this.state.taskId, revision: this.state.revision, event}));
+      const event = { ...input.payload, eventId: input.eventId, seedHash: this.state.seedHash, ...times } as Event;
+      traceDev("keymaster.scheduler", "event.start", () => ({seedHash: this.state.seedHash, revision: this.state.revision, event}));
       const result = step(this.state, event);
       const next = [...this.outbox];
       for (const command of result.commands) {
@@ -112,7 +108,7 @@ export class SchedulerAdapter {
       await this.store.save({ state: result.state, outbox: next });
       this.state = result.state;
       this.outbox = next;
-      traceDev("keymaster.scheduler", "event.committed", () => ({taskId: this.state.taskId, eventId: event.eventId,
+      traceDev("keymaster.scheduler", "event.committed", () => ({seedHash: this.state.seedHash, eventId: event.eventId,
         revision: this.state.revision, failure: this.state.failure, commands: result.commands, pools: this.state.pools, spent: this.state.spent,
         pendingCommandIds: next.map(entry => entry.commandId)}));
       return result.commands;
@@ -127,7 +123,7 @@ export class SchedulerAdapter {
       if (next.length === this.outbox.length) return;
       await this.store.save({ state: this.state, outbox: next });
       this.outbox = next;
-      traceDev("keymaster.scheduler", "command.settled", () => ({taskId: this.state.taskId, commandId, pendingCommandIds: next.map(entry => entry.commandId)}));
+      traceDev("keymaster.scheduler", "command.settled", () => ({seedHash: this.state.seedHash, commandId, pendingCommandIds: next.map(entry => entry.commandId)}));
     });
   }
 

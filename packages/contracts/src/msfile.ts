@@ -456,6 +456,8 @@ export interface MsFileBitfsQuoteView {
   seedPriceSatoshis: string;
   /** 完整 Block 单价，单位聪。 */
   fullBlockPriceSatoshis: string;
+  /** 清单末项 Hash 的报价，单位聪（卖方签名，买方直接采用）。 */
+  tailPriceSatoshis: string;
   /** 卖方签名报价允许的每批最大 Block 数。 */
   maxBlocksPerBatch: number;
   /** 报价有效截止时间，Unix 秒。 */

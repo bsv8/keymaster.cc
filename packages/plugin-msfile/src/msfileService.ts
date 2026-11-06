@@ -168,12 +168,6 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
   private supplierFence = 0;
   /** 初始化失败信息；status() 据此报告 unavailable（而非 unconfigured）。 */
   private initializationError: unknown;
-  /**
-   * 最近一次成功 Stat 的 file_size_bytes（审查修复）：
-   * Read Seed 时传给内容校验执行精确 Seed 长度检查。
-   * 键为 supplier|seedHash；供应商配置世代变化时整体失效。
-   */
-  private readonly statFileSizeBySupplierSeed = new Map<string, string>();
   /** 最近 Stat 元数据的短 TTL 缓存；不缓存 network-error。 */
   private readonly statCache = new Map<string, CachedStatResult>();
   /** 同一 Worker owner-session 内的 local 读取合并表。 */
@@ -280,7 +274,6 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     this.disposed = true;
     this.statCache.clear();
     this.localReadFlights.clear();
-    this.statFileSizeBySupplierSeed.clear();
     this.supplierBarriers.clear();
     for (const [, entry] of [...this.approvals]) {
       entry.reject(new MsFileServiceError("user_rejected", "MSFile service was disposed"));
@@ -485,8 +478,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
         normalized.config
       ];
       this.supplierGeneration += 1;
-      this.statFileSizeBySupplierSeed.clear();
-      this.supplierSnapshot = { generation: this.supplierGeneration, suppliers: nextList };
+        this.supplierSnapshot = { generation: this.supplierGeneration, suppliers: nextList };
       this.cachedSuppliers = nextList;
       // ---- fencing 完成；等待旧连接关闭 ----
       let cleanupError: unknown;
@@ -533,8 +525,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
       committed = true;
       const nextList = this.supplierSnapshot.suppliers.filter((entry) => entry.supplierPublicKeyHex !== key);
       this.supplierGeneration += 1;
-      this.statFileSizeBySupplierSeed.clear();
-      this.supplierSnapshot = { generation: this.supplierGeneration, suppliers: nextList };
+        this.supplierSnapshot = { generation: this.supplierGeneration, suppliers: nextList };
       this.cachedSuppliers = nextList;
       let cleanupError: unknown;
       try {
@@ -797,17 +788,9 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
         : []),
       ...remoteEntries,
     ];
-    // 返回前复核世代；尺寸缓存只在通过最终检查后提交，
-    // 迟到响应不得在缓存清理之后重新写入旧值。
+    // 返回前复核世代；迟到响应不得在复核之后继续写入。
     if (this.supplierFence !== fenceAtStart || this.supplierGeneration !== generationAtStart) {
       throw new MsFileServiceError("msfile_unavailable", "MSFile supplier configuration changed during stat");
-    }
-    for (const entry of entries) {
-      if ((entry.status === "available" || entry.status === "quoted")) {
-        if (entry.sourceKind === "remote-proxy" && entry.supplierPublicKeyHex) {
-          this.statFileSizeBySupplierSeed.set(`${entry.supplierPublicKeyHex}|${input.seedHashHex}`, entry.fileSizeBytes);
-        }
-      }
     }
     const result: MsFileStatResult = { seedHashHex: input.seedHashHex, sources: entries };
     // 只缓存无 network-error 的完整结果。网络错误必须尽快重新探测，
@@ -1111,9 +1094,10 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     }
     const bytes = outcome.content;
     try {
+      // 内容身份只看 Hash：Seed 校验哈希与 32 字节整除，不再按 stat 声明长度
+      // 推导期望长度；块校验哈希与 1..262144 实际载荷。
       if (kind === "seed") {
-        const knownFileSize = this.statFileSizeBySupplierSeed.get(`${supplierPublicKeyHex}|${hashHex}`);
-        await validateSeedContent(bytes, hashHex, knownFileSize === undefined ? {} : { fileSizeBytes: BigInt(knownFileSize) });
+        await validateSeedContent(bytes, hashHex);
       } else {
         await validateBlockContent(bytes, hashHex);
       }

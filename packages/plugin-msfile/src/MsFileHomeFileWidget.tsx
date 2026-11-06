@@ -626,7 +626,8 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
         });
         if (!isCurrent(task)) return;
         const seedBytes = extractMsFileReadBytes(seedResponse, task.hash);
-        const plan = parseSeedBlockPlan(seedBytes, selection.fileSizeBytes);
+        // 计划只从已验证 Seed 解析有序哈希（含重复位置），不再按 stat 长度推导。
+        const plan = parseSeedBlockPlan(seedBytes);
         task.plan = plan;
         if (!isCurrent(task)) return;
         setState((previous) => ({
@@ -650,6 +651,7 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
           {
             signal: task.controller.signal,
             onVerified: ({ verifiedBytes }) => {
+              // verifiedBytes 是本次验收块的实际字节；累计值即已验收总和。
               if (!isCurrent(task)) return;
               setState((previous) => {
                 if (!isCurrent(task)) return previous;
@@ -674,14 +676,17 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
         );
         if (!isCurrent(task)) return;
         setState((previous) => ({ ...previous, phase: "assembling" }));
-        // worker pool 已验证每块；这里再按计划装配一次，确保最终总长度严格相等。
+        // worker pool 已按哈希逐块验收；这里按计划装配（只校验位置齐备），
+        // 实际总字节取拼接和，不再与声明长度比对。
         const assembled = assembleMsFileParts(plan, parts);
         if (!isCurrent(task)) return;
         task.parts = assembled;
+        let verifiedBytes = 0n;
+        for (const part of assembled) verifiedBytes += BigInt(part.length);
         const finalProgress: HomeProgress = {
           verifiedBlocks: plan.blockCount,
           totalBlocks: plan.blockCount,
-          verifiedBytes: selection.fileSizeBytes,
+          verifiedBytes,
           totalBytes: selection.fileSizeBytes,
         };
         if (intent === "preview") {
@@ -1143,7 +1148,7 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
           {state.progress && (state.phase === "seed-reading" || state.phase === "block-reading" || state.phase === "assembling" || state.phase === "preview-ready" || state.phase === "download-ready") ? (
             <div className="msfile-home-file__progress" aria-live="polite">
               <span>{t("msfile.home.progress.blocks", { defaultValue: "已验证 Block：{{done}} / {{total}}", done: state.progress.verifiedBlocks, total: state.progress.totalBlocks })}</span>
-              <span>{t("msfile.home.progress.bytes", { defaultValue: "已验证字节：{{done}} / {{total}}", done: formatBytes(state.progress.verifiedBytes), total: formatBytes(state.progress.totalBytes) })}</span>
+              <span>{t("msfile.home.progress.bytes", { defaultValue: "已验证字节：{{done}}（卖家声明：{{total}}）", done: formatBytes(state.progress.verifiedBytes), total: formatBytes(state.progress.totalBytes) })}</span>
             </div>
           ) : null}
 

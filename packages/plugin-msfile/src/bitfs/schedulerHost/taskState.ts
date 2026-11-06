@@ -3,14 +3,15 @@ import { restoreTask, view, type State, type View } from "keymaster-trade-schedu
 import type { BitfsSessionRecord } from "../sessionJournal.js";
 import { createSchedulerSnapshotStore } from "./store.js";
 
-/** 从唯一持久快照读取任务事实，不能依赖当前进程是否还有连接或适配器。 */
+/** 从唯一持久快照读取任务事实，不能依赖当前进程是否还有连接或适配器。
+ * taskId 是宿主购买执行编号（快照文件定位键）；内核下载对象身份只看 seedHash。 */
 export async function readSchedulerTaskState(input: {
   store: BorrowedModuleFileStore; ownerPublicKeyHex: string; network: string; taskId: string;
 }): Promise<State | undefined> {
   const stored = await createSchedulerSnapshotStore(input).load();
   if (!stored) return undefined;
   const state = restoreTask(stored.snapshot.state);
-  if (state.taskId !== input.taskId || state.seedHash !== stored.snapshot.seedHashHex) throw new Error("调度器状态与任务索引不一致");
+  if (state.seedHash !== stored.snapshot.seedHashHex) throw new Error("调度器状态与任务索引不一致");
   return state;
 }
 

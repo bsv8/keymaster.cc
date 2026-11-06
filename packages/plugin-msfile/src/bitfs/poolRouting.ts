@@ -5,16 +5,16 @@ import type { BitfsSessionJournal, BitfsSessionRecord } from "./sessionJournal.j
 
 const hex = (bytes: Uint8Array) => Array.from(bytes, value => value.toString(16).padStart(2, "0")).join("");
 
-/** 内核池 ID 的持久日志地址；与报价、物理连接及后续请求报价无关。 */
-export function schedulerPoolSessionId(poolId: string): string {
+/** 内核池 ID 的持久日志地址；必须叠加宿主购买执行编号，不同执行的相同内核编号不得共用地址。 */
+export function schedulerPoolSessionId(hostTaskId: string, poolId: string): string {
   const hash = new IncrementalSha256();
-  hash.update(new TextEncoder().encode(poolId));
+  hash.update(new TextEncoder().encode(`${hostTaskId}/${poolId}`));
   return `pool-${hex(hash.digest())}`;
 }
 
 /** 新池按独立地址恢复；旧已开池仍使用原日志，不能迁移或丢弃签名责任。 */
-export async function readSchedulerPoolSessionId(sessions: BitfsSessionJournal, pool: Pool): Promise<string> {
-  const id = schedulerPoolSessionId(pool.id);
+export async function readSchedulerPoolSessionId(sessions: BitfsSessionJournal, hostTaskId: string, pool: Pool): Promise<string> {
+  const id = schedulerPoolSessionId(hostTaskId, pool.id);
   if (await sessions.get(id)) return id;
   if (pool.openingObserved && (await sessions.get(pool.sessionId))?.evidence.includes("kind2-opening-request")) return pool.sessionId;
   return id;
@@ -53,9 +53,9 @@ export async function readPoolQuoteContext(sessions: BitfsSessionJournal, sessio
 
 /** 已验签的报价仅作开池原始来源，复制到独立池日志后不再覆盖。 */
 export async function createSchedulerPoolSession(input: {
-  sessions: BitfsSessionJournal; poolId: string; quoteSessionId: string; nowMs: number;
+  sessions: BitfsSessionJournal; hostTaskId: string; poolId: string; quoteSessionId: string; nowMs: number;
 }): Promise<BitfsSessionRecord> {
-  const id = schedulerPoolSessionId(input.poolId);
+  const id = schedulerPoolSessionId(input.hostTaskId, input.poolId);
   const existing = await input.sessions.get(id);
   const source = await input.sessions.get(input.quoteSessionId);
   if (!source || source.role !== "buyer") throw new Error("BitFS 开池缺少报价来源");

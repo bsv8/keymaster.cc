@@ -2,7 +2,7 @@ import { configureBitfsDebug, traceBitfs } from "./debug.js";
 import { requireWocNetwork } from "@keymaster/contracts";
 import { bitfsPoolSettlementFee } from "./poolBudget.js";
 import { createSchedulerPoolSession, findBuyerPoolResponseSession, readPoolQuoteContext, readSchedulerPoolSessionId, schedulerPoolSessionId } from "./poolRouting.js";
-import { schedulerOpeningBudget, schedulerCloseAmounts, schedulerTailPrice } from "./schedulerHost/funding.js";
+import { schedulerOpeningBudget, schedulerCloseAmounts } from "./schedulerHost/funding.js";
 import { readSchedulerTaskState, schedulerFailureSettled, schedulerSuccessSettled, schedulerSessionResponsibilitiesSettled, schedulerTaskFields } from "./schedulerHost/taskState.js";
 import { view as schedulerView } from "keymaster-trade-scheduler";
 import { deleteBitfsPurchaseData } from "./purchaseCleanup.js";
@@ -659,7 +659,7 @@ async function finishPurchaseTask(owner: string, seed: string, sessionId: string
 }
 
 /** 采购开始时重验实际字节。历史付款标记只能证明曾经买过，不能证明仍在本地。 */
-async function adoptExistingPurchaseContent(owner: string, seed: string, size: string, plan: ReturnType<typeof createBitfsBuyerDownloadPlan>) {
+async function adoptExistingPurchaseContent(owner: string, seed: string, plan: ReturnType<typeof createBitfsBuyerDownloadPlan>) {
   const content = deps.files("");
   const staging = `bitfs-staging/by-seed/${seed}`;
   const canonical = await content.get(`seeds/${seed}.ms`);
@@ -686,15 +686,14 @@ async function adoptExistingPurchaseContent(owner: string, seed: string, size: s
   const seedBytes = canonical?.bytes ?? ((pendingSignedSeed || priorPlans.some(p => p.seedCompleted)) ? (await content.get(`${staging}/seed.bin`))?.bytes : undefined);
   if (!seedBytes) return;
   let inspected: Awaited<ReturnType<typeof inspectPurchasedMsFileSeed>>;
-  try { inspected = await inspectPurchasedMsFileSeed({ seedHashHex: seed, seedBytes, fileSizeBytes: size }); } catch { return; }
+  try { inspected = await inspectPurchasedMsFileSeed({ seedHashHex: seed, seedBytes }); } catch { return; }
   await content.put(`${staging}/seed.bin`, seedBytes);
   const available: string[] = [];
-  for (const [index, hash] of inspected.blockHashesHex.entries()) {
+  for (const hash of inspected.blockHashesHex) {
     const canonicalBlock = await content.get(`storage/${seed}/${hash}`);
     const paid = priorPlans.some(p => p.blocks?.[hash]?.state === "completed");
     const bytes = canonicalBlock?.bytes ?? ((paid || unresolved.has(hash)) ? (await content.get(`${staging}/blocks/${hash}.bin`))?.bytes : undefined);
-    const expected = index === inspected.blockHashesHex.length-1 ? Number(BigInt(size) - BigInt(index)*BigInt(MSFILE_BITFS_KERNEL_BLOCK_BYTES)) : MSFILE_BITFS_KERNEL_BLOCK_BYTES;
-    if (!bytes || bytes.byteLength !== expected || deps.bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as BufferSource))) !== hash) continue;
+    if (!bytes || deps.bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as BufferSource))) !== hash) continue;
     await content.put(`${staging}/blocks/${hash}.bin`, bytes);
     available.push(hash);
   }
@@ -704,8 +703,8 @@ async function adoptExistingPurchaseContent(owner: string, seed: string, size: s
 
 /**
  * 内核复用验证：按本地字节重验 Seed 与全部 Block，返回完整有序清单与已验证复用块。
- * 与 adoptExistingPurchaseContent 共用同一套字节级校验（哈希 + 按位置推导长度），
- * 但不写旧下载计划、不依赖历史付款标记：有 verified 字节就不必重买。
+ * Seed 只验哈希，清单按 Seed 字节读出，每块只验哈希；卖方声明长度不参与。
+ * 不写旧下载计划、不依赖历史付款标记：有 verified 字节就不必重买。
  * Seed 缺失或损坏时返回 undefined（按新购买处理）；单个块缺失/损坏仅从复用清单剔除。
  */
 async function sha256HexNoThrow(bytes: Uint8Array): Promise<string | undefined> {
@@ -720,8 +719,7 @@ async function quarantineKernelStaging(seed: string, path: string, bytes: Uint8A
   await content.put(target, bytes);
   await content.delete(`bitfs-staging/by-seed/${seed}/${path}`);
 }
-async function verifyLocalKernelReuse(seed: string, size: string): Promise<{ blockHashesHex: string[]; available: string[] } | undefined> {
-  if (!/^(0|[1-9][0-9]*)$/u.test(size)) return undefined;
+async function verifyLocalKernelReuse(seed: string): Promise<{ blockHashesHex: string[]; available: string[] } | undefined> {
   const content = deps.files("");
   const staging = `bitfs-staging/by-seed/${seed}`;
   const canonical = await content.get(`seeds/${seed}.ms`);
@@ -733,7 +731,7 @@ async function verifyLocalKernelReuse(seed: string, size: string): Promise<{ blo
   for (const candidate of [canonical?.bytes, stagedSeed?.bytes]) {
     if (!candidate) continue;
     try {
-      inspected = await inspectPurchasedMsFileSeed({ seedHashHex: seed, seedBytes: candidate, fileSizeBytes: size });
+      inspected = await inspectPurchasedMsFileSeed({ seedHashHex: seed, seedBytes: candidate });
       seedBytes = candidate;
       break;
     } catch { /* 该副本无效，试下一个 */ }
@@ -747,24 +745,20 @@ async function verifyLocalKernelReuse(seed: string, size: string): Promise<{ blo
   await content.put(`${staging}/seed.bin`, seedBytes);
   const available: string[] = [];
   const seen = new Set<string>();
-  for (const [index, hash] of inspected.blockHashesHex.entries()) {
+  for (const hash of inspected.blockHashesHex) {
     if (seen.has(hash)) continue;
     seen.add(hash);
-    // 同一 hash 在不同位置的推导长度必须一致，否则该复用块不可信。
-    const expected = index === inspected.blockHashesHex.length - 1
-      ? Number(BigInt(size) - BigInt(index) * BigInt(MSFILE_BITFS_KERNEL_BLOCK_BYTES))
-      : MSFILE_BITFS_KERNEL_BLOCK_BYTES;
     const canonicalBlock = await content.get(`storage/${seed}/${hash}`);
     const stagedBlock = await content.get(`${staging}/blocks/${hash}.bin`);
     // 暂存副本先独立校验：损坏即隔离，不让它阻止重买内容的落盘；正式存储不动。
     if (stagedBlock?.bytes
-      && (stagedBlock.bytes.byteLength !== expected || (await sha256HexNoThrow(stagedBlock.bytes)) !== hash)) {
+      && (await sha256HexNoThrow(stagedBlock.bytes)) !== hash) {
       await quarantineKernelStaging(seed, `blocks/${hash}.bin`, stagedBlock.bytes);
     }
     // 逐个验证候选副本，选用有效内容：正式副本损坏不得遮蔽有效 staging。
     let bytes: Uint8Array | undefined;
     for (const candidate of [canonicalBlock?.bytes, (await content.get(`${staging}/blocks/${hash}.bin`))?.bytes]) {
-      if (!candidate || candidate.byteLength !== expected) continue;
+      if (!candidate) continue;
       if ((await sha256HexNoThrow(candidate)) !== hash) continue;
       bytes = candidate;
       break;
@@ -1060,9 +1054,12 @@ async function listMsfileBitfsBuyerTaskSnapshots(): Promise<import("@keymaster/c
     const fileTaskForCount = await taskForSession(owner, session.seedHashHex, session.sessionId);
     const historyPlanPath = fileTaskForCount && !fileTaskForCount.legacyPlan ? `download-plans/${session.seedHashHex}/${fileTaskForCount.taskId}.json` : `download-plans/${session.seedHashHex}.json`;
     const historyPlan = await deps.files("bitfs-journal").get(historyPlanPath);
+    // 总块数以 Seed 清单为准（下载计划已登记时）；未知时为 null，不拿报价长度伪造。
+    let planTotalBlockCount: number | null = null;
     if (historyPlan) {
-      const history = JSON.parse(new TextDecoder().decode(historyPlan.bytes)) as { blocks?: Record<string, { state: string; sessionId: string }> };
+      const history = JSON.parse(new TextDecoder().decode(historyPlan.bytes)) as { blocks?: Record<string, { state: string; sessionId: string }>; blockHashesHex?: unknown };
       verifiedBlockCount = Object.values(history.blocks ?? {}).filter(b => b.state === "completed").length;
+      if (Array.isArray(history.blockHashesHex)) planTotalBlockCount = history.blockHashesHex.length;
     }
     const account = await ledger.getAccount({ ownerPublicKeyHex: owner, seedHashHex: session.seedHashHex, network: deps.network(), nowMs: Date.now() });
     const pool = account.pools.find((item) => item.poolId === session.sessionId);
@@ -1132,9 +1129,7 @@ async function listMsfileBitfsBuyerTaskSnapshots(): Promise<import("@keymaster/c
       const outputValue = fundingPlan.expectedOutputs.reduce((sum, output) => sum + BigInt(output.valueSatoshis), 0n);
       if (inputValue >= outputValue) fundingFeeSatoshis = inputValue - outputValue;
     }
-    const totalBlockCount = quote.fileSizeBytes === null
-      ? null
-      : Number((BigInt(quote.fileSizeBytes) + 262_143n) / 262_144n);
+    const totalBlockCount = planTotalBlockCount;
     const taskEntry = msfileBitfsBuyerTasks.get(msfileBitfsBuyerTaskKey(owner, session.seedHashHex));
     let availableQuotes: import("@keymaster/contracts").MsFileBitfsQuoteView[] = [];
     if (taskEntry?.ownerSessionEpoch === deps.session().sessionEpoch && taskEntry.requestMessageId
@@ -1279,12 +1274,14 @@ async function listMsfileBitfsBuyerTaskSnapshots(): Promise<import("@keymaster/c
       if (!match) continue;
       const state = await readSchedulerTaskState({ store: deps.files("bitfs-journal"), ownerPublicKeyHex: owner, network: deps.network(), taskId: match[1]! });
       if (!state) continue;
-      const task = (await (await purchaseTasksFor(owner, state.seedHash)).list()).find(item => item.taskId === state.taskId);
-      const members = snapshots.filter(item => item.taskId === state.taskId || task?.sessionIds.includes(item.sessionId));
+      // 快照文件定位键即宿主购买执行编号；内核下载对象只看 seedHash。
+      const hostTaskId = match[1]!;
+      const task = (await (await purchaseTasksFor(owner, state.seedHash)).list()).find(item => item.taskId === hostTaskId);
+      const members = snapshots.filter(item => item.taskId === hostTaskId || task?.sessionIds.includes(item.sessionId));
       const fields = schedulerTaskFields(state);
-      traceBitfs("scheduler.history.project", () => ({ taskId: state.taskId, members: members.map(item => item.sessionId), failure: state.failure }));
+      traceBitfs("scheduler.history.project", () => ({ hostTaskId, seedHashHex: state.seedHash, members: members.map(item => item.sessionId), failure: state.failure }));
       for (const item of members) {
-        item.taskId = state.taskId;
+        item.taskId = hostTaskId;
         item.taskState = task?.state;
         item.taskEndReason = task?.endReason;
         item.createdAt ??= task?.createdAt;
@@ -1301,14 +1298,29 @@ async function listMsfileBitfsBuyerTaskSnapshots(): Promise<import("@keymaster/c
       const hidden = await readBitfsHiddenHistory(deps.files("bitfs-journal"), state.seedHash);
       const blocks = Object.values(state.content).filter(item => item.kind === "block");
       const completedBlocks = blocks.filter(item => state.completed[item.id]);
+      // 已验收字节按暂存实际大小求和；读不到准确大小时为 null，不伪造。
+      let failedVerifiedBytes: string | null = "0";
+      if (completedBlocks.length > 0) {
+        try {
+          const staged = await deps.files("").list({ prefix: `bitfs-staging/by-seed/${state.seedHash}/blocks/`, limit: 10_000 });
+          const sizes = new Map(staged.files.map(file => [file.path.split("/").pop()!.replace(/\.bin$/u, ""), file.size]));
+          let sum = 0n;
+          for (const item of completedBlocks) {
+            const size = sizes.get(item.id);
+            if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) { failedVerifiedBytes = null; break; }
+            sum += BigInt(size);
+          }
+          if (failedVerifiedBytes !== null) failedVerifiedBytes = sum.toString(10);
+        } catch { failedVerifiedBytes = null; }
+      }
       snapshots.push({
-        taskId: state.taskId, taskState: task?.state, taskEndReason: task?.endReason,
-        sessionId: task?.sessionIds[0] ?? state.taskId, seedHashHex: state.seedHash,
+        taskId: hostTaskId, taskState: task?.state, taskEndReason: task?.endReason,
+        sessionId: task?.sessionIds[0] ?? hostTaskId, seedHashHex: state.seedHash,
         createdAt: task?.createdAt, updatedAt: task?.endedAt,
         historyDeleted: !!task?.sessionIds.length && task.sessionIds.every(id => hidden.has(id)),
         phase: "failed", fundingState: "not-opened", openingAmountSatoshis: null,
         verifiedBlockCount: completedBlocks.length,
-        verifiedBytes: state.manifest !== null ? String(completedBlocks.reduce((sum, item) => sum + (item.bytes ?? 0), 0)) : null,
+        verifiedBytes: state.manifest !== null ? failedVerifiedBytes : null,
         totalBlockCount: state.manifest !== null ? blocks.length : null,
         sellerPublicKeyHex: state.failure.sellerId, recommendedFilename: null, fileSizeBytes: null, fullBlockPriceSatoshis: null,
         paidSatoshis: "0", minerFeeSatoshis: "0", lockedSatoshis: "0", pendingReturnSatoshis: "0",
@@ -1461,9 +1473,10 @@ async function createMsfileBitfsBuyerProtocol(
   const quoteViews = poolQuote ? [] : (await link.task.listDiscoveredQuotes()).sort((left, right) => left.sessionId.localeCompare(right.sessionId));
   const quoteView = poolQuote ?? quoteViews.find((item) => item.sessionId === link.quoteSessionId);
   const canonicalQuote = poolQuote ?? quoteViews[0];
-  if (!quoteView || !canonicalQuote || quoteViews.some((item) => item.fileSizeBytes !== canonicalQuote.fileSizeBytes)) {
-    throw new Error("BitFS 同 Seed 报价缺少统一文件大小，不能创建共享下载计划");
+  if (!quoteView || !canonicalQuote) {
+    throw new Error("BitFS 同 Seed 缺少已验签报价，不能创建共享下载计划");
   }
+  // 计划元数据取首个报价声明；内容清单、定价与完成判定只看 Seed 与哈希，报价长度不一致不阻止建任务。
   const runtime = await deps.ensureService();
   const buyerSettings = runtime.getBitfsBuyerSettings
     ? await runtime.getBitfsBuyerSettings()
@@ -1554,7 +1567,7 @@ async function createMsfileBitfsBuyerProtocol(
         setTimeout(() => {
           void (async () => {
             const state = kernelRuntime.adapter.snapshot();
-            const pool = Object.values(state.pools).find((item) => (schedulerPoolSessionId(item.id) === sessionId || item.sessionId === sessionId) && item.funding === "opening");
+            const pool = Object.values(state.pools).find((item) => (schedulerPoolSessionId(kernelRuntime.hostTaskId, item.id) === sessionId || item.sessionId === sessionId) && item.funding === "opening");
             if (!pool) return;
             await msfileBitfsKernelFeed(kernelRuntime, {
               eventId: `opened-${pool.id}`, payload: { type: "opened", poolId: pool.id, commandId: pool.openCommandId },
@@ -1567,13 +1580,13 @@ async function createMsfileBitfsBuyerProtocol(
       onPoolClosed: ({ sessionId }: { sessionId: string }) => {
         setTimeout(() => { void msfileBitfsKernelFeedCloseSettled(kernelRuntime, sessionId).catch(error => traceBitfs("scheduler.pool-closed.callback.failed", () => ({ sessionId, taskId: kernelRuntime.hostTaskId, error }))); }, 0);
       },
-      onDispatchedDelivery: ({ sessionId, accepted, paidSatoshis, startedAt, endedAt }: {
-        sessionId: string; contentIds: string[]; accepted: string[]; paidSatoshis: string; startedAt: number; endedAt: number;
+      onDispatchedDelivery: ({ sessionId, accepted, paidSatoshis, acceptedBlockBytes, startedAt, endedAt }: {
+        sessionId: string; contentIds: string[]; accepted: string[]; paidSatoshis: string; acceptedBlockBytes: number; startedAt: number; endedAt: number;
       }) => {
         setTimeout(() => {
           void (async () => {
             const state = kernelRuntime.adapter.snapshot();
-            const pool = Object.values(state.pools).find((item) => (schedulerPoolSessionId(item.id) === sessionId || item.sessionId === sessionId) && item.requestId !== null);
+            const pool = Object.values(state.pools).find((item) => (schedulerPoolSessionId(kernelRuntime.hostTaskId, item.id) === sessionId || item.sessionId === sessionId) && item.requestId !== null);
             const requestId = pool?.requestId ?? null;
             if (!requestId) return;
             const request = state.requests[requestId];
@@ -1584,7 +1597,7 @@ async function createMsfileBitfsBuyerProtocol(
             const wallEndedAt = receivedAt !== undefined && receivedAt > wallStartedAt ? receivedAt : Math.max(wallStartedAt + 1, endedAt);
             await msfileBitfsKernelFeed(kernelRuntime, {
               eventId: `delivery-${requestId}`,
-              payload: { type: "delivery", requestId, accepted, paid: paidSatoshis, startedAt: wallStartedAt, endedAt: wallEndedAt },
+              payload: { type: "delivery", requestId, accepted, paid: paidSatoshis, acceptedBlockBytes, startedAt: wallStartedAt, endedAt: wallEndedAt },
             });
             msfileBitfsKernelProgress.delete(sessionId);
             msfileBitfsKernelLastSentAt.delete(sessionId);
@@ -1627,7 +1640,6 @@ interface MsfileBitfsKernelRuntime {
   ownerPublicKeyHex: string;
   seedHashHex: string;
   hostTaskId: string;
-  fileSizeBytes: string;
   mediaType: string;
   entry?: NonNullable<ReturnType<typeof msfileBitfsBuyerTasks.get>>;
   adapter: SchedulerAdapter;
@@ -1644,9 +1656,6 @@ const msfileBitfsKernelProgress = new Map<string, { base: number; fed: number }>
 /** 最内侧帧时刻（买方会话编号 → 本地毫秒）：交付墙钟用。 */
 const msfileBitfsKernelLastReceivedAt = new Map<string, number>();
 const msfileBitfsKernelLastSentAt = new Map<string, number>();
-
-/** BitFS 标准块大小（字节）；内核文件信息的 blockBytes 与本地复用验证共用。 */
-const MSFILE_BITFS_KERNEL_BLOCK_BYTES = 262_144;
 
 function msfileBitfsKernelRuntimeKey(owner: string, seed: string): string {
   return `${owner.toLowerCase()}:${seed.toLowerCase()}`;
@@ -1710,14 +1719,14 @@ async function msfileBitfsKernelQuoteFees(quoteView: import("@keymaster/contract
   };
 }
 
-/** 已验签报价 → 内核 Quote。version 由宿主单调递增（同卖家后到的新报价必须能覆盖旧报价）。 */
+/** 已验签报价 → 内核 Quote。version 由宿主单调递增（同卖家后到的新报价必须能覆盖旧报价）。尾价直接采用卖方签名报价，不推导。 */
 async function msfileBitfsKernelQuote(quoteView: import("@keymaster/contracts").MsFileBitfsQuoteView, version: number): Promise<SchedulerQuote> {
   const expiresAtSeconds = Number(quoteView.quoteExpiresAtUnixSeconds);
   return {
     id: quoteView.sessionId, version, sellerId: quoteView.sellerPublicKeyHex, sessionId: quoteView.sessionId,
     expiresAt: Number.isSafeInteger(expiresAtSeconds) && expiresAtSeconds > 0 ? expiresAtSeconds * 1_000 : Date.now() + 300_000,
-    blockPrice: quoteView.fullBlockPriceSatoshis, seedPrice: quoteView.seedPriceSatoshis, blockBytes: 262_144,
-    tailPrice: schedulerTailPrice(quoteView.fullBlockPriceSatoshis, quoteView.fileSizeBytes),
+    blockPrice: quoteView.fullBlockPriceSatoshis, seedPrice: quoteView.seedPriceSatoshis,
+    tailPrice: quoteView.tailPriceSatoshis,
     maxBlocks: quoteView.maxBlocksPerBatch, fees: await msfileBitfsKernelQuoteFees(quoteView),
   };
 }
@@ -1742,7 +1751,8 @@ async function msfileBitfsKernelFeedQuote(runtime: MsfileBitfsKernelRuntime, quo
 async function ensureKernelFileCommitted(runtime: MsfileBitfsKernelRuntime): Promise<boolean> {
   const seed = runtime.seedHashHex;
   const owner = runtime.ownerPublicKeyHex;
-  if (runtime.fileSizeBytes === "0") return false;
+  // 空清单无内容可提交，跳过（采购仍可结束）；是否空以内核清单为准，不看报价长度。
+  if (runtime.adapter.snapshot().manifest?.blockHashes.length === 0) return false;
   if (kernelCommittedSeeds.has(`${owner.toLowerCase()}:${seed.toLowerCase()}`)) return true;
   const journalFiles = deps.files("bitfs-journal");
   const sessions = createBitfsSessionJournal(journalFiles);
@@ -1763,26 +1773,23 @@ async function ensureKernelFileCommitted(runtime: MsfileBitfsKernelRuntime): Pro
   for (const candidate of [seedFormal?.bytes, seedStaged?.bytes]) {
     if (!candidate) continue;
     try {
-      await inspectPurchasedMsFileSeed({ seedHashHex: seed, seedBytes: candidate, fileSizeBytes: runtime.fileSizeBytes });
+      await inspectPurchasedMsFileSeed({ seedHashHex: seed, seedBytes: candidate });
       seedBytes = candidate;
       seedFormalOk = candidate === seedFormal?.bytes;
       break;
     } catch { /* 该副本无效，试下一个 */ }
   }
   if (!seedBytes) throw new Error("提交正式文件缺少本地 Seed");
-  const inspected = await inspectPurchasedMsFileSeed({ seedHashHex: seed, seedBytes, fileSizeBytes: runtime.fileSizeBytes });
+  const inspected = await inspectPurchasedMsFileSeed({ seedHashHex: seed, seedBytes });
   let formalComplete = seedFormalOk && !!(await content.get(`meta/${seed}.json`));
   const blocks: Uint8Array[] = [];
-  for (const [index, hash] of inspected.blockHashesHex.entries()) {
+  for (const hash of inspected.blockHashesHex) {
     const formal = await content.get(`storage/${seed}/${hash}`);
-    const expected = index === inspected.blockHashesHex.length - 1
-      ? Number(BigInt(runtime.fileSizeBytes) - BigInt(index) * BigInt(MSFILE_BITFS_KERNEL_BLOCK_BYTES))
-      : MSFILE_BITFS_KERNEL_BLOCK_BYTES;
     // 逐个验证候选副本，选用有效内容；正式损坏由本次幂等提交覆盖修复。
     let bytes: Uint8Array | undefined;
     let fromFormal = false;
     for (const candidate of [formal?.bytes, (await content.get(`bitfs-staging/by-seed/${seed}/blocks/${hash}.bin`))?.bytes]) {
-      if (!candidate || candidate.byteLength !== expected) continue;
+      if (!candidate) continue;
       if ((await sha256HexNoThrow(candidate)) !== hash) continue;
       bytes = candidate;
       fromFormal = candidate === formal?.bytes;
@@ -1807,7 +1814,7 @@ async function ensureKernelFileCommitted(runtime: MsfileBitfsKernelRuntime): Pro
       } catch { /* 清单损坏则试下一个会话 */ }
     }
     await commitPurchasedMsFileContent({ store: content, seedHashHex: seed, seedBytes, blocks,
-      fileSizeBytes: runtime.fileSizeBytes, fileName, mediaType });
+      fileName, mediaType });
   }
   const index = msfileSellerIndex;
   if (index) {
@@ -1871,7 +1878,7 @@ async function msfileBitfsKernelRunCommand(runtime: MsfileBitfsKernelRuntime, co
     if (command.type === "open") {
       const pool = runtime.adapter.snapshot().pools[command.poolId];
       const sessions = createBitfsSessionJournal(deps.files("bitfs-journal"));
-      const record = pool ? await sessions.get(await readSchedulerPoolSessionId(sessions, pool)) : undefined;
+      const record = pool ? await sessions.get(await readSchedulerPoolSessionId(sessions, runtime.hostTaskId, pool)) : undefined;
       const funded = record ? record.evidence.includes("kind2-opening-request") || record.evidence.includes("funding-transaction") : false;
       if (funded) await msfileBitfsKernelFeed(runtime, { eventId, payload: { type: "unknown", poolId: command.poolId, commandId: command.commandId } });
       else if (["insufficient", "no-utxos", "insufficient_funds"].includes((cause as {code?: string})?.code ?? "")) {
@@ -1885,7 +1892,7 @@ async function msfileBitfsKernelRunCommand(runtime: MsfileBitfsKernelRuntime, co
     } else if (command.type === "download") {
       const pool = runtime.adapter.snapshot().pools[command.poolId];
       const sessions = createBitfsSessionJournal(deps.files("bitfs-journal"));
-      const sessionId = pool ? await readSchedulerPoolSessionId(sessions, pool) : undefined;
+      const sessionId = pool ? await readSchedulerPoolSessionId(sessions, runtime.hostTaskId, pool) : undefined;
       const record = sessionId ? await sessions.get(sessionId) : undefined;
       // Kind 5 在登记 pendingAuthorizationId 后才发送。已发、部分写出或
       // 无法读出责任事实都不能冒充可重试，交付/签名证据继续保留。
@@ -1932,7 +1939,7 @@ async function msfileBitfsKernelFeedStreamProgress(webrtcSessionId: string, byte
   const pool = Object.values(state.pools).find((item) => item.sessionId === quoteSessionId && item.requestId !== null);
   const requestId = pool?.requestId ?? null;
   if (!requestId || !pool) return;
-  const poolSessionId = await readSchedulerPoolSessionId(createBitfsSessionJournal(deps.files("bitfs-journal")), pool);
+  const poolSessionId = await readSchedulerPoolSessionId(createBitfsSessionJournal(deps.files("bitfs-journal")), runtime.hostTaskId, pool);
   const request = state.requests[requestId];
   if (!request || request.state !== "pending") return;
   let record = msfileBitfsKernelProgress.get(poolSessionId);
@@ -1956,7 +1963,7 @@ async function msfileBitfsKernelOpenPool(runtime: MsfileBitfsKernelRuntime, comm
   const quoteView = (await target.link.task.listDiscoveredQuotes()).find((item) => item.sessionId === command.sessionId);
   if (!quoteView) throw new Error("找不到内核所选卖家的已验签报价");
   const sessions = createBitfsSessionJournal(deps.files("bitfs-journal"));
-  const record = await createSchedulerPoolSession({ sessions, poolId: command.poolId, quoteSessionId: command.sessionId, nowMs: Date.now() });
+  const record = await createSchedulerPoolSession({ sessions, hostTaskId: runtime.hostTaskId, poolId: command.poolId, quoteSessionId: command.sessionId, nowMs: Date.now() });
   const sessionId = record.sessionId;
   // 先固定池归属，再创建协议及共享计划。一个报价可成为多个池的原始来源。
   await (await purchaseTasksFor(runtime.ownerPublicKeyHex, runtime.seedHashHex)).attach(runtime.hostTaskId, sessionId);
@@ -2012,7 +2019,7 @@ async function msfileBitfsKernelDispatchDownload(runtime: MsfileBitfsKernelRunti
   const target = msfileBitfsKernelPoolLink(runtime, pool);
   if (!target) throw new Error("内核下载命令的卖家连接已关闭");
   await target.link.quoteAccepted;
-  const sessionId = await readSchedulerPoolSessionId(createBitfsSessionJournal(deps.files("bitfs-journal")), pool);
+  const sessionId = await readSchedulerPoolSessionId(createBitfsSessionJournal(deps.files("bitfs-journal")), runtime.hostTaskId, pool);
   const protocol = await ensureMsfileBitfsBuyerProtocol(target.webrtcSessionId, target.link, sessionId);
   const quoteRaw = await createBitfsSessionJournal(deps.files("bitfs-journal")).getEvidence(command.quote.sessionId, "kind1-quote");
   if (!quoteRaw) throw new Error("内核本次请求缺少对应已验签报价证据");
@@ -2035,7 +2042,7 @@ async function msfileBitfsKernelClosePool(runtime: MsfileBitfsKernelRuntime, com
   if (!pool) return;
   const target = msfileBitfsKernelPoolLink(runtime, pool);
   if (!target) throw new Error("内核关池命令的卖家连接已关闭");
-  const sessionId = await readSchedulerPoolSessionId(createBitfsSessionJournal(deps.files("bitfs-journal")), pool);
+  const sessionId = await readSchedulerPoolSessionId(createBitfsSessionJournal(deps.files("bitfs-journal")), runtime.hostTaskId, pool);
   const protocol = await ensureMsfileBitfsBuyerProtocol(target.webrtcSessionId, target.link, sessionId);
   await protocol.closeDispatchedPool({ sessionId, stream: createMsfileBitfsBuyerStream(target.webrtcSessionId, target.link, sessionId) });
 }
@@ -2056,34 +2063,26 @@ async function msfileBitfsKernelEnsureManifest(runtime: MsfileBitfsKernelRuntime
   if (state.manifest !== null) return;
   if (state.completed[state.seedHash] !== "purchased") return;
   // 有序清单直接从已验证的本地 Seed 推导（含重复位置），不经去重的旧下载计划。
-  const verified = await verifyLocalKernelReuse(runtime.seedHashHex, runtime.fileSizeBytes);
-  if (!verified || verified.blockHashesHex.length === 0) {
-    // 空文件：fileBytes=0 时清单为空是合法的"已知空文件"。
-    if (runtime.fileSizeBytes === "0") {
-      await msfileBitfsKernelFeed(runtime, { eventId: `manifest-${sessionId}`,
-        payload: { type: "manifest", fileBytes: 0, blockBytes: MSFILE_BITFS_KERNEL_BLOCK_BYTES, blockHashes: [] } });
-    }
-    return;
-  }
-  const fileBytes = Number(runtime.fileSizeBytes);
-  if (!Number.isSafeInteger(fileBytes) || fileBytes < 0) return;
+  const verified = await verifyLocalKernelReuse(runtime.seedHashHex);
+  // 无本地 Seed 仍等待；空 Seed 返回空清单，即合法的"已知空文件"。
+  if (!verified) return;
   // 先登记执行层 plan，再喂内核：plan 冲突时内核状态不变，可重试；
   // 增量登记只填充无归属块，不覆盖付款、不释放未决认领。
   const stateNow = runtime.adapter.snapshot();
-  const pool = Object.values(stateNow.pools).find(item => schedulerPoolSessionId(item.id) === sessionId || item.sessionId === sessionId);
+  const pool = Object.values(stateNow.pools).find(item => schedulerPoolSessionId(runtime.hostTaskId, item.id) === sessionId || item.sessionId === sessionId);
   const target = pool ? msfileBitfsKernelPoolLink(runtime, pool) : msfileBitfsKernelLinks(runtime).get(sessionId);
   if (target?.link.downloadPlan) {
     await target.link.downloadPlan.adoptReuseBlocks(verified.blockHashesHex, verified.available);
   }
   await msfileBitfsKernelFeed(runtime, { eventId: `manifest-${sessionId}`,
-    payload: { type: "manifest", fileBytes, blockBytes: MSFILE_BITFS_KERNEL_BLOCK_BYTES,
+    payload: { type: "manifest",
       blockHashes: verified.blockHashesHex, reusedBlockHashes: verified.available } });
 }
 
 /** 关池交易已观察：从专款账本算出 returned/spent 并回灌内核 `closed`（含退款可用）。 */
 async function msfileBitfsKernelFeedCloseSettled(runtime: MsfileBitfsKernelRuntime, sessionId: string): Promise<void> {
   const state = runtime.adapter.snapshot();
-  const pool = Object.values(state.pools).find((item) => (schedulerPoolSessionId(item.id) === sessionId || item.sessionId === sessionId)
+  const pool = Object.values(state.pools).find((item) => (schedulerPoolSessionId(runtime.hostTaskId, item.id) === sessionId || item.sessionId === sessionId)
     && (item.funding === "closing" || item.funding === "open" || item.funding === "problem"));
   if (!pool || !pool.closeCommandId) return;
   const commandId = pool.closeCommandId;
@@ -2152,28 +2151,31 @@ async function recoverMsfileBitfsKernelRuntimes(ownerPublicKeyHex: string): Prom
     if (msfileBitfsKernelRuntimeFor(owner, seed)) continue;
     const hostTask = (await (await purchaseTasksFor(owner, seed)).list()).find((item) => item.taskId === taskId && item.state === "active");
     if (!hostTask) continue;
-    // 文件大小从已固定清单恢复；缺失时保持 0，仅影响后续 manifest 计算。
-    let fileSizeBytes = "0";
-    const sessions = createBitfsSessionJournal(deps.files("bitfs-journal"));
-    for (const sessionId of hostTask.sessionIds) {
-      const manifestRaw = await sessions.getEvidence(sessionId, "purchase-manifest");
-      if (!manifestRaw) continue;
-      try { fileSizeBytes = parseBitfsBuyerPurchaseManifest(manifestRaw, seed).fileSizeBytes; break; } catch { /* 清单损坏不阻止恢复 */ }
+    let adapter: SchedulerAdapter;
+    try {
+      adapter = await SchedulerAdapter.open({
+        store, clock: msfileBitfsKernelClock, seedHash: seed,
+        // 恢复路径只读快照；共享实例仅供无快照时创建，配置以快照为准。
+        scheduler: sharedDownloadScheduler(`${owner}|${network}`, {
+          maxFullBlockPriceSatoshis: settings.maxFullBlockPriceSatoshis, poolBlocks: settings.poolBlocks,
+          schedulerTotalSeats: settings.schedulerTotalSeats, schedulerFloatingSeats: settings.schedulerFloatingSeats,
+          schedulerRequestTimeoutMs: 5_000,
+        }),
+      });
+    } catch (error) {
+      // 单个快照损坏或旧结构拒绝时只跳过该执行，不中断其余任务恢复；
+      // 资金责任仍由账本与会话证据保留，宿主可结束任务后重新开始。
+      await writeBitfsDiagnostic("buyer-scheduler-recovery-error.json", {
+        seedHashHex: seed, taskId, message: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      });
+      continue;
     }
-    const adapter = await SchedulerAdapter.open({
-      store, clock: msfileBitfsKernelClock, taskId, seedHash: seed,
-      // 恢复路径只读快照；共享实例仅供无快照时创建，配置以快照为准。
-      scheduler: sharedDownloadScheduler(`${owner}|${network}`, {
-        maxFullBlockPriceSatoshis: settings.maxFullBlockPriceSatoshis, poolBlocks: settings.poolBlocks,
-        schedulerTotalSeats: settings.schedulerTotalSeats, schedulerFloatingSeats: settings.schedulerFloatingSeats,
-        schedulerRequestTimeoutMs: 5_000,
-      }),
-    });
     let created!: MsfileBitfsKernelRuntime;
     const executor = new SchedulerCommandExecutor(msfileBitfsKernelPorts(() => created));
     created = {
       ownerPublicKeyHex: owner, seedHashHex: seed, hostTaskId: taskId,
-      fileSizeBytes, mediaType: "application/octet-stream", adapter, executor,
+      mediaType: "application/octet-stream", adapter, executor,
     };
     msfileBitfsKernelRuntimes.set(msfileBitfsKernelRuntimeKey(owner, seed), created);
     try {
@@ -2236,9 +2238,8 @@ async function startMsfileBitfsKernelPurchase(input: {
   const selectedQuote = quotes.find((item) => item.sessionId === input.sessionId);
   if (!selectedQuote) throw new Error("所选报价不属于当前 Seed 的已验签报价列表");
   const canonicalQuote = quotes.slice().sort((left, right) => left.sessionId.localeCompare(right.sessionId))[0];
-  if (!canonicalQuote || quotes.some((item) => item.fileSizeBytes !== canonicalQuote.fileSizeBytes)) {
-    throw new Error("同 Seed 报价的签名文件大小不一致，不能安全建立共享下载计划");
-  }
+  if (!canonicalQuote) throw new Error("当前 Seed 暂无已验签报价");
+  // 计划元数据取首个报价声明；内容清单、定价与完成判定只看 Seed 与哈希，报价长度不一致不阻止建任务。
   const mediaType = selectBitfsMediaType(quotes);
   const service = await deps.ensureService();
   const settings = service.getBitfsBuyerSettings ? await service.getBitfsBuyerSettings() : { ...MSFILE_BITFS_BUYER_SETTINGS_DEFAULT };
@@ -2269,11 +2270,9 @@ async function startMsfileBitfsKernelPurchase(input: {
       schedulerRequestTimeoutMs: 5_000,
     };
     const scheduler = sharedDownloadScheduler(`${owner}|${deps.network()}`, schedulerSettings);
-    // 创建前按本地字节重验：Seed 已在本地则提供完整文件信息并跳过购买，否则只传 seedHash。
-    const verified = await verifyLocalKernelReuse(seed, canonicalQuote.fileSizeBytes);
-    const fileSize = Number(canonicalQuote.fileSizeBytes);
-    const fileInfo = verified && Number.isSafeInteger(fileSize) && fileSize >= 0 ? {
-      fileBytes: fileSize, blockBytes: MSFILE_BITFS_KERNEL_BLOCK_BYTES,
+    // 创建前按本地字节重验：Seed 已在本地则提供 resume 清单并跳过购买，否则只传 seedHash。
+    const verified = await verifyLocalKernelReuse(seed);
+    const fileInfo = verified ? {
       blockHashes: verified.blockHashesHex, reusedBlockHashes: verified.available,
     } : undefined;
     if (verified) {
@@ -2282,14 +2281,14 @@ async function startMsfileBitfsKernelPurchase(input: {
       await plan.adoptVerifiedContent(verified.blockHashesHex, verified.available);
     }
     const adapter = await SchedulerAdapter.open({
-      store, clock: msfileBitfsKernelClock, taskId: newTask.taskId, seedHash: seed,
+      store, clock: msfileBitfsKernelClock, seedHash: seed,
       scheduler, ...(fileInfo ? { fileInfo } : {}),
     });
     let created!: MsfileBitfsKernelRuntime;
     const executor = new SchedulerCommandExecutor(msfileBitfsKernelPorts(() => created));
     created = {
       ownerPublicKeyHex: owner, seedHashHex: seed, hostTaskId: newTask.taskId,
-      fileSizeBytes: canonicalQuote.fileSizeBytes, mediaType, entry, adapter, executor,
+      mediaType, entry, adapter, executor,
     };
     runtime = created;
     msfileBitfsKernelRuntimes.set(runtimeKey, runtime);

@@ -1,11 +1,4 @@
 import type { Command } from "keymaster-trade-scheduler";
-import { blockPriceSatoshis } from "bitfs-protocol";
-
-/** 把协议规定的尾块费用作为事实注入策略器，不在宿主另定价格策略。 */
-export function schedulerTailPrice(fullBlockPrice: string, fileSize: string): string | undefined {
-  const tail = BigInt(fileSize) % 262_144n;
-  return tail === 0n ? undefined : blockPriceSatoshis(BigInt(fullBlockPrice), tail).toString(10);
-}
 
 /** 开池使用调度命令冻结的金额与计件预算，不重新按一个内容项报价。 */
 export function schedulerOpeningBudget(command: Extract<Command, { type: "open" }>) {

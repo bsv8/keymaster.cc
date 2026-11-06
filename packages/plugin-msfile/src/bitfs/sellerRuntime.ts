@@ -3,7 +3,7 @@
 
 import { isVerifiedHashRequest, dedupKey, type VerifiedHashRequest } from "bsv8-channel-protocol/hash-request";
 import type { MsFileSellerSettings } from "@keymaster/contracts";
-import { createSellerQuote, type Signer } from "bitfs-protocol";
+import { createSellerQuote, sellerTailPriceSatoshis, type Signer } from "bitfs-protocol";
 import type { BitfsJournal } from "./journal.js";
 import type { BitfsSessionJournal } from "./sessionJournal.js";
 import type { BitfsSeedIndex } from "./seedIndex.js";
@@ -81,12 +81,14 @@ export class BitfsSellerRuntime {
     }
     if (addresses.length === 0 && !hasWebRtcSdpLocator) return null;
     // 每个新 HashRequest 都生成当前设置下的新报价；旧池仅凭原 Kind 2 精确恢复。
+    // 尾价由卖方按本地文件用既有公式计算并签名，买方直接采用。
     const quote = await createSellerQuote(bitfsWorkflowFacts(nowMs), this.signer, {
       seedHash: hexToBytes(request.body.hash),
       buyerPublicKey: hexToBytes(request.from_public_key),
       seedPriceSatoshis: BigInt(settings.seedPriceSatoshis),
       maxBlocksPerBatch: settings.maxBlocksPerBatch,
       fullBlockPriceSatoshis: BigInt(settings.fullBlockPriceSatoshis),
+      tailPriceSatoshis: sellerTailPriceSatoshis(BigInt(settings.fullBlockPriceSatoshis), BigInt(seed.fileSizeBytes)),
       fileSizeBytes: BigInt(seed.fileSizeBytes),
       quoteExpiresAtUnixSeconds: BigInt(Math.floor((nowMs + settings.quoteLifetimeSeconds * 1_000) / 1_000)),
       supportedArbiterPublicKeys: settings.supportedArbiterPublicKeys.map(hexToBytes),

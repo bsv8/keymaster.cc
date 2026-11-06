@@ -53,7 +53,7 @@ interface BitfsBuyerPurchaseManifest {
   version: 1 | 2;
   /** 与买方会话绑定的 Seed Hash。 */
   seedHashHex: string;
-  /** 报价签名绑定的原文件字节数。 */
+  /** 报价签名绑定的原文件字节数（展示信息，未知时为 "0"）；不得据此判断文件为空。 */
   fileSizeBytes: string;
   /** 报价给出的推荐文件名。 */
   recommendedFilename: string;
@@ -104,7 +104,6 @@ export async function recoverBitfsBuyerContentCommit(input: {
   const inspected = await inspectPurchasedMsFileSeed({
     seedHashHex: record.seedHashHex,
     seedBytes: seedObject.bytes,
-    fileSizeBytes: manifest.fileSizeBytes,
   });
   const blocks: Uint8Array[] = [];
   for (const hash of inspected.blockHashesHex) {
@@ -119,7 +118,6 @@ export async function recoverBitfsBuyerContentCommit(input: {
     seedHashHex: record.seedHashHex,
     seedBytes: seedObject.bytes,
     blocks,
-    fileSizeBytes: manifest.fileSizeBytes,
     fileName: manifest.recommendedFilename,
     mediaType: manifest.mediaType ?? "application/octet-stream",
     now: () => input.nowMs,
@@ -216,6 +214,8 @@ export interface BitfsBuyerProtocolDeps {
     contentIds: string[];
     accepted: string[];
     paidSatoshis: string;
+    /** 本次 accepted 中已验收正文实际字节，不含 Seed。 */
+    acceptedBlockBytes: number;
     startedAt: number;
     endedAt: number;
   }): Promise<void> | void;
@@ -282,9 +282,9 @@ export class BitfsBuyerProtocol {
   async startPurchase(input: {
     sessionId: string;
     stream: BitfsBuyerStream;
-    /** 本卖家池的固定开池金额，由 Worker 按唯一 Block 分配预算。 */
+    /** 本卖家池的固定开池金额，由调度器按待购内容提供（必填）；宿主不估算。 */
     openingAmountSatoshis?: string;
-    /** 开池金额中可用于 Seed/Block 付款的预算，不含矿工费。 */
+    /** 开池金额中可用于 Seed/Block 付款的预算，不含矿工费（必填）；由调度器提供。 */
     contentBudgetSatoshis?: string;
     /** 本池专用于 Seed 的预算；每个可接替费用池按自己的 Seed 报价预留。 */
     seedBudgetSatoshis?: string;
@@ -366,7 +366,7 @@ export class BitfsBuyerProtocol {
     if (record.evidence.includes("download-plan")) {
       await this.registerSharedPlanPool(input.sessionId, quote, openingAmount);
     }
-    const totalBlocks = Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n);
+    const totalBlocks = await this.totalBlocksForProgress(input.sessionId, bytesToHex(quote.terms.seedHash), quote.terms.fileSizeBytes);
 
     if (["opening-presign", "funding-prepared", "funding-unknown"].includes(record.phase)) {
       const kind2 = await this.deps.sessions.getEvidence(input.sessionId, "kind2-opening-request");
@@ -427,7 +427,7 @@ export class BitfsBuyerProtocol {
       record = await this.requiredSession(input.sessionId);
     }
     if (["close-required", "close-requested", "close-unknown", "cancel-closing-pool", "cancel-close-unknown"].includes(record.phase)) {
-      await this.prepareAndSendClose(input.sessionId, await this.countStagedBlocks(input.sessionId), totalBlocks, input.stream);
+      await this.prepareAndSendClose(input.sessionId, await this.countStagedBlocks(input.sessionId), totalBlocks ?? 0, input.stream);
       return this.progressForSession(input.sessionId);
     }
     if (record.phase === "funded") {
@@ -504,10 +504,10 @@ export class BitfsBuyerProtocol {
       }, this.deps.nowMs());
     }
     const quote = inspectFileQuoteEvidence(await this.requiredEvidence(input.sessionId, "kind1-quote"));
-    const totalBlocks = Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n);
+    const totalBlocks = await this.totalBlocksForProgress(input.sessionId, bytesToHex(quote.terms.seedHash), quote.terms.fileSizeBytes);
     const verifiedBlocks = await this.countStagedBlocks(input.sessionId);
     try {
-      await this.prepareAndSendClose(input.sessionId, verifiedBlocks, totalBlocks, input.stream);
+      await this.prepareAndSendClose(input.sessionId, verifiedBlocks, totalBlocks ?? 0, input.stream);
     } catch (error) {
       const latest = await this.requiredSession(input.sessionId);
       if (latest.evidence.includes("kind12-close-request")
@@ -547,7 +547,8 @@ export class BitfsBuyerProtocol {
     }
     const quoteRaw = await this.requiredEvidence(record.sessionId, "kind1-quote");
     const quote = acceptBuyerQuote(bitfsWorkflowFacts(this.deps.nowMs()), quoteRaw);
-    if (quote.terms.fileSizeBytes === 0n) throw new Error("当前入库校验不支持购买空文件；资金尚未广播");
+    // fileSizeBytes 仅为报价声明的展示信息（未知统一为 0），不得据此判断文件为空；
+    // 空与否以已验证 Seed 的空清单确定。恢复清单同样允许 "0"。
     await this.persistPurchaseManifest(record, {
       seedHashHex: bytesToHex(quote.terms.seedHash),
       fileSizeBytes: quote.terms.fileSizeBytes.toString(10),
@@ -555,17 +556,15 @@ export class BitfsBuyerProtocol {
       mediaType: input.mediaType ?? quote.terms.mediaType,
     });
     record = await this.requiredSession(record.sessionId);
-    const blockCount = (quote.terms.fileSizeBytes + 262_143n) / 262_144n;
-    // 直接调用协议的缺省预算同样沿用整份文件内容上界；Worker 显式按卖家分配预算。
+    // 开池预算必须由调度器按具体待购内容提供（Seed 未知时先买 Seed，不预融资正文）；
+    // 宿主不得按报价声明长度估算整份文件预融资。
     const feeReserve = this.poolFeeReserves.get(record.sessionId);
     if (feeReserve === undefined) throw new Error("费用池结算预算尚未配置");
-    const defaultOpeningAmount = quote.terms.seedPriceSatoshis + quote.terms.fullBlockPriceSatoshis * blockCount + feeReserve;
-    const openingAmount = input.openingAmountSatoshis === undefined
-      ? defaultOpeningAmount
-      : parseSatoshiAmount(input.openingAmountSatoshis);
-    const contentBudget = input.contentBudgetSatoshis === undefined
-      ? openingAmount - feeReserve
-      : parseSatoshiAmount(input.contentBudgetSatoshis);
+    if (input.openingAmountSatoshis === undefined || input.contentBudgetSatoshis === undefined) {
+      throw new Error("开池预算必须由调度器按待购内容提供；宿主不按报价长度估算");
+    }
+    const openingAmount = parseSatoshiAmount(input.openingAmountSatoshis);
+    const contentBudget = parseSatoshiAmount(input.contentBudgetSatoshis);
     const seedBudget = parseSatoshiAmount(input.seedBudgetSatoshis ?? quote.terms.seedPriceSatoshis.toString(10));
     const seedBudgetReserved = input.seedBudgetReserved ?? true;
     const blockBudget = parseSatoshiAmount(input.blockBudgetSatoshis ?? (contentBudget - seedBudget).toString(10));
@@ -575,7 +574,7 @@ export class BitfsBuyerProtocol {
     if (seedBudget + blockBudget !== contentBudget
       || (seedBudgetReserved && seedBudget < quote.terms.seedPriceSatoshis)
       || (!seedBudgetReserved && seedBudget !== 0n)
-      || (!seedBudgetReserved && blockBudget < quote.terms.fullBlockPriceSatoshis)) {
+      || (!seedBudgetReserved && blockBudget < (quote.terms.tailPriceSatoshis < quote.terms.fullBlockPriceSatoshis ? quote.terms.tailPriceSatoshis : quote.terms.fullBlockPriceSatoshis))) {
       throw new Error("本卖家池的 Seed/Block 预算无效；未派发资金");
     }
     if (openingAmount <= 0n || openingAmount > BigInt(Number.MAX_SAFE_INTEGER)) {
@@ -599,7 +598,8 @@ export class BitfsBuyerProtocol {
       record = await this.deps.sessions.putEvidence(record.sessionId, record.revision, "download-plan", downloadPlanEvidence, this.deps.nowMs());
     }
     await this.registerSharedPlanPool(record.sessionId, quote, openingAmountSatoshis);
-    const totalBlockCount = Number(blockCount);
+    // Seed 未知时总数未知（null）；报价长度未知填 0 时不得认定为已验证的空文件。
+    const totalBlockCount = await this.totalBlocksForProgress(record.sessionId, bytesToHex(quote.terms.seedHash), quote.terms.fileSizeBytes);
     this.progress(record.sessionId, "opening", openingAmountSatoshis, 0, totalBlockCount, "正在准备开池交易；资金尚未广播");
     try {
       const configured = await this.deps.arbitrationServices?.();
@@ -669,7 +669,7 @@ export class BitfsBuyerProtocol {
     const record = await this.requiredSession(sessionId);
     const quoteRaw = await this.requiredEvidence(record.sessionId, "kind1-quote");
     const quote = inspectFileQuoteEvidence(quoteRaw);
-    const blockCount = Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n);
+    const blockCount = await this.totalBlocksForProgress(record.sessionId, bytesToHex(quote.terms.seedHash), quote.terms.fileSizeBytes);
     const opening = this.readOpeningAmount(record.sessionId);
     const verifiedBlockCount = await this.countStagedBlocks(record.sessionId);
     return this.snapshot(record.sessionId, phaseFor(record), opening, verifiedBlockCount, blockCount, null);
@@ -692,11 +692,11 @@ export class BitfsBuyerProtocol {
     const quoteRaw = await this.requiredEvidence(sessionId, "kind1-quote");
     const quote = inspectFileQuoteEvidence(quoteRaw);
     const amount = this.readOpeningAmount(sessionId);
-    const totalBlocks = Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n);
+    const totalBlocks = await this.totalBlocksForProgress(sessionId, bytesToHex(quote.terms.seedHash), quote.terms.fileSizeBytes);
     if (["close-required", "close-requested", "close-unknown", "cancel-closing-pool", "cancel-close-unknown"].includes(record.phase)) {
       const savedKind12 = await this.deps.sessions.getEvidence(sessionId, "kind12-close-request");
       if (savedKind12) await stream.send(savedKind12);
-      else await this.prepareAndSendClose(sessionId, await this.countStagedBlocks(sessionId), totalBlocks, stream);
+      else await this.prepareAndSendClose(sessionId, await this.countStagedBlocks(sessionId), totalBlocks ?? 0, stream);
       return;
     }
     const savedKind4 = await this.deps.sessions.getEvidence(sessionId, "kind4-funding-delivery");
@@ -782,7 +782,7 @@ export class BitfsBuyerProtocol {
       }
       const quoteRaw = await this.requiredEvidence(sessionId, "kind1-quote");
       const quote = inspectFileQuoteEvidence(quoteRaw);
-      const totalBlocks = Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n);
+      const totalBlocks = await this.totalBlocksForProgress(sessionId, bytesToHex(quote.terms.seedHash), quote.terms.fileSizeBytes);
       const result = await this.deps.task.reconcileFunding(sessionId);
       if (result?.kind4) {
         await stream.send(result.kind4);
@@ -844,7 +844,7 @@ export class BitfsBuyerProtocol {
         await this.closeStoppedSharedPool(sessionId, quote, stream);
       } else {
         this.progress(sessionId, "requesting-seed", this.readOpeningAmount(sessionId), 0,
-          Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n), "等待已获分配的卖家池交付 Seed");
+          await this.totalBlocksForProgress(sessionId, bytesToHex(quote.terms.seedHash), quote.terms.fileSizeBytes), "等待已获分配的卖家池交付 Seed");
       }
       return;
     }
@@ -855,11 +855,11 @@ export class BitfsBuyerProtocol {
     }
     if (!plan.seedCompleted) {
       this.progress(sessionId, "requesting-seed", this.readOpeningAmount(sessionId), 0,
-        Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n), "已收到 Seed，正在等待本地付款证据提交");
+        await this.totalBlocksForProgress(sessionId, bytesToHex(quote.terms.seedHash), quote.terms.fileSizeBytes), "已收到 Seed，正在等待本地付款证据提交");
       return;
     }
     if (plan.blockHashesHex === null) {
-      const hashes = await this.getAllBlockHashes(sessionId, quote.terms.fileSizeBytes.toString(10), seedHashHex);
+      const hashes = await this.getAllBlockHashes(sessionId, seedHashHex);
       await this.deps.downloadPlan.setBlockHashes(hashes);
     }
     const latest = await this.deps.downloadPlan.snapshot();
@@ -885,7 +885,7 @@ export class BitfsBuyerProtocol {
         ? BigInt(ownPool.blockBudgetSatoshis) - BigInt(ownPool.blockCommittedSatoshis)
         : 0n;
       if (ownPool && !ownPool.closed && !ownPool.inFlightBlockHashHex
-        && blockBudgetLeft < BigInt(ownPool.fullBlockPriceSatoshis)
+        && blockBudgetLeft < (quote.terms.tailPriceSatoshis < quote.terms.fullBlockPriceSatoshis ? quote.terms.tailPriceSatoshis : quote.terms.fullBlockPriceSatoshis)
         && latest.completedBlockCount < (latest.totalBlockCount ?? 0)) {
         let record = await this.requiredSession(sessionId);
         if (record.phase === "funded") {
@@ -904,7 +904,7 @@ export class BitfsBuyerProtocol {
         latest.totalBlockCount, "等待其他费用池完成已认领 Block，或等待本池预算可用");
       return;
     }
-    const totalBlocks = Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n);
+    const totalBlocks = allBlockHashes.length;
     this.progress(sessionId, "requesting-blocks", this.readOpeningAmount(sessionId), latest.completedBlockCount, totalBlocks,
       `正在请求文件块批次（${nextHashes.length} 块，已完成 ${latest.completedBlockCount}/${allBlockHashes.length}）`);
     await this.prepareAndSendRequest({ sessionId, contentHashes: nextHashes.map(hexToBytes), seed: seedBytes, stream });
@@ -916,11 +916,11 @@ export class BitfsBuyerProtocol {
     await this.serial(input.sessionId, async () => {
       const record = await this.requiredSession(input.sessionId);
       const quote = inspectFileQuoteEvidence(await this.requiredEvidence(input.sessionId, "kind1-quote"));
-      const totalBlocks = Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n);
+      const totalBlocks = await this.totalBlocksForProgress(input.sessionId, bytesToHex(quote.terms.seedHash), quote.terms.fileSizeBytes);
       if (record.phase === "funded") {
         await this.deps.sessions.update(input.sessionId, record.revision, { phase: "close-required" }, this.deps.nowMs());
       }
-      await this.prepareAndSendClose(input.sessionId, await this.countStagedBlocks(input.sessionId), totalBlocks, input.stream);
+      await this.prepareAndSendClose(input.sessionId, await this.countStagedBlocks(input.sessionId), totalBlocks ?? 0, input.stream);
     });
   }
 
@@ -943,10 +943,10 @@ export class BitfsBuyerProtocol {
       }, this.deps.nowMs());
     }
     if (record.phase !== "cancel-closing-pool" && record.phase !== "cancel-close-unknown") return;
-    const totalBlocks = Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n);
+    const totalBlocks = await this.totalBlocksForProgress(sessionId, bytesToHex(quote.terms.seedHash), quote.terms.fileSizeBytes);
     const verifiedBlocks = await this.countStagedBlocks(sessionId);
     try {
-      await this.prepareAndSendClose(sessionId, verifiedBlocks, totalBlocks, stream);
+      await this.prepareAndSendClose(sessionId, verifiedBlocks, totalBlocks ?? 0, stream);
     } catch (error) {
       const latest = await this.requiredSession(sessionId);
       if (latest.evidence.includes("kind12-close-request")) {
@@ -970,7 +970,7 @@ export class BitfsBuyerProtocol {
     stream: BitfsBuyerStream,
   ): Promise<void> {
     const seedHashHex = bytesToHex(quote.terms.seedHash);
-    const orderedBlockHashes = await this.getAllBlockHashes(sessionId, quote.terms.fileSizeBytes.toString(10), seedHashHex);
+    const orderedBlockHashes = await this.getAllBlockHashes(sessionId, seedHashHex);
     let record = await this.requiredSession(sessionId);
     if (record.phase === "funded") {
       record = await this.deps.sessions.update(sessionId, record.revision, { phase: "content-committing" }, this.deps.nowMs());
@@ -983,7 +983,7 @@ export class BitfsBuyerProtocol {
       record = await this.deps.sessions.update(sessionId, record.revision, { phase: "close-required", pendingTxid: undefined }, this.deps.nowMs());
     }
     try { await this.deps.onContentCommitted?.(seedHashHex); } catch { /* 文件已保存；索引刷新不阻止关池。 */ }
-    const totalBlockCount = Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n);
+    const totalBlockCount = orderedBlockHashes.length;
     await this.prepareAndSendClose(sessionId, completedBlockCount, totalBlockCount, stream);
     this.deps.onDownloadPlanChanged?.();
   }
@@ -995,7 +995,7 @@ export class BitfsBuyerProtocol {
       await this.prepareAndSendRequest({ sessionId, contentHashes: [quote.terms.seedHash.slice()], stream });
       return;
     }
-    const blockHashes = await this.getAllBlockHashes(sessionId, quote.terms.fileSizeBytes.toString(10), seedHashHex);
+    const blockHashes = await this.getAllBlockHashes(sessionId, seedHashHex);
     let nextHash: string | undefined;
     for (const hash of blockHashes) {
       if (!(await this.readStagedBytes(sessionId, `blocks/${hash}.bin`))) {
@@ -1011,13 +1011,11 @@ export class BitfsBuyerProtocol {
       record = await this.requiredSession(sessionId);
       await this.deps.sessions.update(sessionId, record.revision, { phase: "close-required" }, this.deps.nowMs());
       try { await this.deps.onContentCommitted?.(seedHashHex); } catch { /* 文件已提交；索引刷新不阻止关池。 */ }
-      const totalBlocks = Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n);
-      await this.prepareAndSendClose(sessionId, blockHashes.length, totalBlocks, stream);
+      await this.prepareAndSendClose(sessionId, blockHashes.length, blockHashes.length, stream);
       return;
     }
-    const totalBlocks = Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n);
     const completedBlocks = await this.countStagedBlocks(sessionId);
-    this.progress(sessionId, "requesting-blocks", this.readOpeningAmount(sessionId), completedBlocks, totalBlocks,
+    this.progress(sessionId, "requesting-blocks", this.readOpeningAmount(sessionId), completedBlocks, blockHashes.length,
       `正在请求文件块 ${completedBlocks + 1}/${blockHashes.length}`);
     await this.prepareAndSendRequest({ sessionId, contentHashes: [hexToBytes(nextHash)], seed: seedBytes, stream });
   }
@@ -1094,7 +1092,7 @@ export class BitfsBuyerProtocol {
     const deliveryCommit = await this.deps.sessions.putEvidence(sessionId, record.revision, deliveryName, rawKind6, this.deps.nowMs());
     record = await this.deps.sessions.putEvidence(sessionId, deliveryCommit.revision, paymentName, result.outbound.bytes(), this.deps.nowMs());
 
-    const allBlockHashes = await this.getAllBlockHashes(sessionId, quote.terms.fileSizeBytes.toString(10), seedHashHex);
+    const allBlockHashes = await this.getAllBlockHashes(sessionId, seedHashHex);
     const blockHashes = [...new Set(allBlockHashes)];
     let completedBlockCount = await this.countStagedBlocks(sessionId);
     let fileReady = true;
@@ -1112,7 +1110,7 @@ export class BitfsBuyerProtocol {
         const startedAt = deliveryElapsedMs !== undefined ? Math.max(1, endedAt - deliveryElapsedMs) : Math.max(1, endedAt - 1);
         await this.deps.onDispatchedDelivery?.({
           sessionId, contentIds: settlement.contentIds, accepted: settlement.contentIds,
-          paidSatoshis: settlement.paidSatoshis, startedAt, endedAt,
+          paidSatoshis: settlement.paidSatoshis, acceptedBlockBytes: effectiveBlockBytes, startedAt, endedAt,
         });
       }
       const downloadPlan = await this.deps.downloadPlan.snapshot();
@@ -1269,7 +1267,7 @@ export class BitfsBuyerProtocol {
       record = await this.deps.sessions.update(sessionId, record.revision, { phase: pendingPhase, pendingTxid: txid }, this.deps.nowMs());
     }
     const quote = inspectFileQuoteEvidence(await this.requiredEvidence(sessionId, "kind1-quote"));
-    const blockCount = Number((quote.terms.fileSizeBytes + 262_143n) / 262_144n);
+    const blockCount = await this.totalBlocksForProgress(sessionId, bytesToHex(quote.terms.seedHash), quote.terms.fileSizeBytes);
     const verifiedBlockCount = await this.countStagedBlocks(sessionId);
     const deadline = this.deps.nowMs() + MAX_CHAIN_WAIT_MS;
     while (this.deps.nowMs() < deadline) {
@@ -1284,6 +1282,7 @@ export class BitfsBuyerProtocol {
         await this.deps.onPoolClosed?.({ sessionId });
         this.progress(sessionId, cancelling ? "cancelled" : "completed", this.readOpeningAmount(sessionId), verifiedBlockCount, blockCount,
           cancelling ? "购买已取消，费用池已关闭且余款已收回"
+            : blockCount === null ? "本费用池已关闭且余款已收回"
             : verifiedBlockCount < blockCount ? "本费用池已关闭且余款已收回，文件仍有内容待采购"
             : "文件已验证并写入本地，费用池已关闭且余款已收回");
         return;
@@ -1462,17 +1461,26 @@ export class BitfsBuyerProtocol {
       seedHashHex,
       seedBytes,
       blocks,
-      fileSizeBytes: manifest.fileSizeBytes,
       fileName: manifest.recommendedFilename,
       mediaType: manifest.mediaType ?? "application/octet-stream",
       now: () => this.deps.nowMs(),
     });
   }
 
-  private async getAllBlockHashes(sessionId: string, fileSizeBytes: string, seedHashHex: string): Promise<string[]> {
+  private async getAllBlockHashes(sessionId: string, seedHashHex: string): Promise<string[]> {
     const seedBytes = await this.readStagedSeed(sessionId);
-    const inspected = await inspectPurchasedMsFileSeed({ seedHashHex, seedBytes, fileSizeBytes });
+    const inspected = await inspectPurchasedMsFileSeed({ seedHashHex, seedBytes });
     return inspected.blockHashesHex;
+  }
+
+  /** 进度总数优先用 Seed 清单长度；Seed 未暂存且报价长度未知（0）时返回 null，不认定为空文件。 */
+  private async totalBlocksForProgress(sessionId: string, seedHashHex: string, fileSizeBytes: bigint): Promise<number | null> {
+    try {
+      return (await this.getAllBlockHashes(sessionId, seedHashHex)).length;
+    } catch {
+      if (fileSizeBytes === 0n) return null;
+      return Number((fileSizeBytes + 262_143n) / 262_144n);
+    }
   }
 
   private async readStagedSeed(sessionId: string): Promise<Uint8Array> {
@@ -1549,7 +1557,7 @@ export class BitfsBuyerProtocol {
     if (seedBudget + blockBudget !== contentBudget
       || (row.seedBudgetReserved && seedBudget < quote.terms.seedPriceSatoshis)
       || (!row.seedBudgetReserved && seedBudget !== 0n)
-      || (!row.seedBudgetReserved && blockBudget < quote.terms.fullBlockPriceSatoshis)
+      || (!row.seedBudgetReserved && blockBudget < (quote.terms.tailPriceSatoshis < quote.terms.fullBlockPriceSatoshis ? quote.terms.tailPriceSatoshis : quote.terms.fullBlockPriceSatoshis))
       || BigInt(openingAmountSatoshis) !== contentBudget + (this.poolFeeReserves.get(sessionId) ?? -1n)) {
       throw new Error("BitFS 下载计划预算与固定开池金额不一致");
     }
@@ -1589,7 +1597,7 @@ export class BitfsBuyerProtocol {
     if (hashHex === seedHashHex) {
       if (hashes.length !== 1) throw new Error("BitFS Seed 必须单独验收付款");
       await this.deps.downloadPlan.completeSeed(input.sessionId, paid.toString(10));
-      const blockHashes = await this.getAllBlockHashes(input.sessionId, input.quote.terms.fileSizeBytes.toString(10), seedHashHex);
+      const blockHashes = await this.getAllBlockHashes(input.sessionId, seedHashHex);
       await this.deps.downloadPlan.setBlockHashes(blockHashes);
     } else {
       if (hashes.includes(seedHashHex)) throw new Error("BitFS Block 批次不能混入 Seed");
@@ -1606,7 +1614,7 @@ export class BitfsBuyerProtocol {
     return { contentIds: hashes, paidSatoshis: paid.toString(10) };
   }
 
-  private async markFailed(sessionId: string, amount: string, total: number, error: unknown): Promise<void> {
+  private async markFailed(sessionId: string, amount: string, total: number | null, error: unknown): Promise<void> {
     const message = error instanceof Error ? error.message : "BitFS 买方流程失败";
     const record = await this.deps.sessions.get(sessionId);
     if (record && record.phase !== "failed") {
@@ -1689,7 +1697,7 @@ export function parseBitfsBuyerPurchaseManifest(bytes: Uint8Array, expectedSeedH
     || row.format !== PURCHASE_MANIFEST_FORMAT || (row.version !== 1 && row.version !== 2)
     || (row.version === 2 && (typeof row.mediaType !== "string" || row.mediaType.length > 255 || !/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/u.test(row.mediaType)))
     || row.seedHashHex !== expectedSeedHashHex
-    || typeof row.fileSizeBytes !== "string" || !/^[1-9][0-9]*$/u.test(row.fileSizeBytes)
+    || typeof row.fileSizeBytes !== "string" || !/^(0|[1-9][0-9]*)$/u.test(row.fileSizeBytes)
     || BigInt(row.fileSizeBytes) > 0xffff_ffff_ffff_ffffn
     || typeof row.recommendedFilename !== "string") {
     throw new Error("BitFS 入库恢复清单字段无效");

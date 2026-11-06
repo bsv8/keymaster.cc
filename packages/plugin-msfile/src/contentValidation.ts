@@ -16,23 +16,13 @@ export class ContentValidationError extends Error {
   }
 }
 
-export interface SeedValidationOptions {
-  /** 可信文件尺寸。提供时必须校验 Seed 精确长度 = block_count * 32。 */
-  fileSizeBytes?: bigint;
-}
-
-/** Seed 校验：hash 相等、≤16MiB、32 字节整除、已知 file size 时精确长度。 */
+/** Seed 校验：hash 相等、≤16MiB、32 字节整除。块身份只看 Seed（含重复位置），不按声明长度推导。 */
 export async function validateSeedContent(
   contentBytes: Uint8Array,
   expectedSeedHashHex: string,
-  options: SeedValidationOptions = {}
 ): Promise<void> {
   if (contentBytes.length > MSFILE_MAX_SEED_BYTES) throw new ContentValidationError("size-limit");
   if (contentBytes.length % MSFILE_DIGEST_SIZE_BYTES !== 0) throw new ContentValidationError("size-alignment");
-  if (options.fileSizeBytes !== undefined) {
-    const expected = expectedSeedLength(options.fileSizeBytes);
-    if (BigInt(contentBytes.length) !== expected) throw new ContentValidationError("size-exact");
-  }
   await assertHash(contentBytes, expectedSeedHashHex);
 }
 
@@ -50,11 +40,4 @@ async function assertHash(contentBytes: Uint8Array, expectedHashHex: string): Pr
   const digest = await sha256(contentBytes);
   const actualHex = Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
   if (actualHex !== expectedHashHex) throw new ContentValidationError("hash-mismatch");
-}
-
-/** wire 规范 §4.2：block_count = floor((file_size - 1)/262144) + 1；空文件为 0。 */
-export function expectedSeedLength(fileSizeBytes: bigint): bigint {
-  if (fileSizeBytes < 0n) return 0n;
-  if (fileSizeBytes === 0n) return 0n;
-  return ((fileSizeBytes - 1n) / BigInt(MSFILE_BLOCK_SIZE_BYTES) + 1n) * BigInt(MSFILE_DIGEST_SIZE_BYTES);
 }

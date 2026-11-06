@@ -28,15 +28,15 @@ export function MsFilePurchasePanel({ service, demand, maximumPrice, onPurchase 
     {demand.quotes.length ? <div className="msfile-quote-cards" aria-label="已验签卖家报价">
       {demand.quotes.map(quote => {
         const samePurchase = purchase?.sessionId === quote.sessionId;
-        const emptyFile = BigInt(quote.fileSizeBytes) === 0n;
+        // 报价长度仅为展示声明（未知填 0），不得据此判断空文件或禁用购买。
         const aboveLimit = maximumPrice === null || BigInt(quote.fullBlockPriceSatoshis) > BigInt(maximumPrice);
         const hasArbiter = quote.supportedArbiterPublicKeys.length > 0;
         // 保留原报价按钮的购买状态判断，不增加费用预览、余额预检或新的准入条件。
         const blockedByOtherPurchase = Boolean(purchase && !samePurchase
           && purchase.phase !== "cancelled" && purchase.phase !== "refunded" && purchase.phase !== "failed" && purchase.phase !== "connection-closed");
-        const disabled = Boolean(starting || demand.existingPurchaseSessionId) || !service.startBitfsPurchase || emptyFile || !hasArbiter || aboveLimit || blockedByOtherPurchase || samePurchase;
+        const disabled = Boolean(starting || demand.existingPurchaseSessionId) || !service.startBitfsPurchase || !hasArbiter || aboveLimit || blockedByOtherPurchase || samePurchase;
         const reference = quoteContentReference(quote);
-        const label = emptyFile ? "暂不支持购买空文件" : aboveLimit ? "超过本文件已选上限" : !hasArbiter ? "此报价没有可用仲裁方" : samePurchase ? purchase?.phase === "completed" ? "购买完成" : "查看购买进度" : blockedByOtherPurchase ? purchase?.phase === "completed" ? "该 Seed 已购买" : "请先完成当前购买" : "购买此报价";
+        const label = aboveLimit ? "超过本文件已选上限" : !hasArbiter ? "此报价没有可用仲裁方" : samePurchase ? purchase?.phase === "completed" ? "购买完成" : "查看购买进度" : blockedByOtherPurchase ? purchase?.phase === "completed" ? "该 Seed 已购买" : "请先完成当前购买" : "购买此报价";
         return <article className="msfile-quote-card" key={quote.sessionId}>
           <header><span>卖家 <code title={quote.sellerPublicKeyHex}>{short(quote.sellerPublicKeyHex)}</code></span>
             <Button disabled={disabled} onClick={() => void begin(quote.sessionId)}>{starting === quote.sessionId ? "正在准备购买…" : demand.existingPurchaseSessionId ? "已有购买任务" : label}</Button></header>
@@ -59,8 +59,10 @@ export function MsFilePurchasePanel({ service, demand, maximumPrice, onPurchase 
 }
 
 function quoteContentReference(quote: MsFileBitfsQuoteView): string {
+  // 长度未知（0）时仅按 Seed 计参考费；实际预算由调度器按 Seed 清单提供。
   const blocks = (BigInt(quote.fileSizeBytes) + 262143n) / 262144n;
-  return (BigInt(quote.seedPriceSatoshis) + blocks * BigInt(quote.fullBlockPriceSatoshis)).toString();
+  if (blocks === 0n) return BigInt(quote.seedPriceSatoshis).toString();
+  return (BigInt(quote.seedPriceSatoshis) + (blocks - 1n) * BigInt(quote.fullBlockPriceSatoshis) + BigInt(quote.tailPriceSatoshis)).toString();
 }
 
 function QuoteBill({ quote }: { quote: MsFileBitfsQuoteView }) {
@@ -69,8 +71,9 @@ function QuoteBill({ quote }: { quote: MsFileBitfsQuoteView }) {
     <dl className="msfile-bill__lines">
       {row("Seed 单价", money(quote.seedPriceSatoshis))}
       {row("完整 Block 单价", money(quote.fullBlockPriceSatoshis))}
-      {row("文件块数", ((BigInt(quote.fileSizeBytes) + 262143n) / 262144n).toString())}
-      {row("文件内容费参考上界", money(quoteContentReference(quote)), "Seed 单价＋文件块数×完整块单价；尾块按实际长度计价，已验收内容不重复购买")}
+      {row("末项 Block 单价", money(quote.tailPriceSatoshis), "清单末项 Hash 的报价")}
+      {row("文件块数", BigInt(quote.fileSizeBytes) === 0n ? "未知（待 Seed 验证）" : ((BigInt(quote.fileSizeBytes) + 262143n) / 262144n).toString(), "报价声明，仅供参考")}
+      {row("文件内容费参考上界", money(quoteContentReference(quote)), "Seed 单价＋其余块完整单价＋末项报价；已验收内容不重复购买")}
       {row("仲裁基础费", "待确定", "一次仲裁请求的固定费用")}
       {row("仲裁条目费", "待确定", "每条费用 × 本次仲裁条目数")}
       {row("仲裁预留", "待确定", "基础费＋条目费；正常完成不支付仲裁费")}

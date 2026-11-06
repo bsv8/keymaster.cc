@@ -233,11 +233,11 @@ export class BitfsArbitrationWorkflow {
     const raw = await this.deps.sessions.getEvidence(record.sessionId, "purchase-manifest");
     if (!seed || !raw) return false;
     const manifest = parseBitfsBuyerPurchaseManifest(raw, record.seedHashHex);
-    const info = await inspectPurchasedMsFileSeed({ seedHashHex: record.seedHashHex, seedBytes: seed.bytes, fileSizeBytes: manifest.fileSizeBytes });
+    const info = await inspectPurchasedMsFileSeed({ seedHashHex: record.seedHashHex, seedBytes: seed.bytes });
     const blocks: Uint8Array[] = [];
     for (const hash of info.blockHashesHex) { const block = await content.get(`${staging}/blocks/${hash}.bin`); if (!block) return false; blocks.push(block.bytes); }
     this.deps.assertActive();
-    await commitPurchasedMsFileContent({ store: content, seedHashHex: record.seedHashHex, seedBytes: seed.bytes, blocks, fileSizeBytes: manifest.fileSizeBytes, fileName: manifest.recommendedFilename, mediaType: manifest.mediaType ?? "application/octet-stream", signal: this.deps.signal });
+    await commitPurchasedMsFileContent({ store: content, seedHashHex: record.seedHashHex, seedBytes: seed.bytes, blocks, fileName: manifest.recommendedFilename, mediaType: manifest.mediaType ?? "application/octet-stream", signal: this.deps.signal });
     return true;
   }
   private async sellerPool(record: BitfsSessionRecord): Promise<SellerPoolEvidence> {

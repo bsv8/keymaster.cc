@@ -124,7 +124,7 @@ export { createWindowP2pMsFileTransport, type MsFileP2pLaneOperation } from "./e
 export type { WindowP2pExecutorBridge, WindowP2pExecutorOperation } from "@keymaster/contracts/window-p2p";
 // 注意：supplierConfig（multiaddr/libp2p 依赖）不在此静态导出，
 // 保持 Worker 初始模块图轻量；页面设置组件直接 import "./supplierConfig.js"。
-export { validateSeedContent, validateBlockContent, expectedSeedLength } from "./contentValidation.js";
+export { validateSeedContent, validateBlockContent } from "./contentValidation.js";
 export {
   FrameDecoder,
   RequestIdCounter,

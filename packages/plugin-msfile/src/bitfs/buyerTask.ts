@@ -103,6 +103,8 @@ export interface BitfsBuyerQuoteView {
   seedPriceSatoshis: string;
   /** 完整 Block 单价。 */
   fullBlockPriceSatoshis: string;
+  /** 清单末项 Hash 的报价（卖方签名，买方直接采用）。 */
+  tailPriceSatoshis: string;
   /** 验签后的卖方每批最大 Block 数。 */
   maxBlocksPerBatch: number;
   /** 报价有效截止 UTC Unix 秒。 */
@@ -1022,6 +1024,7 @@ function toQuoteView(sessionId: string, seedHashHex: string, quote: VerifiedQuot
     sellerPublicKeyHex: bytesToHex(quote.sellerPublicKey),
     seedPriceSatoshis: quote.terms.seedPriceSatoshis.toString(10),
     fullBlockPriceSatoshis: quote.terms.fullBlockPriceSatoshis.toString(10),
+    tailPriceSatoshis: quote.terms.tailPriceSatoshis.toString(10),
     maxBlocksPerBatch: quote.terms.maxBlocksPerBatch,
     quoteExpiresAtUnixSeconds: quote.terms.quoteExpiresAtUnixSeconds.toString(10),
     recommendedFilename: quote.terms.recommendedFilename,

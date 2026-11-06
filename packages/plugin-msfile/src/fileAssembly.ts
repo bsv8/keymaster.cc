@@ -1,18 +1,18 @@
 // packages/plugin-msfile/src/fileAssembly.ts
 // 首页文件获取的文件级安全边界。
 //
-// 这里不实现 wire、hash 或付款逻辑；`msfile.service` 已经负责单个 Seed/
-// Block 的内容校验。本文件只负责把已验证的内容按 Stat 元数据重组为文件，
-// 并在转换 BigInt -> number 前确认数值落在本模块的安全边界内。
+// 这里不实现 wire 或付款逻辑；内容身份只看 Seed（含重复位置），不再按任何
+// 声明文件长度推导块数或块长度。每块载荷必须经 SHA-256 验算等于其哈希，
+// 且为 1..262144 字节的实际载荷；最终文件是各块的实际拼接。
 
 import {
   isValidMsFileHashHex,
-  MSFILE_BLOCK_SIZE_BYTES,
   MSFILE_DIGEST_SIZE_BYTES,
   MSFILE_MAX_BLOCK_BYTES,
   MSFILE_MAX_SEED_BYTES,
   type MsFileReadResult,
 } from "@keymaster/contracts";
+import { sha256 } from "./sha256.js";
 
 /** 首页 Block Read 固定并发上限。 */
 export const FILE_ASSEMBLY_MAX_BLOCK_CONCURRENCY = 8;
@@ -21,7 +21,6 @@ export type FileAssemblyErrorCode =
   | "invalid-file-size"
   | "seed-size-limit"
   | "seed-size-alignment"
-  | "seed-block-count"
   | "invalid-block-hash"
   | "invalid-block-response"
   | "block-size-mismatch"
@@ -40,18 +39,15 @@ export interface FileBlockPlanEntry {
   /** Block 在 Seed 中的位置；重复 hash 也会保留不同的位置。 */
   index: number;
   blockHashHex: string;
-  /** 该位置必须返回的字节数。 */
-  expectedSizeBytes: number;
 }
 
 export interface FileBlockPlan {
-  fileSizeBytes: bigint;
-  /** 规范计算出的 Block 数；通过长度校验后才转换为 number。 */
+  /** Seed 顺序的位置数（含重复位置），等于 blocks.length。 */
   blockCount: number;
   blocks: readonly FileBlockPlanEntry[];
 }
 
-/** 解析规范 uint64 十进制字符串；不接受空值、前导零或超出 uint64 的值。 */
+/** 解析规范 uint64 十进制字符串；不接受空值、前导零或超出 uint64 的值。首页计划不再使用文件大小推导块数，但 stat 展示与预览策略仍用它解析声明值。 */
 export function parseMsFileUint64(input: unknown): bigint {
   if (typeof input !== "string" || !/^(0|[1-9][0-9]*)$/.test(input)) {
     throw new FileAssemblyError("invalid-file-size");
@@ -95,46 +91,25 @@ export function sanitizeMsFileFilename(
   return safe.length > 0 && safe !== "." && safe !== ".." ? safe : fallback;
 }
 
-/** 按 MSFile 规范计算文件所需的 Block 数；空文件的 Block 数为 0。 */
-export function expectedMsFileBlockCount(fileSizeBytes: bigint): bigint {
-  if (fileSizeBytes < 0n) throw new FileAssemblyError("invalid-file-size");
-  if (fileSizeBytes === 0n) return 0n;
-  return (fileSizeBytes - 1n) / BigInt(MSFILE_BLOCK_SIZE_BYTES) + 1n;
-}
-
 function asBytes(input: Uint8Array | ArrayBuffer): Uint8Array {
   return input instanceof Uint8Array ? input : new Uint8Array(input);
 }
 
 /**
- * 由 Seed 字节解析有序 Block Hash，并同时校验 Seed 长度与 Stat 文件大小。
- * 返回的 hash 数组不去重，保证重复 Block Hash 的每个位置都参与组装。
+ * 由 Seed 字节解析完整有序 Block Hash（保留重复位置）。
+ * 只校验 Seed 自身（≤16MiB、32 字节整除）与哈希格式；块数由 Seed 决定，
+ * 不再按任何声明文件长度推导或核对。
  */
 export function parseSeedBlockPlan(
   seedContent: Uint8Array | ArrayBuffer,
-  fileSizeInput: string | bigint,
 ): FileBlockPlan {
-  const fileSizeBytes = typeof fileSizeInput === "bigint"
-    ? fileSizeInput
-    : parseMsFileUint64(fileSizeInput);
-  if (fileSizeBytes < 0n || fileSizeBytes > 0xffffffffffffffffn) {
-    throw new FileAssemblyError("invalid-file-size");
-  }
-
   const bytes = asBytes(seedContent);
   if (bytes.length > MSFILE_MAX_SEED_BYTES) throw new FileAssemblyError("seed-size-limit");
   if (bytes.length % MSFILE_DIGEST_SIZE_BYTES !== 0) {
     throw new FileAssemblyError("seed-size-alignment");
   }
 
-  const expectedCount = expectedMsFileBlockCount(fileSizeBytes);
-  const actualCount = BigInt(bytes.length / MSFILE_DIGEST_SIZE_BYTES);
-  if (actualCount !== expectedCount) throw new FileAssemblyError("seed-block-count");
-  // Seed 的 wire 上限使这里的数组长度天然很小；显式检查后才转 number。
-  if (actualCount > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new FileAssemblyError("seed-block-count");
-  }
-
+  // Seed 上限 16 MiB，位置数天然可用 number 索引，无需 BigInt 转换检查。
   const hashes: string[] = [];
   for (let offset = 0; offset < bytes.length; offset += MSFILE_DIGEST_SIZE_BYTES) {
     let hash = "";
@@ -143,50 +118,29 @@ export function parseSeedBlockPlan(
     }
     hashes.push(hash);
   }
-  return createMsFileBlockPlan(fileSizeBytes, hashes);
+  return createMsFileBlockPlan(hashes);
 }
 
 /**
- * 校验 Block 数量并建立每个位置的精确长度计划。
- * 只有剩余长度已确认不超过 256 KiB 后，才把它转换为 JS number。
+ * 按 Seed 顺序建立块计划；同一 Hash 的每个位置都保留。
+ * 只校验哈希格式，不做任何长度推导；空清单表示空文件。
  */
 export function createMsFileBlockPlan(
-  fileSizeInput: string | bigint,
   blockHashes: readonly string[],
 ): FileBlockPlan {
-  const fileSizeBytes = typeof fileSizeInput === "bigint"
-    ? fileSizeInput
-    : parseMsFileUint64(fileSizeInput);
-  const expectedCount = expectedMsFileBlockCount(fileSizeBytes);
-  if (BigInt(blockHashes.length) !== expectedCount) {
-    throw new FileAssemblyError("block-count-mismatch");
-  }
   if (blockHashes.length > Number.MAX_SAFE_INTEGER) {
     throw new FileAssemblyError("block-count-mismatch");
   }
 
   const blocks: FileBlockPlanEntry[] = [];
-  const blockSize = BigInt(MSFILE_BLOCK_SIZE_BYTES);
   for (let index = 0; index < blockHashes.length; index += 1) {
     const blockHashHex = blockHashes[index];
     if (!isValidMsFileHashHex(blockHashHex)) {
       throw new FileAssemblyError("invalid-block-hash");
     }
-    const offset = BigInt(index) * blockSize;
-    const remaining = fileSizeBytes - offset;
-    if (remaining <= 0n) throw new FileAssemblyError("block-count-mismatch");
-    const expectedSize = remaining < blockSize ? remaining : blockSize;
-    if (expectedSize > BigInt(MSFILE_MAX_BLOCK_BYTES)) {
-      throw new FileAssemblyError("block-size-mismatch");
-    }
-    // expectedSize <= 256 KiB，转换不会丢失精度。
-    blocks.push({
-      index,
-      blockHashHex,
-      expectedSizeBytes: Number(expectedSize),
-    });
+    blocks.push({ index, blockHashHex });
   }
-  return { fileSizeBytes, blockCount: blockHashes.length, blocks };
+  return { blockCount: blocks.length, blocks };
 }
 
 /** 从 service 返回值提取严格的 BinaryField；不接受字符串或隐式类型。 */
@@ -204,21 +158,27 @@ export function extractMsFileReadBytes(
   return new Uint8Array(content.bytes);
 }
 
-/** 校验一个 Block 响应的内容哈希字段和精确位置长度。 */
-export function validateMsFileBlockResponse(
+/**
+ * 校验一个 Block 响应：内容哈希字段必须匹配，且载荷字节必须经 SHA-256
+ * 验算等于该哈希（不信任供应商声明的长度，只接受 1..262144 字节的实际载荷）。
+ */
+export async function validateMsFileBlockResponse(
   response: MsFileReadResult,
-  block: FileBlockPlanEntry,
-): Uint8Array {
-  const bytes = extractMsFileReadBytes(response, block.blockHashHex);
-  if (bytes.length !== block.expectedSizeBytes) {
-    throw new FileAssemblyError("block-size-mismatch");
-  }
+  blockHashHex: string,
+): Promise<Uint8Array> {
+  const bytes = extractMsFileReadBytes(response, blockHashHex);
+  if (bytes.length === 0 || bytes.length > MSFILE_MAX_BLOCK_BYTES) throw new FileAssemblyError("block-size-mismatch");
+  if (!isValidMsFileHashHex(blockHashHex)) throw new FileAssemblyError("invalid-block-hash");
+  const digest = await sha256(bytes);
+  const actualHex = Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
+  if (actualHex !== blockHashHex) throw new FileAssemblyError("invalid-block-response");
   return bytes;
 }
 
 /**
- * 按计划顺序验证并返回 Blob 可用的有序 parts。
- * 这里再次验证长度，避免调用方绕过 worker pool 直接提交不完整数组。
+ * 按计划顺序返回 Blob 可用的有序 parts（含重复位置的多次引用）。
+ * 调用方传入前必须已逐块验收（哈希与长度）；这里只校验位置齐备，
+ * 不再按声明总长度比对——最终总字节是实际拼接和。
  */
 export function assembleMsFileParts(
   plan: FileBlockPlan,
@@ -228,16 +188,11 @@ export function assembleMsFileParts(
     throw new FileAssemblyError("block-count-mismatch");
   }
   const parts: Uint8Array[] = [];
-  let total = 0n;
   for (const block of plan.blocks) {
     const bytes = blockBytes[block.index];
-    if (!bytes || bytes.length !== block.expectedSizeBytes) {
-      throw new FileAssemblyError("block-size-mismatch");
-    }
+    if (!bytes) throw new FileAssemblyError("block-size-mismatch");
     parts.push(bytes);
-    total += BigInt(bytes.length);
   }
-  if (total !== plan.fileSizeBytes) throw new FileAssemblyError("total-size-mismatch");
   return parts;
 }
 
@@ -313,17 +268,12 @@ export async function readMsFileBlocksWithWorkerPool(
       try {
         const response = await readBlock(block.blockHashHex, controller.signal);
         if (controller.signal.aborted) throw createAbortError();
-        const bytes = validateMsFileBlockResponse(response, block);
+        // 同一 Hash 只读取验收一次，再复用到每个重复位置；重复位置的字节相同。
+        const bytes = await validateMsFileBlockResponse(response, block.blockHashHex);
         if (controller.signal.aborted) throw createAbortError();
         for (const position of positionsByHash.get(block.blockHashHex) ?? []) {
-          const positionedBlock = plan.blocks[position]!;
-          // 位置的期望长度可能不同；即使 Hash 相同也要逐位置复核，
-          // 不允许把一个不匹配的响应静默复制到最终文件。
-          const positionedBytes = position === block.index
-            ? bytes
-            : validateMsFileBlockResponse(response, positionedBlock);
-          results[position] = positionedBytes;
-          options.onVerified?.({ index: position, verifiedBytes: positionedBytes.length });
+          results[position] = bytes;
+          options.onVerified?.({ index: position, verifiedBytes: bytes.length });
         }
       } catch (error) {
         if (!controller.signal.aborted) {
@@ -355,12 +305,12 @@ export function assembleMsFileBytes(
   blockBytes: readonly (Uint8Array | undefined)[],
 ): Uint8Array {
   const parts = assembleMsFileParts(plan, blockBytes);
+  let total = 0;
+  for (const part of parts) total += part.length;
   // 首页允许的文件上限远低于 JS TypedArray 的安全索引范围；调用方应先做
   // 256 MiB 边界判断，再调用这个会产生连续副本的辅助函数。
-  if (plan.fileSizeBytes > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new FileAssemblyError("total-size-mismatch");
-  }
-  const result = new Uint8Array(Number(plan.fileSizeBytes));
+  if (total > Number.MAX_SAFE_INTEGER) throw new FileAssemblyError("total-size-mismatch");
+  const result = new Uint8Array(total);
   let offset = 0;
   for (const part of parts) {
     result.set(part, offset);
