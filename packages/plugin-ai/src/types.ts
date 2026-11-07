@@ -15,6 +15,7 @@ export interface Selection { providerId: string; model: string; reasoning: strin
 export interface Settings {
   version: 1;
   configured: boolean;
+  enabled: boolean;
   providers: Provider[];
   defaults: Selection;
   systemPrompt: string;

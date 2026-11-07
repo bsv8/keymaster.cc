@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { Children, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Menu, X, Home, MessageSquare, PanelLeftClose, PanelLeftOpen, ArrowUpToLine, ArrowDownToLine, LayoutGrid } from "lucide-react";
 import * as Icons from "lucide-react";
 import type { BusinessDomain } from "@keymaster/contracts";
@@ -23,12 +23,21 @@ export function AppShell() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [mobileSessions, setMobileSessions] = useState(false);
   const [maximized, setMaximized] = useState(false);
-  const [sidebarWidth, setSidebarWidth] = useState(480);
+  const [sidebarWidths, setSidebarWidths] = useState({ menu: 260, ai: 480 });
   const [listHeight, setListHeight] = useState(200);
   const menuRef = useRef<HTMLDivElement>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const dragCleanup = useRef<(() => void) | null>(null);
   useSyncExternalStore(page.subscribe, page.revision, page.revision);
+  const aiAvailable = Children.count(page.renderFrame("ai-conversations")) > 0;
+  const sidebarMode = aiAvailable ? "ai" : "menu";
+  const sidebarWidth = sidebarWidths[sidebarMode];
+  const minSidebarWidth = aiAvailable ? 320 : 260;
+  function setSidebarWidth(update: number | ((width: number) => number)) {
+    setSidebarWidths(widths => ({ ...widths, [sidebarMode]: typeof update === "function" ? update(widths[sidebarMode]) : update }));
+  }
+  const activeSidebarTab = aiAvailable ? sidebarTab : "menu";
+  useEffect(() => { if (!aiAvailable) setMobileSessions(false); }, [aiAvailable]);
   const domains = useResourceViewSelector<BusinessDomain[], BusinessDomain[]>(resources, "page.navigation", [], state => state.data ?? []);
   const feature = domains.flatMap(domain => domain.features).find(item => isBusinessFeatureActive(item, path));
   const title = feature ? text(feature.label) : path === "/" ? t("home.page.title", { defaultValue: "首页" }) : path.split("/").filter(Boolean).at(-1) ?? "";
@@ -59,7 +68,7 @@ export function AppShell() {
     document.addEventListener("keydown", onKey);
     return () => { document.removeEventListener("pointerdown", onPointer); document.removeEventListener("keydown", onKey); };
   }, [mobileMenuOpen]);
-  useEffect(() => () => dragCleanup.current?.(), [mobile, sidebarOpen, sidebarTab, maximized]);
+  useEffect(() => () => dragCleanup.current?.(), [mobile, sidebarOpen, sidebarTab, maximized, aiAvailable]);
   /** 捕获拖动指针，隔离 iframe；从实际尺寸起拖，避免动画和 CSS 限宽造成跳动。 */
   function beginResize(axis: "width" | "height", event: React.PointerEvent<HTMLDivElement>) {
     if (event.button !== 0 || !event.isPrimary) return;
@@ -84,7 +93,7 @@ export function AppShell() {
       if (!(next.buttons & 1)) { end(); return; }
       next.preventDefault();
       const delta = (axis === "width" ? next.clientX : next.clientY) - start;
-      if (axis === "width") setSidebarWidth(Math.max(320, Math.min(800, window.innerWidth - 320, size + delta)));
+      if (axis === "width") setSidebarWidth(Math.max(minSidebarWidth, Math.min(800, window.innerWidth - 320, size + delta)));
       else setListHeight(Math.max(100, Math.min(window.innerHeight * .5, size + delta)));
     };
     const finishPointer = (next: PointerEvent) => { if (next.pointerId === pointerId) end(); };
@@ -131,22 +140,22 @@ export function AppShell() {
     </header>
     <div className={`workspace-body${mobileSessions ? " is-mobile-sessions" : ""}`}>
       <aside id="workspace-sidebar" className={`workspace-sidebar${sidebarOpen ? " is-open" : ""}`}>
-        <div className="workspace-sidebar-header" role="tablist" aria-label="侧栏"><button role="tab" aria-selected={sidebarTab === "sessions"} className={sidebarTab === "sessions" ? "is-active" : ""} onClick={() => setSidebarTab("sessions")}><MessageSquare size={13}/>会话</button><button role="tab" aria-selected={sidebarTab === "menu"} className={sidebarTab === "menu" ? "is-active" : ""} onClick={() => setSidebarTab("menu")}><LayoutGrid size={13}/>菜单</button><span/>{sidebarTab === "sessions" && page.renderFrame("ai-session-actions")}</div>
-        <div className="workspace-desktop-conversations" hidden={sidebarTab !== "sessions" || mobile}>{!mobile && conversations}</div>
-        <div className="workspace-menu" hidden={sidebarTab !== "menu"}>{menu}</div>
+        <div className="workspace-sidebar-header" role="tablist" aria-label="侧栏">{aiAvailable && <button role="tab" aria-selected={activeSidebarTab === "sessions"} className={activeSidebarTab === "sessions" ? "is-active" : ""} onClick={() => setSidebarTab("sessions")}><MessageSquare size={13}/>会话</button>}<button role="tab" aria-selected={activeSidebarTab === "menu"} className={activeSidebarTab === "menu" ? "is-active" : ""} onClick={() => setSidebarTab("menu")}><LayoutGrid size={13}/>菜单</button><span/>{activeSidebarTab === "sessions" && page.renderFrame("ai-session-actions")}</div>
+        <div className="workspace-desktop-conversations" hidden={activeSidebarTab !== "sessions" || mobile}>{aiAvailable && !mobile && conversations}</div>
+        <div className="workspace-menu" hidden={activeSidebarTab !== "menu"}>{menu}</div>
       </aside>
-      {!mobile && sidebarOpen && <div className="workspace-sidebar-resize" role="separator" tabIndex={0} aria-label="调整侧栏宽度" aria-orientation="vertical" onPointerDown={event => beginResize("width", event)} onKeyDown={event => { if (["ArrowLeft", "ArrowRight"].includes(event.key)) { event.preventDefault(); setSidebarWidth(value => Math.max(320, Math.min(800, window.innerWidth - 320, value + (event.key === "ArrowLeft" ? -20 : 20)))); } }} />}
+      {!mobile && sidebarOpen && <div className="workspace-sidebar-resize" role="separator" tabIndex={0} aria-label="调整侧栏宽度" aria-orientation="vertical" onPointerDown={event => beginResize("width", event)} onKeyDown={event => { if (["ArrowLeft", "ArrowRight"].includes(event.key)) { event.preventDefault(); setSidebarWidth(value => Math.max(minSidebarWidth, Math.min(800, window.innerWidth - 320, value + (event.key === "ArrowLeft" ? -20 : 20)))); } }} />}
       <main className="workspace-main">
         <div className="workspace-tabs-row">
           {!mobile && <button className="workspace-sidebar-toggle" aria-controls="workspace-sidebar" aria-label={sidebarOpen ? "收起侧栏" : "展开侧栏"} title={sidebarOpen ? "收起侧栏" : "展开侧栏"} aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(value => !value)}>{sidebarOpen ? <PanelLeftClose size={16}/> : <PanelLeftOpen size={16}/>}</button>}
           <div className="workspace-tabs" role="tablist" aria-label="工作区标签">
             {resultViews.map(view => <div className={`workspace-tab-app${view.id === activeResult ? " is-active" : ""}`} key={view.id}><button role="tab" aria-selected={view.id === activeResult} onClick={() => { setMobileSessions(false); page.selectResult(view.id); }}><span>AI · {view.title}</span></button><button className="workspace-tab-close" aria-label={`关闭 ${view.title}`} onClick={() => view.close()}><X size={12}/></button></div>)}
-            {mobile && <button role="tab" aria-selected={mobileSessions} className={mobileSessions ? "is-active" : ""} onClick={() => { setMobileSessions(true); page.selectApplication(null); }}><MessageSquare size={13}/>会话</button>}
+            {mobile && aiAvailable && <button role="tab" aria-selected={mobileSessions} className={mobileSessions ? "is-active" : ""} onClick={() => { setMobileSessions(true); page.selectApplication(null); }}><MessageSquare size={13}/>会话</button>}
             <button role="tab" aria-selected={!mobileSessions && !activeApp && !activeResult} className={!mobileSessions && !activeApp && !activeResult ? "is-active" : ""} onClick={navigate}><MenuIcon size={13}/><span>{title}</span></button>
             {views.filter(view => view.mode === "iframe").map(view => <div className={`workspace-tab-app${view.id === activeApp ? " is-active" : ""}`} key={view.id}><button role="tab" aria-selected={view.id === activeApp} onClick={() => page.selectApplication(view.id)}><LayoutGrid size={13}/><span>{view.title}</span></button><button className="workspace-tab-close" aria-label={`关闭 ${view.title}`} onClick={() => view.close()}><X size={12}/></button></div>)}
           </div>
         </div>
-        {mobile && <div className="workspace-mobile-conversations" hidden={!mobileSessions}><div className="workspace-session-actions"><span>会话列表</span>{page.renderFrame("ai-session-actions")}</div>{conversations}</div>}
+        {mobile && aiAvailable && <div className="workspace-mobile-conversations" hidden={!mobileSessions}><div className="workspace-session-actions"><span>会话列表</span>{page.renderFrame("ai-session-actions")}</div>{conversations}</div>}
         <div className="workspace-route" hidden={mobileSessions || !!activeApp || !!activeResult}><NoticeRail/>{page.renderFrame("wallet-guard", <RouteRenderer/>)}</div>
         {resultViews.map(view => <div className="workspace-app-outlet" hidden={mobileSessions || activeResult !== view.id} key={view.id}>{view.render()}</div>)}
         <div ref={attachOutlet} className="workspace-app-outlet" hidden={mobileSessions || !activeApp}/>

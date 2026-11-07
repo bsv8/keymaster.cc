@@ -15,6 +15,8 @@ function list(value: unknown): asserts value is unknown[] { if (!Array.isArray(v
 export function recoverSettings(value: unknown): Settings {
   const data = record(value);
   if (data.version !== 1 || typeof data.configured !== "boolean") throw new Error("AI 设置版本或状态无效");
+  if (data.enabled !== undefined && typeof data.enabled !== "boolean") throw new Error("AI 全局开关无效");
+  data.enabled ??= false;
   selection(data.defaults); text(data.systemPrompt); list(data.providers); list(data.disabledTools);
   const ids = new Set<string>();
   for (const value of data.providers) {

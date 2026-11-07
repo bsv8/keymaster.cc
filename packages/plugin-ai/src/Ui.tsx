@@ -13,6 +13,23 @@ function presetFor(provider: Provider) {
 }
 export function AiSettings({ runtime, onboarding = false }: { runtime: AiRuntime; onboarding?: boolean }) {
   useAi(runtime);
+  const enabled = runtime.settings.enabled;
+  const [error, setError] = useState("");
+  return <>
+    {!onboarding && <section className="ai-settings-page">
+      <PageHeader title="AI" description="全局开关，适用于当前浏览器的钱包系统。关闭不会删除配置或聊天记录。" />
+      <label><input type="checkbox" role="switch" checked={enabled} disabled={runtime.settingsWrites > 0} onChange={event => {
+        const checked = event.target.checked;
+        setError("");
+        void runtime.updateSettings(settings => ({ ...settings, enabled: checked })).catch(() => setError("无法保存 AI 开关，请重新载入后重试。"));
+      }} /> 开启 AI</label>
+      {error && <p role="alert">{error}</p>}
+    </section>}
+    {enabled && <EnabledAiSettings runtime={runtime} onboarding={onboarding} />}
+  </>;
+}
+function EnabledAiSettings({ runtime, onboarding = false }: { runtime: AiRuntime; onboarding?: boolean }) {
+  useAi(runtime);
   const [provider, setProvider] = useState<Provider>(() => ({ id: crypto.randomUUID(), apiKey: "", ...PROVIDER_PRESETS[0]! }));
   const [providerChoice, setProviderChoice] = useState(PROVIDER_PRESETS[0]!.name);
   const editingProviderId = useRef(provider.id);
@@ -61,10 +78,10 @@ export function AiSettings({ runtime, onboarding = false }: { runtime: AiRuntime
   }
   const savePrompt = (text: string) => failure(runtime, runtime.updateSettings(settings => ({ ...settings, systemPrompt: text })));
   return <div className="ai-settings-page">
-    <PageHeader
-      title={onboarding ? "设置 AI（可跳过）" : "AI"}
+    {onboarding && <PageHeader
+      title="设置 AI（可跳过）"
       description="本地加密保存密钥与聊天记录，浏览器直连所选供应商。"
-    />
+    />}
     <div className="ai-settings">
       {runtime.error && <p className="ai-settings__feedback is-error" role="alert">{runtime.error}</p>}
       {runtime.settingsWrites > 0 && <p className="ai-settings__feedback" role="status">正在加密保存设置…</p>}
@@ -188,5 +205,8 @@ export function AiSettings({ runtime, onboarding = false }: { runtime: AiRuntime
     </div>
   </div>;
 }
-export function AiGate({ runtime, children }: { runtime: AiRuntime; children?: ReactNode }) { useAi(runtime); return runtime.settings.configured ? <>{children}</> : <AiSettings runtime={runtime} onboarding/>; }
+export function AiGate({ runtime, children }: { runtime: AiRuntime; children?: ReactNode }) {
+  useAi(runtime);
+  return !runtime.settings.enabled || runtime.settings.configured ? <>{children}</> : <AiSettings runtime={runtime} onboarding/>;
+}
 export function SessionActions({ runtime }: { runtime: AiRuntime }) { useAi(runtime); return <button disabled={!runtime.ready} onClick={() => failure(runtime, runtime.create())}>＋新建</button>; }

@@ -48,7 +48,7 @@ export const aiSetup: PluginSetup = async ctx => {
   const page = ctx.capability(PAGE_UI_RENDERER_CAPABILITY);
   let result: { conversationId: string; view: WorkspaceResultView } | undefined;
   const runtime = new AiRuntime(repo, assertActive, (conversationId, artifact) => {
-    assertActive();
+    assertActive(); runtime.assertEnabled();
     const Result = owned(ctx, Sandbox, { artifact, runtime, conversationId, onSubmit: payload => runtime.feedback(conversationId, artifact.id, payload), onBack: () => { runtime.select(conversationId); } });
     const view = page.openResult({ id: "ai-result", title: artifact.title, render: () => createElement(Result), onClose: () => { result = undefined; } });
     result = { conversationId, view };
@@ -132,10 +132,23 @@ export const aiSetup: PluginSetup = async ctx => {
   ctx.scope.onRevoke(() => { offApps(); offTools(); registrations.clear(); });
   syncAppTools();
   const ui = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope).view;
-  for (const [slot, Component] of [["ai-session-actions", SessionActions], ["ai-session-list", SessionList], ["ai-conversations", Conversations]] as const) {
-    const View = owned(ctx, Component, { runtime });
-    ui.register({ id: slot, kind: "frame", slot, label: "AI", render: () => createElement(View) });
-  }
+  let framesRegistered = false;
+  const syncEnabled = () => {
+    assertActive();
+    const enabled = runtime.settings.enabled;
+    if (!enabled) runtime.disable();
+    if (enabled === framesRegistered) return;
+    framesRegistered = enabled;
+    for (const [slot, Component] of [["ai-session-actions", SessionActions], ["ai-session-list", SessionList], ["ai-conversations", Conversations]] as const) {
+      if (enabled) {
+        const View = owned(ctx, Component, { runtime });
+        ui.register({ id: slot, kind: "frame", slot, label: "AI", render: () => createElement(View) });
+      } else ui.unregister(slot);
+    }
+  };
+  const offEnabled = runtime.subscribe(syncEnabled);
+  ctx.scope.onRevoke(offEnabled);
+  syncEnabled();
   const Settings = owned(ctx, AiSettings, { runtime });
   ui.register({ id: "ai.settings", kind: "page", path: "/settings/ai", label: "AI", settingsPlacement: "embedded", render: () => createElement(Settings) });
   const Gate = owned(ctx, AiGate, { runtime, children: undefined as import("react").ReactNode });

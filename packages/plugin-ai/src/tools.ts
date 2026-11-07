@@ -3,7 +3,7 @@ import type { Json, Tool, ToolContext } from "./types.js";
 export class ToolRegistry {
   private entries = new Map<string, Tool>();
   private listeners = new Set<() => void>();
-  constructor(private disabled: () => string[], private assertActive: () => void) {}
+  constructor(private disabled: () => string[], private assertActive: () => void, private assertExecutable = assertActive) {}
   register(tool: Tool): () => void {
     this.assertActive();
     if (this.entries.has(tool.id)) throw new Error(`工具已注册：${tool.id}`);
@@ -16,14 +16,14 @@ export class ToolRegistry {
   subscribe(listener: () => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   changed() { for (const listener of this.listeners) listener(); }
   async execute(id: string, raw: string, context: ToolContext) {
-    this.assertActive(); context.signal.throwIfAborted();
+    this.assertExecutable(); context.signal.throwIfAborted();
     const tool = this.entries.get(id);
     if (!tool || !this.isEnabled(tool)) throw new Error("工具已关闭或当前不可用，请刷新工具列表");
     if (raw.length > 1_500_000) throw new Error("工具参数过大");
     const args: unknown = JSON.parse(raw);
     validate(args, tool.parameters);
     const result = await tool.execute(args as Record<string, Json>, context);
-    this.assertActive(); context.signal.throwIfAborted();
+    this.assertExecutable(); context.signal.throwIfAborted();
     return result;
   }
   dispose() { this.entries.clear(); this.listeners.clear(); }

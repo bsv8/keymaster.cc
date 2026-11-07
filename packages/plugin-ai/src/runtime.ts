@@ -11,7 +11,7 @@ export class AiRuntime {
   error = "";
   readonly failures = new Map<string, string>();
   ready = false;
-  readonly tools = new ToolRegistry(() => this.settings.disabledTools, () => this.assertActive());
+  readonly tools = new ToolRegistry(() => this.settings.disabledTools, () => this.assertActive(), () => this.assertEnabled());
   private revision = 0;
   private listeners = new Set<() => void>();
   private running = new Map<string, AbortController>();
@@ -33,6 +33,11 @@ export class AiRuntime {
     } });
   }
   assertActive() { if (this.disposed) throw new Error("AI 会话已失效"); this.checkActive(); }
+  assertEnabled() { this.assertActive(); if (!this.settings.enabled) throw new Error("AI 已关闭"); }
+  disable() {
+    for (const controller of this.running.values()) controller.abort();
+    this.closeResults();
+  }
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   snapshot = () => this.revision;
   changed = () => { this.revision++; for (const listener of this.listeners) listener(); };
@@ -47,7 +52,15 @@ export class AiRuntime {
       this.assertActive();
       this.conversations.push(repaired);
     }
-    this.settings = settings; this.selectedId = this.conversations[0]?.id ?? null;
+    this.settings = settings;
+    const url = new URL(window.location.href);
+    const ai = url.searchParams.get("ai");
+    if (ai === "true" || ai === "false") {
+      await this.updateSettings(current => ({ ...current, enabled: ai === "true" }));
+      url.searchParams.delete("ai");
+      window.history.replaceState(window.history.state, "", url);
+    }
+    this.selectedId = this.conversations[0]?.id ?? null;
     this.ready = true; this.changed();
   }
   private repair(conversation: Conversation) {
@@ -67,6 +80,7 @@ export class AiRuntime {
       const next = update(this.settings);
       await this.repo.saveSettings(next); this.assertActive();
       this.settings = next;
+      if (!next.enabled) this.disable();
       for (const [id, controller] of this.running) if (!next.providers.some(provider => provider.id === this.get(id).selection.providerId)) controller.abort();
       this.changed(); this.tools.changed();
     });
@@ -101,10 +115,10 @@ export class AiRuntime {
     if (this.selectedId === id) this.selectedId = this.conversations[0]?.id ?? null;
     this.changed();
   }
-  openArtifact(id: string, artifact: Artifact) { this.assertActive(); this.show(id, artifact); }
+  openArtifact(id: string, artifact: Artifact) { this.assertEnabled(); this.show(id, artifact); }
   stop(id: string) { this.running.get(id)?.abort(); }
   async send(id: string, text: string, onAccepted?: () => void): Promise<void> {
-    this.assertActive();
+    this.assertEnabled();
     const initial = this.get(id);
     const provider = this.settings.providers.find(item => item.id === initial.selection.providerId);
     if (!provider || !initial.selection.model) throw new Error("请配置供应商并选择模型");

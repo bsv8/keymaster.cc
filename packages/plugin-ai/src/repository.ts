@@ -4,7 +4,7 @@ import { recoverConversation, recoverSettings } from "./recovery.js";
 import { DEFAULT_SYSTEM_PROMPT } from "./prompt.js";
 
 export function defaultSettings(): Settings {
-  return { version: 1, configured: false, providers: [], defaults: { providerId: "", model: "", reasoning: "" }, systemPrompt: DEFAULT_SYSTEM_PROMPT, disabledTools: [] };
+  return { version: 1, configured: false, enabled: false, providers: [], defaults: { providerId: "", model: "", reasoning: "" }, systemPrompt: DEFAULT_SYSTEM_PROMPT, disabledTools: [] };
 }
 /** Both record content and settings are sealed; keys contain only random identifiers. */
 export function createAiRepository(store: BorrowedKeyValueStore, secrets: VaultLocalSecretService, assertActive: () => void) {
