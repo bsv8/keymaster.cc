@@ -1049,7 +1049,23 @@ const msfilePluginDefinition = {
     ctx.provide(MSFILE_SERVICE_CAPABILITY, createPublicMsFileService(service, () => ctx.scope.assertActive()));
     // 桶存储服务复用同一 owner 文件根；MasterSeed 算法来自官方 SDK。
     // 块写入经 Coordinator 直写，避免页面 storage 数据面的端口并发上限。
-    const bucketService = createMsFileBucketService({ store: ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, ""), coordinator });
+    // 自有导入完整入库后经控制面通知 Worker 侧采集队列；购买/下载路径
+    // 不经过 bucketService.upload，不会通知。
+    const bucketService = createMsFileBucketService({
+      store: ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, ""),
+      coordinator,
+      onStored: (meta) => {
+        void coordinator.msfileControl({
+          type: "collector.notify-stored",
+          seedHashHex: meta.seedHashHex,
+          fileName: meta.fileName,
+          mediaType: meta.mediaType,
+          fileSizeBytes: meta.fileSizeBytes,
+        }).catch(() => {
+          // 通知失败只影响本次时机，每小时调度会补齐。
+        });
+      },
+    });
     ctx.provide(MSFILE_BUCKET_SERVICE_CAPABILITY, bucketService);
     const resources_ = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
     const walletStateForUi = ctx.capability(VAULT_WALLET_STATE_CAPABILITY).bind(ctx.consumer, ctx.scope);

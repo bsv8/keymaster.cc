@@ -508,6 +508,30 @@ export async function storeMsFileSeed(input: {
 }
 
 /**
+ * 重命名条目：读回元数据、更换 fileName 后写回，其余字段不变。
+ * 购买/下载路径不调用；调用方负责通知采集队列重新入队。
+ */
+export async function updateMsFileSeedFileName(input: {
+  store: BorrowedModuleFileStore;
+  seedHashHex: string;
+  fileName: string;
+  signal?: AbortSignal;
+}): Promise<MsFileSeedMeta> {
+  const { store, signal } = input;
+  const seedHashHex = assertSeedHashHex(input.seedHashHex);
+  try {
+    const metaBytes = await getFile(store, metaPath(seedHashHex), signal);
+    if (!metaBytes) throw new MsFileSeedStoreError("missing-meta", "seed metadata is missing");
+    const meta = parseMsFileSeedMeta(metaBytes, seedHashHex);
+    const next: MsFileSeedMeta = { ...meta, fileName: sanitizeMsFileSeedFileName(input.fileName, seedHashHex) };
+    await putFile(store, metaPath(seedHashHex), serializeMsFileSeedMeta(next), signal);
+    return next;
+  } catch (cause) {
+    throw toStoreError(cause, "storage");
+  }
+}
+
+/**
  * 提交经 BitFS 买方验货后的 Seed/Block。
  *
  * 写入顺序固定为 Block → Seed → meta；meta 是 available 的最后提交点。

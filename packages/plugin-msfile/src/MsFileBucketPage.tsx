@@ -44,7 +44,7 @@ interface BucketError {
 
 type ListPhase = "idle" | "loading" | "ready" | "failed";
 type UploadPhase = "idle" | "hashing" | "storing" | "done" | "failed" | "cancelled";
-type BusyAction = "preview" | "download" | "verify" | "delete";
+type BusyAction = "preview" | "download" | "verify" | "delete" | "edit";
 
 interface UploadState {
   phase: UploadPhase;
@@ -172,6 +172,10 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
   const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<MsFileSeedEntry | null>(null);
+  const [editTarget, setEditTarget] = useState<MsFileSeedEntry | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [editDescriptionTouched, setEditDescriptionTouched] = useState(false);
 
   const listControllerRef = useRef<AbortController | null>(null);
   const opControllerRef = useRef<AbortController | null>(null);
@@ -507,6 +511,47 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
     }
   }, [bucketError, deleteTarget, preview, releasePreview, reload, service, t]);
 
+  const openEdit = useCallback((entry: MsFileSeedEntry) => {
+    setEditTarget(entry);
+    setEditName(entry.meta?.fileName ?? "");
+    setEditDescription("");
+    setEditDescriptionTouched(false);
+  }, []);
+
+  const confirmEdit = useCallback(async () => {
+    const entry = editTarget;
+    if (!entry) return;
+    if (!service.rename || !service.updateDescription) {
+      setNotice({ kind: "error", text: t("msfile.bucket.notice.editUnsupported", { defaultValue: "当前运行单元不支持名称与介绍编辑。" }) });
+      return;
+    }
+    setEditTarget(null);
+    opControllerRef.current?.abort();
+    const controller = new AbortController();
+    opControllerRef.current = controller;
+    setBusy({ action: "edit", seedHashHex: entry.seedHashHex });
+    try {
+      const nextName = editName.trim();
+      if (nextName !== "" && nextName !== entry.meta?.fileName) {
+        await service.rename(entry.seedHashHex, nextName, { signal: controller.signal });
+      }
+      // 介绍框未动过则不覆盖已存介绍；改名本身会携带当前介绍重新入队。
+      if (editDescriptionTouched) {
+        await service.updateDescription(entry.seedHashHex, editDescription);
+      }
+      if (controller.signal.aborted) return;
+      setNotice({ kind: "ok", text: t("msfile.bucket.notice.editDone", { defaultValue: "名称与介绍已保存，采集队列已更新。" }) });
+      await reload();
+    } catch (cause) {
+      if (!controller.signal.aborted && !isCancellation(cause)) setNotice({ kind: "error", text: bucketError(cause).message });
+    } finally {
+      if (opControllerRef.current === controller) {
+        opControllerRef.current = null;
+        setBusy(null);
+      }
+    }
+  }, [bucketError, editDescription, editDescriptionTouched, editName, editTarget, reload, service, t]);
+
   const uploadBusy = uploadState.phase === "hashing" || uploadState.phase === "storing";
   const busyLabel = busy === null ? null : (() => {
     const blocks = busy.progress?.completedBlocks;
@@ -516,6 +561,7 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
       case "preview": return t("msfile.bucket.status.previewing", { defaultValue: "正在读取文件块…" }) + suffix;
       case "download": return t("msfile.bucket.status.downloading", { defaultValue: "正在读取并校验文件块…" }) + suffix;
       case "verify": return t("msfile.bucket.status.verifying", { defaultValue: "正在完整校验…" });
+      case "edit": return t("msfile.bucket.status.editing", { defaultValue: "正在保存名称与介绍…" });
       default: return t("msfile.bucket.status.deleting", { defaultValue: "正在删除…" });
     }
   })();
@@ -664,6 +710,9 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
                       <Button variant="ghost" size="sm" disabled={!canOperate || busy !== null || entry.seedPresent === false} onClick={() => { void handleVerify(entry); }}>
                         {t("msfile.bucket.action.verify", { defaultValue: "校验" })}
                       </Button>
+                      <Button variant="ghost" size="sm" disabled={!canOperate || busy !== null || !entry.meta} onClick={() => openEdit(entry)}>
+                        {t("msfile.bucket.action.edit", { defaultValue: "编辑" })}
+                      </Button>
                       <Button variant="danger" size="sm" disabled={!canOperate || busy !== null} onClick={() => setDeleteTarget(entry)}>
                         {t("msfile.bucket.action.delete", { defaultValue: "删除" })}
                       </Button>
@@ -713,6 +762,40 @@ function MsFileBucketPageContent({ service }: { service: MsFileBucketService }) 
             {deleteTarget.meta?.fileName ?? t("msfile.bucket.metaMissing", { defaultValue: "元数据缺失" })} · <code title={deleteTarget.seedHashHex}>{shortHex(deleteTarget.seedHashHex)}</code>
           </p>
         ) : null}
+      </Modal>
+
+      <Modal
+        open={editTarget !== null}
+        title={t("msfile.bucket.action.editTitle", { defaultValue: "编辑名称与介绍" })}
+        onClose={() => setEditTarget(null)}
+        closeButtonLabel={t("msfile.bucket.action.cancel", { defaultValue: "取消" })}
+        footer={(
+          <div className="msfile-bucket__modal-actions">
+            <Button variant="secondary" size="sm" onClick={() => setEditTarget(null)}>{t("msfile.bucket.action.cancel", { defaultValue: "取消" })}</Button>
+            <Button size="sm" onClick={() => { void confirmEdit(); }}>{t("msfile.bucket.action.save", { defaultValue: "保存" })}</Button>
+          </div>
+        )}
+      >
+        <p>{t("msfile.bucket.action.editBody", { defaultValue: "改名或改介绍会触发采集重新提交；介绍只存于采集备注，不改动文件原始内容。" })}</p>
+        <div className="msfile-bucket__field">
+          <label htmlFor="msfile-bucket-edit-name">{t("msfile.bucket.action.editName", { defaultValue: "文件名" })}</label>
+          <input
+            id="msfile-bucket-edit-name"
+            className="msfile-bucket__control"
+            value={editName}
+            onChange={(event) => setEditName(event.target.value)}
+          />
+        </div>
+        <div className="msfile-bucket__field">
+          <label htmlFor="msfile-bucket-edit-description">{t("msfile.bucket.action.editDescription", { defaultValue: "介绍" })}</label>
+          <textarea
+            id="msfile-bucket-edit-description"
+            className="msfile-bucket__control"
+            rows={3}
+            value={editDescription}
+            onChange={(event) => { setEditDescription(event.target.value); setEditDescriptionTouched(true); }}
+          />
+        </div>
       </Modal>
     </section>
   );

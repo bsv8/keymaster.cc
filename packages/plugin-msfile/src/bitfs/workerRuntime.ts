@@ -1,4 +1,5 @@
 import { configureBitfsDebug, traceBitfs } from "./debug.js";
+import { collectorForOwner } from "../collector/collectorHost.js";
 import { requireWocNetwork } from "@keymaster/contracts";
 import { bitfsPoolSettlementFee } from "./poolBudget.js";
 import { createSchedulerPoolSession, findBuyerPoolResponseSession, readPoolQuoteContext, readSchedulerPoolSessionId, schedulerPoolSessionId } from "./poolRouting.js";
@@ -12,7 +13,7 @@ import { createBitfsPurchaseTasks, type BitfsPurchaseTask } from "./purchaseTask
 import { selectBitfsMediaType } from "./mediaTypeVote.js";
 import { parseBitfsBuyerPurchaseManifest } from "./buyerProtocol.js";
 import { createBitfsDemandMonitor } from "./demandMonitor.js";
-import { inspectPurchasedMsFileSeed, commitPurchasedMsFileContent, inspectLocalMsFileSeed } from "../storage/msfileSeedStore.js";
+import { inspectPurchasedMsFileSeed, commitPurchasedMsFileContent, inspectLocalMsFileSeed, listMsFileSeeds } from "../storage/msfileSeedStore.js";
 import { encodeBitfsBuyerPurchaseManifest } from "./buyerProtocol.js";
 import { arbitrationFeeForItems } from "./arbitrationFees.js";
 import {
@@ -4191,6 +4192,14 @@ async function executeMsfileControlNow(
       value = object.bytes.slice().buffer;
       break;
     }
+    case "collector.notify-stored":
+    case "collector.config.get":
+    case "collector.config.update":
+    case "collector.status":
+    case "collector.description.set": {
+      value = await executeMsfileCollectorControl(control);
+      break;
+    }
     default: return { requestId: request.requestId, sessionEpoch: deps.session().sessionEpoch, ack: { status: "validation-error", message: "Unknown MSFile control" } };
   }
   if (signal?.aborted) throw msfileError("msfile_unavailable", "MSFile control request was cancelled");
@@ -4206,8 +4215,109 @@ async function executeMsfileControlNow(
   return { requestId: request.requestId, sessionEpoch: deps.session().sessionEpoch, ack: { status: "ok" }, operationResult: value };
 }
 
-function clearBuyerState(): void {
-  msfileBitfsBuyerRequests.clear();
+/**
+ * 采集上报控制面：队列、配置、状态、介绍。签名经 Vault 受限能力，
+ * 调度随会话世代自停；顶层门禁已保证 unlocked，定时器触发前再复核。
+ */
+async function executeMsfileCollectorControl(
+  control: Extract<CoordinatorMsFileControl, { type: `collector.${string}` }>,
+): Promise<unknown> {
+  const session = deps.session();
+  const owner = session.activePublicKeyHex?.trim().toLowerCase();
+  if (!owner) throw new Error("请先解锁当前 Key 再使用采集上报");
+  const epoch = session.sessionEpoch;
+  const service = collectorForOwner(owner, epoch, {
+    files: deps.files(""),
+    crypto: () => deps.crypto(owner),
+    isAlive: () => {
+      const current = deps.session();
+      return current.vaultStatus === "unlocked" && current.activePublicKeyHex?.trim().toLowerCase() === owner
+        && current.sessionEpoch === epoch;
+    },
+    diagnostics: deps.diagnosticsEnabled(),
+  });
+  switch (control.type) {
+    case "collector.notify-stored": {
+      assertCollectorHash(control.seedHashHex);
+      assertCollectorFileName(control.fileName);
+      assertCollectorSize(control.fileSizeBytes);
+      if (typeof control.mediaType !== "string" || control.mediaType.length < 1) {
+        throw new Error("采集上报的媒体类型不能为空");
+      }
+      await service.notifyStored({
+        seedHashHex: control.seedHashHex,
+        fileName: control.fileName,
+        mediaType: control.mediaType,
+        fileSizeBytes: control.fileSizeBytes,
+      });
+      return null;
+    }
+    case "collector.config.get":
+      return service.getConfig();
+    case "collector.config.update": {
+      const input = control.input ?? {};
+      if (input.endpoint !== undefined && typeof input.endpoint !== "string") throw new Error("采集地址必须为字符串");
+      const config = await service.updateConfig(input);
+      if (config.enabled && config.endpoint !== "") await collectorBackfill(service);
+      return null;
+    }
+    case "collector.status":
+      return service.getStatus();
+    case "collector.description.set": {
+      assertCollectorHash(control.seedHashHex);
+      if (typeof control.description !== "string" || new TextEncoder().encode(control.description).byteLength > 2048) {
+        throw new Error("介绍必须为 0..2048 UTF-8 字节");
+      }
+      await service.setDescription(control.seedHashHex, control.description);
+      return null;
+    }
+  }
+}
+
+function assertCollectorHash(seedHashHex: string): void {
+  if (!isValidMsFileHashHex(seedHashHex)) throw new Error("Seed Hash 必须是 64 位小写十六进制字符");
+}
+
+function assertCollectorFileName(fileName: string): void {
+  if (typeof fileName !== "string") throw new Error("文件名必须为字符串");
+  const bytes = new TextEncoder().encode(fileName).byteLength;
+  if (bytes < 1 || bytes > 255 || fileName === "." || fileName === ".." || fileName.includes("/") || fileName.includes("\\")) {
+    throw new Error("文件名必须为 1..255 字节的 basename");
+  }
+}
+
+function assertCollectorSize(fileSizeBytes: string): void {
+  if (typeof fileSizeBytes !== "string" || !/^(0|[1-9][0-9]*)$/.test(fileSizeBytes)) {
+    throw new Error("文件长度必须为十进制规范字符串");
+  }
+}
+
+/**
+ * 首次启用时补齐：已有且完整（种子与块齐备）的文件入队。
+ * 启用前已存在的购买/下载文件无法区分来源，会一并入队一次；
+ * 存储分离后该歧义消除。失败不抛错，交由每小时调度补齐。
+ */
+async function collectorBackfill(service: { notifyStored(input: { seedHashHex: string; fileName: string; mediaType: string; fileSizeBytes: string }): Promise<void> }): Promise<void> {
+  try {
+    const store = deps.files("");
+    const entries = await listMsFileSeeds({ store });
+    for (const entry of entries) {
+      if (!entry.meta) continue;
+      const descriptor = await inspectLocalMsFileSeed({ store, seedHashHex: entry.seedHashHex });
+      if (!descriptor) continue;
+      await service.notifyStored({
+        seedHashHex: entry.seedHashHex,
+        fileName: descriptor.meta.fileName,
+        mediaType: descriptor.meta.mediaType,
+        fileSizeBytes: descriptor.meta.fileSizeBytes,
+      });
+    }
+  } catch {
+    // 后台补齐失败不阻塞配置更新。
+  }
+}
+
+function clearBuyerState(): void {  msfileBitfsBuyerRequests.clear();
   msfileBitfsBuyerTasks.clear();
   msfileBitfsBuyerPurchaseTails.clear();
   msfileBitfsBuyerRecoveryInFlight = undefined;

@@ -11,8 +11,10 @@ import {
   listMsFileSeeds,
   readMsFileSeed,
   storeMsFileSeed,
+  updateMsFileSeedFileName,
   verifyMsFileSeed,
   type MsFileSeedEntry,
+  type MsFileSeedMeta,
   type MsFileSeedReadResult,
   type MsFileSeedSource,
   type MsFileSeedStoreProgress,
@@ -49,6 +51,10 @@ export interface MsFileBucketService {
   read(seedHashHex: string, options?: MsFileBucketOperationOptions): Promise<MsFileSeedReadResult>;
   verify(seedHashHex: string, options?: MsFileBucketOperationOptions): Promise<MsFileSeedVerifyResult>;
   remove(seedHashHex: string, options?: { signal?: AbortSignal }): Promise<void>;
+  /** 重命名自有文件并通知采集队列；购买/下载所得不经此入口。 */
+  rename?(seedHashHex: string, fileName: string, options?: { signal?: AbortSignal }): Promise<MsFileSeedMeta>;
+  /** 设置文件介绍（采集自有存储，不改动原始内容）并通知采集队列。 */
+  updateDescription?(seedHashHex: string, description: string): Promise<void>;
 }
 
 export const MSFILE_BUCKET_SERVICE_CAPABILITY = defineCapability<MsFileBucketService>({
@@ -92,6 +98,12 @@ export interface MsFileBucketServiceDeps {
   /** Coordinator 控制面：块写入绕过页面 storage 数据面的端口并发上限。 */
   coordinator: MsFileCoordinatorControl;
   now?(): number;
+  /**
+   * 自有文件完整入库后的通知（上传成功、重命名成功时调用）。
+   * 购买/下载经 commitPurchasedMsFileContent 入库的不经过此回调。
+   * 失败只影响本次通知时机，每小时调度会补齐。
+   */
+  onStored?(meta: MsFileSeedMeta): void;
 }
 
 /** 用 Host 预绑定的文件句柄构造服务；句柄生命周期由 Host 拥有。 */
@@ -215,6 +227,15 @@ export function createMsFileBucketService(deps: MsFileBucketServiceDeps): MsFile
       ...withSignal(uploadOptions.signal),
       ...(uploadOptions.onProgress === undefined ? {} : { onProgress: uploadOptions.onProgress }),
       ...(now === undefined ? {} : { now }),
+    }).then((result) => {
+      // 只有自有导入走此路径：完整入库后通知采集队列。
+      // 购买/下载经 commitPurchasedMsFileContent 入库，不触发。
+      try {
+        deps.onStored?.(result.meta);
+      } catch {
+        // 通知失败只影响本次时机，每小时调度会补齐，不污染上传结果。
+      }
+      return result;
     }),
     read: (seedHashHex, readOptions = {}) => readMsFileSeed({
       store,
@@ -238,6 +259,19 @@ export function createMsFileBucketService(deps: MsFileBucketServiceDeps): MsFile
       if (removeOptions.signal?.aborted) throw new MsFileSeedStoreError("cancelled", "删除已取消");
       const result = await coordinator.msfileControl({ type: "bucket.delete-file", seedHashHex });
       if (result.status !== "ok") throw new MsFileSeedStoreError("storage", "message" in result ? String(result.message) : "文件与采购历史删除失败");
+    },
+    rename: async (seedHashHex, fileName, renameOptions = {}) => {
+      const meta = await updateMsFileSeedFileName({ store, seedHashHex, fileName, ...withSignal(renameOptions.signal) });
+      try {
+        deps.onStored?.(meta);
+      } catch {
+        // 同上传：通知失败不污染重命名结果。
+      }
+      return meta;
+    },
+    updateDescription: async (seedHashHex, description) => {
+      const result = await coordinator.msfileControl({ type: "collector.description.set", seedHashHex, description });
+      if (result.status !== "ok") throw new MsFileSeedStoreError("storage", "message" in result ? String(result.message) : "介绍保存失败");
     },
   };
 }

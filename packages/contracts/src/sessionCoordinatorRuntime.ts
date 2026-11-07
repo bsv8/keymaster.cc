@@ -17,6 +17,8 @@ import type { WalletColdStartSnapshot, WalletInitializeResult, WalletUnlockResul
 import type { StorageListResult, StorageDirectoryResult, StoragePutResult, StorageGetResult, StorageDeleteResult } from "./connectStorage.js";
 import type { KeyValueEntry, KeyValueEntryMeta, KeyValueListResult, KeyValueCommitResult } from "./storage/kv.js";
 import type {
+  MsFileCollectorConfig,
+  MsFileCollectorStatus,
   MsFileSettingsSnapshot, MsFileBitfsBuyerSettings, MsFileReadConcurrencySettings, MsFileBitfsDemandSnapshot,
   MsFileArbitrationTask, MsFileDemandMonitorSnapshot, MsFileBitfsTaskSnapshot, MsFileBitfsFundingPoolSnapshot,
   MsFileSupplierProbeResult, MsFileAppAuthorizationView, MsFileServiceStatus, MsFileStatResult, MsFileReadResult,
@@ -65,7 +67,13 @@ export type CoordinatorMsFileControlResultFor<C extends CoordinatorMsFileControl
   C extends { type: "bitfs.arbitration.list" } ? MsFileArbitrationTask[] : C extends { type: "bitfs.demands.monitor" } ? MsFileDemandMonitorSnapshot :
   C extends { type: "bitfs.purchase.tasks.list" } ? MsFileBitfsTaskSnapshot[] : C extends { type: "bitfs.funding.pools.list" } ? MsFileBitfsFundingPoolSnapshot[] :
   C extends { type: "supplier.probe" } ? MsFileSupplierProbeResult : C extends { type: "app-authorizations.list" } ? MsFileAppAuthorizationView[] :
-  C extends { type: "approvals.pending" } ? CoordinatorMsFileStateEvent["pendingApprovals"] : C extends { type: "bucket.get-block" } ? ArrayBuffer : null;
+  C extends { type: "approvals.pending" } ? CoordinatorMsFileStateEvent["pendingApprovals"] : C extends { type: "bucket.get-block" } ? ArrayBuffer :
+  C extends { type: "collector.config.get" } ? MsFileCollectorConfig : C extends { type: "collector.status" } ? MsFileCollectorStatus : null;
+  // 采集上报控制面结果：查询返回快照，变更返回 null。
+  // Collector control results: queries return snapshots, mutations return null.
+export type CoordinatorMsFileCollectorResultFor<C extends CoordinatorMsFileControl> =
+  C extends { type: "collector.config.get" } ? MsFileCollectorConfig :
+  C extends { type: "collector.status" } ? MsFileCollectorStatus : null;
 export type CoordinatorMsFileControlResult = MsFileServiceStatus | CoordinatorMsFileControlResultFor<CoordinatorMsFileControl> | undefined;
 export type CoordinatorMsFileDataResultFor<D extends CoordinatorMsFileData> = D extends { type: "stat" } ? MsFileStatResult : D extends { type: "read-seed" | "read-block" } ? MsFileReadResult : never;
 export type CoordinatorMsFileDataResult = CoordinatorMsFileDataResultFor<CoordinatorMsFileData> | undefined;

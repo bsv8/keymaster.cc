@@ -807,6 +807,38 @@ export type MsFileServiceStatus =
   | "ready"
   | "unavailable";
 
+/* ============== 采集上报 ============== */
+
+/** 采集提交配置；采集地址为空表示未配置。 */
+export interface MsFileCollectorConfig {
+  /** 采集服务地址，如 https://collector.example.com。Collector endpoint. */
+  endpoint: string;
+  /** 启用开关。Enabled flag. */
+  enabled: boolean;
+}
+
+/** 采集配置更新输入；字段缺省表示不改。 */
+export interface MsFileCollectorConfigInput {
+  endpoint?: string;
+  enabled?: boolean;
+}
+
+/** 采集提交状态摘要；设置页展示用。 */
+export interface MsFileCollectorStatus {
+  /** 是否启用。Whether collection is enabled. */
+  enabled: boolean;
+  /** 采集服务地址。Collector endpoint. */
+  endpoint: string;
+  /** 待提交记录数。Pending record count. */
+  pendingCount: number;
+  /** 是否有发送中批次。Whether a batch is in flight. */
+  inflight: boolean;
+  /** 最近成功提交的 UTC 毫秒时间戳，无则为 null。 */
+  lastSuccessAt: number | null;
+  /** 最近失败原因，无则为 null。 */
+  lastError: string | null;
+}
+
 /* ============== 超额确认 ============== */
 
 export type MsFileApprovalKind = MsFileContentKind;
@@ -893,6 +925,12 @@ export interface MsFileService {
   getBitfsBuyerSettings?(): Promise<MsFileBitfsBuyerSettings>;
   /** 保存当前 Key 的 BitFS 自动购买策略；不改变已开始的购买任务。 */
   updateBitfsBuyerSettings?(input: MsFileBitfsBuyerSettings): Promise<void>;
+  /** 读取采集提交配置（地址、启用开关）。 */
+  getCollectorConfig?(): Promise<MsFileCollectorConfig>;
+  /** 保存采集提交配置；首次启用会补齐已有完整文件。 */
+  updateCollectorConfig?(input: MsFileCollectorConfigInput): Promise<void>;
+  /** 读取采集提交状态摘要（待提交数、最近成功/失败）。 */
+  getCollectorStatus?(): Promise<MsFileCollectorStatus>;
   upsertSupplier(input: MsFileSupplierConfig): Promise<void>;
   deleteSupplier(supplierPublicKeyHex: string): Promise<void>;
   probeSupplier(supplierPublicKeyHex: string, signal?: AbortSignal): Promise<MsFileSupplierProbeResult>;

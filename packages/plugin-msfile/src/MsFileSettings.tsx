@@ -9,6 +9,8 @@ import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import type {
   MsFileAppAuthorizationView,
   MsFileBitfsBuyerSettings,
+  MsFileCollectorConfig,
+  MsFileCollectorStatus,
   MsFilePendingApprovalView,
   MsFileReadConcurrencySettings,
   MsFileSatoshiAmount,
@@ -160,6 +162,9 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
   const [supplierEditorOpen, setSupplierEditorOpen] = useState(false);
   const [probingKey, setProbingKey] = useState<string | null>(null);
   const [probeResult, setProbeResult] = useState<{ key: string; ok: boolean; detail: string } | null>(null);
+  const [collectorEndpoint, setCollectorEndpoint] = useState("");
+  const [collectorEnabled, setCollectorEnabled] = useState(false);
+  const [collectorStatus, setCollectorStatus] = useState<MsFileCollectorStatus | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -175,6 +180,16 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
         schedulerFloatingSeats: String(buyerSettings.schedulerFloatingSeats),
       });
       setAuthorizations(await service.listAppAuthorizations());
+      try {
+        const collectorConfig: MsFileCollectorConfig | undefined = await service.getCollectorConfig?.();
+        if (collectorConfig) {
+          setCollectorEndpoint(collectorConfig.endpoint);
+          setCollectorEnabled(collectorConfig.enabled);
+        }
+        setCollectorStatus(await service.getCollectorStatus?.() ?? null);
+      } catch {
+        // 旧代理缺采集能力时保持缺省展示，不污染已有设置加载。
+      }
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -223,6 +238,22 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
       await service.updateSellerSettings(candidate);
       await reload();
       setStatusMessage("卖方设置已保存。");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function saveCollectorSettings() {
+    setError(null);
+    setStatusMessage(null);
+    if (!service.updateCollectorConfig) {
+      setError("当前 MSFile 运行单元不支持采集上报。");
+      return;
+    }
+    try {
+      await service.updateCollectorConfig({ endpoint: collectorEndpoint.trim(), enabled: collectorEnabled });
+      await reload();
+      setStatusMessage("采集设置已保存。");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -881,6 +912,49 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
         <div className="msfile-settings__section-actions">
           <Button onClick={() => void saveBitfsBuyerSettings()}>
             {t("msfile.settings.bitfsBuyer.save", { defaultValue: "保存 BitFS 买方设置" })}
+          </Button>
+        </div>
+      </section>
+
+      <section className="msfile-settings__section" id="msfile-collector" aria-labelledby="msfile-collector-title">
+        <header className="msfile-settings__section-header">
+          <div>
+            <h2 id="msfile-collector-title">{t("msfile.settings.section.collector", { defaultValue: "采集上报" })}</h2>
+            <p>{t("msfile.settings.section.collector.desc", { defaultValue: "将自有导入文件的名称、介绍、长度与类型上报到采集服务；购买所得不上报。" })}</p>
+          </div>
+        </header>
+        <div className="msfile-settings__form-grid">
+          <label className="msfile-settings__checkbox is-wide">
+            <input
+              type="checkbox"
+              checked={collectorEnabled}
+              onChange={(event) => setCollectorEnabled(event.target.checked)}
+            />
+            <span>{t("msfile.settings.collector.enable", { defaultValue: "启用采集上报" })}</span>
+          </label>
+          <div className="msfile-settings__field is-wide">
+            <label htmlFor="msfile-collector-endpoint">{t("msfile.settings.collector.endpoint", { defaultValue: "采集服务地址" })}</label>
+            <input
+              id="msfile-collector-endpoint"
+              className="msfile-settings__control"
+              inputMode="url"
+              placeholder="https://collector.example.com"
+              value={collectorEndpoint}
+              onChange={(event) => setCollectorEndpoint(event.target.value)}
+            />
+          </div>
+          <div className="msfile-settings__field is-wide">
+            <strong>{t("msfile.settings.collector.status", { defaultValue: "提交状态" })}</strong>
+            <p>{collectorStatus
+              ? t("msfile.settings.collector.statusLine", {
+                defaultValue: `待提交 ${collectorStatus.pendingCount} 条${collectorStatus.inflight ? "（发送中）" : ""}${collectorStatus.lastSuccessAt ? `，最近成功 ${new Date(collectorStatus.lastSuccessAt).toLocaleString()}` : ""}${collectorStatus.lastError ? `，失败：${collectorStatus.lastError}` : ""}`,
+              })
+              : t("msfile.settings.collector.statusUnknown", { defaultValue: "暂无状态。" })}</p>
+          </div>
+        </div>
+        <div className="msfile-settings__section-actions">
+          <Button onClick={() => void saveCollectorSettings()}>
+            {t("msfile.settings.collector.save", { defaultValue: "保存采集设置" })}
           </Button>
         </div>
       </section>

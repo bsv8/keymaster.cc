@@ -49,6 +49,7 @@ import type {
   MsFileApprovalDecision,
   MsFileAppIdentityKey,
   MsFileAppPriceOverrideUpdate,
+  MsFileCollectorConfigInput,
   MsFileConnectAppContext,
   MsFileGlobalPriceSettings,
   MsFileReadConcurrencySettings,
@@ -306,7 +307,20 @@ export type CoordinatorMsFileControl =
    */
   | { type: "bucket.put-block"; seedHashHex: string; blockHashHex: string; bytes: ArrayBuffer }
   /** 桶内文件块读取：下载/预览的块也由 Coordinator 直读，避免端口并发上限。 */
-  | { type: "bucket.get-block"; seedHashHex: string; blockHashHex: string };
+  | { type: "bucket.get-block"; seedHashHex: string; blockHashHex: string }
+  /**
+   * 采集上报：自有导入文件完整入库后通知队列。购买/下载经
+   * commitPurchasedMsFileContent 入库的不通知，不采集暂存块与采购证据。
+   */
+  | { type: "collector.notify-stored"; seedHashHex: string; fileName: string; mediaType: string; fileSizeBytes: string }
+  /** 读取采集提交配置（地址、启用开关）。 */
+  | { type: "collector.config.get" }
+  /** 更新采集提交配置。 */
+  | { type: "collector.config.update"; input: MsFileCollectorConfigInput }
+  /** 读取采集提交状态摘要。 */
+  | { type: "collector.status" }
+  /** 设置指定 Hash 的介绍并重新入队。 */
+  | { type: "collector.description.set"; seedHashHex: string; description: string };
 
 /**
  * MSFile 数据面。grantId 缺失表示受信任内部插件调用（只使用全局额度）；

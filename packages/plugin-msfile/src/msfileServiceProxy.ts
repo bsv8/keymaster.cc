@@ -12,6 +12,9 @@ import type {
   MsFileAppAuthorizationView,
   MsFileAppIdentityKey,
   MsFileAppPriceOverrideUpdate,
+  MsFileCollectorConfig,
+  MsFileCollectorConfigInput,
+  MsFileCollectorStatus,
   MsFileConnectAppContext,
   MsFileErrorCode,
   MsFileGlobalPriceSettings,
@@ -258,6 +261,21 @@ export class MsFileServiceProxy implements MsFileService {
   /** 读取 Worker 持久化的 BitFS 自动购买策略。 */
   getBitfsBuyerSettings(): Promise<MsFileBitfsBuyerSettings> {
     return this.#control({ type: "settings.bitfsBuyer.get" });
+  }
+
+  /** 读取采集提交配置（地址、启用开关）。 */
+  getCollectorConfig(): Promise<MsFileCollectorConfig> {
+    return this.#control<MsFileCollectorConfig>({ type: "collector.config.get" });
+  }
+
+  /** 保存采集提交配置；首次启用会补齐已有完整文件。 */
+  updateCollectorConfig(input: MsFileCollectorConfigInput): Promise<void> {
+    return this.#control({ type: "collector.config.update", input }).then(() => undefined);
+  }
+
+  /** 读取采集提交状态摘要。 */
+  getCollectorStatus(): Promise<MsFileCollectorStatus> {
+    return this.#control<MsFileCollectorStatus>({ type: "collector.status" });
   }
 
   /** 保存 Worker 持久化的 BitFS 自动购买策略。 */
