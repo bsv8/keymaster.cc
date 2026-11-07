@@ -17,9 +17,9 @@ minimumReleaseAgeExclude:
   - keymaster-hold@0.1.0
   - keyhold@2.1.0
   - sat-subscription-protocol@0.3.0
-  - bitfs-protocol@0.5.1
+  - bitfs-protocol@0.6.0
   - webloom-framework@0.6.0
-  - keymaster-trade-scheduler@0.2.0
+  - keymaster-trade-scheduler@0.3.0
   - keymaster-utxo-manager@0.3.0
   - keymaster-utxo-manager@0.5.0
   - keymaster-utxo-manager@0.6.0
