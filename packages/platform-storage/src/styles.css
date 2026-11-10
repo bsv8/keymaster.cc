@@ -462,3 +462,42 @@
 .storage-activity__read, .storage-activity__write { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .2; }
 .storage-activity__read.is-active { background: #22c55e; opacity: 1; }
 .storage-activity__write.is-active { background: #f59e0b; opacity: 1; }
+
+/* S3 settings follow the wallet's card-based settings pages. */
+.km-connect-s3 { width: min(100%, 1120px); min-width: 0; display: flex; flex-direction: column; gap: 18px; }
+.km-connect-s3__status { display: flex; align-items: center; gap: 10px; color: var(--text-dim); font-size: 13px; line-height: 1.5; }
+.km-connect-s3__status p { margin: 0; }
+.km-connect-s3__status-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--text-dim); }
+.km-connect-s3__status.is-configured .km-connect-s3__status-dot { background: var(--primary); }
+.km-connect-s3__controls { display: flex; flex-direction: column; gap: 18px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.km-connect-s3__section { display: flex; flex-direction: column; gap: 18px; min-width: 0; padding: 20px; border: 1px solid var(--border); border-radius: calc(var(--radius) + 2px); background: var(--surface); box-shadow: 0 1px 1px color-mix(in srgb, var(--text) 4%, transparent); }
+.km-connect-s3__section-header h2 { margin: 0; font-size: 16px; }
+.km-connect-s3__section-header p { margin: 5px 0 0; color: var(--text-dim); font-size: 13px; line-height: 1.5; }
+.km-connect-s3__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.km-connect-s3__field { min-width: 0; margin: 0; }
+.km-connect-s3__field.is-wide { grid-column: 1 / -1; }
+.km-connect-s3__field .ui-field__label { color: var(--text-dim); font-size: 12px; font-weight: 600; }
+.km-connect-s3__field .ui-input { width: 100%; min-height: 40px; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); color: var(--text); font: inherit; }
+.km-connect-s3__field .ui-input:focus-visible { border-color: var(--primary); outline: 2px solid color-mix(in srgb, var(--primary) 28%, transparent); outline-offset: 1px; }
+.km-connect-s3__field .ui-input:disabled { cursor: not-allowed; opacity: .55; }
+.km-connect-s3__addressing { display: flex; align-items: flex-start; gap: 10px; padding-top: 16px; border-top: 1px solid var(--border); cursor: pointer; }
+.km-connect-s3__addressing input { width: 16px; height: 16px; margin: 2px 0 0; flex: 0 0 auto; accent-color: var(--primary); }
+.km-connect-s3__addressing > span { display: flex; flex-direction: column; gap: 5px; }
+.km-connect-s3__addressing strong { font-size: 13px; font-weight: 500; }
+.km-connect-s3__addressing span span { color: var(--text-dim); font-size: 12px; line-height: 1.5; }
+.km-connect-s3__actions, .km-connect-s3__primary-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.km-connect-s3__actions { justify-content: space-between; gap: 12px; }
+.km-connect-s3__message { margin: 0; padding: 12px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.km-connect-s3__notes { color: var(--text-dim); font-size: 12px; line-height: 1.6; }
+.km-connect-s3__notes summary { cursor: pointer; width: fit-content; font-size: 13px; }
+.km-connect-s3__notes p { margin: 10px 0 0; }
+@media (max-width: 640px) {
+  .km-connect-s3__section { padding: 16px; }
+  .km-connect-s3__grid { grid-template-columns: minmax(0, 1fr); }
+  .km-connect-s3__actions { align-items: stretch; flex-direction: column; }
+  .km-connect-s3__primary-actions { align-items: stretch; flex-direction: column; }
+}
+
+.km-connect-s3__message p { margin: 0; }
+.km-connect-s3__message p + p { margin-top: 8px; }
+.km-connect-s3__message code { overflow-wrap: anywhere; }

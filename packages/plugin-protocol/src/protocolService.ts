@@ -3254,6 +3254,11 @@ export class ProtocolServiceImpl implements ProtocolService {
     "connect.launch": rec => this.executeConnectLaunch(rec),
     "channel.publish": rec => this.executeChannelPublish(rec),
     "channel.subscription_set": rec => this.executeChannelSubscriptionSet(rec),
+    // 只会分派实际安装 SDK 已发布的方法；旧 SDK 不公开这些候选处理入口。
+    ...{
+      "storage.encrypted.put": (rec: RequestRecord) => this.executeStoragePut(rec, true),
+      "storage.encrypted.get": (rec: RequestRecord) => this.executeStorageGet(rec, true),
+    },
     "storage.list": rec => this.executeStorageList(rec),
     "storage.directory.create": rec => this.executeStorageDirectoryCreate(rec),
     "storage.directory.delete": rec => this.executeStorageDirectoryDelete(rec),
@@ -3336,17 +3341,19 @@ export class ProtocolServiceImpl implements ProtocolService {
     return client.deleteDirectory( { path: params.path, signal: rec.abortController?.signal });
   }
 
-  private async executeStoragePut(rec: RequestRecord): Promise<StoragePutResult> {
+  private async executeStoragePut(rec: RequestRecord, encrypted = false): Promise<StoragePutResult> {
     const params = rec.params as import("@keymaster/contracts").StoragePutParams;
     rec.payloadSize = params.content.bytes.byteLength;
     const client = await this.requireStorageContext(rec, params.walletPublicKeyHex);
-    return client.put( { path: params.path, content: params.content, contentType: params.contentType, overwrite: params.overwrite, signal: rec.abortController?.signal });
+    const input = { path: params.path, content: params.content, contentType: params.contentType, overwrite: params.overwrite, signal: rec.abortController?.signal };
+    return encrypted ? client.putEncrypted(input) : client.put(input);
   }
 
-  private async executeStorageGet(rec: RequestRecord): Promise<StorageGetResult> {
+  private async executeStorageGet(rec: RequestRecord, encrypted = false): Promise<StorageGetResult> {
     const params = rec.params as import("@keymaster/contracts").StorageGetParams;
     const client = await this.requireStorageContext(rec, params.walletPublicKeyHex);
-    return client.getRange( { path: params.path, offset: params.offset, length: params.length, ifMatch: params.ifMatch, signal: rec.abortController?.signal });
+    const input = { path: params.path, offset: params.offset, length: params.length, ifMatch: params.ifMatch, signal: rec.abortController?.signal };
+    return encrypted ? client.getEncrypted(input) : client.getRange(input);
   }
 
   private async executeStorageDelete(rec: RequestRecord): Promise<StorageDeleteResult> {

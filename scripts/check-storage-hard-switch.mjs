@@ -33,7 +33,7 @@ const productionRoots = /^(?:packages|src)\//u;
 const indexedDbAllowlist = new Set([
   "packages/platform-storage/src/local/indexedDbWalletStore.ts",
 ])
-// S3 体系已整体移除：任何生产代码引用 AWS SDK 都是回归。
+// S3 仅供 Connect 数据面，禁止进入钱包本地引擎与其他模块。
 const forbiddenS3Dependencies = [
   ["S3 SDK", /@aws-sdk\/client-s3/u],
   ["Smithy fetch handler", /@smithy\/fetch-http-handler/u],
@@ -127,7 +127,7 @@ for (const scanRoot of scanRoots) {
         violations.push(`${relativeFile}: 持久化配额探测只能由钱包存储引擎访问`);
       }
       for (const [label, pattern] of forbiddenS3Dependencies) {
-        if (pattern.test(executable)) violations.push(`${relativeFile}: 禁止重新引入${label}`);
+        if (pattern.test(executable) && !["packages/platform-storage/src/connect-s3/fileStore.ts", "packages/platform-storage/package.json"].includes(relativeFile)) violations.push(`${relativeFile}: 禁止在 Connect S3 数据面以外引入${label}`);
       }
     }
   }

@@ -1638,7 +1638,9 @@ export interface MethodParamsMap {
   "storage.directory.create": StorageDirectoryParams;
   "storage.directory.delete": StorageDirectoryParams;
   "storage.put": StoragePutParams;
+  "storage.encrypted.put": StoragePutParams;
   "storage.get": StorageGetParams;
+  "storage.encrypted.get": StorageGetParams;
   "storage.delete": StorageDeleteParams;
   "msfile.stat": MsFileStatParams;
   "msfile.seed.read": MsFileSeedReadParams;
@@ -1670,7 +1672,9 @@ export interface MethodResultMap {
   "storage.directory.create": StorageDirectoryResult;
   "storage.directory.delete": StorageDirectoryResult;
   "storage.put": StoragePutResult;
+  "storage.encrypted.put": StoragePutResult;
   "storage.get": StorageGetResult;
+  "storage.encrypted.get": StorageGetResult;
   "storage.delete": StorageDeleteResult;
   "msfile.stat": MsFileStatResult;
   "msfile.seed.read": MsFileReadResult;

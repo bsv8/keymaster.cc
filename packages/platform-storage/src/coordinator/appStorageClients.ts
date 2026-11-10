@@ -20,6 +20,8 @@ export function createAppStorageClients(controller: StorageRuntimeController, pr
         createDirectory: input => call(() => controller.createDirectory(grant, input)),
         deleteDirectory: input => call(() => controller.deleteDirectory(grant, input)),
         put: input => call(() => controller.put(grant, input)),
+        putEncrypted: input => call(() => controller.putEncrypted(grant, input)),
+        getEncrypted: input => call(() => controller.getEncrypted(grant, input)),
         getRange: input => call(() => controller.getRange(grant, input)),
         delete: input => call(() => controller.delete(grant, input)),
       };

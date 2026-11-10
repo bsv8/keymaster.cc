@@ -20,11 +20,14 @@ import {
   STORAGE_MAX_CURSORS_PER_SESSION,
   STORAGE_MAX_LIST_LIMIT,
 } from "@keymaster/contracts";
-import type { ModuleFileStore } from "@keymaster/contracts";
+import type { ConnectFileStore } from "../connect-s3/fileStore.js";
 import { StorageRuntimeError, storageErrorCode } from "./storageError.js";
 
 interface CursorRecord {
   walletPublicKeyHex: string;
+  sessionEpoch: string;
+  transportOrigin: string;
+  backend: object | undefined;
   appStorageName: string;
   prefix: string;
   after: string | undefined;
@@ -46,7 +49,7 @@ export interface StorageRuntimeControllerDeps {
   /** 当前钱包摘要（公钥、标签、世代）。 */
   summary(): Promise<Omit<StorageRuntimeSummary, "status" | "medium" | "persistence">>;
   /** 为一个已验证 Connect App 打开它的独立目录句柄。 */
-  openAppFileStore(ctx: OwnerAppStorageGrant): Promise<ModuleFileStore>;
+  openAppFileStore(ctx: OwnerAppStorageGrant, encrypted?: boolean): Promise<ConnectFileStore>;
   /** 中止一个 Connect 会话。 */
   abortSession(walletPublicKeyHex: string): Promise<void>;
   /** 浏览器持久化授权与配额。 */
@@ -137,145 +140,165 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
   }
 
   async list(ctx: OwnerAppStorageGrant, input: { prefix?: string; cursor?: string; limit?: number; signal?: AbortSignal }): Promise<StorageListResult> {
+    if (this.disposed) throw new StorageRuntimeError("storage_unavailable", "Storage controller is disposed");
     const store = await this.deps.openAppFileStore(ctx);
-    const prefix = normalizeAppPrefix(input.prefix);
-    const limit = assertListLimit(input.limit);
-    const absolutePrefix = `${prefix === "" ? "" : `${prefix}/`}`;
-    const after = input.cursor === undefined
-      ? undefined
-      : this.resolveCursor(ctx, input.cursor, prefix, limit);
-    const page = await store.list({
-      ...(absolutePrefix === "" ? {} : { prefix: absolutePrefix }),
-      ...(after === undefined ? {} : { cursor: after }),
-      limit,
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-    });
-    const directories = new Map<string, StorageListEntry["path"] extends string ? string : never>();
-    const files: StorageListEntry[] = [];
-    for (const entry of page.files) {
-      const relative = entry.path.startsWith(absolutePrefix) ? entry.path.slice(absolutePrefix.length) : entry.path;
-      // 目录 marker 是实现细节，不出现在 Connect 的文件列表里。
-      if (relative === ".dir") continue;
-      const slash = relative.indexOf("/");
-      if (slash > 0) {
-        const child = absolutePrefix + relative.slice(0, slash);
-        directories.set(child, child.slice(absolutePrefix.length));
-        continue;
-      }
-      files.push({
-        path: absolutePrefix + relative,
-        name: relative,
-        size: entry.size,
-        revision: entry.revision,
-        lastModified: entry.lastModified,
-      });
-    }
-    const nextCursor = page.nextCursor === undefined
-      ? undefined
-      : this.issueCursor(ctx, {
-        walletPublicKeyHex: ctx.walletPublicKeyHex,
-        appStorageName: ctx.appStorageName,
-        prefix,
-        after: page.nextCursor,
+    try {
+      const prefix = normalizeAppPrefix(input.prefix);
+      const limit = assertListLimit(input.limit);
+      const absolutePrefix = `${prefix === "" ? "" : `${prefix}/`}`;
+      const after = input.cursor === undefined
+        ? undefined
+        : this.resolveCursor(ctx, input.cursor, prefix, limit, store.bindingId);
+      const page = await store.list({
+        ...(absolutePrefix === "" ? {} : { prefix: absolutePrefix }),
+        ...(after === undefined ? {} : { cursor: after }),
         limit,
-        expiresAt: now(this.clock) + CURSOR_TTL_MS,
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
       });
-    return {
-      prefix: absolutePrefix,
-      parentPrefix: parentPrefix(prefix) === "" ? "" : `${parentPrefix(prefix)}/`,
-      directories: [...directories.values()].map((path) => ({ path, name: path.slice(absolutePrefix.length) })),
-      files,
-      ...(nextCursor === undefined ? {} : { nextCursor }),
-    };
+      const directories = new Map<string, StorageListEntry["path"] extends string ? string : never>();
+      const files: StorageListEntry[] = [];
+      for (const entry of page.files) {
+        const relative = entry.path.startsWith(absolutePrefix) ? entry.path.slice(absolutePrefix.length) : entry.path;
+        // 目录 marker 是实现细节，不出现在 Connect 的文件列表里。
+        if (relative === ".dir") continue;
+        const slash = relative.indexOf("/");
+        if (slash > 0) {
+          const child = absolutePrefix + relative.slice(0, slash);
+          directories.set(child, child.slice(absolutePrefix.length));
+          continue;
+        }
+        files.push({
+          path: absolutePrefix + relative,
+          name: relative,
+          size: entry.size,
+          revision: entry.revision,
+          lastModified: entry.lastModified,
+        });
+      }
+      const nextCursor = page.nextCursor === undefined
+        ? undefined
+        : this.issueCursor(ctx, {
+          walletPublicKeyHex: ctx.walletPublicKeyHex, sessionEpoch: ctx.sessionEpoch, transportOrigin: ctx.transportOrigin, backend: store.bindingId,
+          appStorageName: ctx.appStorageName,
+          prefix,
+          after: page.nextCursor,
+          limit,
+          expiresAt: now(this.clock) + CURSOR_TTL_MS,
+        });
+      return {
+        prefix: absolutePrefix,
+        parentPrefix: parentPrefix(prefix) === "" ? "" : `${parentPrefix(prefix)}/`,
+        directories: [...directories.values()].map((path) => ({ path, name: path.slice(absolutePrefix.length) })),
+        files,
+        ...(nextCursor === undefined ? {} : { nextCursor }),
+      };
+    } finally { store.close(); }
   }
 
-  async createDirectory(ctx: OwnerAppStorageGrant, input: { path: string; overwrite?: boolean }): Promise<StorageDirectoryResult> {
+  async createDirectory(ctx: OwnerAppStorageGrant, input: { path: string; overwrite?: boolean; signal?: AbortSignal }): Promise<StorageDirectoryResult> {
+    if (this.disposed) throw new StorageRuntimeError("storage_unavailable", "Storage controller is disposed");
     const store = await this.deps.openAppFileStore(ctx);
-    const prefix = normalizeAppPrefix(input.path);
-    if (prefix === "") throw new StorageRuntimeError("storage_invalid_path", "Directory path is required");
-    const marker = `${prefix}${DIRECTORY_MARKER_SUFFIX}`;
-    const existing = await store.get(marker);
-    if (existing && input.overwrite !== true) {
-      throw new StorageRuntimeError("storage_conflict", "Storage directory already exists");
-    }
-    await store.put(marker, new Uint8Array(0), { contentType: "application/x-directory" });
-    return { path: prefix, created: true };
+    try {
+      const prefix = normalizeAppPrefix(input.path);
+      if (prefix === "") throw new StorageRuntimeError("storage_invalid_path", "Directory path is required");
+      const marker = `${prefix}${DIRECTORY_MARKER_SUFFIX}`;
+      await store.put(marker, new Uint8Array(0), { contentType: "application/x-directory", signal: input.signal,
+        ...(input.overwrite === true ? {} : { ifNoneMatch: true as const }) });
+      return { path: prefix, created: true };
+    } finally { store.close(); }
   }
 
-  async deleteDirectory(ctx: OwnerAppStorageGrant, input: { path: string }): Promise<StorageDirectoryResult> {
+  async deleteDirectory(ctx: OwnerAppStorageGrant, input: { path: string; signal?: AbortSignal }): Promise<StorageDirectoryResult> {
+    if (this.disposed) throw new StorageRuntimeError("storage_unavailable", "Storage controller is disposed");
     const store = await this.deps.openAppFileStore(ctx);
-    const prefix = normalizeAppPrefix(input.path);
-    if (prefix === "") throw new StorageRuntimeError("storage_invalid_path", "Directory path is required");
-    const page = await store.list({ prefix: `${prefix}/`, limit: MAX_CONNECT_LIST_LIMIT });
-    if (page.files.length > 0) {
-      throw new StorageRuntimeError("storage_conflict", "Storage directory is not empty");
-    }
-    await store.delete(`${prefix}${DIRECTORY_MARKER_SUFFIX}`);
-    return { path: prefix, deleted: true };
+    try {
+      const prefix = normalizeAppPrefix(input.path);
+      if (prefix === "") throw new StorageRuntimeError("storage_invalid_path", "Directory path is required");
+      const page = await store.list({ prefix: `${prefix}/`, limit: MAX_CONNECT_LIST_LIMIT, signal: input.signal });
+      if (page.files.some(file => file.path !== `${prefix}${DIRECTORY_MARKER_SUFFIX}`) || page.nextCursor !== undefined) {
+        throw new StorageRuntimeError("storage_conflict", "Storage directory is not empty");
+      }
+      await store.delete(`${prefix}${DIRECTORY_MARKER_SUFFIX}`, { signal: input.signal });
+      return { path: prefix, deleted: true };
+    } finally { store.close(); }
   }
 
-  async put(ctx: OwnerAppStorageGrant, input: {
+  put(...args: Parameters<StorageRuntimeControllerContract["put"]>): Promise<StoragePutResult> { return this.putFile(...args); }
+  putEncrypted(...args: Parameters<StorageRuntimeControllerContract["put"]>): Promise<StoragePutResult> { return this.putFile(...args, true); }
+  getRange(...args: Parameters<StorageRuntimeControllerContract["getRange"]>): Promise<StorageGetResult> { return this.getFile(...args); }
+  getEncrypted(...args: Parameters<StorageRuntimeControllerContract["getRange"]>): Promise<StorageGetResult> { return this.getFile(...args, true); }
+
+  private async putFile(ctx: OwnerAppStorageGrant, input: {
     path: string;
     content: { $type: "binary"; bytes: ArrayBuffer; mime?: string };
     contentType?: string;
     overwrite?: boolean;
-  }): Promise<StoragePutResult> {
-    const store = await this.deps.openAppFileStore(ctx);
-    const path = normalizeAppPrefix(input.path);
-    if (path === "" || path.endsWith(DIRECTORY_MARKER_SUFFIX)) {
-      throw new StorageRuntimeError("storage_invalid_path", "Storage file path is required");
-    }
-    const bytes = new Uint8Array(input.content.bytes);
-    if (input.overwrite === false) {
-      const existing = await store.get(path);
-      if (existing) throw new StorageRuntimeError("storage_conflict", "Storage object already exists");
-    }
-    const written = await store.put(path, bytes, {
-      contentType: input.contentType ?? input.content.mime ?? "application/octet-stream",
-    });
-    return {
-      path,
-      size: bytes.byteLength,
-      revision: written.revision,
-      updatedAt: Date.parse(written.lastModified) || now(this.clock),
-    };
+    signal?: AbortSignal;
+  }, encrypted = false): Promise<StoragePutResult> {
+    if (this.disposed) throw new StorageRuntimeError("storage_unavailable", "Storage controller is disposed");
+    const store = await this.deps.openAppFileStore(ctx, encrypted);
+    try {
+      const path = normalizeAppPrefix(input.path);
+      if (path === "" || path.endsWith(DIRECTORY_MARKER_SUFFIX)) {
+        throw new StorageRuntimeError("storage_invalid_path", "Storage file path is required");
+      }
+      const bytes = new Uint8Array(input.content.bytes);
+      const written = await store.put(path, bytes, {
+        contentType: input.contentType ?? input.content.mime ?? "application/octet-stream",
+        signal: input.signal, ...(input.overwrite === false ? { ifNoneMatch: true as const } : {}),
+      });
+      return {
+        path,
+        size: bytes.byteLength,
+        revision: written.revision,
+        updatedAt: Date.parse(written.lastModified) || now(this.clock),
+      };
+    } finally { store.close(); }
   }
 
-  async getRange(ctx: OwnerAppStorageGrant, input: {
+  private async getFile(ctx: OwnerAppStorageGrant, input: {
     path: string;
     offset?: number;
     length?: number;
     ifMatch?: string;
-  }): Promise<StorageGetResult> {
-    const store = await this.deps.openAppFileStore(ctx);
-    const path = normalizeAppPrefix(input.path);
-    const object = await store.get(path);
-    if (!object) throw new StorageRuntimeError("storage_not_found", "Storage object was not found");
-    if (input.ifMatch !== undefined && input.ifMatch !== object.revision) {
-      throw new StorageRuntimeError("storage_conflict", "Storage object changed");
-    }
-    const totalSize = object.bytes.byteLength;
-    const offset = Math.min(Math.max(0, input.offset ?? 0), totalSize);
-    const end = input.length === undefined ? totalSize : Math.min(totalSize, offset + Math.max(0, input.length));
-    const bytes = object.bytes.slice(offset, end);
-    return {
-      path,
-      // 拷贝成独立 ArrayBuffer：transfer 到页面时不能与 Worker 内部缓冲共享。
-      content: { $type: "binary", bytes: bytes.slice().buffer },
-      offset,
-      totalSize,
-      eof: end >= totalSize,
-      revision: object.revision,
-      lastModified: object.lastModified,
-    };
+    signal?: AbortSignal;
+  }, encrypted = false): Promise<StorageGetResult> {
+    if (this.disposed) throw new StorageRuntimeError("storage_unavailable", "Storage controller is disposed");
+    const store = await this.deps.openAppFileStore(ctx, encrypted);
+    try {
+      const path = normalizeAppPrefix(input.path);
+      const object = await store.get(path, { ifRevision: input.ifMatch, signal: input.signal });
+      if (!object) throw new StorageRuntimeError("storage_not_found", "Storage object was not found");
+      if (input.ifMatch !== undefined && input.ifMatch !== object.revision) {
+        throw new StorageRuntimeError("storage_conflict", "Storage object changed");
+      }
+      const totalSize = object.bytes.byteLength;
+      const offset = Math.min(Math.max(0, input.offset ?? 0), totalSize);
+      const end = input.length === undefined ? totalSize : Math.min(totalSize, offset + Math.max(0, input.length));
+      const bytes = object.bytes.slice(offset, end);
+      return {
+        path,
+        // 拷贝成独立 ArrayBuffer：transfer 到页面时不能与 Worker 内部缓冲共享。
+        content: { $type: "binary", bytes: bytes.slice().buffer },
+        ...(object.contentType === undefined ? {} : { contentType: object.contentType }),
+        offset,
+        totalSize,
+        eof: end >= totalSize,
+        revision: object.revision,
+        lastModified: object.lastModified,
+      };
+    } finally { store.close(); }
   }
 
-  async delete(ctx: OwnerAppStorageGrant, input: { path: string }): Promise<StorageDeleteResult> {
+  async delete(ctx: OwnerAppStorageGrant, input: { path: string; signal?: AbortSignal }): Promise<StorageDeleteResult> {
+    if (this.disposed) throw new StorageRuntimeError("storage_unavailable", "Storage controller is disposed");
     const store = await this.deps.openAppFileStore(ctx);
-    const path = normalizeAppPrefix(input.path);
-    if (path === "") throw new StorageRuntimeError("storage_invalid_path", "Storage file path is required");
-    await store.delete(path);
-    return { path, deleted: true, updatedAt: now(this.clock) };
+    try {
+      const path = normalizeAppPrefix(input.path);
+      if (path === "") throw new StorageRuntimeError("storage_invalid_path", "Storage file path is required");
+      await store.delete(path, { signal: input.signal });
+      return { path, deleted: true, updatedAt: now(this.clock) };
+    } finally { store.close(); }
   }
 
   dispose(): void {
@@ -301,18 +324,19 @@ export class StorageRuntimeControllerImpl implements StorageRuntimeControllerCon
         .sort((left, right) => left[1].expiresAt - right[1].expiresAt)[0];
       if (oldest) this.cursors.delete(oldest[0]);
     }
-    const key = `${record.walletPublicKeyHex}|${record.appStorageName}|${record.after ?? ""}|${record.prefix}`;
+    const key = id(this.clock);
     this.cursors.set(key, record);
-    return `${id(this.clock)}.${key}`;
+    return key;
   }
 
-  private resolveCursor(ctx: OwnerAppStorageGrant, cursor: string, prefix: string, limit: number): string {
-    const separator = cursor.indexOf(".");
-    const key = separator < 0 ? cursor : cursor.slice(separator + 1);
-    const record = this.cursors.get(key);
+  private resolveCursor(ctx: OwnerAppStorageGrant, cursor: string, prefix: string, limit: number, backend: object | undefined): string {
+    const record = this.cursors.get(cursor);
     if (!record
       || record.walletPublicKeyHex !== ctx.walletPublicKeyHex
+      || record.sessionEpoch !== ctx.sessionEpoch
+      || record.transportOrigin !== ctx.transportOrigin
       || record.appStorageName !== ctx.appStorageName
+      || record.backend !== backend
       || record.prefix !== prefix
       || record.limit !== limit
       || record.expiresAt <= now(this.clock)) {

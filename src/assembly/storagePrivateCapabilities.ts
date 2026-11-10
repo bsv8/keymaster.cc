@@ -1,5 +1,5 @@
 import { definePrivateCapability } from "webloom-framework/advanced";
-import { STORAGE_PRIVATE_BROWSE_CAPABILITY } from "@keymaster/platform-storage/assembly";
+import { STORAGE_PRIVATE_BROWSE_CAPABILITY, STORAGE_PRIVATE_S3_CAPABILITY } from "@keymaster/platform-storage/assembly";
 
 declare const __KEYMASTER_STORAGE_PRIVATE_GRANT__: string;
 
@@ -10,18 +10,16 @@ declare const __KEYMASTER_STORAGE_PRIVATE_GRANT__: string;
 export function storagePrivateCapabilities() {
   // Node 单元测试不启动真实浏览器装配，也不签发生产授权。
   if (typeof __KEYMASTER_STORAGE_PRIVATE_GRANT__ === "undefined") return [];
-  return [definePrivateCapability({
-    capability: STORAGE_PRIVATE_BROWSE_CAPABILITY,
+  return [STORAGE_PRIVATE_BROWSE_CAPABILITY, STORAGE_PRIVATE_S3_CAPABILITY].map(capability => definePrivateCapability({
+    capability,
     pluginId: "storage",
     unitId: "storage.window",
     grantId: __KEYMASTER_STORAGE_PRIVATE_GRANT__,
-  })];
+  }));
 }
 
 /** 私有客户端也明确绑定来源槽位，不在多个 Worker 中扫描第一个同名服务。 */
 export function storagePrivateSlotBindings(slotId: string) {
-  const capability = STORAGE_PRIVATE_BROWSE_CAPABILITY;
-  return {
-    [`storage\0storage.window\0${capability.kind}\0${capability.id}\0${capability.version}`]: slotId,
-  };
+  return Object.fromEntries([STORAGE_PRIVATE_BROWSE_CAPABILITY, STORAGE_PRIVATE_S3_CAPABILITY].map(capability =>
+    [`storage\0storage.window\0${capability.kind}\0${capability.id}\0${capability.version}`, slotId]));
 }

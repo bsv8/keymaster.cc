@@ -125,15 +125,20 @@ export class StorageRpcProxy implements StorageRuntimeController {
     }), [], input.signal);
   }
 
-  put(ctx: OwnerAppStorageGrant, input: {
+  put(...args: Parameters<StorageRuntimeController["put"]>): Promise<StoragePutResult> { return this.putData(...args); }
+  putEncrypted(...args: Parameters<StorageRuntimeController["put"]>): Promise<StoragePutResult> { return this.putData(...args, true); }
+  getRange(...args: Parameters<StorageRuntimeController["getRange"]>): Promise<StorageGetResult> { return this.getData(...args); }
+  getEncrypted(...args: Parameters<StorageRuntimeController["getRange"]>): Promise<StorageGetResult> { return this.getData(...args, true); }
+
+  private putData(ctx: OwnerAppStorageGrant, input: {
     path: string;
     content: { $type: "binary"; bytes: ArrayBuffer; mime?: string };
     contentType?: string;
     overwrite?: boolean;
     signal?: AbortSignal;
-  }): Promise<StoragePutResult> {
+  }, encrypted = false): Promise<StoragePutResult> {
     return this.dataFor<StoragePutResult>(ctx, (grantId) => ({
-      type: "put",
+      type: encrypted ? "put-encrypted" : "put",
       grantId,
       input: {
         path: input.path,
@@ -144,15 +149,15 @@ export class StorageRpcProxy implements StorageRuntimeController {
     }), [input.content.bytes], input.signal);
   }
 
-  getRange(ctx: OwnerAppStorageGrant, input: {
+  private getData(ctx: OwnerAppStorageGrant, input: {
     path: string;
     offset?: number;
     length?: number;
     ifMatch?: string;
     signal?: AbortSignal;
-  }): Promise<StorageGetResult> {
+  }, encrypted = false): Promise<StorageGetResult> {
     return this.dataFor<StorageGetResult>(ctx, (grantId) => ({
-      type: "get-range",
+      type: encrypted ? "get-encrypted" : "get-range",
       grantId,
       input: {
         path: input.path,

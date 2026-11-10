@@ -1,4 +1,4 @@
-import { STORAGE_FILE_CLIENTS_CAPABILITY, STORAGE_KV_CLIENTS_CAPABILITY } from "@keymaster/contracts";
+import { PROTOCOL_METHODS, STORAGE_FILE_CLIENTS_CAPABILITY, STORAGE_KV_CLIENTS_CAPABILITY } from "@keymaster/contracts";
 import { COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY, COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY } from "@keymaster/contracts";
 import { APP_STORAGE_CLIENTS_CAPABILITY } from "@keymaster/contracts";
 import { createAppStorageClients } from "./coordinator/appStorageClients.js";
@@ -7,18 +7,8 @@ import { StorageUnavailableGuard } from "./ui/StorageUnavailableGuard.js";
 import { createElement } from "react";
 import { StoragePrivateProvider } from "./ui/StoragePrivateContext.js";
 import { I18N_SERVICE_CAPABILITY, BUSINESS_REGISTRY_CAPABILITY, PAGE_UI_REGISTRY_CAPABILITY, PAGE_UI_RENDERER_CAPABILITY } from "@keymaster/contracts";
-// Storage 平台插件 manifest（单钱包本地存储）。
-//
-// 相对旧实现，这里没有任何存储配置面：没有桶目录、没有 Provider 选择、
-// 没有 endpoint/region/凭据表单、没有条件写能力探测、没有 multipart 上传。
-// setup 负责：
-//   1. 把 Worker 的存储控制 RPC 包成页面侧受限控制器并注册为 capability；
-//   2. 把只读浏览 RPC 包成私有代理，由本实例的页面闭包持有；
-//   3. 通过 page 注册浏览页与既有持久存储授权条；
-//   4. 注册只读的 storage.status 资源。
-//
-// 钱包生命周期（创建/导入/解锁/锁定/改密/改名/导出 KeyHold/重置）的权威实现
-// 在 Worker 侧的 WalletLifecycleService 里，页面只通过控制 RPC 驱动它。
+// Storage 拥有钱包本地存储、只读浏览及 Connect 专用 S3 文件能力。
+// 两种介质的数据面分离，私有 S3 配置仅向本插件 UI 开放。
 import type {
   I18nPluginResources,
   PluginManifest,
@@ -36,6 +26,8 @@ import { StorageRpcProxy } from "./coordinator/storageRpcProxy.js";
 import { STORAGE_PRIVATE_BROWSE_CAPABILITY } from "./coordinator/storageBrowsePrivateCapability.js";
 import { StorageBrowseRpcProxy } from "./coordinator/storageBrowseRpcProxy.js";
 import { IndexedDbPersistenceBar } from "./ui/IndexedDbPersistenceBar.js";
+import { STORAGE_PRIVATE_S3_CAPABILITY } from "./connect-s3/protocol.js";
+import { ConnectS3SettingsPage } from "./ui/ConnectS3SettingsPage.js";
 import { StorageBrowsePage } from "./ui/StorageBrowsePage.js";
 
 export const STORAGE_PLATFORM_PLUGIN_ID = "storage";
@@ -51,14 +43,51 @@ export const storageResources: I18nPluginResources = {
   namespace: "common",
   resources: {
     en: {
+      "storage.s3.testing": "Testing connection…",
+      "storage.s3.failed.configuration": "Configuration is invalid. Nothing was saved; correct the fields and retry.",
+      "storage.s3.failed.list": "S3 listing failed. Nothing was saved; check the endpoint, credentials, permissions and CORS, then retry.",
+      "storage.s3.failed.write": "S3 test upload failed. Nothing was saved; correct the configuration and retry.",
+      "storage.s3.failed.read": "S3 test read failed. Nothing was saved; check read permissions and CORS, then retry.",
+      "storage.s3.failed.verify": "S3 test content or version did not match. Nothing was saved; check the service and CORS exposed headers, then retry.",
+      "storage.s3.failed.delete": "S3 test cleanup failed. Nothing was saved; check delete permissions and retry.",
+      "storage.s3.failed.cancelled": "The S3 check was cancelled or timed out. Nothing was saved; retry when the connection is available.",
+      "storage.s3.cleanupFailed": "A test object may remain in the bucket. Remove this object manually:",
+      "storage.s3.httpStatus": "HTTP status: {{status}}",
+      "storage.s3.cleared": "Configuration removed. Remote App files were not deleted.",
+      "storage.s3.pageTitle": "Storage",
+      "storage.s3.locationTitle": "Storage location",
+      "storage.s3.locationHint": "Define where App files are stored and how the bucket is addressed.",
+      "storage.s3.authenticationTitle": "Access credentials",
+      "storage.s3.addressingHint": "Address the bucket through the endpoint path instead of a bucket subdomain.",
+      "storage.s3.connectionNotes": "Connection and data notes",
+      "storage.s3.dataHint": "Wallet keys and internal data stay in this browser. App objects are stored as submitted, without wallet encryption.",
+      "storage.s3.title": "Storage",
+      "storage.s3.description": "Define the storage location and connection settings for external App files.",
+      "storage.s3.configured": "S3 is configured. All connected Apps use their isolated S3 directories.",
+      "storage.s3.missing": "S3 is not configured. App storage is unavailable.",
+      "storage.s3.endpoint": "HTTPS endpoint",
+      "storage.s3.region": "Region",
+      "storage.s3.bucket": "Bucket",
+      "storage.s3.accessKeyId": "Access Key ID",
+      "storage.s3.secretAccessKey": "Secret Access Key",
+      "storage.s3.sessionToken": "Session token (optional)",
+      "storage.s3.forcePathStyle": "Use path-style bucket URLs (Path-Style)",
+      "storage.s3.credentialsHint": "Credentials are encrypted locally with Vault after the connection check passes. Re-enter credentials to save changes; failed checks keep your inputs for correction.",
+      "storage.s3.save": "Save",
+      "storage.s3.clear": "Remove configuration",
+      "storage.s3.probe": "Test saved connection",
+      "storage.s3.probeOk": "Saved connection passed listing, test upload, read verification and cleanup.",
+      "storage.s3.saved": "S3 connection check passed. Configuration saved.",
+      "storage.s3.failed": "Operation failed. Check the configuration, wallet session, network, S3 permissions and CORS, then retry.",
+      "storage.s3.corsHint": "Allow the wallet origin in bucket CORS, with GET, PUT, DELETE, HEAD and the required request headers. Expose ETag and Last-Modified. Removing configuration does not delete remote files. Local App files are not migrated.",
       "storage.status.title": "Local storage",
       "storage.activity.title": "Storage activity", "storage.activity.read": "Reading", "storage.activity.write": "Writing",
       "storage.activity.reading": "Storage reading", "storage.activity.writing": "Storage writing",
       "storage.activity.readIdle": "Storage reads idle", "storage.activity.writeIdle": "Storage writes idle",
-      "storage.browse.business.label": "Storage browser",
-      "storage.browse.crumb.browse": "Storage",
+      "storage.browse.business.label": "Local storage",
+      "storage.browse.crumb.browse": "Local storage",
       "storage.browse.crumb.settings": "Settings",
-      "storage.browse.title": "Storage browser",
+      "storage.browse.title": "Local storage",
       "storage.browse.description": "Read-only view of the files this wallet stores in this browser.",
       "storage.browse.refresh": "Refresh",
       "storage.browse.loading": "Loading…",
@@ -132,14 +161,51 @@ export const storageResources: I18nPluginResources = {
       "storage.browse.failed": "The request failed.",
     },
     "zh-CN": {
+      "storage.s3.testing": "正在测试连接…",
+      "storage.s3.failed.configuration": "配置格式不正确，未保存。请修改后重新保存。",
+      "storage.s3.failed.list": "S3 列举失败，未保存。请检查端点、凭据、权限和 CORS 后重试。",
+      "storage.s3.failed.write": "S3 测试写入失败，未保存。请修改配置后重试。",
+      "storage.s3.failed.read": "S3 测试读取失败，未保存。请检查读取权限和 CORS 后重试。",
+      "storage.s3.failed.verify": "S3 测试内容或版本核对失败，未保存。请检查服务和 CORS 暴露头后重试。",
+      "storage.s3.failed.delete": "S3 测试对象清理失败，未保存。请检查删除权限后重试。",
+      "storage.s3.failed.cancelled": "S3 检查已取消或超时，未保存。请恢复连接后重试。",
+      "storage.s3.cleanupFailed": "桶中可能残留测试对象，请人工清理此对象：",
+      "storage.s3.httpStatus": "HTTP 状态：{{status}}",
+      "storage.s3.cleared": "已移除配置，未删除远端 App 文件。",
+      "storage.s3.pageTitle": "存储",
+      "storage.s3.locationTitle": "存储位置",
+      "storage.s3.locationHint": "定义外部 App 文件的存储位置和访问方式。",
+      "storage.s3.authenticationTitle": "访问凭据",
+      "storage.s3.addressingHint": "通过端点路径访问桶，而非使用桶名子域名。",
+      "storage.s3.connectionNotes": "连接与数据说明",
+      "storage.s3.dataHint": "钱包密钥和内部数据仍在本浏览器。App 对象按提交内容存储，钱包不额外加密文件内容。",
+      "storage.s3.title": "存储",
+      "storage.s3.description": "定义外部 App 文件的存储位置和连接方式。",
+      "storage.s3.configured": "已配置 S3，所有连接的 App 使用各自隔离的 S3 目录。",
+      "storage.s3.missing": "尚未配置 S3，App 存储不可用。",
+      "storage.s3.endpoint": "HTTPS 端点",
+      "storage.s3.region": "区域（Region）",
+      "storage.s3.bucket": "桶名称（Bucket）",
+      "storage.s3.accessKeyId": "Access Key ID",
+      "storage.s3.secretAccessKey": "Secret Access Key",
+      "storage.s3.sessionToken": "会话令牌（可选）",
+      "storage.s3.forcePathStyle": "使用路径式桶地址（Path-Style）",
+      "storage.s3.credentialsHint": "连接检查通过后，凭据由 Vault 加密保存在本机。修改已保存配置需重新输入凭据；检查失败会保留本页输入供修改。",
+      "storage.s3.save": "保存",
+      "storage.s3.clear": "移除配置",
+      "storage.s3.probe": "测试已保存连接",
+      "storage.s3.probeOk": "已保存连接的列举、测试写入、读回核对及清理均已通过。",
+      "storage.s3.saved": "S3 连接检查通过，配置已保存。",
+      "storage.s3.failed": "操作失败，请检查配置、钱包连接、网络、S3 权限与 CORS 后重试。",
+      "storage.s3.corsHint": "桶 CORS 需允许钱包来源、GET / PUT / DELETE / HEAD 及所需请求头，并暴露 ETag、Last-Modified。移除配置不删除远端文件；旧 App 本地文件不会迁移。",
       "storage.status.title": "本地存储",
       "storage.activity.title": "存储活动", "storage.activity.read": "读取", "storage.activity.write": "写入",
       "storage.activity.reading": "正在读取存储", "storage.activity.writing": "正在写入存储",
       "storage.activity.readIdle": "存储读取空闲", "storage.activity.writeIdle": "存储写入空闲",
-      "storage.browse.business.label": "存储浏览器",
-      "storage.browse.crumb.browse": "存储",
+      "storage.browse.business.label": "本地存储",
+      "storage.browse.crumb.browse": "本地存储",
       "storage.browse.crumb.settings": "设置",
-      "storage.browse.title": "存储浏览器",
+      "storage.browse.title": "本地存储",
       "storage.browse.description": "只读查看本钱包保存在当前浏览器中的文件。",
       "storage.browse.refresh": "刷新",
       "storage.browse.loading": "加载中…",
@@ -223,7 +289,7 @@ const storagePlatformPluginDefinition = {
   units: [{
     id: STORAGE_BROWSE_UNIT_ID,
     runtime: "window-main" as const,
-    connect: { providerMethods: ["storage.list", "storage.directory.create", "storage.directory.delete", "storage.put", "storage.get", "storage.delete"] },
+    connect: { providerMethods: PROTOCOL_METHODS.filter(method => method.startsWith("storage.")) },
     scopeKind: "storage" as const,
     provides: [
       capabilityDescriptor(STORAGE_RUNTIME_CONTROLLER_CAPABILITY), APP_STORAGE_CLIENTS_CAPABILITY,
@@ -242,7 +308,7 @@ const storagePlatformPluginDefinition = {
     runtime: "shared-worker" as const,
     scopeKind: "storage" as const,
     provides: [COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY, COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY, STORAGE_FILE_CLIENTS_CAPABILITY, STORAGE_KV_CLIENTS_CAPABILITY],
-    privateProvides: [STORAGE_PRIVATE_BROWSE_CAPABILITY],
+    privateProvides: [STORAGE_PRIVATE_BROWSE_CAPABILITY, STORAGE_PRIVATE_S3_CAPABILITY],
   }],
   i18n: storageResources,
   async setup(ctx) {
@@ -267,8 +333,12 @@ const storagePlatformPluginDefinition = {
     const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope);
     pages.view.register({ kind: "frame", slot: "storage-guard", id: "storage.guard", label: "Storage",
       render: location => createElement(StorageUnavailableGuard, { children: location.children }) });
+    pages.view.register({ id: "storage.connect-s3", kind: "page", path: "/settings/connect-storage",
+      label: { key: "storage.s3.title", fallback: "Storage" },
+      render: () => createElement(ConnectS3SettingsPage, { client: () => ctx.privateCapability(STORAGE_PRIVATE_S3_CAPABILITY), epoch: () => coordinator.getSessionEpoch() }),
+    });
     pages.view.register({ id: "storage.browse", kind: "page", path: "/settings/storage",
-      label: { key: "storage.browse.business.label", fallback: "Storage browser" },
+      label: { key: "storage.browse.business.label", fallback: "Local storage" },
       render: () => privateContents(StorageBrowsePage),
     });
     pages.view.register({ id: "storage.persistence", kind: "header", slot: "above-header", order: 0,
@@ -285,8 +355,12 @@ const storagePlatformPluginDefinition = {
     // feature id 是两套身份；feature id 用 settings.* 前缀与其它设置项保持一致。
     const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     business.registerFeature(ctx.pluginId, "settings", {
+      id: "settings.connect-s3", label: { key: "storage.s3.title", fallback: "Storage" }, order: 61, icon: "HardDrive",
+      entry: { path: "/settings/connect-storage", routeId: "storage.connect-s3", visibleWhen: ({ unlocked }) => unlocked },
+    });
+    business.registerFeature(ctx.pluginId, "settings", {
       id: "settings.storagebrowse",
-      label: { key: "storage.browse.business.label", fallback: "Storage browser" },
+      label: { key: "storage.browse.business.label", fallback: "Local storage" },
       order: 60,
       icon: "HardDrive",
       entry: {

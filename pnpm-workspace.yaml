@@ -8,6 +8,7 @@ allowBuilds:
   esbuild: true
 
 overrides:
+  "@aws-sdk/xml-builder": 3.972.19
   bitcoin-libp2p: 0.3.2
 
 minimumReleaseAgeExclude:

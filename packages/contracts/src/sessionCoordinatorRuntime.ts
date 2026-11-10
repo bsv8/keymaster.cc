@@ -57,7 +57,7 @@ export type CoordinatorStorageControlResultFor<C extends CoordinatorStorageContr
 export type CoordinatorStorageControlResult = CoordinatorStorageControlResultFor<CoordinatorStorageControl> | null | undefined;
 export type CoordinatorStorageDataResultFor<D extends CoordinatorStorageData> =
   D extends { type: "list" } ? StorageListResult : D extends { type: "create-directory" | "delete-directory" } ? StorageDirectoryResult :
-  D extends { type: "put" } ? StoragePutResult : D extends { type: "get-range" } ? StorageGetResult : D extends { type: "delete" } ? StorageDeleteResult :
+  D extends { type: "put" | "put-encrypted" } ? StoragePutResult : D extends { type: "get-range" | "get-encrypted" } ? StorageGetResult : D extends { type: "delete" } ? StorageDeleteResult :
   D extends { type: "batch" } ? { paths: string[]; committedAt: string } : never;
 export type CoordinatorStorageDataResult = CoordinatorStorageDataResultFor<CoordinatorStorageData> | undefined;
 export type CoordinatorMsFileControlResultFor<C extends CoordinatorMsFileControl> =
@@ -194,9 +194,9 @@ const fileEntry = (value: unknown) => fields(value, "path size revision lastModi
 const fileObject = (value: unknown) => fields(value, "path revision lastModified", { bytes: copy });
 const batchResult = (value: unknown) => fields(value, "committedAt", { paths: copy });
 const storageList = (value: unknown) => fields(value, "prefix parentPrefix markerPath nextCursor", {
-  directories: each(value => fields(value, "path name")), files: each(value => fields(value, "path name size etag lastModified")),
+  directories: each(value => fields(value, "path name")), files: each(value => fields(value, "path name size revision lastModified")),
 });
-const storageGet = (value: unknown) => fields(value, "path contentType offset totalSize eof etag lastModified", { content: binary });
+const storageGet = (value: unknown) => fields(value, "path contentType offset totalSize eof revision lastModified", { content: binary });
 function storageGrant(value: unknown): Row {
   const common = "bsvNetwork publicKeyHex storageGrantId walletGeneration runGeneration sessionEpoch authority model schemaVersion";
   return (value as StorageBindingGrant).authority === "third-party-app"
@@ -221,9 +221,11 @@ function storageControlResult(control: CoordinatorStorageControl, value: unknown
 function storageDataResult(data: CoordinatorStorageData, value: unknown): unknown {
   switch (data.type) {
     case "list": return storageList(value);
+    case "get-encrypted":
     case "get-range": return storageGet(value);
     case "batch": return batchResult(value);
-    case "put": return fields(value, "path size updatedAt etag");
+    case "put-encrypted":
+    case "put": return fields(value, "path size updatedAt revision");
     case "delete": return fields(value, "path deleted updatedAt");
     default: return fields(value, "path created deleted");
   }

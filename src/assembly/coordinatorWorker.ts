@@ -43,7 +43,7 @@ import { createKeyValueMaintenance } from "@keymaster/platform-storage/coordinat
 
 import { BUILTIN_PLUGIN_DEFINITIONS } from "@keymaster/contracts";
 import { createWalletStateSource } from "@keymaster/plugin-vault/coordinator";
-import { STORAGE_PRIVATE_BROWSE_CAPABILITY, type StorageBrowsePrivateCommand } from "@keymaster/platform-storage/assembly";
+import { STORAGE_PRIVATE_BROWSE_CAPABILITY, STORAGE_PRIVATE_S3_CAPABILITY, type StorageBrowsePrivateCommand } from "@keymaster/platform-storage/assembly";
 import { storagePrivateCapabilities } from "../assembly/storagePrivateCapabilities.js";
 // src/keymasterSessionCoordinator.worker.ts
 // Keymaster Session Coordinator SharedWorker
@@ -298,6 +298,10 @@ const vaultWalletWorker = createVaultWalletWorker({
 });
 
 const storageWorkerRoot = createStorageWorkerRoot({
+  secrets: {
+    seal: async (scope, plaintext) => await vaultWorkerOperations.executeVaultOperation({ type: "sealLocalSecret", scope, plaintext }) as import("@keymaster/contracts").VaultSealedSecret,
+    open: async (scope, sealed) => await vaultWorkerOperations.executeVaultOperation({ type: "openLocalSecret", scope, sealed }) as Uint8Array,
+  },
   session: () => ({ walletGeneration: coordinatorState.walletGeneration, sessionEpoch: coordinatorState.sessionEpoch, runGeneration: coordinatorState.runGeneration, vaultStatus: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.activePublicKeyHex }),
   wallet: {
     store: () => vaultWalletWorker.walletStore,
@@ -2952,7 +2956,7 @@ function coordinatorSessionClosed(peerId: string, binding: CoordinatorSessionBin
 }
 
 const COORDINATOR_SESSION_EXPOSURES = [
-  STORAGE_PRIVATE_BROWSE_CAPABILITY,
+  STORAGE_PRIVATE_BROWSE_CAPABILITY, STORAGE_PRIVATE_S3_CAPABILITY,
   COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
   COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY,
   COORDINATOR_CRYPTO_RPC_CAPABILITY,
@@ -3007,7 +3011,7 @@ function reconcileCoordinatorSessionExposure(state: CoordinatorPeerState): void 
   try {
     state.serviceExposure = state.peer.exposeGroup(COORDINATOR_SESSION_EXPOSURES.map((capability) => ({
       capability,
-      options: capability === STORAGE_PRIVATE_BROWSE_CAPABILITY
+      options: (capability === STORAGE_PRIVATE_BROWSE_CAPABILITY || capability === STORAGE_PRIVATE_S3_CAPABILITY)
         ? {} // 私有票据由框架按连接与消费实例签发，不使用公共会话 grant。
         : { grantId: coordinatorSessionGrantId(state, capability.id) },
     })));
@@ -3111,7 +3115,7 @@ async function openCoordinatorSession(
         const serviceExposure = coordinatorSessionServicesReady()
           ? state.peer.exposeGroup(COORDINATOR_SESSION_EXPOSURES.map((capability) => ({
             capability,
-            options: capability === STORAGE_PRIVATE_BROWSE_CAPABILITY
+            options: (capability === STORAGE_PRIVATE_BROWSE_CAPABILITY || capability === STORAGE_PRIVATE_S3_CAPABILITY)
               ? {} // 私有票据由框架按连接与消费实例签发，不使用公共会话 grant。
               : { grantId: coordinatorSessionGrantId(state, capability.id) },
           })))
@@ -3300,7 +3304,14 @@ const coordinatorRuntimePlugins = [
     owner: handleCoordinatorOwnerStorageRpc, platform: handleCoordinatorPlatformStorageRpc,
     authorize: call => requireCoordinatorSessionPeer(call).peer.peerId,
     browse: processRequest,
+    s3: (request, signal) => withCoordinatorFinalIoLease(request.type === "get" ? "read" : "write", signal, async () => {
+      if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch || signal.aborted) throw storageUnavailableError("S3 settings session expired");
+      const result = await storageWorkerRoot.s3Runtime().execute(request, signal);
+      if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch || signal.aborted) throw storageUnavailableError("S3 settings session expired");
+      return result;
+    }, { auditOperation: "storage.connect-s3.settings" }),
     revokeBrowse: () => storageWorkerRequests.storageBrowseCoordinator.revokeAll(),
+    revokeS3: () => storageWorkerRoot.disposeS3(),
   }),
   createWindowP2pWorkerPlugin({
     bridge: { get available() { return windowP2pWorkerRuntime.windowP2pExecutorLease?.transportReady === true; }, request: windowP2pWorkerRuntime.requestWindowP2pExecutorOperation },
@@ -3360,7 +3371,7 @@ export function coordinatorHostOptions() {
       COORDINATOR_TOPIC_STREAM_CAPABILITY,
     ],
     peerExposureAllowlist: [
-      STORAGE_PRIVATE_BROWSE_CAPABILITY,
+      STORAGE_PRIVATE_BROWSE_CAPABILITY, STORAGE_PRIVATE_S3_CAPABILITY,
       COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
       COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY,
       COORDINATOR_CRYPTO_RPC_CAPABILITY,

@@ -1,16 +1,18 @@
 import {
   type NetworkIdentity, type StorageRuntimeController, type StorageRuntimeControllerStatus,
   type CoordinatorStorageStateEvent, type CoordinatorAuthorityRecovery, type WalletColdStartSnapshot,
-  deriveThirdPartyStorageModuleId,
+  CENTRAL_STORAGE_DECLARATIONS, traceDev,
 } from "@keymaster/contracts";
 import type { WalletStore } from "@keymaster/contracts/storage-internal";
 import {
   createPlatformRootStore, createStorageRuntimeController, createWalletStoreActivity,
   StorageRuntimeError, type StoragePrivateRootStore,
 } from "./coordinator/index.js";
+import { createConnectS3Runtime, type ConnectS3Secrets } from "./connect-s3/runtime.js";
 import { removeRetiredPluginIntent } from "./assembly.js";
 
 export interface StorageWorkerRootPorts {
+  secrets: ConnectS3Secrets;
   session(): { walletGeneration: string; sessionEpoch: string; runGeneration: string; vaultStatus: string; activePublicKeyHex?: string };
   wallet: { store(): WalletStore | undefined; identity(): Promise<NetworkIdentity>; label(): Promise<string | undefined>; coldStart(): WalletColdStartSnapshot | undefined; lifecycleReady(): boolean };
   artifacts(root: StoragePrivateRootStore): Promise<{ commit(): void; dispose(): void }>;
@@ -27,6 +29,7 @@ export interface StorageWorkerRootPorts {
 
 /** 平台根、健康状态和控制器属于 Storage；候选根准备成功前不可见。 */
 export function createStorageWorkerRoot(ports: StorageWorkerRootPorts) {
+  let s3: ReturnType<typeof createConnectS3Runtime> | undefined;
   let root: StoragePrivateRootStore | undefined;
   let token: object | undefined;
   let ready = false;
@@ -80,8 +83,13 @@ export function createStorageWorkerRoot(ports: StorageWorkerRootPorts) {
     const previousRoot = root;
     const previousToken = token;
     try {
+      s3?.dispose(); s3 = undefined;
       root = candidate; token = candidateToken;
       artifacts.commit();
+      // 解锁/重绑会安装新的根；旧控制器的文件网关仍捕获旧根，不能继续复用。
+      (controller as StorageRuntimeController & { dispose?(): void } | undefined)?.dispose?.();
+      controller = undefined;
+      traceDev("storage.root", "binding.installed", () => ({ replaced: Boolean(previousRoot) }));
       ready = true;
       ports.lifecycle.maintenance();
     } catch (error) {
@@ -120,10 +128,13 @@ export function createStorageWorkerRoot(ports: StorageWorkerRootPorts) {
             ...(session.walletGeneration ? { label: await ports.wallet.label(), walletGeneration: session.walletGeneration } : {}),
           };
         },
-        openAppFileStore: async context => boundRoot.openModuleFileStore({
-          declaration: { moduleId: deriveThirdPartyStorageModuleId(context.appIdentity.publisherPublicKeyHex, context.appIdentity.appId), purposeId: "", authority: "third-party-app", model: "files", schemaVersion: 1 },
-          appStorageName: context.appStorageName, verifiedAppIdentity: { publisherPublicKeyHex: context.appIdentity.publisherPublicKeyHex, appId: context.appIdentity.appId },
-        }),
+        openAppFileStore: (context, encrypted) => {
+          const live = ports.session();
+          if (root !== boundRoot || live.vaultStatus !== "unlocked" || context.publicKeyHex !== live.activePublicKeyHex
+            || context.walletGeneration !== live.walletGeneration || context.sessionEpoch !== live.sessionEpoch || context.runGeneration !== live.runGeneration)
+            throw new StorageRuntimeError("storage_unavailable", "Connect file request belongs to an expired wallet session");
+          return s3Runtime().open(context, encrypted);
+        },
         abortSession: async id => ports.abortSession(id),
         persistence: async () => await ports.wallet.store()?.persistence() ?? { persisted: false },
         status,
@@ -149,7 +160,27 @@ export function createStorageWorkerRoot(ports: StorageWorkerRootPorts) {
     try { await pending; } catch (error) { failed = true; emit(); throw error; }
     finally { if (recovering === pending) recovering = undefined; }
   }
+  function s3Runtime() {
+    if (s3) return s3;
+    const boundRoot = root;
+    const boundToken = token;
+    const session = { ...ports.session() };
+    if (!boundRoot || !boundToken) throw new StorageRuntimeError("storage_unavailable", "Storage root is unavailable");
+    s3 = createConnectS3Runtime({
+      identity: boundRoot.identity,
+      settings: () => boundRoot.openPlatformFileStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.connectS3Settings }),
+      secrets: ports.secrets,
+      assertLive() {
+        const live = ports.session();
+        if (root !== boundRoot || token !== boundToken || live.vaultStatus !== "unlocked" || live.sessionEpoch !== session.sessionEpoch || live.walletGeneration !== session.walletGeneration || live.runGeneration !== session.runGeneration)
+          throw new StorageRuntimeError("storage_unavailable", "S3 configuration requires the current unlocked wallet");
+      },
+    });
+    return s3;
+  }
+  function disposeS3() { s3?.dispose(); s3 = undefined; }
   async function release() {
+    disposeS3();
     ports.revokeRequests();
     (controller as StorageRuntimeController & { dispose?(): void } | undefined)?.dispose?.();
     controller = undefined; ready = false;
@@ -169,7 +200,7 @@ export function createStorageWorkerRoot(ports: StorageWorkerRootPorts) {
       || Boolean(error && typeof error === "object" && "recoveryRequired" in error && error.recoveryRequired) || failed;
   }
   return {
-    install, ensure, recover, release, assertAvailable, failure, isFailure, status, emit, activity,
+    install, ensure, recover, release, s3Runtime, disposeS3, assertAvailable, failure, isFailure, status, emit, activity,
     get root() { return root; }, set root(value) { root = value; },
     get token() { return token; }, set token(value) { token = value; },
     get ready() { return ready; }, set ready(value) { ready = value; },

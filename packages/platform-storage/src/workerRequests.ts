@@ -235,7 +235,7 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
   }
 
   async function executeStorageData(request: Extract<CoordinatorClientRequest, { kind: "storage.data" }>, controller: AbortController, actualClientId: string): Promise<CoordinatorResponse> {
-    const operation = request.data.type === "list" || request.data.type === "get-range" ? "read" : "write";
+    const operation = request.data.type === "list" || request.data.type === "get-range" || request.data.type === "get-encrypted" ? "read" : "write";
     return ports.io.run(operation, controller.signal, () => executeStorageDataUnsafe(request, controller, actualClientId), { auditOperation: "storage.connect.data" });
   }
 

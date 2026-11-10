@@ -14,6 +14,7 @@ export type FinalIoAuditOperation =
   | "service.owner-generation.read"
   | "service.crypto.sign"
   | "storage.control"
+  | "storage.connect-s3.settings"
   | "storage.platform.data"
   | "storage.owner.data"
   /** Worker 内置模块文件根（model: "files"）的最终 I/O 边界。 */

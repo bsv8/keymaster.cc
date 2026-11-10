@@ -4,8 +4,8 @@ import type { NetworkIdentity as importNetworkIdentity } from "./networkIdentity
 // 这里保留 Connect 的文件 wire shape；它与 platform-storage 的本地引擎、
 // K-V 引擎和受限句柄契约分离，Connect 调用方不能接触物理路径或数据库。
 //
-// S3 multipart 已随远程存储体系一起移除：纯本地介质没有分片续传语义，
-// 一次性 put 已经是完整写入。大文件调用方改用分多次 put 或自带业务传输。
+// 外部文件数据面只使用 S3；钱包本地介质不作为回退。
+// 当前 wire 保留整对象 put，不提供 multipart 或断点续传。
 
 import type { BinaryField } from "./protocol.js";
 import type { AppIdentitySnapshot } from "./appIdentity.js";

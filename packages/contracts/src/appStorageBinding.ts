@@ -17,6 +17,8 @@ export interface AppStorageClient {
   createDirectory(input: Parameters<StorageRuntimeController["createDirectory"]>[1]): ReturnType<StorageRuntimeController["createDirectory"]>;
   deleteDirectory(input: Parameters<StorageRuntimeController["deleteDirectory"]>[1]): ReturnType<StorageRuntimeController["deleteDirectory"]>;
   put(input: Parameters<StorageRuntimeController["put"]>[1]): ReturnType<StorageRuntimeController["put"]>;
+  putEncrypted(input: Parameters<StorageRuntimeController["put"]>[1]): ReturnType<StorageRuntimeController["put"]>;
+  getEncrypted(input: Parameters<StorageRuntimeController["getRange"]>[1]): ReturnType<StorageRuntimeController["getRange"]>;
   getRange(input: Parameters<StorageRuntimeController["getRange"]>[1]): ReturnType<StorageRuntimeController["getRange"]>;
   delete(input: Parameters<StorageRuntimeController["delete"]>[1]): ReturnType<StorageRuntimeController["delete"]>;
 }

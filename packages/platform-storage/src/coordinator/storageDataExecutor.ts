@@ -157,12 +157,14 @@ async function executeStorageDataUnsafe(request: Extract<CoordinatorClientReques
       case "list": value = await service.list(ctx, { ...data.input, signal }); break;
       case "create-directory": value = await service.createDirectory(ctx, { ...data.input, signal }); break;
       case "delete-directory": value = await service.deleteDirectory(ctx, { ...data.input, signal }); break;
+      case "put-encrypted": value = await service.putEncrypted(ctx, { ...data.input, signal }); break;
+      case "get-encrypted": value = await service.getEncrypted(ctx, { ...data.input, signal }); break;
       case "put": value = await service.put(ctx, { ...data.input, signal }); break;
       case "get-range": value = await service.getRange(ctx, { ...data.input, signal }); break;
       case "delete": value = await service.delete(ctx, { ...data.input, signal }); break;
     }
-    // 本地 IndexedDB 事务可能忽略 AbortSignal 并在锁定/换绑之后才 resolve。
-    // 结果跨过会话或绑定栅栏时一律丢弃，不提交也不返回给页面。
+    // 远端请求可能已被接受后才发生锁定或换绑；取消不能回滚远端写入。
+    // 结果跨过会话或绑定栅栏时一律丢弃，不返回给页面。
     if (controller.signal.aborted || capturedSessionEpoch !== deps.sessionEpoch()) {
       const error = new Error("Storage request became stale during owner transition") as Error & { code?: string };
       error.code = "storage_unavailable";

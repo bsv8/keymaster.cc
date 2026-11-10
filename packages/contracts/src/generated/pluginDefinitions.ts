@@ -256,6 +256,11 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             "kind": "rpc",
             "id": "storage.private.browse",
             "version": "1"
+          },
+          {
+            "kind": "rpc",
+            "id": "storage.private.connect-s3",
+            "version": "1"
           }
         ],
         "dependencies": [],

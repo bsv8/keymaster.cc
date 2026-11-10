@@ -228,8 +228,8 @@ export type CoordinatorStorageData =
   | { type: "list"; grantId: string; input: { prefix?: string; cursor?: string; limit?: number } }
   | { type: "create-directory"; grantId: string; input: { path: string; overwrite?: boolean } }
   | { type: "delete-directory"; grantId: string; input: { path: string } }
-  | { type: "put"; grantId: string; input: { path: string; content: { $type: "binary"; bytes: ArrayBuffer; mime?: string }; contentType?: string; overwrite?: boolean } }
-  | { type: "get-range"; grantId: string; input: { path: string; offset?: number; length?: number; ifMatch?: string } }
+  | { type: "put" | "put-encrypted"; grantId: string; input: { path: string; content: { $type: "binary"; bytes: ArrayBuffer; mime?: string }; contentType?: string; overwrite?: boolean } }
+  | { type: "get-range" | "get-encrypted"; grantId: string; input: { path: string; offset?: number; length?: number; ifMatch?: string } }
   | { type: "delete"; grantId: string; input: { path: string } }
   /** 同一事务内原子提交多个文件操作。 */
   | { type: "batch"; grantId: string; input: { operations: Array<{ type: "put"; path: string; content: { $type: "binary"; bytes: ArrayBuffer; mime?: string }; contentType?: string } | { type: "delete"; path: string }>; conditions?: Array<{ path: string; ifMatch?: string }> } };
