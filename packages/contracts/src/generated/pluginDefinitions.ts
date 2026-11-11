@@ -219,6 +219,8 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             "storage.directory.delete",
             "storage.put",
             "storage.get",
+            "storage.encrypted.put",
+            "storage.encrypted.get",
             "storage.delete"
           ]
         },
@@ -379,8 +381,7 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             "identity.get",
             "intent.sign",
             "cipher.encrypt",
-            "cipher.decrypt",
-            "payment.channel.register"
+            "cipher.decrypt"
           ]
         },
         "permissions": [],
@@ -1565,7 +1566,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
         ],
         "connect": {
           "providerMethods": [
-            "p2pkh.transfer",
             "payment.pay",
             "payment.status",
             "feepool.prepare",

@@ -6,7 +6,7 @@ import type { MessageBus } from "webloom-framework";
 import type { P2pkhLocalTransaction, P2pkhTransferInput, P2pkhTransferPreview, P2pkhTransferResult, ReadyKeyIdentity } from "./p2pkhContracts.js";
 import { assetIdToNetwork, makeResourceId } from "./p2pkhContracts.js";
 import { buildUnsigned, estimateFeeSats, estimateSignedSize } from "keymaster-utxo-manager";
-import { buildPaymentTemplate, p2pkScriptFromPublicKey, publisherMatchesPaymentScript } from "./p2pkhPaymentTemplate.js";
+import { buildPaymentTemplate } from "./p2pkhPaymentTemplate.js";
 import type { P2pkhStateRepositoryHandle } from "./storage/p2pkhStateRepository.js";
 import { calcTxidFromRawTxHex, rawTxHexByteLength, signP2pkhTx } from "./p2pkhSigner.js";
 import { p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
@@ -82,59 +82,76 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       const payment = input.payment;
       const sendAll = input.sendAll === true;
       if (payment && sendAll) throw new Error("Connect payment cannot use sendAll");
-      const recipientScriptHex = payment
-        ? payment.recipient.type === "p2pkh" ? p2pkhAddressToScriptHex(payment.recipient.address, network) : p2pkScriptFromPublicKey(payment.recipient.publicKeyHex)
-        : undefined;
-      const recipientOwnership = payment && recipientScriptHex
-        ? publisherMatchesPaymentScript(recipientScriptHex, payment.publisherPublicKeyHex) ? "app-publisher" as const : "third-party" as const
-        : "unknown" as const;
+      if (payment && (!Array.isArray(payment.outputs) || payment.outputs.length === 0)) throw new Error("Connect payment outputs must be non-empty");
+      if (payment && (input.recipientAddress !== undefined || input.amountSatoshis !== undefined)) throw new Error("Connect payment must only carry outputs");
+      // 校验业务输出：金额非负安全整数，脚本偶数长度 hex（允许空脚本零长度）。
+      const businessOutputs = payment ? payment.outputs.map((row, index) => {
+        if (typeof row.amount !== "number" || !Number.isSafeInteger(row.amount) || row.amount < 0) throw new Error(`Connect payment outputs[${index}].amount must be a non-negative safe integer`);
+        if (typeof row.script !== "string" || row.script.length % 2 !== 0 || (row.script.length > 0 && !/^[0-9a-fA-F]+$/u.test(row.script))) throw new Error(`Connect payment outputs[${index}].script must be even-length hex`);
+        return { scriptHex: row.script.toLowerCase(), valueSats: String(row.amount) };
+      }) : [];
       const { address: changeAddress } = await activeCrypto.deriveP2pkhAddress();
-      const businessScriptHex = recipientScriptHex ?? p2pkhAddressToScriptHex(input.recipientAddress!, network);
+      if (!payment) {
+        if (typeof input.recipientAddress !== "string" || !input.recipientAddress) throw new Error("recipientAddress is required");
+        if (!sendAll) {
+          if (typeof input.amountSatoshis !== "number" || !Number.isSafeInteger(input.amountSatoshis) || input.amountSatoshis <= 0) throw new Error("amountSatoshis must be a positive safe integer");
+        }
+      }
+      const businessScriptHexes = payment ? businessOutputs.map(row => row.scriptHex) : [p2pkhAddressToScriptHex(input.recipientAddress!, network)];
+      const businessTotalSats = payment ? businessOutputs.reduce((sum, row) => sum + BigInt(row.valueSats), 0n) : sendAll ? 0n : BigInt(input.amountSatoshis!);
+      const outputScriptLengths = businessScriptHexes.map(hex => hex.length / 2);
       const submissionId = crypto.randomUUID();
       const requested = sendAll
         ? {kind: "all", allocation: await manager.requestAll({ownerPublicKeyHex: owner.publicKeyHex, resource})} as const
         : {kind: "amount", allocation: await manager.request({ownerPublicKeyHex: owner.publicKeyHex, resource,
-          amountSats: String(input.amountSatoshis), feeRateSatPerKb: String(input.feeRateSatoshisPerKb!),
-          outputScriptLengths: [businessScriptHex.length / 2]})} as const;
+          amountSats: String(businessTotalSats), feeRateSatPerKb: String(input.feeRateSatoshisPerKb!),
+          outputScriptLengths})} as const;
       const funding = requested.allocation;
       // Every error after freezing, including fee calculation and construction,
       // must release this request's ID while the transaction is still unsigned.
       try {
         const selected = funding.selectedInputs.map(row => row.utxo);
+        const feeRate = BigInt(input.feeRateSatoshisPerKb!);
         const feeSats = requested.kind === "all"
-          ? estimateFeeSats(BigInt(input.feeRateSatoshisPerKb!), estimateSignedSize(selected.length, [businessScriptHex.length / 2]))
+          ? estimateFeeSats(feeRate, estimateSignedSize(selected.length, outputScriptLengths))
           : BigInt(requested.allocation.feeSats);
-        const businessSats = requested.kind === "all" ? BigInt(funding.totalInSats) - feeSats : BigInt(requested.allocation.businessSats);
+        const businessSats = requested.kind === "all" ? BigInt(funding.totalInSats) - feeSats : businessTotalSats;
         if (requested.kind === "all" && businessSats <= 0n) throw new Error("Insufficient balance");
+        // 余额必须覆盖业务总额 + 矿工费；manager 已按全部脚本实际长度计费。
+        const totalNeeded = businessSats + feeSats;
+        const totalIn = BigInt(funding.totalInSats);
+        if (totalIn < totalNeeded) throw new Error("Insufficient balance");
         const changeSats = requested.kind === "all" ? 0n : BigInt(requested.allocation.changeSats);
         const changeScriptHex = changeSats > 0n ? p2pkhAddressToScriptHex(changeAddress, network) : null;
-        const outputs = buildPaymentTemplate({paymentType: payment?.paymentType ?? "p2pkh", businessAmountSats: String(businessSats),
-          businessScriptHex, changeAmountSats: String(changeSats), changeScriptHex});
+        const outputs = payment
+          ? buildPaymentTemplate({ businessOutputs, changeAmountSats: String(changeSats), changeScriptHex })
+          : buildPaymentTemplate({ businessOutputs: [{ scriptHex: businessScriptHexes[0]!, valueSats: String(businessSats) }], changeAmountSats: String(changeSats), changeScriptHex });
         const unsignedTxHex = buildUnsigned({inputs: selected.map(row => ({txid: row.txid, vout: row.vout})),
           outputs: outputs.map(row => ({scriptHex: row.scriptHex, value: row.valueSats}))});
         const reservation = {...funding, businessSats: String(businessSats), feeSats: String(feeSats), changeSats: String(changeSats),
-          unsignedTxHex, outputs, businessScriptHex, changeScriptHex, planDigest: JSON.stringify(outputs)};
+          unsignedTxHex, outputs, changeScriptHex, planDigest: JSON.stringify(outputs)};
         const business = Number(businessSats), fee = Number(feeSats), change = Number(changeSats);
+        const businessTotal = payment ? businessOutputs.map(row => ({ value: Number(row.valueSats), scriptHex: row.scriptHex })) : [{ value: business, scriptHex: businessScriptHexes[0]! }];
         deps.submissions.prepare({ownerPublicKeyHex: owner.publicKeyHex, network, submissionId, allocationId: reservation.allocationId,
-          paymentId: payment?.paymentId, unsignedTxHex, inputs: selected, outputs: [{value: business, scriptHex: businessScriptHex}],
+          paymentId: payment?.paymentId, unsignedTxHex, inputs: selected, outputs: businessTotal,
           feeSatoshis: fee, feeRateSatoshisPerKb: input.feeRateSatoshisPerKb!, changeSatoshis: change, ...(change > 0 ? {changeAddress} : {})});
         const allocation = { requestedSatoshis: business, feeReserveSatoshis: fee, selected, totalInputSatoshis: Number(reservation.totalInSats), changeSatoshis: change };
         const paymentPreview = payment ? {
           paymentId: payment.paymentId, clientRequestId: payment.clientRequestId, planDigest: reservation.planDigest!,
-          paymentType: payment.paymentType, businessKind: payment.businessKind, appId: payment.appId, appName: payment.appName,
-          origin: payment.origin, publisherPublicKeyHex: payment.publisherPublicKeyHex, recipientOwnership,
-          recipientLabel: payment.recipient.type === "p2pkh" ? payment.recipient.address : payment.recipient.publicKeyHex,
-          businessScriptHex: reservation.businessScriptHex, businessAmountSats: reservation.businessSats, changeAmountSats: reservation.changeSats,
+          appId: payment.appId, appName: payment.appName,
+          origin: payment.origin, publisherPublicKeyHex: payment.publisherPublicKeyHex,
+          businessTotalSats: String(businessTotalSats),
+          changeAmountSats: reservation.changeSats,
           feeSats: reservation.feeSats, changeScriptHex: reservation.changeScriptHex, outputs: reservation.outputs,
         } satisfies import("@keymaster/contracts").P2pkhConnectPaymentPreview : undefined;
         return remember({
           ...(input.paymentContext ? { paymentContext: { ...input.paymentContext } } : {}),
           assetId: input.assetId, network, ownerPublicKeyHex: owner.publicKeyHex,
-          recipientAddress: payment ? payment.recipient.type === "p2pkh" ? payment.recipient.address : "" : input.recipientAddress!,
+          recipientAddress: payment ? "" : input.recipientAddress!,
           ...(paymentPreview ? { payment: paymentPreview } : {}), amountSatoshis: business, feeRateSatoshisPerKb: input.feeRateSatoshisPerKb!,
           allocation, changeAddress,
           outputs: payment ? reservation.outputs.map(row => ({ scriptHex: row.scriptHex, value: Number(row.valueSats), role: row.role,
-            ...(row.role === "change" ? { address: changeAddress } : payment.recipient.type === "p2pkh" ? { address: payment.recipient.address } : {}),
+            ...(row.role === "change" ? { address: changeAddress } : {}),
           })) : [{ address: input.recipientAddress!, value: business }, ...(change > 0 ? [{ address: changeAddress, value: change }] : [])],
           estimatedFeeSatoshis: fee, serializedSizeBytes: rawTxHexByteLength(reservation.unsignedTxHex) + selected.length * 108,
           txid: "", rawTxHex: reservation.unsignedTxHex, managerAllocationId: reservation.allocationId, previewId: crypto.randomUUID(), sendAll,

@@ -18,6 +18,7 @@
 import { useState } from "react";
 import { Button, PageHeader } from "@keymaster/ui";
 import { formatShortPublicKey } from "@keymaster/contracts";
+import { interpretLockingScript } from "keymaster-connect/script";
 import type {
   P2pkhTransferAssetId,
   ProtocolCommandFeedState,
@@ -495,17 +496,75 @@ function ConfirmCardBody({
 export function PaymentPreviewDetails({ command }: { command: ProtocolCommandRecord }) {
   const payment = command.paymentPreview;
   if (!payment) return null;
+  const businessTotal = (() => {
+    try { return BigInt((payment as { businessTotalSats?: string }).businessTotalSats ?? "0").toString(); }
+    catch { return "0"; }
+  })();
+  const fee = (() => {
+    try { return BigInt(payment.feeSats).toString(); } catch { return payment.feeSats; }
+  })();
+  const change = (() => {
+    try { return BigInt(payment.changeAmountSats).toString(); } catch { return payment.changeAmountSats; }
+  })();
+  const actualSpend = (() => {
+    try { return (BigInt(businessTotal) + BigInt(payment.feeSats)).toString(); } catch { return businessTotal; }
+  })();
+  const outputs = Array.isArray((payment as { outputs?: unknown }).outputs) ? (payment as { outputs: Array<{ vout: number; scriptHex: string; valueSats: string; role: string }> }).outputs : [];
   return <section className="application-payment-preview"><h3>冻结付款预览</h3><dl>
     <dt>App / 实际来源</dt><dd>{payment.appName}<br /><code>{payment.origin}</code></dd>
     <dt>发行人公钥</dt><dd><code>{payment.publisherPublicKeyHex}</code></dd>
-    <dt>付款用途 / 类型</dt><dd>{payment.businessKind} / {payment.paymentType}</dd>
-    <dt>收款方</dt><dd><code>{payment.recipientLabel}</code></dd>
-    <dt>收款归属</dt><dd>{payment.recipientOwnership === "app-publisher" ? "发行人收款" : "第三方 / 未知收款方"}</dd>
-    <dt>业务金额</dt><dd>{payment.businessAmountSats} sat</dd>
-    <dt>矿工费</dt><dd>{payment.feeSats} sat</dd>
-    <dt>自有找零</dt><dd>{payment.changeAmountSats} sat</dd>
-    <dt>钱包实际花费</dt><dd>{((payment.businessScriptHex === payment.changeScriptHex ? 0n : BigInt(payment.businessAmountSats)) + BigInt(payment.feeSats)).toString()} sat（含费）</dd>
-  </dl><p className="application-warning">身份已验证不等于交易安全，请核对实际收款方、用途与花费。</p></section>;
+    <dt>业务输出总额</dt><dd>{businessTotal} sat</dd>
+    <dt>矿工费</dt><dd>{fee} sat</dd>
+    <dt>自有找零</dt><dd>{change} sat</dd>
+    <dt>钱包实际支出</dt><dd>{actualSpend} sat（含费）</dd>
+    <dt>批准绑定已保存计划</dt><dd><code>{(payment as { planDigest?: string }).planDigest ?? ""}</code></dd>
+  </dl>
+    <div className="application-payment-outputs">
+      <h4>业务输出（按 App 顺序）</h4>
+      <ol>
+        {outputs.map((output, index) => (
+          <li key={output.vout ?? index} data-output-role={output.role} data-output-index={output.vout ?? index}>
+            <PaymentOutputExplanation output={output} />
+          </li>
+        ))}
+      </ol>
+    </div>
+  <p className="application-warning">身份已验证不等于交易安全，请核对实际收款方、用途与花费。批准仅提交已冻结的原计划，不重新选币。</p></section>;
+}
+
+function PaymentOutputExplanation({ output }: { output: { vout: number; scriptHex: string; valueSats: string; role: string } }) {
+  const scriptHex = (output.scriptHex ?? "").toLowerCase();
+  const amountText = `${output.valueSats} sat`;
+  const interpreted = interpretOutputScript(scriptHex, output.valueSats);
+  return <div className="application-payment-output">
+    <div><strong>#{output.vout}</strong> [{output.role}] [{interpreted.kindLabel}] {amountText}</div>
+    <div>{interpreted.detail}</div>
+    <div>完整脚本 <code>{scriptHex}</code></div>
+  </div>;
+}
+
+function interpretOutputScript(scriptHex: string, valueSats: string): { kindLabel: string; detail: React.ReactNode } {
+  const amountText = `${valueSats} sat`;
+  const amountSats = Number(valueSats);
+  const amount = Number.isSafeInteger(amountSats) ? amountSats : 0;
+  try {
+    const interpreted = interpretLockingScript(scriptHex, amount);
+    if (interpreted.kind === "p2pkh") {
+      return { kindLabel: "P2PKH", detail: <>收款地址 <code>{interpreted.addressMainnet}</code> / <code>{interpreted.addressTestnet}</code>，金额 {amountText}</> };
+    }
+    if (interpreted.kind === "p2pk") {
+      return { kindLabel: "P2PK", detail: <>收款公钥 <code>{interpreted.publicKeyHex}</code>，金额 {amountText}</> };
+    }
+    if (interpreted.kind === "multisig") {
+      return { kindLabel: `标准多签 ${interpreted.m}/${interpreted.n}`, detail: <>所需签名数 {interpreted.m}，公钥列表 <code>{interpreted.publicKeysHex.join(", ")}</code>，金额 {amountText}</> };
+    }
+    if (interpreted.kind === "op_return") {
+      return { kindLabel: "数据输出", detail: <>数据输出，数据 <code>{interpreted.dataHex || "(空)"}</code>{interpreted.dataText ? <>（文本：{interpreted.dataText}）</> : null}，金额 {amountText}</> };
+    }
+  } catch {
+    // 按未知脚本展示，不误导。
+  }
+  return { kindLabel: "未知脚本", detail: <>不认识此脚本，无法解释其用途，金额 {amountText}</> };
 }
 
 /* ============== queued 卡（已确认，等待执行） ============== */

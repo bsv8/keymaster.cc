@@ -260,17 +260,18 @@ export interface P2pkhProtocolSubmission {
  * `ownerPublicKeyHex` 是 session / caller 视角的 owner 真值，本参数
  */
 export interface P2pkhTransferInput {
-  /** 调用方注册的支付渠道；App 必须携带同一连接的会话，重试不得丢失。 */
+  /** 调用方注册的支付渠道；Connect outputs 支付不再要求渠道注册，保留仅为兼容旧调用。 */
   paymentContext?: { channelId: string; sessionId: string | null };
   assetId: P2pkhAssetId;
   /** session / caller 视角的 owner public key hex；UTXO 选币 / 签名 key / resourceId 全按该 owner 走。 */
   ownerPublicKeyHex: string;
   recipientAddress?: string;
-  amountSatoshis: number;
+  /** 普通转账金额；Connect outputs 支付时忽略，以 payment.outputs 总额为准。 */
+  amountSatoshis?: number;
   /** 使用所有可用输入；最终收款额在签名后按实际 fee 自动扣减。 */
   sendAll?: boolean;
   feeRateSatoshisPerKb?: number;
-  /** Connect v1 strict payment facts; mutually exclusive with sendAll. */
+  /** Connect v1 outputs payment facts; mutually exclusive with sendAll. */
   payment?: P2pkhConnectPaymentFacts;
 }
 

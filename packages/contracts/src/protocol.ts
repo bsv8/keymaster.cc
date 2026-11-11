@@ -599,9 +599,6 @@ export interface P2pkhTransferResult {
 
 /* ============== payment.pay / payment.status ============== */
 
-/** Connect v1 支付方案；业务种类（businessKind）是独立维度。 */
-export type ConnectPaymentType = "p2pkh" | "p2pk";
-export type ConnectPaymentRecipientOwnership = "app-publisher" | "third-party" | "unknown";
 export type ConnectPaymentStatus =
   | "pending"
   | "not_signed"
@@ -611,27 +608,21 @@ export type ConnectPaymentStatus =
   | "accepted"
   | "already_known";
 
-/** 收款材料：类型必须与 paymentType 一致。 */
-export type ConnectPaymentRecipient =
-  | { type: "p2pkh"; address: string }
-  | { type: "p2pk"; publicKeyHex: string };
+/** 业务输出：金额（聪，允许 0）与 locking script hex。 */
+export interface ConnectPaymentOutput {
+  amount: number;
+  script: string;
+}
 
 /**
- * 通用支付申请。App 只声明业务金额、业务种类、费率与收款材料；不得自报
- * publisher、归属、找零或任意脚本。钱包输入与找零固定为付款钱包 P2PKH。
+ * 通用支付申请。App 只声明业务输出数组；网络取当前连接，费率取钱包配置，
+ * 找零由钱包生成。输出顺序即链上顺序。
  */
 export interface PaymentPayParams {
-  channelId: string;
   /** 稳定幂等身份，1–128 字符。 */
   clientRequestId: string;
-  paymentType: ConnectPaymentType;
-  /** App 声明的业务用途；展示时不是可信商业结论。 */
-  businessKind: string;
-  /** 业务金额（聪，不含矿工费）。 */
-  amountSatoshis: number;
-  /** 可选希望费率（sat/kB）。 */
-  feeRateSatoshisPerKb?: number;
-  recipient: ConnectPaymentRecipient;
+  /** 业务输出；非空，顺序即链上顺序。 */
+  outputs: ConnectPaymentOutput[];
   assetId?: P2pkhTransferAssetId;
   walletPublicKeyHex: string;
 }
@@ -650,8 +641,6 @@ export interface PaymentPayResult {
   clientRequestId: string;
   status: ConnectPaymentStatus;
   assetId: P2pkhTransferAssetId;
-  paymentType: ConnectPaymentType;
-  recipientOwnership: ConnectPaymentRecipientOwnership;
   /** 只有 accepted/already_known 才有 canonical txid。 */
   txid?: string;
   feeSatoshis?: number;
@@ -682,7 +671,6 @@ export interface ProtocolConnectPaymentRecord {
   requestDigest: string;
   params: PaymentPayParams;
   status: ConnectPaymentStatus;
-  recipientOwnership: ConnectPaymentRecipientOwnership;
   reason?: string;
   txid?: string;
   feeSatoshis?: number;

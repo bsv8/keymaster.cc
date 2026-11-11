@@ -653,7 +653,7 @@ const vaultPluginDefinition = {
   units: [{
     id: "vault.window",
     runtime: "window-main",
-    connect: { providerMethods: ["identity.get", "intent.sign", "cipher.encrypt", "cipher.decrypt", "payment.channel.register"] },
+    connect: { providerMethods: ["identity.get", "intent.sign", "cipher.encrypt", "cipher.decrypt"] },
     scopeKind: "root",
     provides: [VAULT_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, VAULT_LOCAL_SECRET_CAPABILITY, AUTOLOCK_SERVICE_CAPABILITY],
     dependencies: [

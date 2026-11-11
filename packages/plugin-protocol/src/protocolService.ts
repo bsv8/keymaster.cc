@@ -1,20 +1,6 @@
 import { applicationKey, requiresApplicationApproval, readApplicationPermissions, setApplicationPermission } from "./applicationPermissions.js";
 import { projectNetworkIdentity, sameNetworkIdentity, type NetworkIdentity } from "@keymaster/contracts";
 import { requireUnlockedWalletIdentity } from "@keymaster/contracts";
-async function appPaymentChannelId(owner: string, name: string, paymentType: string, network: string): Promise<string> {
-  const bytes = new TextEncoder().encode(JSON.stringify(["keymaster.app-payment-channel.v1", owner, name, paymentType, network]));
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
-  return "pay." + Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-function publisherPaymentOwner(publisher: string): string {
-  return "publisher." + publisher.toLowerCase();
-}
-async function publisherPaymentChannelId(publisher: string, paymentType: PaymentChannelRegisterParams["paymentType"], network: NetworkIdentity["bsvNetwork"]): Promise<string> {
-  return appPaymentChannelId(publisherPaymentOwner(publisher), "publisher-single.v1", paymentType, network);
-}
-async function publisherPaymentSessionId(sessionId: string): Promise<string> {
-  return appPaymentChannelId("connect-session", sessionId, "publisher-single.v1", "session");
-}
 import { createProviderDispatch } from "./providerDispatch.js";
 import { KeymasterConnectReceiver, type ReceiverRequest } from "keymaster-connect/server";
 import type * as ConnectPublic from "keymaster-connect/protocol";
@@ -132,15 +118,11 @@ import {
   type SessionRuntimeBootstrap,
   type P2pkhProtocolAdapter,
   type P2pkhTransferAssetId,
-  type PaymentChannelRegisterParams,
-  type PaymentChannelRegisterResult,
   type PaymentPayParams,
   type PaymentPayResult,
   type PaymentStatusParams,
   type PaymentStatusResult,
   type ProtocolConnectPaymentRecord,
-  type P2pkhTransferParams,
-  type P2pkhTransferResult,
   type ProtocolClosingMessage,
   type ProtocolCommandFeedState,
   type ProtocolCommandRecord,
@@ -205,9 +187,6 @@ import {
   sdkVerifyServerUpdateSig,
   FINAL_LOCKTIME
 } from "./feepoolSdk.js";
-
-/** p2pkh auto-approve 缺省 fee rate。 */
-const DEFAULT_P2PKH_FEE_RATE_SAT_PER_KB = 100;
 
 /** 公开资产标识 -> p2pkh 内部 assetId（施工单 2026-09-18 001）。 */
 function toInternalP2pkhAssetId(
@@ -2672,7 +2651,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       try { return (await readApplicationPermissions(this.deps.storageRepository, _rec.applicationKey)).includes(parsed.method); }
       catch { return false; } // unknown permission never silently authorizes execution
     }
-    if (parsed.method === "payment.channel.register" || parsed.method === "payment.status" || parsed.method === "p2pkh.transfer" || parsed.method === "feepool.prepare" || parsed.method === "feepool.commit") return true;
+    if (parsed.method === "payment.status" || parsed.method === "feepool.prepare" || parsed.method === "feepool.commit") return true;
     // connect.* 走 manual 路径（施工单 2026-06-28 001）：
     //   - connect.login / resume：用户必须明确点确认（login 还要选 key）；
     //   - connect.logout：unlocked 时直接入队执行（不需要额外确认 UI），
@@ -3238,12 +3217,10 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   private readonly providerDispatch = createProviderDispatch<RequestRecord, MethodResult | null>({
-    "payment.channel.register": rec => this.executePaymentChannelRegister(rec),
     "identity.get": rec => this.executeIdentityGet(rec),
     "intent.sign": rec => this.executeIntentSign(rec),
     "cipher.encrypt": rec => this.executeCipherEncrypt(rec),
     "cipher.decrypt": rec => this.executeCipherDecrypt(rec),
-    "p2pkh.transfer": async rec => { await this.executeP2pkhTransferAndFinalize(rec); return null; },
     "payment.pay": rec => this.executePaymentPay(rec),
     "payment.status": rec => this.executePaymentStatus(rec),
     "feepool.prepare": async rec => { await this.executeFeepoolPrepareAndFinalize(rec); return null; },
@@ -4365,7 +4342,6 @@ export class ProtocolServiceImpl implements ProtocolService {
       throw protocolError("internal_error", "Connect payment idempotency storage is unavailable");
     }
     const publicAssetId = params.assetId ?? (session.networkIdentity.bsvNetwork === "test" ? "bsv-testnet" : "bsv-mainnet");
-    const internalAssetId = toInternalP2pkhAssetId(publicAssetId);
     const normalized = normalizePaymentPayParams(params, publicAssetId);
     const identity = {
       origin: rec.origin,
@@ -4394,7 +4370,6 @@ export class ProtocolServiceImpl implements ProtocolService {
       requestDigest,
       params: normalized,
       status: "pending",
-      recipientOwnership: "unknown",
       createdAt: now,
       updatedAt: now,
     };
@@ -4417,22 +4392,11 @@ export class ProtocolServiceImpl implements ProtocolService {
     let submissionStarted = false;
     try {
       assertBoundPayment();
-      const channelId = await publisherPaymentChannelId(session.appIdentity.publisherPublicKeyHex, params.paymentType, session.networkIdentity.bsvNetwork);
-      assertBoundPayment();
-      if (params.channelId !== channelId) throw protocolError("invalid_request", "Register a publisher single-payment channel before creating a new payment");
-      const paymentSessionId = await publisherPaymentSessionId(session.sessionId);
-      void paymentSessionId;
-      assertBoundPayment();
       const preview = await p2pkhService.prepareTransfer({
-        paymentContext: { channelId: params.channelId, sessionId: paymentSessionId },
-        amountSatoshis: params.amountSatoshis,
-        feeRateSatoshisPerKb: params.feeRateSatoshisPerKb ?? DEFAULT_P2PKH_FEE_RATE_SAT_PER_KB,
         payment: {
           paymentId: current.paymentId,
           clientRequestId: params.clientRequestId,
-          paymentType: params.paymentType,
-          businessKind: params.businessKind,
-          recipient: params.recipient,
+          outputs: normalized.outputs.map(output => ({ amount: output.amount, script: output.script })),
           appId: identity.appId,
           appName: session.appIdentity.appName,
           origin: identity.origin,
@@ -4446,7 +4410,6 @@ export class ProtocolServiceImpl implements ProtocolService {
         ...current,
         allocationId: (preview as { managerAllocationId?: string }).managerAllocationId,
         previewId: (preview as { previewId?: string }).previewId,
-        recipientOwnership: payment.recipientOwnership,
         feeSatoshis: Number(payment.feeSats),
         changeSatoshis: Number(payment.changeAmountSats),
         updatedAt: Date.now(),
@@ -4585,109 +4548,11 @@ export class ProtocolServiceImpl implements ProtocolService {
     return paymentResultFromRecord(record);
   }
 
-  /* ============== p2pkh.transfer ============== */
+  /* ============== payment.channel.register / p2pkh.transfer 已移除 ============== */
 
-  private async paymentOwner(session: ConnectSessionRecord): Promise<string> {
-    if (!session.appIdentity) throw protocolError("identity_required", "Payment settings require a verified publisher");
-    return publisherPaymentOwner(session.appIdentity.publisherPublicKeyHex);
-  }
   private async legacyPaymentOwner(session: ConnectSessionRecord): Promise<string> {
     const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(session.origin)));
     return "connect." + Array.from(digest, b => b.toString(16).padStart(2, "0")).join("");
-  }
-  private async executePaymentChannelRegister(rec: RequestRecord): Promise<PaymentChannelRegisterResult> {
-    const params = rec.params as PaymentChannelRegisterParams;
-    const session = await this.requireConnectSession(rec, params.walletPublicKeyHex);
-    this.assertSessionOwnerIsActive(session);
-    const owner = await this.paymentOwner(session);
-    const network = params.assetId === "bsv-testnet" ? "test" : "main";
-    if (network !== session.networkIdentity.bsvNetwork) throw localFailure("asset_not_enabled", "Payment network differs from session identity");
-    const channelId = await publisherPaymentChannelId(session.appIdentity!.publisherPublicKeyHex, params.paymentType, network);
-    void channelId; void owner; void network;
-    await this.requireConnectSession(rec, params.walletPublicKeyHex);
-    this.assertSessionOwnerIsActive(session);
-    return {channelId};
-  }
-  /* ============== p2pkh.transfer ============== */
-
-  private async executeP2pkhTransferAndFinalize(rec: RequestRecord): Promise<void> {
-    const params = rec.params as P2pkhTransferParams;
-    const p2pkhService = this.currentP2pkhService();
-    if (!p2pkhService) {
-      rec.phase = "failed";
-      rec.errorCode = "internal_error";
-      rec.errorMessage = "p2pkh service not available";
-      rec.failureReason = "internal_error";
-      rec.finishedAt = Date.now();
-      rec.updatedAt = rec.finishedAt;
-      await this.persistFeedCommandFor(rec);
-      await this.replyErrorToRec(rec, "internal_error", "p2pkh service not available");
-      return;
-    }
-    try {
-      // 施工单 2026-06-28 002 硬切换：p2pkh.transfer 走 session 绑定 owner，
-      // 不再读全局 active key。execute 阶段先 requireConnectSession 校验
-      // session 仍有效，再把 session 绑定的 owner public key 交给
-      // 走选币 + 签名）。
-      const session = await this.requireConnectSession(rec, params.walletPublicKeyHex);
-      const ownerPublicKeyHex = session.ownerPublicKeyHex;
-      // 硬切换 002 收尾：protocol 层显式校验 session owner == 当前
-      // active key。硬门禁（`walletState.openOwnerAppStore` 要求
-      // `active === input.publicKeyHex`）会在底层挡掉，但「Key
-      // storage is not ready」是偶发底层错误，**不**适合作为协议
-      // 失败语义。提前在协议层以「session is no longer bound to
-      // active key」显式 fail-closed，让 caller / UI 拿到明确错误。
-      this.assertSessionOwnerIsActive(session);
-      const publicAssetId = params.assetId ?? (session.networkIdentity.bsvNetwork === "test" ? "bsv-testnet" : "bsv-mainnet");
-      const internalAssetId = toInternalP2pkhAssetId(publicAssetId);
-      // 渠道按 App 来源稳定注册；同一次 Connect 连接的所有渠道共享 sessionId。
-      // 这里只建立零额度渠道，免确认额度只能由钱包设置提高。
-      const paymentOwner = await this.paymentOwner(session);
-      const paymentChannelId = params.channelId;
-      const paymentSessionId = await publisherPaymentSessionId(session.sessionId);
-      const expectedChannelId = await publisherPaymentChannelId(session.appIdentity!.publisherPublicKeyHex, "p2pkh", session.networkIdentity.bsvNetwork);
-      if (paymentChannelId !== expectedChannelId) throw protocolError("invalid_request", "Register a publisher single-payment channel before creating a new transfer");
-      void paymentSessionId; void paymentOwner;
-      const card = this.feedCommands.find((c) => c.id === rec.recordId);
-      if (card) {
-        card.recipientAddress = params.recipientAddress;
-        card.amountSatoshis = params.amountSatoshis;
-        card.assetId = publicAssetId;
-        card.autoApproved = rec.autoApproved;
-        card.updatedAt = Date.now();
-      }
-      const preview = await p2pkhService.prepareTransfer({
-        paymentContext: {channelId: paymentChannelId, sessionId: paymentSessionId},
-        recipientAddress: params.recipientAddress,
-        amountSatoshis: params.amountSatoshis,
-        feeRateSatoshisPerKb: params.feeRateSatoshisPerKb ?? DEFAULT_P2PKH_FEE_RATE_SAT_PER_KB
-      });
-      this.assertSessionOwnerIsActive(session);
-      if (preview.ownerPublicKeyHex !== ownerPublicKeyHex) throw localFailure("session_owner_mismatch", "Transfer preview identity mismatch");
-      const submitted = await p2pkhService.submitTransfer(preview);
-      const txid = submitted.txid ?? preview.txid;
-      const result: P2pkhTransferResult = {
-        assetId: publicAssetId,
-        txid,
-        rawTxHex: submitted.rawTxHex,
-        feeSatoshis: preview.estimatedFeeSatoshis
-      };
-      rec.phase = "approved";
-      rec.finishedAt = Date.now();
-      rec.updatedAt = rec.finishedAt;
-      await this.persistFeedCommandFor(rec);
-      await this.replyResultToRec(rec, result);
-    } catch (err) {
-      const reason = classifyP2pkhFailure(err);
-      rec.phase = "failed";
-      rec.errorCode = "user_rejected";
-      rec.errorMessage = "User rejected";
-      rec.failureReason = reason;
-      rec.finishedAt = Date.now();
-      rec.updatedAt = rec.finishedAt;
-      await this.persistFeedCommandFor(rec);
-      await this.replyErrorToRec(rec, "user_rejected", "User rejected");
-    }
   }
 
   /* ============== feepool.prepare ============== */
@@ -6094,9 +5959,8 @@ function normalizePaymentPayParams(params: PaymentPayParams, assetId: P2pkhTrans
   return {
     ...params,
     assetId,
-    recipient: params.recipient.type === "p2pk"
-      ? { type: "p2pk", publicKeyHex: params.recipient.publicKeyHex.toLowerCase() }
-      : { type: "p2pkh", address: params.recipient.address },
+    clientRequestId: params.clientRequestId,
+    outputs: params.outputs.map(output => ({ amount: output.amount, script: output.script.toLowerCase() })),
   };
 }
 
@@ -6122,18 +5986,11 @@ function paymentRequestKey(identity: Parameters<typeof paymentIdentityKey>[0], c
 }
 
 function paymentRequestDigest(identity: Parameters<typeof paymentIdentityKey>[0], params: PaymentPayParams): string {
-  const recipient = params.recipient.type === "p2pkh" ? params.recipient.address : params.recipient.publicKeyHex;
   return bytesToHex(sha256Bytes(new TextEncoder().encode(JSON.stringify([
     "keymaster.connect-payment-request.v1",
     paymentIdentityKey(identity),
-    params.channelId,
     params.clientRequestId,
-    params.paymentType,
-    params.businessKind,
-    params.amountSatoshis,
-    params.feeRateSatoshisPerKb ?? 0,
-    params.recipient.type,
-    recipient,
+    params.outputs.map(output => [output.amount, output.script.toLowerCase()]),
     params.assetId ?? "",
   ]))));
 }
@@ -6145,8 +6002,6 @@ function paymentResultFromRecord(record: ProtocolConnectPaymentRecord): PaymentP
     clientRequestId: record.clientRequestId,
     status: record.status,
     assetId: record.params.assetId ?? (record.networkIdentity.bsvNetwork === "test" ? "bsv-testnet" : "bsv-mainnet"),
-    paymentType: record.params.paymentType,
-    recipientOwnership: record.recipientOwnership,
     ...(terminal && record.txid ? { txid: record.txid } : {}),
     ...(record.feeSatoshis === undefined ? {} : { feeSatoshis: record.feeSatoshis }),
     ...(record.changeSatoshis === undefined ? {} : { changeSatoshis: record.changeSatoshis }),

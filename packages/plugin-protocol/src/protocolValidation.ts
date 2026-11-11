@@ -10,7 +10,7 @@ export {
 /** 可信 receiver identity 转换成旧业务层所需上下文，不把内部字段放回 wire。 */
 export function internalExecutionParams(method: ProtocolMethod, params: object, receiverIdentity: NetworkIdentity): MethodParams<ProtocolMethod> {
   const identity = receiverIdentity;
-  const payment = method === "payment.pay" || method === "payment.channel.register";
+  const payment = method === "payment.pay";
   return { ...params,
     ...(!["connect.login", "connect.launch", "channel.publish", "channel.subscription_set"].includes(method) ? { walletPublicKeyHex: identity.publicKeyHex } : {}),
     ...(payment ? { assetId: identity.bsvNetwork === "test" ? "bsv-testnet" : "bsv-mainnet" } : {}),

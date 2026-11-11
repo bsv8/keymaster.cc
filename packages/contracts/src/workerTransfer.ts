@@ -9,7 +9,8 @@ export const VAULT_WORKER_CRYPTO_CAPABILITY = defineCapability<VaultWorkerCrypto
 export interface P2pkhTransferRequest {
   paymentContext?: { channelId: string; sessionId: string | null };
   recipientAddress?: string;
-  amountSatoshis: number;
+  /** 普通转账金额；Connect outputs 支付时忽略，以 payment.outputs 总额为准。 */
+  amountSatoshis?: number;
   sendAll?: boolean;
   feeRateSatoshisPerKb?: number;
   payment?: import("./p2pkhConnectPayment.js").P2pkhConnectPaymentFacts;

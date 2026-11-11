@@ -81,7 +81,8 @@ export interface P2pkhTransferPrepareInput {
   readonly network: "main" | "test";
   readonly ownerPublicKeyHex: string;
   readonly recipientAddress?: string;
-  readonly amountSatoshis: number;
+  /** 普通转账金额；Connect outputs 支付时忽略，以 payment.outputs 总额为准。 */
+  readonly amountSatoshis?: number;
   readonly sendAll?: boolean;
   /** Connect v1 strict payment facts; mutually exclusive with sendAll. */
   readonly payment?: P2pkhConnectPaymentFacts;

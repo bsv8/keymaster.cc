@@ -624,7 +624,7 @@ const p2pkhPluginDefinition = {
     {
       id: "p2pkh.window",
       runtime: "window-main",
-    connect: { providerMethods: ["p2pkh.transfer", "payment.pay", "payment.status", "feepool.prepare", "feepool.commit"] },
+    connect: { providerMethods: ["payment.pay", "payment.status", "feepool.prepare", "feepool.commit"] },
       scopeKind: "owner-session",
       provides: [PROTECTED_OUTPOINT_REGISTRY_CAPABILITY, P2PKH_CAPABILITY, BALANCE_BROADCAST_CAPABILITY, P2PKH_ADDRESS_CODEC_CAPABILITY, P2PKH_PROTOCOL_SPEND_CAPABILITY, P2PKH_SUBMISSION_OBSERVER_CAPABILITY, CENTRAL_BROADCAST_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY],
       storage: CENTRAL_STORAGE_DECLARATIONS.p2pkhFiles,

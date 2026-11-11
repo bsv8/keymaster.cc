@@ -334,7 +334,7 @@ function channelResult(operation: CoordinatorChannelOperation, value: unknown): 
     case "release": return null;
   }
 }
-const paymentPreview = (value: unknown) => fields(value, "paymentId clientRequestId planDigest paymentType businessKind appId appName origin publisherPublicKeyHex recipientOwnership recipientLabel businessScriptHex businessAmountSats changeAmountSats feeSats changeScriptHex", {
+const paymentPreview = (value: unknown) => fields(value, "paymentId clientRequestId planDigest appId appName origin publisherPublicKeyHex businessTotalSats changeAmountSats feeSats changeScriptHex", {
   outputs: each(value => fields(value, "vout scriptHex valueSats role")),
 });
 const transferPreview = (value: unknown) => fields(value, "previewId assetId network ownerPublicKeyHex recipientAddress amountSatoshis sendAll feeRateSatoshisPerKb estimatedFeeSatoshis serializedSizeBytes changeAddress rawTxHex txid managerAllocationId", {
