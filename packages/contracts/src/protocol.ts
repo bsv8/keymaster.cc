@@ -180,6 +180,8 @@ export type ProtocolMethod = (typeof PROTOCOL_METHODS)[number];
 export type ProtocolErrorCode =
   /** Transport authority was revoked or belongs to another wallet/Worker generation. */
   | "connection_expired"
+  /** Wallet confirms the credential is gone/revoked/invalid; client must clear saved recovery. */
+  | "authorization_expired"
   | "invalid_request"
   | "invalid_origin"
   | "user_rejected"

@@ -2190,7 +2190,8 @@ export class ProtocolServiceImpl implements ProtocolService {
       }
       // session 有效：locked → waiting_unlock_manual；unlocked → 直接
       // queued（**不**经过 confirming）。解锁后同样直接 queued。
-      rec.walletPublicKeyHex = resumeParams.walletPublicKeyHex;
+      // 新 SDK 不再在 params 中携带钱包选择器，沿用快照中的 owner 绑定。
+      rec.walletPublicKeyHex = resumeParams.walletPublicKeyHex ?? rec.connectResumeSnapshot?.ownerPublicKeyHex ?? "";
       rec.ownerPublicKeyHex = rec.connectResumeSnapshot?.ownerPublicKeyHex ?? "";
       rec.autoExecuteAfterUnlock = true;
       this.applyManualPhaseDecision(recordId, origin, /* skipConfirmWhenUnlocked */ true);
@@ -2598,9 +2599,55 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!this.deps.storageRepository) {
       return { code: "user_rejected", reason: "internal_error" };
     }
+    // 刷新恢复（携带原授权引用）：按原授权严格恢复，不走无凭据重建默认授权路径。
+    // 会话缺失、已撤销、来源或授权不匹配一律返回 authorization_expired，调用方清除本地记录；
+    // proof 无效或身份不匹配返回 invalid_request，保留原恢复记录，不创建新授权。
+    if (rec.protocol.authorizationId) {
+      let session: ConnectSessionRecord | null = null;
+      try {
+        session = await this.deps.storageRepository.getConnectSession(rec.networkIdentity, origin);
+      } catch {
+        // 临时读取失败不能证明授权已失效，返回内部错误并保留恢复记录。
+        return { code: "internal_error", reason: "internal_error" };
+      }
+      if (!session || session.revokedAt !== null || session.origin !== origin) return { code: "authorization_expired", reason: "internal_error" };
+      if (session.authorizationId !== rec.protocol.authorizationId) return { code: "authorization_expired", reason: "internal_error" };
+      try {
+        const key = await this.publicOwnerKey(session.networkIdentity);
+        if (!key) return { code: "user_rejected", reason: "internal_error" };
+        rec.connectAuthBackend = "software";
+      } catch {
+        return { code: "user_rejected", reason: "internal_error" };
+      }
+      const resumeProof = (params as { appIdentity?: AppIdentityProofV1 }).appIdentity;
+      if (resumeProof) {
+        try {
+          const appIdentity = verifyAppIdentityProof(resumeProof);
+          // 恢复不得替换身份或扩大许可：必须与原授权快照的发布者、应用标识和身份摘要完全一致。
+          // requirements 已计入身份摘要，摘要一致即许可范围一致；与 CLI 的 IdentityDigest 核对保持一致。
+          if (!session.appIdentity) throw new Error("Application authorization identity mismatch");
+          if (session.appIdentity.publisherPublicKeyHex.toLowerCase() !== appIdentity.publisherPublicKeyHex.toLowerCase()
+            || session.appIdentity.appId !== appIdentity.appId
+            || session.appIdentity.identityDigestHex.toLowerCase() !== appIdentity.identityDigestHex.toLowerCase()) {
+            throw new Error("Application authorization identity mismatch");
+          }
+          this.assertLoginRequirements(resumeProof, true);
+          // 恢复时不修改授权快照：沿用原授权，不覆盖、不扩大。
+        } catch {
+          return { code: "invalid_request", reason: "internal_error" };
+        }
+      }
+      rec.connectResumeSnapshot = {
+        sessionId: session.sessionId,
+        ownerPublicKeyHex: session.ownerPublicKeyHex,
+        ownerLabel: session.ownerLabel,
+        claimsSnapshot: session.claimsSnapshot
+      };
+      return null;
+    }
     let session: ConnectSessionRecord | null = null;
     try {
-      session = await this.fetchSessionForBinding({ ...rec.networkIdentity, publicKeyHex: params.walletPublicKeyHex }, origin);
+      session = await this.fetchSessionForBinding(rec.networkIdentity, origin);
     } catch (err) {
       return { code: "user_rejected", reason: "internal_error" };
     }
@@ -3911,7 +3958,31 @@ export class ProtocolServiceImpl implements ProtocolService {
    */
   private async executeConnectResume(rec: RequestRecord): Promise<ConnectResumeResult> {
     const params = rec.params as ConnectResumeParams;
-    const session = await this.requireConnectSession(rec, params.walletPublicKeyHex);
+    // 刷新恢复（携带原授权）：必须沿用原授权建立新 binding，绝不创建新授权或扩大权限。
+    if (rec.protocol.authorizationId) {
+      if (!this.deps.storageRepository) throw localFailure("internal_error", "connect.resume: session storage unavailable");
+      const existing = await this.deps.storageRepository.getConnectSession(rec.networkIdentity, rec.origin);
+      if (!existing || existing.revokedAt !== null || existing.origin !== rec.origin || existing.authorizationId !== rec.protocol.authorizationId) {
+        throw protocolError("authorization_expired", "Application authorization is no longer valid; login again");
+      }
+      this.assertWalletGeneration(rec);
+      this.receiver.assertCurrent(rec.protocol);
+      const key = this.requireCurrentOwnerKey(existing.ownerPublicKeyHex);
+      if (!key) throw localFailure("internal_error", "connect.resume: owner key not found");
+      const now = Date.now();
+      const next: ConnectSessionRecord = { ...existing, lastUsedAt: now };
+      await this.deps.storageRepository.putConnectSession(next);
+      return {
+        authorizationId: existing.authorizationId!,
+        walletPublicKeyHex: existing.ownerPublicKeyHex,
+        networkIdentity: existing.networkIdentity,
+        ownerPublicKeyHex: existing.ownerPublicKeyHex,
+        resolvedClaims: existing.claimsSnapshot,
+        resolvedAt: now,
+        ...(existing.appIdentity ? { appIdentity: existing.appIdentity } : {})
+      };
+    }
+    const session = await this.requireConnectSession(rec, (params as { walletPublicKeyHex?: string }).walletPublicKeyHex ?? rec.walletPublicKeyHex);
     if (rec.protocol.authorizationId && session.authorizationId !== rec.protocol.authorizationId) throw protocolError("connection_expired", "Application authorization changed during recovery");
     const storageRepository = this.deps.storageRepository;
     if (!storageRepository) {
@@ -5320,7 +5391,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     code: ProtocolErrorCode,
     errorMessage: string
   ): Promise<void> {
-    this.receiver.replyError(rec.protocol, { code, message: errorMessage });
+    // 候选 SDK 新增 authorization_expired；正式依赖升级前向旧 Receiver 类型兼容透传。
+    this.receiver.replyError(rec.protocol, { code: code as never, message: errorMessage });
   }
 
   private postEventMessage(target: Window, origin: string, message: ProtocolEventMessage): void {
