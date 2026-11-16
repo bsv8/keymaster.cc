@@ -27,7 +27,7 @@ import type {
 } from "@keymaster/contracts";
 import {
   PROTOCOL_SERVICE_CAPABILITY,
-  STORAGE_KV_CLIENTS_CAPABILITY, CENTRAL_STORAGE_DECLARATIONS, APPLICATION_CONNECTIONS_CAPABILITY,
+  STORAGE_FILE_CLIENTS_CAPABILITY, CENTRAL_STORAGE_DECLARATIONS, APPLICATION_CONNECTIONS_CAPABILITY,
   VAULT_WALLET_STATE_CAPABILITY,
   PAGE_UI_REGISTRY_CAPABILITY,
   BUSINESS_REGISTRY_CAPABILITY,
@@ -179,7 +179,7 @@ const appsPluginDefinition = {
     storages: [CENTRAL_STORAGE_DECLARATIONS.appsDirectory],
     provides: [capabilityDescriptor(APP_DIRECTORY_CAPABILITY)],
     dependencies: defineRuntimeUnitDependencies([
-      { capability: STORAGE_KV_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "目录完整状态的原子持久化" },
+      { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "目录完整状态的原子持久化" },
       { capability: APPLICATION_CONNECTIONS_CAPABILITY, sourceRuntime: "window-main", reason: "真实连接验证成功后解析 pending URL 身份" },
       { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
       { capability: VAULT_WALLET_STATE_CAPABILITY, reason: "应用授权弹窗读取唯一钱包 Key 元数据" },
@@ -190,11 +190,8 @@ const appsPluginDefinition = {
   }],
   i18n: appsResources,
   setup(ctx) {
-    // 提供共享应用目录能力：市场快照 + 本地缓存 + 收藏 + 自添加合并。
-    // 只读探测已取消的私有格式：明确拒绝，不迁移、不覆盖、不清空。
-    let incompatibleLegacyState=false;
-    try {incompatibleLegacyState=["keymaster.apps.directory.store.v1","keymaster.apps.directory.market.v1","keymaster.apps.directory.locals.v1","keymaster.apps.directory.favorites.v1"].some(key=>window.localStorage?.getItem(key)!==null&&window.localStorage?.getItem(key)!==undefined)} catch { /* 统一 K-V 仓储不依赖 localStorage 是否可用。 */ }
-    const directory = createAppDirectoryService({ incompatibleLegacyState, repository: ctx.capability(STORAGE_KV_CLIENTS_CAPABILITY).bind(ctx.consumer,ctx.scope,CENTRAL_STORAGE_DECLARATIONS.appsDirectory.purposeId) });
+    // 完整目录以模块根下的 directory.json 原子保存；不读取旧 K-V 路径。
+    const directory = createAppDirectoryService({ repository: ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer,ctx.scope,CENTRAL_STORAGE_DECLARATIONS.appsDirectory.purposeId) });
     ctx.provide(APP_DIRECTORY_CAPABILITY, directory);
     const connections = ctx.capability(APPLICATION_CONNECTIONS_CAPABILITY);
     const off = connections.subscribe(() => {

@@ -3,7 +3,7 @@ import { ScopedPluginConsumerProvider, useInstanceActive } from "@keymaster/runt
 import {
   APPLICATION_AI_TOOLS_CAPABILITY, BREADCRUMB_REGISTRY_CAPABILITY, BUSINESS_REGISTRY_CAPABILITY, CENTRAL_STORAGE_DECLARATIONS,
   I18N_SERVICE_CAPABILITY, MSFILE_SERVICE_CAPABILITY, PAGE_UI_REGISTRY_CAPABILITY, PAGE_UI_RENDERER_CAPABILITY,
-  STORAGE_KV_CLIENTS_CAPABILITY, VAULT_LOCAL_SECRET_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY,
+  STORAGE_FILE_CLIENTS_CAPABILITY, VAULT_LOCAL_SECRET_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY,
   bindWalletIdentity, defineRuntimeUnitDependencies, type PluginContext, type PluginManifest, type PluginSetup, type WorkspaceResultView,
 } from "@keymaster/contracts";
 import { P2PKH_CAPABILITY } from "@keymaster/plugin-p2pkh";
@@ -19,7 +19,7 @@ export const aiPlugin = {
   units: [{ id: "ai.window", runtime: "window-main", scopeKind: "owner-session", provides: [],
     storages: [CENTRAL_STORAGE_DECLARATIONS.aiState],
     dependencies: defineRuntimeUnitDependencies([
-      { capability: STORAGE_KV_CLIENTS_CAPABILITY, reason: "AI 本地加密数据" },
+      { capability: STORAGE_FILE_CLIENTS_CAPABILITY, reason: "AI 本地加密数据" },
       { capability: VAULT_LOCAL_SECRET_CAPABILITY, reason: "按钱包身份封装密钥与会话" },
       { capability: VAULT_WALLET_STATE_CAPABILITY, reason: "绑定当前身份及运行世代" },
       { capability: PAGE_UI_REGISTRY_CAPABILITY, reason: "设置、会话和首启配置" },
@@ -44,7 +44,7 @@ export const aiSetup: PluginSetup = async ctx => {
   const state = ctx.capability(VAULT_WALLET_STATE_CAPABILITY).bind(ctx.consumer, ctx.scope);
   const identity = bindWalletIdentity(state);
   const assertActive = () => { ctx.scope.assertActive(); identity.assertActive(); };
-  const repo = createAiRepository(ctx.capability(STORAGE_KV_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, CENTRAL_STORAGE_DECLARATIONS.aiState.purposeId), ctx.capability(VAULT_LOCAL_SECRET_CAPABILITY), assertActive);
+  const repo = createAiRepository(ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, CENTRAL_STORAGE_DECLARATIONS.aiState.purposeId), ctx.capability(VAULT_LOCAL_SECRET_CAPABILITY), assertActive);
   const page = ctx.capability(PAGE_UI_RENDERER_CAPABILITY);
   let result: { conversationId: string; view: WorkspaceResultView } | undefined;
   const runtime = new AiRuntime(repo, assertActive, (conversationId, artifact) => {

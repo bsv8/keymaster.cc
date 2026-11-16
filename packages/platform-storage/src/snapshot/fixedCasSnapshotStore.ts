@@ -1,6 +1,6 @@
 // 中央系统固定 CAS snapshot。
 //
-// 一个 declaration 永远只对应逻辑根下的一个固定对象（`<root>current`）。
+// 一个 declaration 永远只对应固定 JSON 文档（`<module>/<purpose>.json`）。
 // 差异只在 CAS 边界：本地没有 Provider ETag，初次发布用 ifNoneMatch，后续发布
 // 用读到的本地 revision 做 ifRevision。revision 0 表示对象不存在，因此
 // 「读—比较—写」也不会覆盖别人的并发发布。

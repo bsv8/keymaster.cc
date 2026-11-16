@@ -9,7 +9,7 @@ import type { PluginStorageDeclaration } from "./access.js";
  */
 export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
   aiState: Object.freeze({
-    moduleId: "ai", purposeId: "state", authority: "built-in-module", model: "kv", schemaVersion: 1,
+    moduleId: "ai", purposeId: "", authority: "built-in-module", model: "files", schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
   vaultPayments: Object.freeze({
     moduleId: "vault", purposeId: "payments", authority: "built-in-module", model: "files", schemaVersion: 1,
@@ -22,7 +22,7 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
   appsDirectory: Object.freeze({
-    moduleId: "apps", purposeId: "directory", authority: "built-in-module", model: "kv", schemaVersion: 2,
+    moduleId: "apps", purposeId: "", authority: "built-in-module", model: "files", schemaVersion: 2,
   } satisfies PluginStorageDeclaration),
   protocolDurablePolicy: Object.freeze({
     moduleId: "protocol",

@@ -131,7 +131,8 @@ export function buildStorageNamespaceRoot(binding: StorageNamespaceBinding): str
 
 /** 固定 snapshot 对象的逻辑路径；只有平台实现使用此函数执行本地 I/O。 */
 export function buildStorageSnapshotPath(binding: StorageNamespaceBinding): string {
-  return `${buildStorageNamespaceRoot(binding)}current`;
+  // snapshot 用途本身就是单个文档，不再增加 current 子对象层。
+  return `${buildStorageNamespaceRoot(binding).slice(0, -1)}.json`;
 }
 
 /**

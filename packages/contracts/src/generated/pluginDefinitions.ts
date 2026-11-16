@@ -1618,7 +1618,7 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "capability": {
               "kind": "local",
-              "id": "storage.kv-clients",
+              "id": "storage.file-clients",
               "version": "1"
             },
             "sourceRuntime": "window-main",
@@ -1683,9 +1683,9 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
         "storages": [
           {
             "moduleId": "apps",
-            "purposeId": "directory",
+            "purposeId": "",
             "authority": "built-in-module",
-            "model": "kv",
+            "model": "files",
             "schemaVersion": 2
           }
         ]
@@ -1706,7 +1706,7 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "capability": {
               "kind": "local",
-              "id": "storage.kv-clients",
+              "id": "storage.file-clients",
               "version": "1"
             },
             "sourceRuntime": "window-main",
@@ -1809,9 +1809,9 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
         "storages": [
           {
             "moduleId": "ai",
-            "purposeId": "state",
+            "purposeId": "",
             "authority": "built-in-module",
-            "model": "kv",
+            "model": "files",
             "schemaVersion": 1
           }
         ]
