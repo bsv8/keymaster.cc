@@ -17,7 +17,7 @@ export { createModuleFileStore } from "../storage-access/wallet/moduleFileStore.
 export { createFixedCasSnapshotStore } from "../snapshot/fixedCasSnapshotStore.js";
 export { createPlatformRootStore } from "../storage-access/platform-root/platformRootStore.js";
 export type { PlatformRootStoreOptions, StoragePrivateRootStore } from "../storage-access/platform-root/platformRootStore.js";
-export { createStorageRuntimeController, StorageRuntimeControllerImpl } from "../runtime/storageController.js";
+export { createStorageRuntimeController } from "../runtime/storageController.js";
 export type { StorageRuntimeControllerDeps } from "../runtime/storageController.js";
 export { StorageRuntimeError, storageErrorCode } from "../runtime/storageError.js";
 // 存储浏览服务留在 Worker-safe 入口内：它读 WalletStore，不含 React 与 Markdown

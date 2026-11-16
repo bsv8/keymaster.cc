@@ -6,7 +6,6 @@ import { createProviderDispatch } from "./providerDispatch.js";
 import { KeymasterConnectReceiver, type ReceiverRequest } from "keymaster-connect/server";
 import type * as ConnectPublic from "keymaster-connect/protocol";
 import type { ProtocolResultMessage } from "keymaster-connect/protocol";
-import type { AppStorageBinding, AppStorageClient } from "@keymaster/contracts";
 // packages/plugin-protocol/src/protocolService.ts
 // 钱包 Connect 宿主：解锁/授权 UI 调度、串行执行、Vault 与实际业务、持久责任。
 // Client/Receiver 的协议校验、来源/绑定、在途去重与封包统一由独立 KeymasterConnect 实现。
@@ -70,7 +69,7 @@ import type { AppStorageBinding, AppStorageClient } from "@keymaster/contracts";
 // 不依赖 React；可单测。
 
 import { secp256k1 } from "@noble/curves/secp256k1.js";
-import { deriveAppStorageName, canonicalOrigin } from "@keymaster/contracts";
+import { canonicalOrigin } from "@keymaster/contracts";
 import {
   PROTOCOL_VERSION,
   LaunchAppViewError,
@@ -142,17 +141,10 @@ import {
   type ProtocolSessionPhase,
   type ProtocolSessionSnapshot,
   type ProtocolStorageRepository,
-  type StorageRuntimeStatusService,
-  type OwnerAppStorageGrant,
   type MsFileService,
   type MsFileConnectAppContext,
   type MsFileStatResult,
   type MsFileReadResult,
-  type StorageListResult,
-  type StorageDirectoryResult,
-  type StoragePutResult,
-  type StorageGetResult,
-  type StorageDeleteResult,
   type VaultService
 } from "@keymaster/contracts";
 import { ProtocolValidationError, internalExecutionParams, validateExactChannel } from "./protocolValidation.js";
@@ -256,12 +248,6 @@ export interface ProtocolServiceDeps {
   getP2pkhService?: () => P2pkhProtocolAdapter | undefined;
   /** Session Window 使用的已验证 Connect Channel facade。 */
   connectChannelRuntime?: ConnectChannelRuntime;
-  /** Optional Storage platform capability; absence only disables storage.*. */
-  storageController?: StorageRuntimeStatusService;
-  /** Explicit Storage provider; the gateway supplies verified session facts, never a namespace. */
-  bindAppStorage?: (binding: AppStorageBinding) => AppStorageClient;
-  /** Resolve the current Storage capability at request/lifecycle time. */
-  getStorageController?: () => StorageRuntimeStatusService | undefined;
   /**
    * Optional MSFile platform capability（可选 MSFile 平台能力）。
    * 缺失时只让 `msfile.*` fail closed；不得影响其他方法族。
@@ -708,18 +694,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
   }
 
-  /** Resolve the current Storage capability after an independent plugin restart. */
-  private currentStorageController(): StorageRuntimeStatusService | undefined {
-    if (this.deps.getStorageController) {
-      try {
-        return this.deps.getStorageController();
-      } catch {
-        return undefined;
-      }
-    }
-    return this.deps.storageController;
-  }
-
   /** MSFile capability 是可选依赖；缺失时 `msfile.*` fail closed。 */
   private currentMsfileService(): MsFileService | undefined {
     if (this.deps.getMsfileService) {
@@ -873,16 +847,14 @@ export class ProtocolServiceImpl implements ProtocolService {
       if (rec.walletPublicKeyHex) sessionIds.add(rec.walletPublicKeyHex);
       if (
         rec.phase === "executing" &&
-        (rec.method.startsWith("storage.") || rec.method.startsWith("msfile."))
+        rec.method.startsWith("msfile.")
       ) {
         rec.cancelRequested = true;
         rec.abortController?.abort();
       }
     }
-    const storageController = this.currentStorageController();
     const msfileService = this.currentMsfileService();
     for (const sessionId of sessionIds) {
-      void storageController?.abortSession(sessionId);
       void msfileService?.abortSession(sessionId);
       void sessionId;
     }
@@ -1289,16 +1261,14 @@ export class ProtocolServiceImpl implements ProtocolService {
       if (rec.walletPublicKeyHex) sessionIds.add(rec.walletPublicKeyHex);
       if (
         rec.phase === "executing" &&
-        (rec.method.startsWith("storage.") || rec.method.startsWith("msfile."))
+        rec.method.startsWith("msfile.")
       ) {
         rec.cancelRequested = true;
         rec.abortController?.abort();
       }
     }
-    const storageController = this.currentStorageController();
     const msfileService = this.currentMsfileService();
     for (const sessionId of sessionIds) {
-      void storageController?.abortSession(sessionId);
       void msfileService?.abortSession(sessionId);
     }
     this.sendClosingBestEffort();
@@ -2213,11 +2183,11 @@ export class ProtocolServiceImpl implements ProtocolService {
             await this.scheduleFailFastRequest(recordId, "internal_error", "storage_error"); return;
           }
         }
-        if ((method.startsWith("storage.") || method.startsWith("msfile.")) && !session.origin) {
-          // MSFile 与 Storage 一致：无 verified App Identity 的 session 不允许
+        if (method.startsWith("msfile.") && !session.origin) {
+          // 无 verified App Identity 的 session 不允许
           // 进入执行；对外用稳定 code fail-fast。
           const identityCode: ProtocolErrorCode =
-            method.startsWith("msfile.") ? "msfile_identity_required" : "storage_identity_required";
+            "msfile_identity_required";
           await this.scheduleFailFastRequest(recordId, identityCode, "storage_error");
           return;
         }
@@ -2256,14 +2226,11 @@ export class ProtocolServiceImpl implements ProtocolService {
       return;
     }
 
-    // storage.* is an auto-execute session capability. It never opens a
-    // confirmation card, but a locked Vault still queues it until unlock so
-    // the Storage plugin can open its sealed provider config.
+    // MSFile 请求可自动执行，仍受解锁与会话校验约束。
     if (
-      parsed.method.startsWith("storage.") ||
       parsed.method.startsWith("msfile.")
     ) {
-      // msfile.* 与 storage.* 同为 auto-execute session capability；价格确认
+      // MSFile 为自动执行业务；价格确认
       // 由 msfile.service gateway 内部处理，不占用 popup 命令流 confirm UI。
       rec.autoApproved = true;
       rec.autoExecuteAfterUnlock = true;
@@ -3127,7 +3094,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       await this.rememberChannelSessionFromResult(rec, result);
       if (
       rec.cancelRequested &&
-      (rec.method.startsWith("storage.") || rec.method.startsWith("msfile.")) &&
+      rec.method.startsWith("msfile.") &&
       rec.phase !== "rejected" &&
       rec.phase !== "failed"
     ) {
@@ -3184,17 +3151,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     "connect.launch": rec => this.executeConnectLaunch(rec),
     "channel.publish": rec => this.executeChannelPublish(rec),
     "channel.subscription_set": rec => this.executeChannelSubscriptionSet(rec),
-    // 只会分派实际安装 SDK 已发布的方法；旧 SDK 不公开这些候选处理入口。
-    ...{
-      "storage.encrypted.put": (rec: RequestRecord) => this.executeStoragePut(rec, true),
-      "storage.encrypted.get": (rec: RequestRecord) => this.executeStorageGet(rec, true),
-    },
-    "storage.list": rec => this.executeStorageList(rec),
-    "storage.directory.create": rec => this.executeStorageDirectoryCreate(rec),
-    "storage.directory.delete": rec => this.executeStorageDirectoryDelete(rec),
-    "storage.put": rec => this.executeStoragePut(rec),
-    "storage.get": rec => this.executeStorageGet(rec),
-    "storage.delete": rec => this.executeStorageDelete(rec),
     "msfile.stat": rec => this.executeMsfileStat(rec),
     "msfile.seed.read": rec => this.executeMsfileSeedRead(rec),
     "msfile.block.read": rec => this.executeMsfileBlockRead(rec),
@@ -3236,60 +3192,6 @@ export class ProtocolServiceImpl implements ProtocolService {
       return null;
     }
     return null;
-  }
-
-  private async requireStorageContext(rec: RequestRecord, walletPublicKeyHex: string): Promise<AppStorageClient> {
-    const service = this.currentStorageController();
-    if (!service || !this.deps.bindAppStorage) throw protocolError("storage_unavailable", "Storage service is unavailable");
-    const session = await this.requireConnectSession(rec, walletPublicKeyHex);
-    if (!session.origin) throw protocolError("storage_identity_required", "Storage requires a trusted origin session");
-    if (!session.ownerPublicKeyHex) throw protocolError("storage_identity_required", "Storage requires an active owner");
-    const summary = await service.summary();
-    if (!summary.walletGeneration) throw protocolError("storage_unavailable", "Storage requires an initialized wallet");
-    const lifecycle = this.deps.walletState.snapshot();
-    return this.deps.bindAppStorage({ authorizationId:session.authorizationId!, appPublicKeyHex:permissionKeyFor(rec.origin,session.appPublicKeyHex), ...session.networkIdentity, walletPublicKeyHex: session.ownerPublicKeyHex, transportOrigin: rec.origin,
-      origin: session.origin, sessionEpoch: lifecycle.sessionEpoch,
-      walletGeneration: summary.walletGeneration, runGeneration: lifecycle.runGeneration,
-    });
-  }
-
-  private async executeStorageList(rec: RequestRecord): Promise<StorageListResult> {
-    const params = rec.params as import("@keymaster/contracts").StorageListParams;
-    const client = await this.requireStorageContext(rec, params.walletPublicKeyHex);
-    return client.list( { prefix: params.prefix, cursor: params.cursor, limit: params.limit, signal: rec.abortController?.signal });
-  }
-
-  private async executeStorageDirectoryCreate(rec: RequestRecord): Promise<StorageDirectoryResult> {
-    const params = rec.params as import("@keymaster/contracts").StorageDirectoryParams;
-    const client = await this.requireStorageContext(rec, params.walletPublicKeyHex);
-    return client.createDirectory( { path: params.path, overwrite: params.overwrite, signal: rec.abortController?.signal });
-  }
-
-  private async executeStorageDirectoryDelete(rec: RequestRecord): Promise<StorageDirectoryResult> {
-    const params = rec.params as import("@keymaster/contracts").StorageDirectoryParams;
-    const client = await this.requireStorageContext(rec, params.walletPublicKeyHex);
-    return client.deleteDirectory( { path: params.path, signal: rec.abortController?.signal });
-  }
-
-  private async executeStoragePut(rec: RequestRecord, encrypted = false): Promise<StoragePutResult> {
-    const params = rec.params as import("@keymaster/contracts").StoragePutParams;
-    rec.payloadSize = params.content.bytes.byteLength;
-    const client = await this.requireStorageContext(rec, params.walletPublicKeyHex);
-    const input = { path: params.path, content: params.content, contentType: params.contentType, overwrite: params.overwrite, signal: rec.abortController?.signal };
-    return encrypted ? client.putEncrypted(input) : client.put(input);
-  }
-
-  private async executeStorageGet(rec: RequestRecord, encrypted = false): Promise<StorageGetResult> {
-    const params = rec.params as import("@keymaster/contracts").StorageGetParams;
-    const client = await this.requireStorageContext(rec, params.walletPublicKeyHex);
-    const input = { path: params.path, offset: params.offset, length: params.length, ifMatch: params.ifMatch, signal: rec.abortController?.signal };
-    return encrypted ? client.getEncrypted(input) : client.getRange(input);
-  }
-
-  private async executeStorageDelete(rec: RequestRecord): Promise<StorageDeleteResult> {
-    const params = rec.params as import("@keymaster/contracts").StorageDeleteParams;
-    const client = await this.requireStorageContext(rec, params.walletPublicKeyHex);
-    return client.delete( { path: params.path, signal: rec.abortController?.signal });
   }
 
   /* ============== MSFile 执行 ============== */
@@ -3983,7 +3885,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 这一步不依赖 vault.lock 成功与否：session 一旦 logout，旧 owner
     // capability 就不应继续常驻内存。
     this.clearSessionRuntimeBootstrap(result.walletPublicKeyHex, "logout");
-    await this.currentStorageController()?.abortSession(result.walletPublicKeyHex);
     await this.currentMsfileService()?.abortSession(result.walletPublicKeyHex);
     // 清掉 popup 当前 unlock runtime。**同步** await：施工单 4.4 + 5.1.3
     // 要求 logout 同时"吊销 session + 清 popup unlock runtime"——
@@ -5766,7 +5667,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       rec.phase === "waiting_unlock_auto" ||
       rec.phase === "confirming" ||
       rec.phase === "queued" ||
-      (rec.phase === "executing" && (rec.method.startsWith("storage.") || rec.method.startsWith("msfile.")))
+      (rec.phase === "executing" && rec.method.startsWith("msfile."))
     );
   }
 

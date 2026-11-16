@@ -45,7 +45,6 @@ export * from "./appIdentity.js";
 export * from "./cipherSiteKey.js";
 export * from "./storage/index.js";
 export * from "./storage/systemStorageDeclarations.js";
-export * from "./connectStorage.js";
 export * from "./cbor.js";
 export * from "./vaultSession.js";
 export * from "./sessionCoordinator.js";
@@ -68,7 +67,6 @@ export * from "./scopedClients.js";
 
 export { BUILTIN_PLUGIN_DEFINITIONS } from "./generated/pluginDefinitions.js";
 
-export * from "./appStorageBinding.js";
 
 export * from "./workerTransfer.js";
 export * from "./workerPlugin.js";

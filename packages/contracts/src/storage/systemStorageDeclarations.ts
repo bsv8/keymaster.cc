@@ -8,19 +8,16 @@ import type { PluginStorageDeclaration } from "./access.js";
  * 复制这些坐标再拼物理路径。
  */
 export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
-  connectS3Settings: Object.freeze({
-    moduleId: "storage", purposeId: "connect-s3", authority: "platform-only", model: "files", schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
   aiState: Object.freeze({
-    moduleId: "ai", purposeId: "state", authority: "platform-only", model: "kv", schemaVersion: 1,
+    moduleId: "ai", purposeId: "state", authority: "built-in-module", model: "kv", schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
   vaultPayments: Object.freeze({
-    moduleId: "vault", purposeId: "payments", authority: "platform-only", model: "files", schemaVersion: 1,
+    moduleId: "vault", purposeId: "payments", authority: "built-in-module", model: "files", schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
   coordinatorSettings: Object.freeze({
-    moduleId: "coordinator",
+    moduleId: "background",
     purposeId: "settings",
-    authority: "platform-only",
+    authority: "built-in-module",
     model: "snapshot",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
@@ -30,21 +27,21 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
   protocolDurablePolicy: Object.freeze({
     moduleId: "protocol",
     purposeId: "durable-policy",
-    authority: "platform-only",
+    authority: "built-in-module",
     model: "kv",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
   protocolSessions: Object.freeze({
     moduleId: "protocol",
     purposeId: "sessions",
-    authority: "platform-only",
+    authority: "built-in-module",
     model: "kv",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
   protocolCommandHistory: Object.freeze({
     moduleId: "protocol",
     purposeId: "command-history",
-    authority: "platform-only",
+    authority: "built-in-module",
     model: "kv",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
@@ -99,10 +96,10 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
   /**
-   * MSFile 设置与供应商：`msfiles/setting.json`，整文件替换。
+   * MSFile 设置与供应商：`msfile/setting.json`，整文件替换。
    */
   msfilesFiles: Object.freeze({
-    moduleId: "msfiles",
+    moduleId: "msfile",
     purposeId: "",
     authority: "built-in-module",
     model: "files",
@@ -113,23 +110,23 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
    * 独立 purpose 防止与内容、MSFile 设置或 App 用量混写。
    */
   bitfsJournalFiles: Object.freeze({
-    moduleId: "msfiles",
+    moduleId: "msfile",
     purposeId: "bitfs-journal",
     authority: "built-in-module",
     model: "files",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
   /**
-   * 三方 App 的 Keymaster 管理设置：`.keymaster/system/app/app-settings/`。
+   * 三方 App 的 Keymaster 管理设置：`msfile/app-settings/`。
    *
    * 这是平台管理记录，不在 `apps/<app-name>/` 内：App 不能通过自己的文件权限
    * 修改自己的授权、额度或其它 App 的记录。同一发布者的不同 appId 共享这一份
    * 发布者级设置，不按 App 目录复制成互相冲突的多份真值。
    */
   appSettingsFiles: Object.freeze({
-    moduleId: "app",
+    moduleId: "msfile",
     purposeId: "app-settings",
-    authority: "platform-only",
+    authority: "built-in-module",
     model: "files",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
@@ -139,7 +136,6 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
 export const SYSTEM_STORAGE_DECLARATIONS: Readonly<Record<string, readonly PluginStorageDeclaration[]>> = Object.freeze({
   apps: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.appsDirectory]),
   ai: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.aiState]),
-  storage: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.connectS3Settings]),
   vault: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.vaultPayments]),
   "collectible-1satordinals": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.ordinalsMintHistory]),
   p2pkh: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.p2pkhFiles, CENTRAL_STORAGE_DECLARATIONS.p2pkhState]),
@@ -180,6 +176,7 @@ export function assertSystemStorageDeclaration(pluginId: string, declaration: Pl
   // nevertheless have an exact central registration; an unknown pluginId may
   // not self-assign built-in authority by simply bypassing the lookup.
   if (declaration.authority === "third-party-app") return;
+  if (declaration.moduleId !== pluginId) throw new Error("Storage module must match its plugin");
   if (!expected || !expected.some((candidate) =>
     declaration.moduleId === candidate.moduleId
     && declaration.purposeId === candidate.purposeId

@@ -179,7 +179,7 @@ export interface KeyValueStore {
   /** 中央声明绑定的稳定用途身份。 */
   readonly purposeId: string;
   /** 中央声明授权主体。 */
-  readonly authority: "platform-only" | "built-in-module";
+  readonly authority: "built-in-module";
   /** 中央声明数据模型；此句柄必须是 kv。 */
   readonly model: "kv";
   /** 中央声明 schema 版本。 */

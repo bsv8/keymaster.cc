@@ -1,9 +1,9 @@
 import { defineWorkerRequestRoute } from "@keymaster/contracts";
 import {
   type CoordinatorClientRequest as PublicCoordinatorClientRequest, type CoordinatorResponse, type SessionEpoch,
-  type StorageRuntimeController, SYSTEM_STORAGE_DECLARATIONS, CENTRAL_STORAGE_DECLARATIONS, sameNetworkIdentity, deriveAppStorageModuleId, deriveAppStorageName, canonicalOrigin, assertAppPublicKeyHex,
+  type StorageRuntimeController, SYSTEM_STORAGE_DECLARATIONS, CENTRAL_STORAGE_DECLARATIONS,
 } from "@keymaster/contracts";
-import type { CoordinatorOwnerStorageData, CoordinatorPlatformStorageData, StorageOwnerGrant, StoragePlatformGrant } from "@keymaster/contracts/storage-internal";
+import type { CoordinatorOwnerStorageData, StorageOwnerGrant } from "@keymaster/contracts/storage-internal";
 import { createStorageGrantAuthority, createStorageDataQueue, createStorageDataExecutor, type StoragePrivateRootStore } from "./coordinator/index.js";
 import { StorageBrowseCoordinator, type StorageBrowsePrivateCommand } from "./assembly.js";
 type CoordinatorClientRequest = PublicCoordinatorClientRequest | StorageBrowsePrivateCommand;
@@ -25,11 +25,9 @@ export interface StorageWorkerRequestPorts {
   assertAvailable(): void;
   unavailable(message: string): Error;
   ensureRuntime(peerId?: string): Promise<StorageRuntimeController>;
-  appSession(identity: import("@keymaster/contracts").NetworkIdentity, origin: string, authorizationId?: string): Promise<(NonNullable<Awaited<ReturnType<Parameters<typeof createStorageGrantAuthority>[0]["appSession"]>>> & { sessionId: string }) | null>;
-  appStorageName(origin: string): string;
   failure(error: unknown): void;
   admission: { open(peerId: string): boolean; revoked(peerId: string): boolean; response(requestId: string): CoordinatorResponse };
-  io: { run<T>(operation: "read" | "write", signal: AbortSignal | undefined, execute: (signal: AbortSignal) => Promise<T>, options: { auditOperation: "storage.browse" | "storage.platform.data" | "storage.owner.data" | "storage.connect.data"; durableLease?: boolean; allowLocalLock?: boolean; allowLocalOwnerTransition?: boolean; allowLocalBindingDiscard?: boolean }): Promise<T> };
+  io: { run<T>(operation: "read" | "write", signal: AbortSignal | undefined, execute: (signal: AbortSignal) => Promise<T>, options: { auditOperation: "storage.browse" | "storage.owner.data"; durableLease?: boolean; allowLocalLock?: boolean; allowLocalOwnerTransition?: boolean; allowLocalBindingDiscard?: boolean }): Promise<T> };
   clearSecrets(request: { kind: string }): void;
   errorResponse(requestId: string, error: unknown): CoordinatorResponse;
   control(request: Extract<CoordinatorClientRequest, { kind: "storage.control" }>, signal?: AbortSignal, peerId?: string): Promise<CoordinatorResponse>;
@@ -57,20 +55,15 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
 
   const storageGrantAuthority = createStorageGrantAuthority({
     session: () => ({ sessionEpoch: ports.session().sessionEpoch, walletGeneration: ports.session().walletGeneration, runGeneration: ports.session().runGeneration, unlocked: ports.session().vaultStatus === "unlocked", rootAvailable: ports.root() !== undefined }),
-    appSession: ports.appSession,
   });
 
-  const storageGrants = storageGrantAuthority.apps;
 
   const ownerStorageGrants = storageGrantAuthority.owners;
 
-  const platformStorageGrants = storageGrantAuthority.platforms;
 
-  const resolvePlatformStorageGrant = storageGrantAuthority.resolvePlatform;
 
   const resolveOwnerStorageGrant = storageGrantAuthority.resolveOwner;
 
-  const resolveStorageGrant = storageGrantAuthority.resolveApp;
 
   let storageMutationTail: Promise<void> = Promise.resolve();
 
@@ -173,9 +166,7 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
   }
 
   function revokeStorageSessionGrants(): void {
-    storageGrants.clear();
     ownerStorageGrants.clear();
-    platformStorageGrants.clear();
     storageRequests.clear();
   }
 
@@ -191,34 +182,17 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
     if (next) storagePortCounts.set(clientId, next); else storagePortCounts.delete(clientId);
   }
 
-  const { executePlatformStorageDataUnsafe, executeOwnerStorageDataUnsafe, executeStorageDataUnsafe } = createStorageDataExecutor({
+  const { executeOwnerStorageDataUnsafe } = createStorageDataExecutor({
     root: () => ports.root(),
     rootToken: () => ports.token(),
     sessionEpoch: () => ports.session().sessionEpoch,
     assertStorageDataAvailable: ports.assertAvailable,
     storageUnavailableError: ports.unavailable,
-    resolvePlatformStorageGrant,
     resolveOwnerStorageGrant,
-    resolveStorageGrant,
-    ensureStorageRuntime: ports.ensureRuntime,
     beginStorageBindingRequest,
     currentCoordinatorStorageBinding,
     assertStorageBindingLive,
   });
-
-  async function executePlatformStorageData(
-    data: CoordinatorPlatformStorageData,
-    actualClientId: string,
-    signal?: AbortSignal,
-  ): Promise<unknown> {
-    const operation = data.type === "platform.get" || data.type === "platform.list" ? "read" : "write";
-    return ports.io.run(operation, signal, () => executePlatformStorageDataUnsafe(data, actualClientId, signal), {
-      auditOperation: "storage.platform.data",
-      // 平台 K-V 的 get/list 没有外部副作用；保留本地运行世代前后校验，
-      // 但不把页面导航中尚未返回的只读 Promise 写成持久运行锁。
-      durableLease: operation === "write",
-    });
-  }
 
   async function executeOwnerStorageData(
     data: CoordinatorOwnerStorageData,
@@ -234,16 +208,10 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
     });
   }
 
-  async function executeStorageData(request: Extract<CoordinatorClientRequest, { kind: "storage.data" }>, controller: AbortController, actualClientId: string): Promise<CoordinatorResponse> {
-    const operation = request.data.type === "list" || request.data.type === "get-range" || request.data.type === "get-encrypted" ? "read" : "write";
-    return ports.io.run(operation, controller.signal, () => executeStorageDataUnsafe(request, controller, actualClientId), { auditOperation: "storage.connect.data" });
-  }
-
   function revokeStorageSessionRequests(walletPublicKeyHex: string): void {
     for (const [requestId, pending] of storageRequests) {
       if (pending.walletPublicKeyHex === walletPublicKeyHex) { pending.controller.abort(); storageRequests.delete(requestId); }
     }
-    for (const [grantId, grant] of storageGrants) if (grant.context.walletPublicKeyHex === walletPublicKeyHex) storageGrants.delete(grantId);
   }
 
   async function abortStorageSession(walletPublicKeyHex: string, peerId: string): Promise<void> {
@@ -252,48 +220,7 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
     await service.abortSession(walletPublicKeyHex);
   }
 
-  async function executeStorageRequest(request: Extract<CoordinatorClientRequest, { kind: "storage.grant" | "storage.control" | "storage.data" | "storage.cancel" | "storage.session.abort" | "storage.browse.open" | "storage.browse.data" | "storage.browse.close" | "storage.owner.bind" | "storage.platform.bind" | "storage.owner.data" | "storage.platform.data" | "storage.clear.root" }>, actualClientId: string, requestSignal?: AbortSignal): Promise<CoordinatorResponse> {
-    if (request.kind === "storage.grant") {
-      const session = await ports.appSession(request.networkIdentity, request.transportOrigin, request.authorizationId);
-      if (ports.admission.revoked(actualClientId)) return ports.admission.response(request.requestId);
-      if (!session || !session.networkIdentity || !ports.root() || !sameNetworkIdentity(session.networkIdentity, ports.root()!.identity)) return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "error", message: "Storage network identity is invalid or revoked", code: "storage_identity_required" } };
-      if (ports.session().vaultStatus !== "unlocked" || !ports.session().activePublicKeyHex || !ports.root()) {
-        return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "error", message: "Storage requires an unlocked wallet", code: "storage_identity_required" } };
-      }
-      let origin: string;
-      try {
-        origin = canonicalOrigin(session.origin);
-        assertAppPublicKeyHex(session.appPublicKeyHex);
-        if(!session.authorizationId || session.authorizationId !== request.authorizationId)throw new Error("App authorization is required");
-      } catch {
-        return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "error", message: "Storage network identity is invalid or revoked", code: "storage_identity_required" } };
-      }
-      const appPublicKeyHex = session.appPublicKeyHex!;
-      const moduleId = deriveAppStorageModuleId(appPublicKeyHex);
-      // 目录名由平台登记并绑定可信来源；App 只能看到自己那一个目录，既不能
-      // 列举 `apps/` 根，也不能指定别的 name 切换目录。
-      const appStorageName = deriveAppStorageName({appPublicKeyHex});
-      if (ports.admission.revoked(actualClientId)) return ports.admission.response(request.requestId);
-      const grantId = `grant-${crypto.randomUUID()}`;
-      storageGrants.set(grantId, {
-        context: {
-          ...session.networkIdentity,
-          walletPublicKeyHex: session.ownerPublicKeyHex,
-          transportOrigin: session.origin,
-          appPublicKeyHex, authorizationId:session.authorizationId!,
-          origin,
-          appStorageName,
-          moduleId,
-          purposeId: "files",
-          sessionEpoch: ports.session().sessionEpoch,
-          walletGeneration: ports.session().walletGeneration,
-          runGeneration: ports.session().runGeneration,
-        },
-        clientId: actualClientId,
-        sessionEpoch: ports.session().sessionEpoch,
-      });
-      return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "ok" }, operationResult: grantId };
-    }
+  async function executeStorageRequest(request: Extract<CoordinatorClientRequest, { kind: "storage.control" | "storage.cancel" | "storage.session.abort" | "storage.browse.open" | "storage.browse.data" | "storage.browse.close" | "storage.owner.bind" | "storage.owner.data" | "storage.clear.root" }>, actualClientId: string, requestSignal?: AbortSignal): Promise<CoordinatorResponse> {
     if (request.kind === "storage.browse.open" || request.kind === "storage.browse.data" || request.kind === "storage.browse.close") {
       return storageBrowseCoordinator.execute(request, actualClientId, requestSignal);
     }
@@ -306,39 +233,9 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
       await abortStorageSession(request.walletPublicKeyHex, actualClientId);
       return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "ok" } };
     }
-    if (request.kind === "storage.platform.bind") {
-      // platform bind 只面向平台专属 K-V。请求体只用于声明匹配，grant 始终
-      // 由 Coordinator 使用中央声明目录里的预存值生成，调用方不能自报
-      // module/purpose 来扩大权限。
-      const expected = SYSTEM_STORAGE_DECLARATIONS[request.pluginId]?.flat().find((candidate) => candidate.authority === "platform-only" && candidate.purposeId === request.declaration.purposeId);
-      if (!expected || expected.authority !== "platform-only" || expected.model !== "kv"
-        || request.declaration.moduleId !== expected.moduleId
-        || request.declaration.purposeId !== expected.purposeId
-        || request.declaration.authority !== expected.authority
-        || request.declaration.model !== expected.model
-        || request.declaration.schemaVersion !== expected.schemaVersion) {
-        return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "error", message: "Platform storage declaration is not authorized", code: "storage_forbidden" } };
-      }
-      if (!ports.root()) return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "error", message: "Platform storage requires a ready root", code: "storage_unavailable" } };
-      const grant: StoragePlatformGrant & { clientId: string } = {
-        ...ports.root()!.identity,
-        platformGrantId: `platform-${crypto.randomUUID()}`,
-        walletGeneration: ports.session().walletGeneration,
-        runGeneration: ports.session().runGeneration,
-        moduleId: expected.moduleId,
-        purposeId: expected.purposeId,
-        authority: expected.authority,
-        model: expected.model,
-        schemaVersion: expected.schemaVersion,
-        sessionEpoch: ports.session().sessionEpoch,
-        clientId: actualClientId
-      };
-      platformStorageGrants.set(grant.platformGrantId, grant);
-      return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "ok" }, operationResult: grant };
-    }
     if (request.kind === "storage.owner.bind") {
       const expected = SYSTEM_STORAGE_DECLARATIONS[request.pluginId]?.find((candidate) => candidate.authority === "built-in-module" && candidate.purposeId === request.declaration.purposeId);
-      if (!expected || expected.authority !== "built-in-module"
+      if (!expected || expected.moduleId !== request.pluginId || expected.authority !== "built-in-module"
         || (expected.model !== "kv" && expected.model !== "files")
         || request.declaration.moduleId !== expected.moduleId
         || request.declaration.purposeId !== expected.purposeId
@@ -400,7 +297,7 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
           const root = ports.root();
           if (!root) throw ports.unavailable("Platform storage has not been bootstrapped");
           await root.clearStorageRoot(request.input);
-        }, { auditOperation: "storage.platform.data" });
+        }, { auditOperation: "storage.owner.data" });
       } catch (error) {
         ports.failure(error);
         throw error;
@@ -431,88 +328,22 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
         ...(request.data.type === "owner.delete" ? {} : { operationResult: value }),
       };
     }
-    if (request.kind === "storage.platform.data") {
-      if (ports.admission.revoked(actualClientId)) return ports.admission.response(request.requestId);
-      const controller = new AbortController();
-      const requestKey = storageRequestKey(actualClientId, request.requestId);
-      storageRequests.set(requestKey, { controller, clientId: actualClientId });
-      let value: unknown;
-      try {
-        value = await withStorageDataSlot(
-          actualClientId,
-          () => executePlatformStorageData(request.data, actualClientId, controller.signal),
-          controller.signal,
-        );
-      } catch (error) {
-        ports.failure(error);
-        throw error;
-      } finally {
-        if (storageRequests.get(requestKey)?.controller === controller) storageRequests.delete(requestKey);
-      }
-      return {
-        requestId: request.requestId,
-        sessionEpoch: ports.session().sessionEpoch,
-        ack: { status: "ok" },
-        ...(request.data.type === "platform.delete" ? {} : { operationResult: value }),
-      };
-    }
+
     const controller = new AbortController();
     const requestKey = storageRequestKey(actualClientId, request.requestId);
-    let physicalStarted = false;
-    let physicalAccountingReleased = false;
-    const releasePhysicalAccounting = (): void => {
-      if (physicalAccountingReleased) return;
-      physicalAccountingReleased = true;
-      // A client may reuse a requestId after cancellation. Do not let the old
-      // physical operation delete the newer request's controller entry.
-      if (storageRequests.get(requestKey)?.controller === controller) storageRequests.delete(requestKey);
-      if (request.kind === "storage.data") releaseStoragePortSlot(actualClientId);
-    };
-    if (request.kind === "storage.data") {
-      if (!reserveStoragePortSlot(actualClientId)) return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "error", message: "storage_limit_exceeded", code: "storage_limit_exceeded" } };
-    }
-    if (ports.admission.revoked(actualClientId)) {
-      if (request.kind === "storage.data") releaseStoragePortSlot(actualClientId);
-      return ports.admission.response(request.requestId);
-    }
-    storageRequests.set(requestKey, { controller, clientId: actualClientId, walletPublicKeyHex: request.kind === "storage.data" && "grantId" in request.data ? storageGrants.get(request.data.grantId)?.context.walletPublicKeyHex : undefined });
+    if (ports.admission.revoked(actualClientId)) return ports.admission.response(request.requestId);
+    storageRequests.set(requestKey, { controller, clientId: actualClientId });
     try {
-      if (request.kind === "storage.control") {
-        let result!: CoordinatorResponse;
-        const run = storageMutationTail.then(() => ports.control(request, controller.signal, actualClientId), () => ports.control(request, controller.signal, actualClientId));
-        storageMutationTail = run.then(() => undefined, () => undefined);
-        result = await run;
-        return result;
-      }
-      return await withStorageDataSlot(
-        actualClientId,
-        () => executeStorageData(request, controller, actualClientId),
-        controller.signal,
-        {
-          onPhysicalStart: () => { physicalStarted = true; },
-          // The RPC may already have returned a cancellation error here. Keep
-          // the admission count and request binding until the real Provider
-          // Promise settles, otherwise repeated cancel calls bypass the limit.
-          onPhysicalSettled: releasePhysicalAccounting
-        }
-      );
-    } catch (err) {
-      ports.failure(err);
-      const code = (err as { code?: string })?.code;
-      return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "error", message: err instanceof Error ? err.message : String(err), ...(typeof code === "string" ? { code: code as never } : {}) } };
+      const run = storageMutationTail.then(() => ports.control(request, controller.signal, actualClientId), () => ports.control(request, controller.signal, actualClientId));
+      storageMutationTail = run.then(() => undefined, () => undefined);
+      return await run;
     } finally {
-      if (request.kind === "storage.data") {
-        // Queued/early-cancelled calls never acquired a physical slot, so their
-        // admission reservation belongs to the RPC lifecycle. Once physical
-        // execution starts, releasePhysicalAccounting owns it until settle.
-        if (!physicalStarted) releasePhysicalAccounting();
-      } else if (storageRequests.get(requestKey)?.controller === controller) {
-        storageRequests.delete(requestKey);
-      }
+      if (storageRequests.get(requestKey)?.controller === controller) storageRequests.delete(requestKey);
     }
   }
+
   const route = defineWorkerRequestRoute<Extract<CoordinatorClientRequest, { kind: `storage.${string}` }>>({
-    kinds: ["storage.control", "storage.grant", "storage.data", "storage.cancel", "storage.session.abort", "storage.browse.open", "storage.browse.data", "storage.browse.close", "storage.clear.root", "storage.owner.bind", "storage.platform.bind", "storage.owner.data", "storage.platform.data"],
+    kinds: ["storage.control", "storage.cancel", "storage.session.abort", "storage.browse.open", "storage.browse.data", "storage.browse.close", "storage.clear.root", "storage.owner.bind", "storage.owner.data"],
     policy: request => ({
       scheduling: "parallel", validateEpoch: false,
       cleanupOnly: request.kind === "storage.cancel" || request.kind === "storage.session.abort",
@@ -527,12 +358,8 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
     storageRequestKey,
     storagePortCounts,
     storageGrantAuthority,
-    storageGrants,
     ownerStorageGrants,
-    platformStorageGrants,
-    resolvePlatformStorageGrant,
     resolveOwnerStorageGrant,
-    resolveStorageGrant,
     get storageMutationTail() { return storageMutationTail; }, set storageMutationTail(value: typeof storageMutationTail) { storageMutationTail = value; },
     STORAGE_DATA_MAX_PER_PORT,
     storageDataQueue,
@@ -551,12 +378,8 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
     revokeStorageSessionGrants,
     reserveStoragePortSlot,
     releaseStoragePortSlot,
-    executePlatformStorageDataUnsafe,
     executeOwnerStorageDataUnsafe,
-    executeStorageDataUnsafe,
-    executePlatformStorageData,
     executeOwnerStorageData,
-    executeStorageData,
     revokeStorageSessionRequests,
     abortStorageSession,
     executeStorageRequest,

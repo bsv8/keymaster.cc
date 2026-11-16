@@ -139,11 +139,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             "kind": "local",
             "id": "storage.runtime-controller",
             "version": "1"
-          },
-          {
-            "kind": "local",
-            "id": "storage.app-clients",
-            "version": "1"
           }
         ],
         "privateProvides": [],
@@ -212,18 +207,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             "reason": "为 /settings/storage 提供面包屑"
           }
         ],
-        "connect": {
-          "providerMethods": [
-            "storage.list",
-            "storage.directory.create",
-            "storage.directory.delete",
-            "storage.put",
-            "storage.get",
-            "storage.encrypted.put",
-            "storage.encrypted.get",
-            "storage.delete"
-          ]
-        },
         "permissions": [],
         "storages": []
       },
@@ -235,11 +218,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "kind": "rpc",
             "id": "coordinator.owner-storage",
-            "version": "1.0.0"
-          },
-          {
-            "kind": "rpc",
-            "id": "coordinator.platform-storage",
             "version": "1.0.0"
           },
           {
@@ -257,11 +235,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "kind": "rpc",
             "id": "storage.private.browse",
-            "version": "1"
-          },
-          {
-            "kind": "rpc",
-            "id": "storage.private.connect-s3",
             "version": "1"
           }
         ],
@@ -420,7 +393,7 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "moduleId": "vault",
             "purposeId": "payments",
-            "authority": "platform-only",
+            "authority": "built-in-module",
             "model": "files",
             "schemaVersion": 1
           }
@@ -639,7 +612,7 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
         "permissions": [],
         "storages": [
           {
-            "moduleId": "msfiles",
+            "moduleId": "msfile",
             "purposeId": "",
             "authority": "built-in-module",
             "model": "files",
@@ -721,23 +694,23 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
         "permissions": [],
         "storages": [
           {
-            "moduleId": "msfiles",
+            "moduleId": "msfile",
             "purposeId": "",
             "authority": "built-in-module",
             "model": "files",
             "schemaVersion": 1
           },
           {
-            "moduleId": "msfiles",
+            "moduleId": "msfile",
             "purposeId": "bitfs-journal",
             "authority": "built-in-module",
             "model": "files",
             "schemaVersion": 1
           },
           {
-            "moduleId": "app",
+            "moduleId": "msfile",
             "purposeId": "app-settings",
-            "authority": "platform-only",
+            "authority": "built-in-module",
             "model": "files",
             "schemaVersion": 1
           }
@@ -1041,26 +1014,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "capability": {
               "kind": "local",
-              "id": "storage.app-clients",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "Connect App 会话受限文件客户端",
-            "optional": true
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "storage.runtime-controller",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "可选 Storage 方法",
-            "optional": true
-          },
-          {
-            "capability": {
-              "kind": "local",
               "id": "msfile.service",
               "version": "1"
             },
@@ -1092,21 +1045,21 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "moduleId": "protocol",
             "purposeId": "durable-policy",
-            "authority": "platform-only",
+            "authority": "built-in-module",
             "model": "kv",
             "schemaVersion": 1
           },
           {
             "moduleId": "protocol",
             "purposeId": "sessions",
-            "authority": "platform-only",
+            "authority": "built-in-module",
             "model": "kv",
             "schemaVersion": 1
           },
           {
             "moduleId": "protocol",
             "purposeId": "command-history",
-            "authority": "platform-only",
+            "authority": "built-in-module",
             "model": "kv",
             "schemaVersion": 1
           }
@@ -1857,7 +1810,7 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "moduleId": "ai",
             "purposeId": "state",
-            "authority": "platform-only",
+            "authority": "built-in-module",
             "model": "kv",
             "schemaVersion": 1
           }

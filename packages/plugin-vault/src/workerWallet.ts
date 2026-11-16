@@ -12,7 +12,6 @@ export interface VaultWalletWorkerPorts {
   };
   unavailable(message: string): Error;
   transitions: Pick<Parameters<typeof createWalletLifecycleService>[0], "revokeGrants" | "establishSession" | "adoptUnlockedKey">;
-  clearAppRoot(name: string): Promise<void>;
   binding: { installRoot(): Promise<void>; loadSettings(): Promise<void>; ensureStorage(): Promise<unknown>; ensureTasks(): Promise<void>; complete(cause: "initialize"): Promise<void>; lock(reason: string): Promise<void> };
 }
 /** 唯一 Key 仓储、钱包生命周期与冷启动事实归 Vault；公共层只编排会话提交。 */
@@ -53,7 +52,6 @@ export function createVaultWalletWorker(ports: VaultWalletWorkerPorts) {
       case "renamed":
         break;
       case "password-changed":
-      case "app-revoked":
         break;
       default:
         break;
@@ -81,7 +79,6 @@ export function createVaultWalletWorker(ports: VaultWalletWorkerPorts) {
       publish: publishWalletLifecycleEvent,
       runGeneration: () => ports.session().runGeneration,
       currentSessionEpoch: () => ports.session().sessionEpoch,
-      clearAppRoot: ports.clearAppRoot,
     });
     // 冷启动只读 meta 与固定 KeyHold；这里不恢复任何运行态授权。
     storageColdStartState = await walletLifecycle.coldStart();

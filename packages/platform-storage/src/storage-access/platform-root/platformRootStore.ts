@@ -9,7 +9,7 @@ import type { StorageBrowseWallet } from "../../runtime/storageBrowsePrivate.js"
 //   - 不再有 Provider、bucket 与 bucketGeneration；物理数据按逻辑根隔离，权限
 //     由绑定里的四件事（钱包世代、会话 epoch、运行世代、App 身份）保证；
 //   - 清空一个根按前缀分页删除，不全量读取对象字节；
-//   - platform-only 与 built-in-module 直接使用可信装配提供的声明。
+//   - 所有插件共用按 module/purpose 绑定的存储入口。
 
 import type {
   KeyValueStore,
@@ -36,7 +36,6 @@ import { createModuleFileStore } from "../wallet/moduleFileStore.js";
 export interface StoragePrivateRootStore extends PlatformRootStore {
   openBrowseStore(): Promise<StorageBrowseWallet>;
   /** 只交给可信 Worker 装配；普通模块入口不能打开核心额度账本。 */
-  openPlatformFileStore(input: { declaration: PluginStorageDeclaration }): Promise<ModuleFileStore>;
 }
 
 export interface PlatformRootStoreOptions {
@@ -98,7 +97,7 @@ function platformRootMatchesGeneration(live: { walletGeneration: string; session
       ...identity,
       moduleId: "coordinator",
       purposeId: "settings",
-      authority: "platform-only",
+      authority: "built-in-module",
       model: "kv",
       schemaVersion: 1,
       walletGeneration: live.walletGeneration,
@@ -219,20 +218,12 @@ function platformRootMatchesGeneration(live: { walletGeneration: string; session
       const binding = bind(declaration);
       return createModuleFileStore({ store: options.store, binding, isCurrent: gateFor(binding) });
     },
-    openPlatformFileStore: async (input: { declaration: PluginStorageDeclaration }): Promise<ModuleFileStore> => {
-      const binding = bind(input.declaration);
-      return createModuleFileStore({ store: options.store, binding, isCurrent: gateFor(binding) });
-    },
-    openPlatformSnapshot: async <T>(input: {
+    openSnapshot: async <T>(input: {
       declaration: PluginStorageDeclaration;
       validate: (value: unknown) => StorageSnapshotJsonCompatible<T>;
     }): Promise<SnapshotStore<T>> => {
       const binding = bind(input.declaration);
       return createFixedCasSnapshotStore({ store: options.store, binding, isCurrent: gateFor(binding), validate: input.validate });
-    },
-    openPlatformStore: async (input: { declaration: PluginStorageDeclaration }): Promise<KeyValueStore> => {
-      const binding = bind(input.declaration);
-      return createKeyValueStore({ store: options.store, binding, isCurrent: gateFor(binding) });
     },
     async clearStorageRoot(input): Promise<void> {
       const declaration = input.declaration;

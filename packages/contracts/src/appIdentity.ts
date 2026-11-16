@@ -1,5 +1,4 @@
 import { secp256k1 } from "@noble/curves/secp256k1.js";
-import { sha256 } from "@noble/hashes/sha2.js";
 
 export class OriginValidationError extends Error {
   constructor(message: string) {
@@ -66,37 +65,4 @@ export function assertAppPublicKeyHex(value: unknown, field = "appPublicKeyHex")
     throw new OriginValidationError(`${field} must be a valid secp256k1 public key`);
   }
   return value;
-}
-
-/** 应用稳定归属根：<network>/<walletPublicKeyLower>/<appPublicKeyHex>/files/ */
-export function appStorageRoot(network: string, walletPublicKeyHex: string, appPublicKeyHex: string): string {
-  if (network !== "main" && network !== "test") {
-    throw new OriginValidationError("network must be main or test");
-  }
-  if (!/^(02|03)[0-9a-f]{64}$/iu.test(walletPublicKeyHex)) {
-    throw new OriginValidationError("wallet public key is invalid");
-  }
-  assertAppPublicKeyHex(appPublicKeyHex);
-  return `${network}/${walletPublicKeyHex.toLowerCase()}/${appPublicKeyHex}/files/`;
-}
-
-/** App 级加密 scope：storage.encrypted-file.v1|<sha256hex(root + path)> */
-export function appStorageScope(root: string, path: string): string {
-  if (!root || !path) throw new OriginValidationError("storage root/path is invalid");
-  const digest = sha256(new TextEncoder().encode(root + path));
-  return `storage.encrypted-file.v1|${Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("")}`;
-}
-
-/**
- * 从已验证 App 公钥派生三方 App 的稳定 moduleId。
- * 域与 origin 版（v1）分离；同一公钥在不同设备一致，不残留 origin 或 App ID。
- */
-export function deriveAppStorageModuleId(appPublicKeyHex: string): string {
-  const app = assertAppPublicKeyHex(appPublicKeyHex);
-  const bytes = new TextEncoder().encode(`keymaster.storage-module.v2\u0000${app}`);
-  const digest = sha256(bytes);
-  digest[6] = (digest[6]! & 0x0f) | 0x50;
-  digest[8] = (digest[8]! & 0x3f) | 0x80;
-  const hex = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }

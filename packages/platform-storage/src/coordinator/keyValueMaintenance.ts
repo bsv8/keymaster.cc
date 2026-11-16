@@ -119,9 +119,7 @@ export function createKeyValueMaintenance(deps: KeyValueMaintenanceDependencies)
       if (visited.has(targetKey)) continue;
       let store: KeyValueStore | undefined;
       try {
-        store = declaration.authority === "platform-only"
-          ? await root.openPlatformStore({ declaration })
-          : await root.openKeyValueStore({ declaration });
+        store = await root.openKeyValueStore({ declaration });
         if (!maintenanceStoreMatches(store, root, declaration)) throw new Error("Coordinator K-V maintenance binding mismatch");
         await collect(store, targetKey);
       } catch (error) {

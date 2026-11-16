@@ -98,9 +98,6 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      // AWS 的 browser XML parser 依赖 DOMParser；SharedWorker 没有 DOM。
-      // 固定 XML 组件使用 SDK 自带的纯 JS 解析入口，不向 Worker 注入页面/DOM polyfill。
-      "@aws-sdk/xml-builder": createRequire(new URL("./packages/platform-storage/package.json", import.meta.url)).resolve("@aws-sdk/xml-builder"),
       // WebLoom 在开发阶段通过 link 接入；所有 React Hook 必须解析到
       // Keymaster 应用的同一份 React，避免 peer 依赖产生第二份 dispatcher。
       react: new URL("./node_modules/react", import.meta.url).pathname,

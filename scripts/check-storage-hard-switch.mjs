@@ -11,6 +11,7 @@ const root = process.cwd();
 const scanRoots = ["."];
 const sourceExtensions = /\.(?:ts|tsx|js|jsx|json|css)$/u;
 const forbiddenText = [
+  ["平台插件存储特权", /platform-only|\bopenPlatform(?:Store|Snapshot|FileStore)\b|storage\.platform\.(?:bind|data)|COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY/u],
   ["旧包名", /@keymaster\/plugin-storage/u],
   ["旧运行时符号", /\bStorageService\b/u],
   ["旧权限上下文符号", /\bStorageAppContext\b/u],

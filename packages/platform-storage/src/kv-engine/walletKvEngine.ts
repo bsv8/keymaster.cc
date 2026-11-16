@@ -341,7 +341,7 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
     get runGeneration() { return options.binding.runGeneration; },
     moduleId: declaration.moduleId,
     purposeId: declaration.purposeId,
-    authority: declaration.authority as "platform-only" | "built-in-module",
+    authority: declaration.authority as "built-in-module",
     model: "kv",
     schemaVersion: declaration.schemaVersion,
     async get<T = KeyValueValue>(key: string, input: { partition?: string } = {}): Promise<KeyValueEntry<T> | undefined> {

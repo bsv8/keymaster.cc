@@ -26,6 +26,7 @@ import type {
 import {
   validateBsvNetwork,
   KEYHOLD_LIMITS,
+  WALLET_KEYHOLD_PATH,
 } from "@keymaster/contracts";
 import * as secp256k1 from "@noble/secp256k1";
 import type { WalletVaultLifecycleStore } from "@keymaster/contracts/storage-internal";
@@ -81,7 +82,6 @@ export interface WalletLifecycleDeps {
   /** 当前会话 epoch；锁定状态下为空串。 */
   currentSessionEpoch: () => string;
   /** 删除一个已撤销 App 的独立目录；只作用于该目录。 */
-  clearAppRoot: (appStorageName: string) => Promise<void>;
 }
 
 function encode(value: unknown): Uint8Array {
@@ -132,8 +132,6 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
   walletGeneration(): string;
   /** 校验某个 grant 的世代是否仍然是当前的。 */
   isGrantLive(input: { walletGeneration: string; sessionEpoch: string; runGeneration: string }): boolean;
-  /** 撤销指定 App 的授权并清空它的独立目录。 */
-  revokeApp(appStorageName: string): Promise<void>;
 } {
   const now = deps.now ?? (() => Date.now());
   const listeners = new Set<(event: WalletLifecycleEvent) => void>();
@@ -300,8 +298,8 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
       // 唯一的提交边界：KeyHold、meta 与初始化记录同事务落盘。
       // 条件创建保证并发初始化只有一个成功，另一方得到 conflict 而不是覆盖。
       await deps.store.batch({ operations: [
-        { type: "put", path: "key.json", bytes: keyHoldBytes, contentType: "application/json" },
-      ], conditions: [{ path: "key.json", ifNoneMatch: true }] });
+        { type: "put", path: WALLET_KEYHOLD_PATH, bytes: keyHoldBytes, contentType: "application/json" },
+      ], conditions: [{ path: WALLET_KEYHOLD_PATH, ifNoneMatch: true }] });
     } catch (caught) {
       privateKeyBytes.fill(0);
       const code = errorCode(caught);
@@ -511,16 +509,6 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
       if (input.sessionEpoch !== deps.currentSessionEpoch()) return false;
       if (input.runGeneration !== deps.runGeneration()) return false;
       return true;
-    },
-    /**
-     * 撤销单个 App 授权。
-     *
-     * 这里只广播事件让页面丢弃该 App 的缓存授权，并调用 Coordinator 提供的
-     * 清理回调删除它自己的目录；不影响其它 App、模块或平台记录。
-     */
-    async revokeApp(appStorageName: string): Promise<void> {
-      await deps.clearAppRoot(appStorageName);
-      emit({ type: "app-revoked", appStorageName });
     },
   };
 }

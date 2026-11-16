@@ -5,13 +5,10 @@
 // `path`,不含桶身份或钱包 Owner 前缀。
 
 /** 唯一钱包 Key 的固定逻辑路径;这是结构约束,不是可配置项。 */
-export const WALLET_KEYHOLD_PATH = "key.json";
+export const WALLET_KEYHOLD_PATH = "vault/key.json";
 
 /** 本地格式与初始化状态的固定路径。 */
 export const WALLET_META_PATH = ".keymaster/meta";
-
-/** 系统保留区根前缀;普通插件不得读写其中的内容。 */
-export const WALLET_SYSTEM_ROOT = ".keymaster/system/";
 
 /** 第三方 App 存储根前缀。 */
 export const WALLET_APPS_ROOT = "apps/";
@@ -133,18 +130,6 @@ export function resolveAppStorageNameConflict(input: {
   return (base.slice(0, 54) + "-" + digest.slice(0, 8));
 }
 
-/**
- * 没有显式登记 name 时，由可信来源派生出稳定的 App 目录名。
- *
- * 这保证「同名不同来源绝不共用目录」在没有登记记录时也成立：目录名完全来自
- * 来源摘要，跨设备、跨重启结果一致，显示名称或本地化不影响它。平台一旦有
- * 正式登记记录，就应使用登记值并在本函数之外做冲突分配。
- */
-export function deriveAppStorageName(input: { appPublicKeyHex: string }): string {
-  const app = assertAppPublicKeyHex(input.appPublicKeyHex);
-  return "app-" + originDigestHex(app).slice(0,24);
-}
-
 /** 与来源同族的稳定摘要;只需短后缀,用于目录名去冲突。 */
 function originDigestHex(canonical: string): string {
   const bytes = new TextEncoder().encode(
@@ -164,20 +149,20 @@ import { canonicalOrigin, assertAppPublicKeyHex } from "../appIdentity.js";
  * 只能提供中央声明坐标,不能自报根目录。`purposeId` 为空串表示模块根。
  */
 export function buildWalletStorageRoot(input: {
-  authority: "platform-only" | "built-in-module" | "third-party-app";
+  authority: "built-in-module" | "third-party-app";
   moduleId: string;
   purposeId: string;
   /** 仅 third-party-app 需要:平台登记并规范化后的存储名称。 */
   appStorageName?: string;
 }): string {
-  const { moduleId, purposeId } = input;
-  if (input.authority === "platform-only") {
-    return WALLET_SYSTEM_ROOT + moduleId + "/" + purposeId + "/";
-  }
+  const moduleId = normalizeRelativeStoragePath(input.moduleId);
+  const purposeId = input.purposeId === "" ? "" : normalizeRelativeStoragePath(input.purposeId);
+  if (moduleId.includes("/") || purposeId.includes("/")) throw new Error("Storage coordinates must be single directory names");
   if (input.authority === "built-in-module") {
     return purposeId === "" ? moduleId + "/" : moduleId + "/" + purposeId + "/";
   }
-  return WALLET_APPS_ROOT + input.appStorageName + "/";
+  if (input.authority !== "third-party-app") throw new Error("Storage authority is invalid");
+  return WALLET_APPS_ROOT + normalizeAppStorageName(input.appStorageName ?? "") + "/";
 }
 
 /**
@@ -398,5 +383,4 @@ export type WalletLifecycleEvent =
   | { type: "locked" }
   | { type: "password-changed" }
   | { type: "renamed"; label: string }
-  | { type: "reset"; walletGeneration: string }
-  | { type: "app-revoked"; appStorageName: string };
+  | { type: "reset"; walletGeneration: string };

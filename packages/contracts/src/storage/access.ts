@@ -11,11 +11,10 @@ import {
 /**
  * 中央存储声明的授权主体。
  *
- * 物理数据不再按桶和 Owner 隔离，权限仍然隔离：系统管理数据、内置模块数据和
- * 第三方 App 数据只能通过各自绑定的句柄访问。三类主体对应三个固定根，不能
- * 互相访问对方的保留区。
+ * 插件数据只能通过绑定自身 module/purpose 的句柄访问，不设平台插件特权。
+ * 第三方 App 的历史命名空间模型独立于插件存储，不扩大插件目录权限。
  */
-export type StorageAuthority = "platform-only" | "built-in-module" | "third-party-app";
+export type StorageAuthority = "built-in-module" | "third-party-app";
 
 /** 中央存储声明的数据模型。 */
 export type StorageModel = "snapshot" | "kv" | "files";
@@ -32,7 +31,7 @@ export interface PluginStorageDeclaration {
   moduleId: string;
   /** 模块内稳定用途，例如 `settings` 或 `state`；文件模型允许空串表示模块根。 */
   purposeId: string;
-  /** 平台专属、内置模块或已验证第三方 App。 */
+  /** 内置模块或已验证第三方 App。 */
   authority: StorageAuthority;
   /** 固定单对象快照或 unique-value-id K-V。 */
   model: StorageModel;
@@ -85,7 +84,7 @@ export function validateStoragePurposeId(purposeId: string): string {
 /** 校验并规范化一个中央存储声明。 */
 export function validatePluginStorageDeclaration(input: PluginStorageDeclaration): PluginStorageDeclaration {
   if (!input) throw new Error("storage declaration is invalid");
-  if (input.authority !== "platform-only" && input.authority !== "built-in-module" && input.authority !== "third-party-app") {
+  if (input.authority !== "built-in-module" && input.authority !== "third-party-app") {
     throw new Error("storage declaration authority is invalid");
   }
   if (input.model !== "snapshot" && input.model !== "kv" && input.model !== "files") {
@@ -110,14 +109,11 @@ export function validatePluginStorageDeclaration(input: PluginStorageDeclaration
  * 构造绑定后的逻辑 namespace 根。
  *
  * 根路径完全由 authority 与中央声明坐标决定，调用方不能自报物理路径：
- *   - platform-only → `.keymaster/system/<moduleId>/<purposeId>/`
  *   - built-in-module → `<moduleId>/<purposeId>/`（空 purpose 即模块根）
  *   - third-party-app → `apps/<appStorageName>/`
  */
 export function buildStorageNamespaceRoot(binding: StorageNamespaceBinding): string {
-  // Host assembly supplies this binding. App authorization is performed when
-  // issuing the handle; path construction does not revalidate internal facts.
-  const declaration = binding;
+  const declaration = validatePluginStorageDeclaration(binding);
   if (declaration.authority === "third-party-app") {
     return networkIdentityStorageRoot(binding) + buildWalletStorageRoot({
       authority: "third-party-app",
@@ -199,13 +195,11 @@ export interface PlatformRootStore {
     /** 三方 App 已验证身份：仅 third-party-app 声明允许携带。 */
     origin?: string;
   }): Promise<import("./files.js").ModuleFileStore>;
-  /** 打开平台专属 snapshot。 */
-  openPlatformSnapshot<T>(input: {
+  /** 打开已绑定插件用途的 snapshot。 */
+  openSnapshot<T>(input: {
     declaration: PluginStorageDeclaration;
     validate: (value: unknown) => StorageSnapshotJsonCompatible<T>;
   }): Promise<SnapshotStore<T>>;
-  /** 打开平台 K-V。 */
-  openPlatformStore(input: { declaration: PluginStorageDeclaration }): Promise<KeyValueStore>;
   /** 删除一个已绑定目录下的全部对象；只由重置和单 App 清理流程调用。 */
   clearStorageRoot(input: { declaration: PluginStorageDeclaration; appStorageName?: string }): Promise<void>;
 }

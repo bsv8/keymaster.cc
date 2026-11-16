@@ -5,16 +5,15 @@ import { defineCapability } from "webloom-framework";
 import type {
   CoordinatorClientRequest, CoordinatorCommandAck, CoordinatorCryptoOperation, CoordinatorCryptoResult,
   CoordinatorResponse, CoordinatorTopic, CoordinatorTopicEvent, CoordinatorSessionOpenResult,
-  CoordinatorVaultOperation, CoordinatorStorageControl, CoordinatorStorageData,
+  CoordinatorVaultOperation, CoordinatorStorageControl,
   CoordinatorMsFileControl, CoordinatorMsFileData, CoordinatorChannelOperation,
   P2pkhProviderConfig, SessionEpoch, WindowP2pExecutorLease, WindowP2pExecutorTransferResult, WindowP2pIdentitySignResult,
 } from "./sessionCoordinator.js";
 import type { ChannelPublishResult, ChannelSubscriptionSetResult, OpenedPrivateEnvelope } from "./channel.js";
 import type { KeyRef, VaultSealedSecret } from "./vault.js";
-import type { StorageBindingGrant, StoragePlatformGrant, CoordinatorOwnerStorageData, CoordinatorPlatformStorageData } from "./storage/internal.js";
+import type { StorageBindingGrant, CoordinatorOwnerStorageData } from "./storage/internal.js";
 import type { StorageRuntimeControllerStatus, StorageRuntimeSummary } from "./storage/runtime.js";
 import type { WalletColdStartSnapshot, WalletInitializeResult, WalletUnlockResult } from "./storage/wallet.js";
-import type { StorageListResult, StorageDirectoryResult, StoragePutResult, StorageGetResult, StorageDeleteResult } from "./connectStorage.js";
 import type { KeyValueEntry, KeyValueEntryMeta, KeyValueListResult, KeyValueCommitResult } from "./storage/kv.js";
 import type {
   MsFileCollectorConfig,
@@ -55,11 +54,7 @@ export type CoordinatorStorageControlResultFor<C extends CoordinatorStorageContr
   C extends { type: "unlock" } ? WalletUnlockResult : C extends { type: "lock" | "change-key-password" | "rename-key" | "export-key-hold" } ? true :
   C extends { type: "reset-wallet" } ? { walletGeneration: string; clearedAt: string } : never;
 export type CoordinatorStorageControlResult = CoordinatorStorageControlResultFor<CoordinatorStorageControl> | null | undefined;
-export type CoordinatorStorageDataResultFor<D extends CoordinatorStorageData> =
-  D extends { type: "list" } ? StorageListResult : D extends { type: "create-directory" | "delete-directory" } ? StorageDirectoryResult :
-  D extends { type: "put" | "put-encrypted" } ? StoragePutResult : D extends { type: "get-range" | "get-encrypted" } ? StorageGetResult : D extends { type: "delete" } ? StorageDeleteResult :
-  D extends { type: "batch" } ? { paths: string[]; committedAt: string } : never;
-export type CoordinatorStorageDataResult = CoordinatorStorageDataResultFor<CoordinatorStorageData> | undefined;
+
 export type CoordinatorMsFileControlResultFor<C extends CoordinatorMsFileControl> =
   C extends { type: "settings.get" } ? MsFileSettingsSnapshot : C extends { type: "settings.bitfsBuyer.get" } ? MsFileBitfsBuyerSettings :
   C extends { type: "settings.readConcurrency.get" } ? MsFileReadConcurrencySettings :
@@ -89,16 +84,15 @@ export type CoordinatorChannelOperationResultFor<O extends CoordinatorChannelOpe
   O extends { type: "publish" | "hash-request-publish" | "private-publish" } ? ChannelPublishResult :
   O extends { type: "open-private-envelope" } ? OpenedPrivateEnvelope : O extends { type: "subscription-set" } ? ChannelSubscriptionSetResult : null;
 export type CoordinatorChannelOperationResult = CoordinatorChannelOperationResultFor<CoordinatorChannelOperation>;
-export type CoordinatorOwnerStorageResultFor<D extends CoordinatorOwnerStorageData | CoordinatorPlatformStorageData> =
-  D extends { type: "owner.get" | "platform.get" } ? KeyValueEntry<unknown> | undefined :
-  D extends { type: "owner.list" | "platform.list" } ? KeyValueListResult : D extends { type: "owner.put" | "platform.put" } ? KeyValueEntryMeta :
-  D extends { type: "owner.delete" | "platform.delete" | "owner.file-delete" } ? undefined :
-  D extends { type: "owner.commit" | "platform.commit" } ? KeyValueCommitResult :
+export type CoordinatorOwnerStorageResultFor<D extends CoordinatorOwnerStorageData> =
+  D extends { type: "owner.get" } ? KeyValueEntry<unknown> | undefined :
+  D extends { type: "owner.list" } ? KeyValueListResult : D extends { type: "owner.put" } ? KeyValueEntryMeta :
+  D extends { type: "owner.delete" | "owner.file-delete" } ? undefined :
+  D extends { type: "owner.commit" } ? KeyValueCommitResult :
   D extends { type: "owner.file-list" } ? import("./storage/files.js").ModuleFileListPage :
   D extends { type: "owner.file-get" | "owner.file-range" } ? import("./storage/files.js").ModuleFileObject | undefined :
   D extends { type: "owner.file-put" } ? { revision: string; lastModified: string } : D extends { type: "owner.file-batch" } ? { paths: string[]; committedAt: string } : never;
 export type CoordinatorOwnerStorageResult = KeyValueEntry<unknown> | KeyValueEntry<unknown>[] | KeyValueListResult | KeyValueEntryMeta | KeyValueCommitResult | undefined | null;
-export type CoordinatorPlatformStorageResult = CoordinatorOwnerStorageResult;
 export type CoordinatorCryptoResultFor<O extends CoordinatorCryptoOperation> = Extract<CoordinatorCryptoResult, { type: O["type"] }>;
 export type CoordinatorP2pkhBroadcastResult = P2pkhBroadcastResult |
   { status: "not-dispatched"; reason: "cancelled" | "stale-provider-generation" | "broadcast-provider-unavailable" | "coordinator-not-dispatched" | "stale-session-epoch" | "snapshot-stale" | "snapshot-consumed" | "snapshot-binding-required" | "snapshot-input-invalid"; currentSeq?: number } |
@@ -108,10 +102,9 @@ export type CoordinatorRpcResultForRequest<R extends CoordinatorRpcRequest> =
   R extends { kind: "session.open" } ? CoordinatorSessionOpenResult :
   R extends { kind: "vault.operation"; operation: infer O extends CoordinatorVaultOperation } ? CoordinatorVaultOperationResultFor<O> :
   R extends { kind: "storage.control"; control: infer C extends CoordinatorStorageControl } ? CoordinatorStorageControlResultFor<C> :
-  R extends { kind: "storage.data"; data: infer D extends CoordinatorStorageData } ? CoordinatorStorageDataResultFor<D> :
-  R extends { kind: "storage.owner.data" | "storage.platform.data"; data: infer D extends CoordinatorOwnerStorageData | CoordinatorPlatformStorageData } ? CoordinatorOwnerStorageResultFor<D> :
-  R extends { kind: "storage.grant" | "msfile.grant" } ? string : R extends { kind: "storage.owner.bind" } ? StorageBindingGrant :
-  R extends { kind: "storage.platform.bind" } ? StoragePlatformGrant : R extends { kind: "storage.clear.root" } ? true :
+  R extends { kind: "storage.owner.data"; data: infer D extends CoordinatorOwnerStorageData } ? CoordinatorOwnerStorageResultFor<D> :
+  R extends { kind: "msfile.grant" } ? string : R extends { kind: "storage.owner.bind" } ? StorageBindingGrant :
+  R extends { kind: "storage.clear.root" } ? true :
   R extends { kind: "msfile.control"; control: infer C extends CoordinatorMsFileControl } ? CoordinatorMsFileControlResultFor<C> :
   R extends { kind: "msfile.data"; data: infer D extends CoordinatorMsFileData } ? CoordinatorMsFileDataResultFor<D> :
   R extends { kind: "window-p2p.executor.acquire" } ? WindowP2pExecutorLease : R extends { kind: "window-p2p.executor.spike.transfer" } ? WindowP2pExecutorTransferResult :
@@ -128,7 +121,7 @@ export type CoordinatorRpcResultFor<K extends CoordinatorRpcRequestKind> = Coord
 type ResponseBase = Omit<CoordinatorRpcResponse, "operationResult" | "cryptoResult">;
 type NonOkResponse = ResponseBase & { ack: Exclude<CoordinatorCommandAck, { status: "ok" }>; operationResult?: never; cryptoResult?: never };
 type VoidRequest = Extract<CoordinatorRpcRequest, { kind: "session.close" | "session.activity" | "unlock" | "lock" | "background.run-now" | "background.trigger" | "background.cancel" | "background.cancel-by-key" | "background.settings.update" | "autolock.settings.update" | "storage.cancel" | "storage.session.abort" | "msfile.cancel" | "msfile.session.abort" | "window-p2p.executor.release" | "channel.cancel" | "chain.fee-policy.update" | "p2pkh.provider-config.update" }> |
-  (Extract<CoordinatorRpcRequest, { kind: "storage.owner.data" | "storage.platform.data" }> & { data: Extract<CoordinatorOwnerStorageData | CoordinatorPlatformStorageData, { type: "owner.delete" | "platform.delete" }> });
+  (Extract<CoordinatorRpcRequest, { kind: "storage.owner.data" }> & { data: Extract<CoordinatorOwnerStorageData, { type: "owner.delete" }> });
 export type CoordinatorRpcResponseForRequest<R extends CoordinatorRpcRequest> =
   R extends { kind: "crypto"; operation: infer O extends CoordinatorCryptoOperation } ? (ResponseBase & { ack: { status: "ok" }; cryptoResult: CoordinatorCryptoResultFor<O>; operationResult?: never }) | NonOkResponse :
   R extends VoidRequest ? (ResponseBase & { ack: { status: "ok" }; operationResult?: never; cryptoResult?: never }) | NonOkResponse :
@@ -193,17 +186,12 @@ const kvCommit = (value: unknown) => fields(value, "revision commitId committedA
 const fileEntry = (value: unknown) => fields(value, "path size revision lastModified");
 const fileObject = (value: unknown) => fields(value, "path revision lastModified", { bytes: copy });
 const batchResult = (value: unknown) => fields(value, "committedAt", { paths: copy });
-const storageList = (value: unknown) => fields(value, "prefix parentPrefix markerPath nextCursor", {
-  directories: each(value => fields(value, "path name")), files: each(value => fields(value, "path name size revision lastModified")),
-});
-const storageGet = (value: unknown) => fields(value, "path contentType offset totalSize eof revision lastModified", { content: binary });
 function storageGrant(value: unknown): Row {
   const common = "bsvNetwork publicKeyHex storageGrantId walletGeneration runGeneration sessionEpoch authority model schemaVersion";
   return (value as StorageBindingGrant).authority === "third-party-app"
     ? fields(value, `${common} appStorageName`, { verifiedAppIdentity: value => fields(value, "publisherPublicKeyHex appId") })
     : fields(value, `${common} moduleId purposeId`);
 }
-const platformGrant = (value: unknown) => fields(value, "bsvNetwork publicKeyHex platformGrantId walletGeneration runGeneration sessionEpoch moduleId purposeId authority model schemaVersion");
 const walletError = (value: unknown) => fields(value, "title summary action code incidentId diagnostic phase");
 function storageControlResult(control: CoordinatorStorageControl, value: unknown): unknown {
   if (value === null || value === undefined) return value;
@@ -218,25 +206,13 @@ function storageControlResult(control: CoordinatorStorageControl, value: unknown
     default: return value;
   }
 }
-function storageDataResult(data: CoordinatorStorageData, value: unknown): unknown {
-  switch (data.type) {
-    case "list": return storageList(value);
-    case "get-encrypted":
-    case "get-range": return storageGet(value);
-    case "batch": return batchResult(value);
-    case "put-encrypted":
-    case "put": return fields(value, "path size updatedAt revision");
-    case "delete": return fields(value, "path deleted updatedAt");
-    default: return fields(value, "path created deleted");
-  }
-}
-function ownerResult(data: CoordinatorOwnerStorageData | CoordinatorPlatformStorageData, value: unknown): unknown {
+function ownerResult(data: CoordinatorOwnerStorageData, value: unknown): unknown {
   if (value === undefined || value === null) return value;
   switch (data.type) {
-    case "owner.get": case "platform.get": return kvEntry(value);
-    case "owner.list": case "platform.list": return kvList(value);
-    case "owner.put": case "platform.put": return kvMeta(value);
-    case "owner.commit": case "platform.commit": return kvCommit(value);
+    case "owner.get": return kvEntry(value);
+    case "owner.list": return kvList(value);
+    case "owner.put": return kvMeta(value);
+    case "owner.commit": return kvCommit(value);
     case "owner.file-list": return fields(value, "nextCursor", { files: each(fileEntry) });
     case "owner.file-get": case "owner.file-range": return fileObject(value);
     case "owner.file-put": return fields(value, "revision lastModified");
@@ -362,11 +338,9 @@ function resultFor(request: CoordinatorRpcRequest, value: unknown): unknown {
         default: return value;
       }
     case "storage.control": return storageControlResult(request.control, value);
-    case "storage.data": return storageDataResult(request.data, value);
-    case "storage.owner.data": case "storage.platform.data": return ownerResult(request.data, value);
+    case "storage.owner.data": return ownerResult(request.data, value);
     case "storage.owner.bind": return storageGrant(value);
-    case "storage.platform.bind": return platformGrant(value);
-    case "storage.grant": case "msfile.grant": case "storage.clear.root": return value;
+    case "msfile.grant": case "storage.clear.root": return value;
     case "msfile.control": return msControlResult(request.control, value);
     case "msfile.data": return request.data.type === "stat" ? fields(value, "seedHashHex", { sources: each(msStatSource) }) : fields(value, "contentHashHex", { content: binary });
     case "window-p2p.executor.acquire": return fields(value, "leaseId sessionEpoch activePublicKeyHex");
@@ -461,16 +435,11 @@ export const COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY = defineCapability<Coordin
   request: { parse: value => copy(value) as CoordinatorOwnerStorageData }, response: { parse: value => ownerDataResponse(value) as CoordinatorOwnerStorageResult },
   transfer: { request: transfers, response: transfers },
 });
-export const COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY = defineCapability<CoordinatorPlatformStorageData, CoordinatorPlatformStorageResult>({
-  kind: "rpc", id: "coordinator.platform-storage", version: "1.0.0",
-  request: { parse: value => copy(value) as CoordinatorPlatformStorageData }, response: { parse: value => ownerDataResponse(value) as CoordinatorPlatformStorageResult },
-  transfer: { request: transfers, response: transfers },
-});
 export const COORDINATOR_CRYPTO_RPC_CAPABILITY = defineCapability<CoordinatorCryptoOperation, CoordinatorCryptoResult>({
   kind: "rpc", id: "coordinator.crypto", version: "1.0.0",
   request: { parse: value => copy(value) as CoordinatorCryptoOperation }, response: { parse: cryptoResult },
 });
 export const COORDINATOR_RUNTIME_CAPABILITIES = Object.freeze([
   COORDINATOR_RPC_CAPABILITY, COORDINATOR_TOPIC_STREAM_CAPABILITY, COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
-  COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY, COORDINATOR_CRYPTO_RPC_CAPABILITY,
+  COORDINATOR_CRYPTO_RPC_CAPABILITY,
 ] as const);

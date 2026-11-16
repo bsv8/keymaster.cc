@@ -25,7 +25,6 @@ export interface StorageBindingAuthority {
   openOwnerAppStore(input: { pluginId: string; declaration: PluginStorageDeclaration }): Promise<OwnerAppStore>;
   /** 打开模块文件根（model: "files"）。 */
   openOwnerFileStore(input: { pluginId: string; declaration: PluginStorageDeclaration }): Promise<ModuleFileStore>;
-  openPlatformStore(input: { pluginId: string; declaration: PluginStorageDeclaration }): Promise<KeyValueStore>;
   /** 清空一个已绑定根下的全部对象；只由重置与单 App 清理流程调用。 */
   clearStorageRoot(input: { declaration: PluginStorageDeclaration; appStorageName?: string }): Promise<void>;
 }
@@ -56,31 +55,9 @@ export type CoordinatorOwnerStorageData =
     conditions?: Array<{ path: string; ifRevision?: string; ifNoneMatch?: boolean }>;
   };
 
-export type CoordinatorPlatformStorageData =
-  | { type: "platform.get"; platformGrantId: string; key: string; partition?: string }
-  | { type: "platform.list"; platformGrantId: string; input?: { prefix?: string; cursor?: string; limit?: number; partition?: string } }
-  | { type: "platform.put"; platformGrantId: string; key: string; value: unknown; condition?: { ifRevision?: number; partition?: string } }
-  | { type: "platform.delete"; platformGrantId: string; key: string; condition?: { ifRevision?: number; partition?: string } }
-  | { type: "platform.commit"; platformGrantId: string; partition: string; ifRevision?: number; operations: import("./kv.js").KeyValueCommitOperation[] };
-
-/** 平台 K-V 授权；物理路径、数据库连接和内部 revision 只保存在 Worker 内。 */
-export interface StoragePlatformGrant extends importNetworkIdentity {
-  platformGrantId: string;
-  walletGeneration: string;
-  runGeneration: string;
-  moduleId: string;
-  purposeId: string;
-  authority: "platform-only" | "built-in-module";
-  model: "kv";
-  schemaVersion: number;
-  sessionEpoch: SessionEpoch;
-}
-
 export interface StorageBindingCoordinatorClient {
   storageBindOwner(input: { pluginId: string; declaration: PluginStorageDeclaration }): Promise<import("../sessionCoordinator.js").CoordinatorValueResult<StorageOwnerGrant | ThirdPartyAppStorageGrant>>;
-  storageBindPlatform(input: { pluginId: string; declaration: PluginStorageDeclaration }): Promise<import("../sessionCoordinator.js").CoordinatorValueResult<StoragePlatformGrant>>;
   storageOwnerData(data: CoordinatorOwnerStorageData, transfer?: ArrayBuffer[], signal?: AbortSignal): Promise<import("../sessionCoordinator.js").CoordinatorValueResult<unknown>>;
-  storagePlatformData(data: CoordinatorPlatformStorageData): Promise<import("../sessionCoordinator.js").CoordinatorValueResult<unknown>>;
   storageClearRoot(input: { declaration: PluginStorageDeclaration; appStorageName?: string }): Promise<import("../sessionCoordinator.js").CoordinatorValueResult<unknown>>;
 }
 

@@ -43,7 +43,7 @@ import { createKeyValueMaintenance } from "@keymaster/platform-storage/coordinat
 
 import { BUILTIN_PLUGIN_DEFINITIONS } from "@keymaster/contracts";
 import { createWalletStateSource } from "@keymaster/plugin-vault/coordinator";
-import { STORAGE_PRIVATE_BROWSE_CAPABILITY, STORAGE_PRIVATE_S3_CAPABILITY, type StorageBrowsePrivateCommand } from "@keymaster/platform-storage/assembly";
+import { STORAGE_PRIVATE_BROWSE_CAPABILITY, type StorageBrowsePrivateCommand } from "@keymaster/platform-storage/assembly";
 import { storagePrivateCapabilities } from "../assembly/storagePrivateCapabilities.js";
 // src/keymasterSessionCoordinator.worker.ts
 // Keymaster Session Coordinator SharedWorker
@@ -65,7 +65,7 @@ import type { SessionEpoch, CoordinatorVaultStatus, CoordinatorClientRequest as 
 /** 可信 Worker 入口内的命令联合；私有浏览不进入公共 transport parser。 */
 type CoordinatorClientRequest = PublicCoordinatorClientRequest | StorageBrowsePrivateCommand;
 
-import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, deriveAppStorageName, coordinatorClientRequestFromRpc, projectCoordinatorResponse, isValidBackgroundSyncIntervalMs, BACKGROUND_TRIGGER_REASON, AUTO_LOCK_DEFAULT_TIMEOUT_MS, isValidAutoLockTimeoutMs, normalizeAutoLockTimeoutMs } from "@keymaster/contracts";
+import { CENTRAL_STORAGE_DECLARATIONS, SYSTEM_STORAGE_DECLARATIONS, coordinatorClientRequestFromRpc, projectCoordinatorResponse, isValidBackgroundSyncIntervalMs, BACKGROUND_TRIGGER_REASON, AUTO_LOCK_DEFAULT_TIMEOUT_MS, isValidAutoLockTimeoutMs, normalizeAutoLockTimeoutMs } from "@keymaster/contracts";
 import { BUILTIN_PLUGIN_PRODUCT_ID_SET } from "@keymaster/contracts";
 
 import { COORDINATOR_SERVICE_PROTOCOL_VERSION } from "@keymaster/contracts";
@@ -73,7 +73,6 @@ import {
   COORDINATOR_RPC_CAPABILITY,
   COORDINATOR_TOPIC_STREAM_CAPABILITY,
   COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
-  COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY,
   COORDINATOR_CRYPTO_RPC_CAPABILITY,
 } from "@keymaster/contracts";
 import { MSFILE_READ_CONCURRENCY_RECOMMENDED, MSFILE_SELLER_SETTINGS_DEFAULT } from "@keymaster/contracts";
@@ -290,7 +289,6 @@ const vaultWalletWorker = createVaultWalletWorker({
   createStore: () => storageWorkerRoot.activity.wrap(createIndexedDbWalletStore()), bootstrapStorage: createVaultBootstrapStorage,
   unavailable: storageUnavailableError,
   transitions: { revokeGrants: revokeWalletGrants, establishSession: establishWalletSession, adoptUnlockedKey: input => vaultWorkerOperations.adoptUnlockedKey(input) },
-  clearAppRoot: clearThirdPartyAppRoot,
   binding: {
     installRoot: () => installPlatformStorage(), loadSettings: () => loadCoordinatorMeta(), ensureStorage: () => ensureStorageRuntime(),
     ensureTasks: () => ensureCoordinatorTasksRegistered(), complete: cause => completeUnlockedBinding(cause), lock: reason => performGlobalLock(reason),
@@ -298,10 +296,6 @@ const vaultWalletWorker = createVaultWalletWorker({
 });
 
 const storageWorkerRoot = createStorageWorkerRoot({
-  secrets: {
-    seal: async (scope, plaintext) => await vaultWorkerOperations.executeVaultOperation({ type: "sealLocalSecret", scope, plaintext }) as import("@keymaster/contracts").VaultSealedSecret,
-    open: async (scope, sealed) => await vaultWorkerOperations.executeVaultOperation({ type: "openLocalSecret", scope, sealed }) as Uint8Array,
-  },
   session: () => ({ walletGeneration: coordinatorState.walletGeneration, sessionEpoch: coordinatorState.sessionEpoch, runGeneration: coordinatorState.runGeneration, vaultStatus: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.activePublicKeyHex }),
   wallet: {
     store: () => vaultWalletWorker.walletStore,
@@ -314,7 +308,7 @@ const storageWorkerRoot = createStorageWorkerRoot({
     let settings: SnapshotStore<CoordinatorSettingsSnapshot> | undefined;
     let protocol: CoordinatorProtocolStorageStores | undefined;
     try {
-      settings = await root.openPlatformSnapshot({ declaration: CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings, validate: validateCoordinatorSettingsSnapshot });
+      settings = await root.openSnapshot({ declaration: CENTRAL_STORAGE_DECLARATIONS.coordinatorSettings, validate: validateCoordinatorSettingsSnapshot });
       protocol = await openCoordinatorProtocolStorageStores(root);
       const ownedSettings = settings; const ownedProtocol = protocol;
       return {
@@ -336,8 +330,8 @@ const storageWorkerRoot = createStorageWorkerRoot({
     reconcile: () => { void reconcileCoordinatorRuntime(); }, maintenance: () => scheduleCoordinatorKeyValueMaintenance(),
   },
   abortSession: id => storageWorkerRequests.revokeStorageSessionRequests(id),
-  revokeRequests() { abortStorageRequests(); storageWorkerRequests.storageGrants.clear(); storageWorkerRequests.ownerStorageGrants.clear(); storageWorkerRequests.platformStorageGrants.clear(); },
-  invalidateClients() { workerStorageClients.invalidateAll(); storageWorkerRequests.ownerStorageGrants.clear(); storageWorkerRequests.platformStorageGrants.clear(); },
+  revokeRequests() { abortStorageRequests(); storageWorkerRequests.ownerStorageGrants.clear();  },
+  invalidateClients() { workerStorageClients.invalidateAll(); storageWorkerRequests.ownerStorageGrants.clear();  },
   recover: peerId => resumeAfterStorageReady(peerId), assertAuthority: ensureCoordinatorAuthorityClaim,
   recovery: () => coordinatorAuthority.coordinatorAuthorityRecovery,
   publish: event => { publishTopicEvent("storage.state", event); },
@@ -376,7 +370,7 @@ function platformArtifactsMatch(binding = coordinatorPlatformArtifactsBinding): 
   return Boolean(binding && binding.walletGeneration === coordinatorState.walletGeneration
     && binding.sessionEpoch === coordinatorState.sessionEpoch && binding.runGeneration === coordinatorState.runGeneration);
 }
-/** Protocol 的三个 platform-only purpose K-V。 */
+/** Protocol 自身目录下的三个 purpose K-V。 */
 interface CoordinatorProtocolStorageStores {
   durablePolicy: KeyValueStore;
   sessions: KeyValueStore;
@@ -442,12 +436,12 @@ const storageWorkerRequests = createStorageWorkerRequests({
   session: () => ({ sessionEpoch: coordinatorState.sessionEpoch, walletGeneration: coordinatorState.walletGeneration, runGeneration: coordinatorState.runGeneration, vaultStatus: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.activePublicKeyHex }),
   root: () => storageWorkerRoot.root, token: () => storageWorkerRoot.token, ready: () => storageWorkerRoot.ready,
   assertAvailable: assertStorageDataAvailable, unavailable: storageUnavailableError, ensureRuntime: ensureStorageRuntime,
-  appSession: readProtocolConnectSession, appStorageName: resolveConnectAppStorageName, failure: markStorageIoFailure,
   admission: {
     open(peerId) { const state = coordinatorPeerState(peerId); return Boolean(state?.sessionOpen && state.status === "open" && state.peer.scope.state === "active" && state.sessionBinding && state.openCommitOrder !== undefined); },
     revoked: peerId => revokedCoordinatorPeerIds.has(peerId), response: disconnectedClientResponse,
   },
   io: { run: (operation, signal, execute, options) => withCoordinatorFinalIoLease(operation, signal, execute, { ...options, auditOperation: options.auditOperation }) },
+  failure: markStorageIoFailure,
   clearSecrets: request => storageWorkerControl.clearSecrets(request), errorResponse: storageErrorResponse,
   control: (...args) => storageWorkerControl.execute(...args),
 });
@@ -461,11 +455,11 @@ const scheduleCoordinatorKeyValueMaintenance = storageKeyValueMaintenance.schedu
 async function openCoordinatorProtocolStorageStores(root: PlatformRootStore): Promise<CoordinatorProtocolStorageStores> {
   const opened: KeyValueStore[] = [];
   try {
-    const durablePolicy = await root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.protocolDurablePolicy });
+    const durablePolicy = await root.openKeyValueStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.protocolDurablePolicy });
     opened.push(durablePolicy);
-    const sessions = await root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.protocolSessions });
+    const sessions = await root.openKeyValueStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.protocolSessions });
     opened.push(sessions);
-    const commandHistory = await root.openPlatformStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.protocolCommandHistory });
+    const commandHistory = await root.openKeyValueStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.protocolCommandHistory });
     opened.push(commandHistory);
     return { durablePolicy, sessions, commandHistory };
   } catch (error) {
@@ -587,38 +581,6 @@ function isStorageConflict(error: unknown): boolean {
 }
 
 let testStorageSessionResolver: ((sessionId: string) => Promise<{ sessionId: string; origin: string; networkIdentity?: import("@keymaster/contracts").NetworkIdentity; ownerPublicKeyHex?: string; revokedAt: number | null } | null>) | undefined;
-
-function isValidStorageIdentity(identity: unknown): identity is string {
-  return typeof identity === "string" && identity.length > 0;
-}
-
-/**
- * 解析一个已验证 App 身份的平台登记存储名。
- *
- * 目录名只由验证身份派生：相同身份的 App 永远落进同一个 `apps/<name>/`，
- * 不同身份即使显示名称相同也得到不同目录。这样「同名不同身份」在没有任何
- * 显式登记记录时也不会共用目录，而显示名称或本地化变化不会移动已有目录。
- */
-function resolveConnectAppStorageName(origin: string): string {
-  return deriveAppStorageName({ appPublicKeyHex:origin });
-}
-
-/**
- * 第三方 App 文件 namespace 的声明形状。
- *
- * 它不在中央声明目录里：每个 App 的 moduleId 由验证身份派生，目录由平台
- * 登记的 appStorageName 决定。只有在需要「按 name 定位一个目录」（如单 App
- * 清理）而调用方尚未提供具体身份时，才使用这条中性坐标；
- * `buildWalletStorageRoot` 对 third-party-app 只读取 appStorageName，因此这里的
- * moduleId 不参与任何路径计算。
- */
-const THIRD_PARTY_APP_FILES_DECLARATION = Object.freeze({
-  moduleId: "third-party-app",
-  purposeId: "",
-  authority: "third-party-app",
-  model: "files",
-  schemaVersion: 1,
-} satisfies PluginStorageDeclaration);
 
 async function readProtocolConnectSession(identity: import("@keymaster/contracts").NetworkIdentity, origin: string, authorizationId?: string): Promise<{ authorizationId?:string; appPublicKeyHex?:string; sessionId: string; origin: string; networkIdentity: import("@keymaster/contracts").NetworkIdentity; ownerPublicKeyHex: string; revokedAt: number | null } | null> {
   if (testStorageSessionResolver) {
@@ -1050,7 +1012,7 @@ async function ensureMsfileRuntime(expectedInstanceId?: string, boundStores?: Ms
   let stores = boundStores;
   if (!stores && testDomainUnitReadiness && coordinatorState.activePublicKeyHex) stores = {
     ownerPublicKeyHex: coordinatorState.activePublicKeyHex.trim().toLowerCase(),
-    settings: createWorkerModuleFileStore("msfile", ""), appSettings: workerStorageClients.platformFiles("msfile", "app-settings"),
+    settings: createWorkerModuleFileStore("msfile", ""), appSettings: workerStorageClients.moduleFiles("msfile", "app-settings"),
   };
   const runtime = await msfileWorkerLifecycle.ensure(stores, assertScopeActive);
   const unit = activateCoordinatorOwnerWorkerUnit("msfile.coordinator-worker", expectedInstanceId);
@@ -1441,9 +1403,7 @@ function abortCoordinatorPeerInflight(peerId: string): void {
   for (const [requestId, request] of windowP2pWorkerRuntime.windowP2pExecutorIdentityRequests) {
     if (request.clientId === peerId) { request.controller.abort(); windowP2pWorkerRuntime.windowP2pExecutorIdentityRequests.delete(requestId); }
   }
-  for (const [grantId, grant] of storageWorkerRequests.storageGrants) if (grant.clientId === peerId) storageWorkerRequests.storageGrants.delete(grantId);
   for (const [grantId, grant] of storageWorkerRequests.ownerStorageGrants) if (grant.clientId === peerId) storageWorkerRequests.ownerStorageGrants.delete(grantId);
-  for (const [grantId, grant] of storageWorkerRequests.platformStorageGrants) if (grant.clientId === peerId) storageWorkerRequests.platformStorageGrants.delete(grantId);
   for (const [grantId, grant] of msfileWorkerRequests.msfileGrants) if (grant.clientId === peerId) msfileWorkerRequests.msfileGrants.delete(grantId);
   // 浏览授权是专属授权：peer 一旦脱离 committed session，它名下签发的授权当场作废，
   // 随后任何 browse 调用都只能得到「不可用」。
@@ -2070,11 +2030,7 @@ const workerStorageClientCapabilities = createScopedStorageClients({
   async openOwnerFileStore({ pluginId, declaration }) {
     const binding = storageWorkerRequests.currentCoordinatorStorageBinding();
     if (!binding) throw storageUnavailableError("Worker file binding is unavailable");
-    // Scoped clients retain the consumer lifetime and use the internal declaration directly.
-    // Platform-managed App settings must use the private platform file entry.
-    const files = declaration.authority === "platform-only"
-      ? workerStorageClients.platformFiles(pluginId, declaration.purposeId)
-      : createWorkerModuleFileStore(pluginId, declaration.purposeId);
+    const files = createWorkerModuleFileStore(pluginId, declaration.purposeId);
     return { ...files, ...declaration, model: "files" as const, ...binding, close: () => { } };
   },
   async openOwnerAppStore({ pluginId, declaration }) {
@@ -2083,7 +2039,6 @@ const workerStorageClientCapabilities = createScopedStorageClients({
     const store = createWorkerKeyValueStore(pluginId, declaration.purposeId);
     return { ...store, ...binding };
   },
-  async openPlatformStore() { throw storageUnavailableError("Worker public clients do not expose platform purposes"); },
   async clearStorageRoot() { throw storageUnavailableError("Worker public clients do not clear roots"); },
 }, pluginId => BUILTIN_PLUGIN_DEFINITIONS.find(plugin => plugin.id === pluginId));
 
@@ -2905,11 +2860,10 @@ function publishTopicEvent(topic: CoordinatorTopic, event: any): CoordinatorTopi
 // 13. Worker Entry Point
 // ============================================================
 
-const { owner: handleCoordinatorOwnerStorageRpc, platform: handleCoordinatorPlatformStorageRpc } = createStorageRpcHandlers({
+const { owner: handleCoordinatorOwnerStorageRpc } = createStorageRpcHandlers({
   authorize: call => requireCoordinatorSessionPeer(call).peer.peerId,
   unavailable: storageUnavailableError,
   owner: storageWorkerRequests.executeOwnerStorageData,
-  platform: storageWorkerRequests.executePlatformStorageData,
 });
 const vaultWorkerRuntime = createVaultWorkerRuntime({
   walletControl: vaultWorkerOperations.walletControl,
@@ -2953,9 +2907,8 @@ function coordinatorSessionClosed(peerId: string, binding: CoordinatorSessionBin
 }
 
 const COORDINATOR_SESSION_EXPOSURES = [
-  STORAGE_PRIVATE_BROWSE_CAPABILITY, STORAGE_PRIVATE_S3_CAPABILITY,
+  STORAGE_PRIVATE_BROWSE_CAPABILITY,
   COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
-  COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY,
   COORDINATOR_CRYPTO_RPC_CAPABILITY,
 ] as const;
 
@@ -3008,7 +2961,7 @@ function reconcileCoordinatorSessionExposure(state: CoordinatorPeerState): void 
   try {
     state.serviceExposure = state.peer.exposeGroup(COORDINATOR_SESSION_EXPOSURES.map((capability) => ({
       capability,
-      options: (capability === STORAGE_PRIVATE_BROWSE_CAPABILITY || capability === STORAGE_PRIVATE_S3_CAPABILITY)
+      options: (capability === STORAGE_PRIVATE_BROWSE_CAPABILITY)
         ? {} // 私有票据由框架按连接与消费实例签发，不使用公共会话 grant。
         : { grantId: coordinatorSessionGrantId(state, capability.id) },
     })));
@@ -3112,7 +3065,7 @@ async function openCoordinatorSession(
         const serviceExposure = coordinatorSessionServicesReady()
           ? state.peer.exposeGroup(COORDINATOR_SESSION_EXPOSURES.map((capability) => ({
             capability,
-            options: (capability === STORAGE_PRIVATE_BROWSE_CAPABILITY || capability === STORAGE_PRIVATE_S3_CAPABILITY)
+            options: (capability === STORAGE_PRIVATE_BROWSE_CAPABILITY)
               ? {} // 私有票据由框架按连接与消费实例签发，不使用公共会话 grant。
               : { grantId: coordinatorSessionGrantId(state, capability.id) },
           })))
@@ -3298,17 +3251,10 @@ const coordinatorRuntimePlugins = [
   createStorageWorkerPlugin({
     files: workerStorageClientCapabilities[0].value,
     keyValues: workerStorageClientCapabilities[1].value,
-    owner: handleCoordinatorOwnerStorageRpc, platform: handleCoordinatorPlatformStorageRpc,
+    owner: handleCoordinatorOwnerStorageRpc,
     authorize: call => requireCoordinatorSessionPeer(call).peer.peerId,
     browse: processRequest,
-    s3: (request, signal) => withCoordinatorFinalIoLease(request.type === "get" ? "read" : "write", signal, async () => {
-      if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch || signal.aborted) throw storageUnavailableError("S3 settings session expired");
-      const result = await storageWorkerRoot.s3Runtime().execute(request, signal);
-      if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch || signal.aborted) throw storageUnavailableError("S3 settings session expired");
-      return result;
-    }, { auditOperation: "storage.connect-s3.settings" }),
     revokeBrowse: () => storageWorkerRequests.storageBrowseCoordinator.revokeAll(),
-    revokeS3: () => storageWorkerRoot.disposeS3(),
   }),
   createWindowP2pWorkerPlugin({
     bridge: { get available() { return windowP2pWorkerRuntime.windowP2pExecutorLease?.transportReady === true; }, request: windowP2pWorkerRuntime.requestWindowP2pExecutorOperation },
@@ -3368,9 +3314,8 @@ export function coordinatorHostOptions() {
       COORDINATOR_TOPIC_STREAM_CAPABILITY,
     ],
     peerExposureAllowlist: [
-      STORAGE_PRIVATE_BROWSE_CAPABILITY, STORAGE_PRIVATE_S3_CAPABILITY,
+      STORAGE_PRIVATE_BROWSE_CAPABILITY,
       COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
-      COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY,
       COORDINATOR_CRYPTO_RPC_CAPABILITY,
     ],
     configurePeer: configureCoordinatorPeer,
@@ -3561,18 +3506,6 @@ async function initializeCoordinatorInternal(skipStorageBootstrap = false, propa
     // 状态，否则首个页面会永久停留在 booting。
     publishSessionState("bootstrap");
   }
-}
-
-/** 删除一个已撤销第三方 App 的独立目录；只作用于该目录。 */
-async function clearThirdPartyAppRoot(appStorageName: string): Promise<void> {
-  if (!storageWorkerRoot.root) return;
-  // 第三方 App 的 namespace 不在中央声明目录里：它的 moduleId 由验证身份派生，
-  // 目录由平台登记的 name 决定。buildWalletStorageRoot 对 third-party-app 只使用
-  // appStorageName，因此 moduleId 在这里只是一条不参与路径计算的稳定坐标。
-  await storageWorkerRoot.root.clearStorageRoot({
-    declaration: THIRD_PARTY_APP_FILES_DECLARATION,
-    appStorageName,
-  });
 }
 
 let coordinatorInitialization: Promise<void> | undefined;

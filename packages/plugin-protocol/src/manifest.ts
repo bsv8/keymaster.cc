@@ -3,7 +3,6 @@ import { ApplicationConnectionHost } from "./applicationConnectionHost.js";
 import { ApplicationCenterPage, ApplicationConnectionControls } from "./ApplicationCenter.js";
 import { APPLICATION_AI_TOOLS_CAPABILITY, APPLICATION_CONNECTIONS_CAPABILITY, BUSINESS_REGISTRY_CAPABILITY, type ApplicationConnectionsSnapshot } from "@keymaster/contracts";
 import { createPublicProtocolService } from "./publicProtocolService.js";
-import { APP_STORAGE_CLIENTS_CAPABILITY } from "@keymaster/contracts";
 import { STORAGE_KV_CLIENTS_CAPABILITY } from "@keymaster/contracts";
 import { PROTOCOL_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
 import { createElement } from "react";
@@ -28,7 +27,6 @@ import type {
   ProtocolSessionSnapshot,
   ProtocolCommandFeedState,
   ProtocolService,
-  StorageRuntimeStatusService,
   SessionCoordinatorClient,
   P2pkhProtocolAdapter
 } from "@keymaster/contracts";
@@ -39,7 +37,6 @@ import {
   PROTOCOL_STORAGE_REPOSITORY_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
   PROTOCOL_COORDINATOR_CONTROL_CAPABILITY,
-  STORAGE_RUNTIME_CONTROLLER_CAPABILITY,
   VAULT_SERVICE_CAPABILITY,
   VAULT_WALLET_STATE_CAPABILITY,
   type ProtocolCoordinatorControl,
@@ -116,15 +113,6 @@ const protocolResources: I18nPluginResources = {
       "protocol.error.invalid_request": "Invalid request.",
       "protocol.error.invalid_origin": "The request origin does not match the declared aud.",
       "protocol.error.decrypt_failed": "Decryption failed.",
-      "protocol.error.storage_unavailable": "Storage is unavailable.",
-      "protocol.error.storage_identity_required": "This session has no local catalog metadata snapshot for storage.",
-      "protocol.error.storage_invalid_path": "The storage path is invalid.",
-      "protocol.error.storage_invalid_upload": "The storage upload is invalid or expired.",
-      "protocol.error.storage_limit_exceeded": "The storage request exceeds its limit.",
-      "protocol.error.storage_forbidden": "The storage provider denied the request.",
-      "protocol.error.storage_not_found": "The storage object was not found.",
-      "protocol.error.storage_conflict": "The storage object changed or already exists.",
-      "protocol.error.storage_provider_error": "The storage provider returned an error.",
       "protocol.error.internal_error": "Internal error.",
       "protocol.feed.empty":
         "No command history for this site yet. The first request will appear here after it completes.",
@@ -311,15 +299,6 @@ const protocolResources: I18nPluginResources = {
       "protocol.error.invalid_request": "请求格式不合法。",
       "protocol.error.invalid_origin": "请求来源与声明的 aud 不一致。",
       "protocol.error.decrypt_failed": "解密失败。",
-      "protocol.error.storage_unavailable": "Storage 当前不可用。",
-      "protocol.error.storage_identity_required": "当前会话没有已验证的 App identity proof snapshot，不能使用 Storage。",
-      "protocol.error.storage_invalid_path": "Storage 路径不合法。",
-      "protocol.error.storage_invalid_upload": "Storage 上传无效或已过期。",
-      "protocol.error.storage_limit_exceeded": "Storage 请求超过限制。",
-      "protocol.error.storage_forbidden": "Provider 拒绝了 Storage 请求。",
-      "protocol.error.storage_not_found": "Storage 对象不存在。",
-      "protocol.error.storage_conflict": "Storage 对象已变化或已存在。",
-      "protocol.error.storage_provider_error": "Provider 返回了 Storage 错误。",
       "protocol.error.internal_error": "内部错误。",
       "protocol.feed.empty": "当前站点尚无命令历史。第一条请求完成后会出现在这里。",
       "protocol.feed.empty.waitingOrigin": "等待来自外部站点的第一条请求。命令历史会按该站点的 origin 归档。",
@@ -490,8 +469,6 @@ const protocolPluginDefinition = {
       },
       { capability: VAULT_WALLET_STATE_CAPABILITY, reason: "协议需要 owner key 状态" },
       { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "注册 protocol 资源" },
-      { capability: APP_STORAGE_CLIENTS_CAPABILITY, optional: true, reason: "Connect App 会话受限文件客户端" },
-      { capability: STORAGE_RUNTIME_CONTROLLER_CAPABILITY, optional: true, reason: "可选 Storage 方法" },
       { capability: MSFILE_SERVICE_CAPABILITY, optional: true, reason: "可选 MSFile 方法" },
       { capability: P2PKH_SERVICE_CAPABILITY, optional: true, reason: "可选 P2PKH 方法" },
     ]),
@@ -505,15 +482,6 @@ const protocolPluginDefinition = {
     if (!coordinatorClient) throw new Error("Protocol Coordinator control is unavailable");
     ctx.provide(PROTOCOL_COORDINATOR_CONTROL_CAPABILITY, coordinatorClient);
     const connectChannelRuntime = createConnectChannelRuntime(coordinatorClient);
-    let storageController: StorageRuntimeStatusService | undefined;
-    try {
-      storageController = ctx.optionalCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
-    } catch {
-      // Storage is an optional platform plugin.  The protocol service still
-      // starts, while storage.* requests fail closed with a stable error.
-      storageController = undefined;
-    }
-
     // MSFile 是可选平台能力：缺失时只让
     // `msfile.*` 三个方法 fail closed（msfile_unavailable），不阻塞协议页。
     let msfileService: import("@keymaster/contracts").MsFileService | undefined;
@@ -537,19 +505,6 @@ const protocolPluginDefinition = {
     const serviceDeps: import("./protocolService.js").ProtocolServiceDeps = {
         vault: vaultService,
         walletState: walletStateService,
-        storageController,
-        bindAppStorage: binding => {
-          const clients = ctx.optionalCapability(APP_STORAGE_CLIENTS_CAPABILITY);
-          if (!clients) throw new Error("Storage App clients unavailable");
-          return clients.bind(ctx.consumer, ctx.scope, binding);
-        },
-        getStorageController: () => {
-          try {
-            return ctx.optionalCapability(STORAGE_RUNTIME_CONTROLLER_CAPABILITY);
-          } catch {
-            return undefined;
-          }
-        },
         msfileService,
         getMsfileService: () => {
           try {

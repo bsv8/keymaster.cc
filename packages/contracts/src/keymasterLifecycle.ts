@@ -30,7 +30,6 @@ export type PluginPermission =
   | "identity.read"
   | "storage.read"
   | "storage.write"
-  | "storage.platform"
   | "crypto.signIntent"
   | "crypto.signTransaction"
   | "crypto.channel"

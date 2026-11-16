@@ -28,18 +28,6 @@ import type { NetworkIdentity } from "./networkIdentity.js";
 import { defineCapability } from "webloom-framework";
 import type { ActiveKeyCrypto } from "./activeKeyCrypto.js";
 import type {
-  StorageDeleteParams,
-  StorageDeleteResult,
-  StorageDirectoryParams,
-  StorageDirectoryResult,
-  StorageGetParams,
-  StorageGetResult,
-  StorageListParams,
-  StorageListResult,
-  StoragePutParams,
-  StoragePutResult
-} from "./connectStorage.js";
-import type {
   MsFileBlockReadParams,
   MsFileReadResult,
   MsFileSeedReadParams,
@@ -145,7 +133,7 @@ export type BinaryField = ConnectPublic.BinaryField;
 /** 协议方法名常量集合。 */
 // 费用池只保留钱包内部历史处理类型，不进入独立 Connect 的公开方法表。
 export const PROTOCOL_METHODS = [
-  ...CONNECT_PUBLIC_METHODS.filter((method): method is Exclude<typeof method, `price.${string}`> => !method.startsWith("price.")),
+  ...CONNECT_PUBLIC_METHODS.filter((method): method is Exclude<typeof method, `price.${string}` | `storage.${string}`> => !method.startsWith("price.") && !method.startsWith("storage.")),
   "feepool.prepare", "feepool.commit",
 ] as const;
 
@@ -1619,14 +1607,6 @@ export interface MethodParamsMap {
   "connect.launch": ConnectLaunchParams;
   "channel.publish": ChannelPublishParams;
   "channel.subscription_set": ChannelSubscriptionSetParams;
-  "storage.list": StorageListParams;
-  "storage.directory.create": StorageDirectoryParams;
-  "storage.directory.delete": StorageDirectoryParams;
-  "storage.put": StoragePutParams;
-  "storage.encrypted.put": StoragePutParams;
-  "storage.get": StorageGetParams;
-  "storage.encrypted.get": StorageGetParams;
-  "storage.delete": StorageDeleteParams;
   "msfile.stat": MsFileStatParams;
   "msfile.seed.read": MsFileSeedReadParams;
   "msfile.block.read": MsFileBlockReadParams;
@@ -1653,14 +1633,6 @@ export interface MethodResultMap {
   "connect.launch": ConnectLaunchResult;
   "channel.publish": ChannelPublishResult;
   "channel.subscription_set": ChannelSubscriptionSetResult;
-  "storage.list": StorageListResult;
-  "storage.directory.create": StorageDirectoryResult;
-  "storage.directory.delete": StorageDirectoryResult;
-  "storage.put": StoragePutResult;
-  "storage.encrypted.put": StoragePutResult;
-  "storage.get": StorageGetResult;
-  "storage.encrypted.get": StorageGetResult;
-  "storage.delete": StorageDeleteResult;
   "msfile.stat": MsFileStatResult;
   "msfile.seed.read": MsFileReadResult;
   "msfile.block.read": MsFileReadResult;

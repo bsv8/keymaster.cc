@@ -22,14 +22,6 @@ import type { VaultSealedSecret } from "./vault.js";
 import { defineCapability } from "webloom-framework";
 import type { CoordinatorVaultOperationResultFor } from "./sessionCoordinatorRuntime.js";
 import type {
-  OwnerAppStorageGrant,
-  StorageListResult,
-  StorageDirectoryResult,
-  StoragePutResult,
-  StorageGetResult,
-  StorageDeleteResult
-} from "./connectStorage.js";
-import type {
   StorageRuntimeControllerStatus,
   StorageRuntimeSummary
 } from "./storage/runtime.js";
@@ -224,20 +216,8 @@ export type CoordinatorStorageControl =
   /** 重置钱包：先撤销授权，再原子清空新格式全部数据。 */
   | { type: "reset-wallet"; confirmationLabel: string };
 
-export type CoordinatorStorageData =
-  | { type: "list"; grantId: string; input: { prefix?: string; cursor?: string; limit?: number } }
-  | { type: "create-directory"; grantId: string; input: { path: string; overwrite?: boolean } }
-  | { type: "delete-directory"; grantId: string; input: { path: string } }
-  | { type: "put" | "put-encrypted"; grantId: string; input: { path: string; content: { $type: "binary"; bytes: ArrayBuffer; mime?: string }; contentType?: string; overwrite?: boolean } }
-  | { type: "get-range" | "get-encrypted"; grantId: string; input: { path: string; offset?: number; length?: number; ifMatch?: string } }
-  | { type: "delete"; grantId: string; input: { path: string } }
-  /** 同一事务内原子提交多个文件操作。 */
-  | { type: "batch"; grantId: string; input: { operations: Array<{ type: "put"; path: string; content: { $type: "binary"; bytes: ArrayBuffer; mime?: string }; contentType?: string } | { type: "delete"; path: string }>; conditions?: Array<{ path: string; ifMatch?: string }> } };
-
 export type CoordinatorClientRequestWithStorage =
-  | { kind: "storage.grant"; authorizationId: string; networkIdentity: import("./networkIdentity.js").NetworkIdentity; clientId: string; requestId: string; walletPublicKeyHex: string; transportOrigin: string; expectedSessionEpoch: SessionEpoch }
   | { kind: "storage.control"; clientId: string; requestId: string; control: CoordinatorStorageControl; expectedSessionEpoch: SessionEpoch }
-  | { kind: "storage.data"; clientId: string; requestId: string; data: CoordinatorStorageData; expectedSessionEpoch: SessionEpoch }
   | { kind: "storage.cancel"; clientId: string; requestId: string; targetRequestId: string }
   | { kind: "disconnect"; clientId: string; requestId: string }
   | { kind: "storage.session.abort"; clientId: string; requestId: string; walletPublicKeyHex: string; expectedSessionEpoch: SessionEpoch };
@@ -245,9 +225,7 @@ export type CoordinatorClientRequestWithStorage =
 /** Host/Coordinator 内部存储请求，不属于插件可见的 SessionCoordinatorClient。 */
 export type CoordinatorClientRequestWithInternalStorage =
   | { kind: "storage.owner.bind"; clientId: string; requestId: string; pluginId: string; declaration: import("./storage/access.js").PluginStorageDeclaration; expectedSessionEpoch: SessionEpoch }
-  | { kind: "storage.platform.bind"; clientId: string; requestId: string; pluginId: string; declaration: import("./storage/access.js").PluginStorageDeclaration; expectedSessionEpoch: SessionEpoch }
   | { kind: "storage.owner.data"; clientId: string; requestId: string; data: import("./storage/internal.js").CoordinatorOwnerStorageData; expectedSessionEpoch: SessionEpoch }
-  | { kind: "storage.platform.data"; clientId: string; requestId: string; data: import("./storage/internal.js").CoordinatorPlatformStorageData; expectedSessionEpoch: SessionEpoch }
   /** 清空一个已绑定根下的全部对象；只由重置与单 App 清理流程调用。 */
   | { kind: "storage.clear.root"; clientId: string; requestId: string; input: { declaration: import("./storage/access.js").PluginStorageDeclaration; appStorageName?: string }; expectedSessionEpoch: SessionEpoch };
 
@@ -823,8 +801,6 @@ export interface SessionCoordinatorClient {
   /** 更新自动锁定设置（超时毫秒；0 = 永不）。 */
   autolockSettingsUpdate(settings: AutoLockSettings): Promise<CoordinatorCommandResult>;
   storageControl(control: CoordinatorStorageControl): Promise<CoordinatorValueResult<unknown>>;
-  storageGrant(context: OwnerAppStorageGrant): Promise<CoordinatorValueResult<string>>;
-  storageData(data: CoordinatorStorageData, transfer?: ArrayBuffer[], signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
   storageCancel(targetRequestId: string): Promise<CoordinatorCommandResult>;
   storageSessionAbort(walletPublicKeyHex: string): Promise<CoordinatorCommandResult>;
   msfileControl(control: CoordinatorMsFileControl): Promise<CoordinatorValueResult<unknown>>;
@@ -878,7 +854,7 @@ export type CoordinatorSessionControl = Pick<SessionCoordinatorClient,
 
 /** Storage 插件 Coordinator 面。 */
 export type StorageCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
-  "storageControl" | "storageGrant" | "storageData" | "storageCancel" | "storageSessionAbort"
+  "storageControl" | "storageCancel" | "storageSessionAbort"
 >;
 
 /**

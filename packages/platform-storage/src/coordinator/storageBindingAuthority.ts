@@ -24,11 +24,9 @@ import type {
 } from "@keymaster/contracts";
 import type {
   CoordinatorOwnerStorageData,
-  CoordinatorPlatformStorageData,
   StorageBindingAuthority,
   StorageBindingCoordinatorClient,
   StorageOwnerGrant,
-  StoragePlatformGrant,
 } from "@keymaster/contracts/storage-internal";
 
 function unwrap<T>(result: CoordinatorValueResult<unknown>, operation: string): T {
@@ -181,113 +179,11 @@ export function createStorageBindingAuthority(
     };
   }
 
-  async function openPlatformStore(input: { pluginId: string; declaration: PluginStorageDeclaration }): Promise<KeyValueStore> {
-    const declaration = input.declaration;
-    let currentGrant: StoragePlatformGrant | undefined;
-    let grantPromise: Promise<StoragePlatformGrant> | undefined;
-
-    const bind = async (): Promise<StoragePlatformGrant> => {
-      grantPromise ??= client.storageBindPlatform({ pluginId: input.pluginId, declaration })
-        .then((result) => unwrap<StoragePlatformGrant>(result, "platform storage bind"))
-        .then((grant) => {
-          currentGrant = grant;
-          return grant;
-        })
-        .catch((error: unknown) => {
-          grantPromise = undefined;
-          throw error;
-        });
-      return grantPromise;
-    };
-
-    /**
-     * 只让仍指向本次请求的旧 grant 失效。
-     *
-     * 并发的另一个请求可能已经完成重新绑定，如果无条件清空就会把新 grant 一起
-     * 丢掉，句柄会反复重绑。
-     */
-    const invalidate = (expected: StoragePlatformGrant): void => {
-      if (currentGrant !== expected) return;
-      currentGrant = undefined;
-      grantPromise = undefined;
-    };
-
-    const getGrant = async (): Promise<StoragePlatformGrant> => currentGrant ?? bind();
-    const initialGrant = await getGrant();
-    let closed = false;
-    const assertOpen = (): void => { if (closed) throw new Error("Storage handle is closed"); };
-
-    /**
-     * Worker 在真正落盘前就会拒绝过期 grant。这类失败可以安全地重放一次：重放
-     * 的仍然只是授权申请与同一条数据请求，不会在重新绑定后重复执行已经越过
-     * 提交边界的写入。
-     */
-    const isPreCommitGrantFailure = (error: unknown): boolean => {
-      const message = error instanceof Error ? error.message : String(error);
-      return message === "Platform storage grant is invalid"
-        || message === "Platform storage grant generation is stale"
-        || message === "Storage session epoch changed";
-    };
-
-    const call = async <T>(data: CoordinatorPlatformStorageData): Promise<T> => unwrap<T>(await client.storagePlatformData(data), "platform storage");
-
-    const request = async <T>(build: (platformGrantId: string) => CoordinatorPlatformStorageData): Promise<T> => {
-      assertOpen();
-      const grant = await getGrant();
-      try {
-        return await call<T>(build(grant.platformGrantId));
-      } catch (error) {
-        if (closed || !isPreCommitGrantFailure(error)) throw error;
-        invalidate(grant);
-        const rebound = await getGrant();
-        return call<T>(build(rebound.platformGrantId));
-      }
-    };
-
-    return {
-      get walletGeneration() { return (currentGrant ?? initialGrant).walletGeneration; },
-      get sessionEpoch() { return (currentGrant ?? initialGrant).sessionEpoch; },
-      get runGeneration() { return (currentGrant ?? initialGrant).runGeneration; },
-      moduleId: initialGrant.moduleId,
-      purposeId: initialGrant.purposeId,
-      authority: initialGrant.authority,
-      model: "kv",
-      schemaVersion: initialGrant.schemaVersion,
-      async get<T = KeyValueValue>(key: string, getInput: { partition?: string } = {}): Promise<KeyValueEntry<T> | undefined> {
-        assertOpen();
-        return request<KeyValueEntry<T> | undefined>((platformGrantId) => ({
-          type: "platform.get",
-          platformGrantId,
-          key,
-          ...(getInput.partition === undefined ? {} : { partition: getInput.partition }),
-        }));
-      },
-      async list(listInput: KeyValueListInput = {}): Promise<KeyValueListResult> {
-        assertOpen();
-        return request<KeyValueListResult>((platformGrantId) => ({ type: "platform.list", platformGrantId, input: listInput }));
-      },
-      async put<T = KeyValueValue>(key: string, value: T, condition = {}): Promise<KeyValueEntryMeta> {
-        assertOpen();
-        return request<KeyValueEntryMeta>((platformGrantId) => ({ type: "platform.put", platformGrantId, key, value, condition }));
-      },
-      async delete(key: string, condition = {}): Promise<void> {
-        assertOpen();
-        await request<void>((platformGrantId) => ({ type: "platform.delete", platformGrantId, key, condition }));
-      },
-      async commit(commitInput: KeyValueCommitInput): Promise<KeyValueCommitResult> {
-        assertOpen();
-        return request<KeyValueCommitResult>((platformGrantId) => ({ type: "platform.commit", platformGrantId, ...commitInput }));
-      },
-      close() { closed = true; },
-    };
-  }
-
   return {
     getActivePublicKeyHex: () => options.getActivePublicKeyHex?.(),
     getWalletGeneration: () => options.getWalletGeneration?.(),
     openOwnerAppStore,
     openOwnerFileStore,
-    openPlatformStore,
     async clearStorageRoot(input: { declaration: PluginStorageDeclaration; appStorageName?: string }) {
       unwrap<void>(await client.storageClearRoot(input), "clear storage root");
     },

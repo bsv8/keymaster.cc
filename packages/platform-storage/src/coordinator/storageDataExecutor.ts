@@ -1,5 +1,5 @@
-import type { CoordinatorClientRequest, CoordinatorResponse, KeyValueStore, ModuleFileStore, StorageRuntimeController, OwnerAppStorageGrant, SessionEpoch } from "@keymaster/contracts";
-import type { CoordinatorPlatformStorageData, CoordinatorOwnerStorageData, StorageOwnerGrant, StoragePlatformGrant } from "@keymaster/contracts/storage-internal";
+import type { KeyValueStore, ModuleFileStore, StorageRuntimeController, SessionEpoch } from "@keymaster/contracts";
+import type { CoordinatorOwnerStorageData, StorageOwnerGrant } from "@keymaster/contracts/storage-internal";
 import type { StoragePrivateRootStore } from "../storage-access/platform-root/platformRootStore.js";
 
 /** Trusted worker assembly supplies authenticated grants and transition fences.
@@ -11,53 +11,13 @@ export interface StorageDataExecutorDependencies<Binding> {
   sessionEpoch(): SessionEpoch;
   assertStorageDataAvailable(): void;
   storageUnavailableError(message: string): Error;
-  resolvePlatformStorageGrant(id: string, clientId: string): Promise<StoragePlatformGrant>;
   resolveOwnerStorageGrant(id: string, clientId: string): Promise<StorageOwnerGrant>;
-  resolveStorageGrant(id: string, clientId: string): Promise<{ context: OwnerAppStorageGrant; walletPublicKeyHex: string }>;
-  ensureStorageRuntime(clientId: string): Promise<StorageRuntimeController>;
   beginStorageBindingRequest(): () => void;
   currentCoordinatorStorageBinding(): Binding | undefined;
   assertStorageBindingLive(binding: Binding): void;
 }
 
 export function createStorageDataExecutor<Binding>(deps: StorageDataExecutorDependencies<Binding>) {
-async function executePlatformStorageDataUnsafe(
-  data: CoordinatorPlatformStorageData,
-  actualClientId: string,
-  signal?: AbortSignal,
-): Promise<unknown> {
-  if (signal?.aborted) throw deps.storageUnavailableError("Platform storage request was cancelled");
-  deps.assertStorageDataAvailable();
-  const root = deps.root();
-  const rootToken = deps.rootToken();
-  if (!root || !rootToken) throw new Error("Platform storage has not been bootstrapped");
-  const grant = await deps.resolvePlatformStorageGrant(data.platformGrantId, actualClientId);
-  const store = await root.openPlatformStore({ declaration: {
-    moduleId: grant.moduleId,
-    purposeId: grant.purposeId,
-    authority: grant.authority,
-    model: grant.model,
-    schemaVersion: grant.schemaVersion,
-  } });
-  try {
-    if (signal?.aborted) throw deps.storageUnavailableError("Platform storage request was cancelled");
-    let value: unknown;
-    switch (data.type) {
-      case "platform.get": value = await store.get(data.key, { partition: data.partition }); break;
-      case "platform.list": value = await store.list(data.input); break;
-      case "platform.put": value = await store.put(data.key, data.value, data.condition); break;
-      case "platform.delete": await store.delete(data.key, data.condition); value = undefined; break;
-      case "platform.commit": value = await store.commit({ partition: data.partition, ifRevision: data.ifRevision, operations: data.operations }); break;
-    }
-    if (deps.root() !== root || deps.rootToken() !== rootToken) throw deps.storageUnavailableError("Platform storage binding became stale");
-    deps.assertStorageDataAvailable();
-    return value;
-  } finally {
-    store.close();
-  }
-}
-
-
 async function executeOwnerStorageDataUnsafe(data: CoordinatorOwnerStorageData, actualClientId: string, signal?: AbortSignal): Promise<unknown> {
   if (signal?.aborted) throw deps.storageUnavailableError("Owner storage request was cancelled");
   deps.assertStorageDataAvailable();
@@ -137,46 +97,5 @@ async function executeOwnerStorageDataUnsafe(data: CoordinatorOwnerStorageData, 
 }
 
 
-async function executeStorageDataUnsafe(request: Extract<CoordinatorClientRequest, { kind: "storage.data" }>, controller: AbortController, actualClientId: string): Promise<CoordinatorResponse> {
-  deps.assertStorageDataAvailable();
-  const capturedSessionEpoch = deps.sessionEpoch();
-  const service = await deps.ensureStorageRuntime(actualClientId);
-  if (!("grantId" in request.data)) throw new Error("Storage grant is required for file operations");
-  const data = request.data;
-  const resolvedGrant = await deps.resolveStorageGrant(data.grantId, actualClientId);
-  const ctx = resolvedGrant.context;
-  const root = deps.root();
-  if (!root) throw deps.storageUnavailableError("Platform storage root is unavailable");
-  const expectedBinding = deps.currentCoordinatorStorageBinding();
-  if (!expectedBinding) throw deps.storageUnavailableError("Storage binding is unavailable");
-  const releaseBindingRequest = deps.beginStorageBindingRequest();
-  try {
-    const signal = controller.signal;
-    let value: unknown;
-    switch (data.type) {
-      case "list": value = await service.list(ctx, { ...data.input, signal }); break;
-      case "create-directory": value = await service.createDirectory(ctx, { ...data.input, signal }); break;
-      case "delete-directory": value = await service.deleteDirectory(ctx, { ...data.input, signal }); break;
-      case "put-encrypted": value = await service.putEncrypted(ctx, { ...data.input, signal }); break;
-      case "get-encrypted": value = await service.getEncrypted(ctx, { ...data.input, signal }); break;
-      case "put": value = await service.put(ctx, { ...data.input, signal }); break;
-      case "get-range": value = await service.getRange(ctx, { ...data.input, signal }); break;
-      case "delete": value = await service.delete(ctx, { ...data.input, signal }); break;
-    }
-    // 远端请求可能已被接受后才发生锁定或换绑；取消不能回滚远端写入。
-    // 结果跨过会话或绑定栅栏时一律丢弃，不返回给页面。
-    if (controller.signal.aborted || capturedSessionEpoch !== deps.sessionEpoch()) {
-      const error = new Error("Storage request became stale during owner transition") as Error & { code?: string };
-      error.code = "storage_unavailable";
-      throw error;
-    }
-    deps.assertStorageBindingLive(expectedBinding);
-    await deps.resolveStorageGrant(data.grantId, actualClientId);
-    return { requestId: request.requestId, sessionEpoch: deps.sessionEpoch(), ack: { status: "ok" }, operationResult: value };
-  } finally {
-    releaseBindingRequest();
-  }
-}
-
-return { executePlatformStorageDataUnsafe, executeOwnerStorageDataUnsafe, executeStorageDataUnsafe };
+return { executeOwnerStorageDataUnsafe };
 }

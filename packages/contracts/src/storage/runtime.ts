@@ -1,16 +1,7 @@
 // 全局存储运行状态与平台运行时契约。
 //
-// 钱包内部介质为本 Origin IndexedDB；本地状态摘要与配额不代表 App S3 状态。
-// Connect 文件控制器使用隔离的 S3 数据面，配置管理仅在 Storage 私有接口。
+// 钱包内部介质为本 Origin IndexedDB。
 import { defineCapability } from "webloom-framework";
-import type { OwnerAppStorageGrant } from "../connectStorage.js";
-import type {
-  StorageDeleteResult,
-  StorageDirectoryResult,
-  StorageGetResult,
-  StorageListResult,
-  StoragePutResult,
-} from "../connectStorage.js";
 import type {
   WalletColdStartSnapshot,
   WalletInitializePlan,
@@ -105,14 +96,6 @@ export interface StorageRuntimeController {
   /** 重置钱包：撤销授权后原子清空新格式全部数据。 */
   resetWallet?(input: { confirmationLabel: string }): Promise<{ walletGeneration: string; clearedAt: string }>;
   abortSession(walletPublicKeyHex: string): Promise<void>;
-  list(ctx: OwnerAppStorageGrant, input: { prefix?: string; cursor?: string; limit?: number; signal?: AbortSignal }): Promise<StorageListResult>;
-  createDirectory(ctx: OwnerAppStorageGrant, input: { path: string; overwrite?: boolean; signal?: AbortSignal }): Promise<StorageDirectoryResult>;
-  deleteDirectory(ctx: OwnerAppStorageGrant, input: { path: string; signal?: AbortSignal }): Promise<StorageDirectoryResult>;
-  put(ctx: OwnerAppStorageGrant, input: { path: string; content: { $type: "binary"; bytes: ArrayBuffer; mime?: string }; contentType?: string; overwrite?: boolean; signal?: AbortSignal }): Promise<StoragePutResult>;
-  putEncrypted(...args: Parameters<StorageRuntimeController["put"]>): Promise<StoragePutResult>;
-  getEncrypted(...args: Parameters<StorageRuntimeController["getRange"]>): Promise<StorageGetResult>;
-  getRange(ctx: OwnerAppStorageGrant, input: { path: string; offset?: number; length?: number; ifMatch?: string; signal?: AbortSignal }): Promise<StorageGetResult>;
-  delete(ctx: OwnerAppStorageGrant, input: { path: string; signal?: AbortSignal }): Promise<StorageDeleteResult>;
 }
 
 export type StorageRuntimeStatusService = Pick<StorageRuntimeController, "status" | "subscribe" | "summary" | "abortSession">;

@@ -11,7 +11,7 @@ import {
 } from "webloom-framework";
 import { createWindowAppFromHost } from "webloom-framework/advanced";
 import type { ApplicationBootstrapPhase, ApplicationBootstrapSnapshot, ApplicationBootstrapStatus, ApplicationBootstrapListener } from "@keymaster/contracts";
-import type { CoordinatorPlatformStorageData, StorageBindingCoordinatorClient } from "@keymaster/contracts/storage-internal";
+import type { StorageBindingCoordinatorClient } from "@keymaster/contracts/storage-internal";
 import { type PluginHost } from "@keymaster/runtime";
 import { attachKeymasterRemoteRuntime, createKeymasterPluginHost as createPluginHost, getWebLoomHost } from "@keymaster/runtime/assembly";
 import { createStorageBindingAuthority } from "@keymaster/platform-storage/coordinator/authority";
@@ -161,14 +161,6 @@ type CoordinatorMethodName = keyof SessionCoordinatorClient | keyof StorageBindi
  * 重放的仍然只是授权申请与同一条数据请求，不会重复执行已经越过提交边界的
  * 写入。final I/O 之后才出现的 stale binding 不在集合内，必须原样抛出。
  */
-const PRE_IO_PLATFORM_GRANT_FAILURES = new Set([
-  "Platform storage grant is invalid",
-  "Platform storage session changed",
-  "Platform storage wallet generation changed",
-  "Platform storage run generation changed",
-  "Platform storage root is unavailable",
-]);
-
 function bindCoordinatorMethods<T>(
   client: SessionCoordinatorClient,
   names: readonly CoordinatorMethodName[]
@@ -186,7 +178,7 @@ function bindCoordinatorMethods<T>(
 export function createPublicCoordinatorClient(client: SessionCoordinatorClient): Omit<SessionCoordinatorClient, "chainFeePolicyUpdate"> {
   return bindCoordinatorMethods<Omit<SessionCoordinatorClient, "chainFeePolicyUpdate">>(client, [
     "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainFeeSnapshots", "getChainHeightSnapshot", "subscribeTopic", "sendActivity",
-    "storageGrant", "storageData", "storageCancel", "storageSessionAbort",
+    "storageCancel", "storageSessionAbort",
     "msfileControl", "msfileGrant", "msfileData", "msfileCancel", "msfileSessionAbort",
     "windowP2pExecutorAcquire", "windowP2pExecutorRelease", "windowP2pExecutorSpikeTransfer", "windowP2pExecutorSignNoiseStaticKey", "windowP2pExecutorSignPeerRecord",
     "satOperation", "channelOperation",
@@ -198,7 +190,7 @@ export function createPublicCoordinatorClient(client: SessionCoordinatorClient):
 export function createStorageCoordinatorClient(client: SessionCoordinatorClient): StorageCoordinatorControl {
   return bindCoordinatorMethods<StorageCoordinatorControl>(client, [
     "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "subscribeTopic",
-    "storageControl", "storageGrant", "storageData", "storageCancel", "storageSessionAbort"
+    "storageControl", "storageCancel", "storageSessionAbort"
   ]);
 }
 
@@ -281,122 +273,6 @@ function createApplicationBootstrapStatus(initial: ApplicationBootstrapSnapshot)
     },
     setRetry(retry) {
       retryHandler = retry;
-    }
-  };
-}
-
-function isStaleCoordinatorStorageBinding(error: unknown): boolean {
-  const code = error && typeof error === "object" && "code" in error
-    ? (error as { code?: unknown }).code
-    : undefined;
-  if (typeof code === "string") {
-    return code === "storage_unavailable" || code === "storage_identity_required";
-  }
-  const message = error instanceof Error ? error.message : String(error);
-  return /storage (?:handle|grant|binding) .*?(?:stale|invalid|changed)|storage .*unavailable|owner storage .*changed|platform storage .*changed/i.test(message);
-}
-
-/** 页面侧平台 K-V 句柄：只转发 platform K-V RPC，不暴露 Provider 或物理路径。 */
-/** 创建页面 Host 使用的受限平台 K-V 句柄；不暴露真实 Provider 或 grant 值。 */
-export function createCoordinatorPlatformStore(
-  client: SessionCoordinatorClient,
-  declaration: PluginStorageDeclaration,
-  pluginId = "runtime"
-): KeyValueStore {
-  if (declaration.authority !== "platform-only" || declaration.model !== "kv") {
-    throw new Error("Coordinator platform store requires a platform-only K-V declaration");
-  }
-  const internalClient = client as SessionCoordinatorClient & StorageBindingCoordinatorClient;
-  let currentGrant: import("@keymaster/contracts/storage-internal").StoragePlatformGrant | undefined;
-  let grantPromise: Promise<import("@keymaster/contracts/storage-internal").StoragePlatformGrant> | undefined;
-  const grant = async () => {
-    if (!grantPromise) {
-      grantPromise = internalClient.storageBindPlatform({ pluginId, declaration }).then((result) => {
-        if (result.status !== "ok") {
-          const error = new Error("message" in result ? result.message : `Platform storage bind failed: ${result.status}`) as Error & { code?: string };
-          if ("code" in result && typeof result.code === "string") error.code = result.code;
-          throw error;
-        }
-        currentGrant = result.value;
-        return result.value;
-      }).catch((error) => {
-        grantPromise = undefined;
-        throw error;
-      });
-    }
-    return grantPromise;
-  };
-  const invalidateGrant = (expected: import("@keymaster/contracts/storage-internal").StoragePlatformGrant): void => {
-    // 并发请求中如果已经完成重绑，旧请求不能把新 grant 一起清掉。
-    if (currentGrant !== expected) return;
-    currentGrant = undefined;
-    grantPromise = undefined;
-  };
-  const isPreIoGrantValidationFailure = (error: unknown): boolean => {
-    const message = error instanceof Error ? error.message : String(error);
-    // Worker 在打开底层 store 之前完成 grant 校验：授权本身无效，或
-    // 钱包 / 会话 / 运行世代已经变化。只有这里允许同一业务调用重绑一次；
-    // 越过最终 I/O 后的 stale binding 不能重放写入。
-    return PRE_IO_PLATFORM_GRANT_FAILURES.has(message);
-  };
-  let closed = false;
-  const assertOpen = () => {
-    if (closed) throw new Error("Platform storage handle is closed");
-  };
-  const call = async <T>(data: CoordinatorPlatformStorageData): Promise<T> => {
-    assertOpen();
-    const result = await internalClient.storagePlatformData(data);
-    if (result.status !== "ok") {
-      const message = "message" in result ? result.message : `Platform storage request failed: ${result.status}`;
-      const error = new Error(message) as Error & { code?: string };
-      if ("code" in result && typeof result.code === "string") error.code = result.code;
-      throw error;
-    }
-    return result.value as T;
-  };
-  const request = async <T>(build: (platformGrantId: string) => CoordinatorPlatformStorageData): Promise<T> => {
-    assertOpen();
-    const bound = await grant();
-    try {
-      return await call<T>(build(bound.platformGrantId));
-    } catch (error) {
-      if (closed || !isPreIoGrantValidationFailure(error)) {
-        // 不重试已经越过远端物理 I/O 的调用；下一次业务调用才重新
-        // 获取 grant，避免把不确定的 put/commit 变成重复写入。
-        if (isStaleCoordinatorStorageBinding(error)) invalidateGrant(bound);
-        throw error;
-      }
-      invalidateGrant(bound);
-      const rebound = await grant();
-      return call<T>(build(rebound.platformGrantId));
-    }
-  };
-  return {
-    get walletGeneration() { return currentGrant?.walletGeneration ?? ""; },
-    get sessionEpoch() { return currentGrant?.sessionEpoch ?? ""; },
-    get runGeneration() { return currentGrant?.runGeneration ?? ""; },
-    moduleId: declaration.moduleId,
-    purposeId: declaration.purposeId,
-    authority: declaration.authority,
-    model: declaration.model,
-    schemaVersion: declaration.schemaVersion,
-    get<T = KeyValueValue>(key: string, options: { partition?: string } = {}): Promise<KeyValueEntry<T> | undefined> {
-      return request<KeyValueEntry<T> | undefined>((platformGrantId) => ({ type: "platform.get", platformGrantId, key, partition: options.partition }));
-    },
-    list(input: KeyValueListInput = {}): Promise<KeyValueListResult> {
-      return request<KeyValueListResult>((platformGrantId) => ({ type: "platform.list", platformGrantId, input }));
-    },
-    put<T = KeyValueValue>(key: string, value: T, condition: { ifRevision?: number; partition?: string } = {}): Promise<KeyValueEntryMeta> {
-      return request<KeyValueEntryMeta>((platformGrantId) => ({ type: "platform.put", platformGrantId, key, value, condition }));
-    },
-    async delete(key: string, condition: { ifRevision?: number; partition?: string } = {}): Promise<void> {
-      await request<void>((platformGrantId) => ({ type: "platform.delete", platformGrantId, key, condition }));
-    },
-    commit(input: KeyValueCommitInput): Promise<KeyValueCommitResult> {
-      return request<KeyValueCommitResult>((platformGrantId) => ({ type: "platform.commit", platformGrantId, ...input }));
-    },
-    close() {
-      closed = true;
     }
   };
 }
@@ -584,7 +460,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     approvedPermissionsForPlugin: (pluginId, requested) => {
       const approvedByPlugin: Readonly<Record<string, readonly PluginPermission[]>> = {
         vault: ["identity.read", "storage.read", "storage.write", "crypto.signIntent", "crypto.signTransaction", "vault.exportBackup", "vault.manage"],
-        storage: ["storage.read", "storage.write", "storage.platform"],
+        storage: ["storage.read", "storage.write"],
         protocol: ["identity.read", "crypto.signIntent", "crypto.channel"],
       };
       const approved = new Set(approvedByPlugin[pluginId] ?? []);

@@ -29,7 +29,6 @@ import type {
   CoordinatorSubscribeTopicsResult,
   SessionCoordinatorClient,
   CoordinatorStorageControl,
-  CoordinatorStorageData,
   CoordinatorSatOperation,
   CoordinatorChannelOperation,
   ChainHeightSnapshot,
@@ -54,10 +53,8 @@ import type {
 } from "@keymaster/contracts";
 import type {
   CoordinatorOwnerStorageData,
-  CoordinatorPlatformStorageData,
   StorageBindingCoordinatorClient,
   StorageBindingGrant,
-  StoragePlatformGrant
 } from "@keymaster/contracts/storage-internal";
 import { toCoordinatorRpcRequest } from "@keymaster/contracts";
 import { connectSharedWorker, definePlugin, type HandlerCallContext, type RuntimeDrainResult, type RuntimeHandle, type RuntimePluginDefinition, type WindowApp } from "webloom-framework";
@@ -778,30 +775,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
   }
 
-  async storageGrant(context: import("@keymaster/contracts").OwnerAppStorageGrant): Promise<import("@keymaster/contracts").CoordinatorValueResult<string>> {
-    const request = { kind: "storage.grant" as const, authorizationId:context.authorizationId, networkIdentity: { bsvNetwork: context.bsvNetwork, publicKeyHex: context.publicKeyHex }, clientId: this.clientId, requestId: this.generateRequestId(), walletPublicKeyHex: context.walletPublicKeyHex, transportOrigin: context.transportOrigin, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
-    try {
-      const response = await this.sendRequest(request);
-      if (response.ack.status !== "ok") return response.ack;
-      return { status: "ok", value: requiredCoordinatorOperationResult(response, request.kind), sessionEpoch: response.sessionEpoch };
-    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
-  }
-
-  async storageData(data: CoordinatorStorageData, transfer: ArrayBuffer[] = [], signal?: AbortSignal): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
-    const request = { kind: "storage.data" as const, clientId: this.clientId, requestId: this.generateRequestId(), data, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
-    let onAbort: (() => void) | undefined;
-    try {
-      if (signal?.aborted) return { status: "transport-error", message: "Storage request cancelled", retryable: false };
-      onAbort = () => { void this.storageCancel(request.requestId); };
-      signal?.addEventListener("abort", onAbort, { once: true });
-      const response = await this.sendRequest(request);
-      if (signal?.aborted) return { status: "transport-error", message: "Storage request cancelled", retryable: false };
-      if (response.ack.status !== "ok") return response.ack;
-      return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
-    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
-    finally { if (onAbort) signal?.removeEventListener("abort", onAbort); }
-  }
-
   async storageCancel(targetRequestId: string): Promise<CoordinatorCommandResult> {
     return this.requestCommand({ kind: "storage.cancel", clientId: this.clientId, requestId: this.generateRequestId(), targetRequestId });
   }
@@ -819,26 +792,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
   }
 
-  async storageBindPlatform(input: { pluginId: string; declaration: import("@keymaster/contracts").PluginStorageDeclaration }): Promise<import("@keymaster/contracts").CoordinatorValueResult<StoragePlatformGrant>> {
-    const request = { kind: "storage.platform.bind" as const, clientId: this.clientId, requestId: this.generateRequestId(), ...input, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
-    try {
-      const response = await this.sendRequest(request);
-      if (response.ack.status !== "ok") return response.ack;
-      return { status: "ok", value: requiredCoordinatorOperationResult(response, request.kind), sessionEpoch: response.sessionEpoch };
-    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
-  }
-
   async storageOwnerData(data: CoordinatorOwnerStorageData, transfer: ArrayBuffer[] = [], signal?: AbortSignal): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
     return this.sendInternalStorageData("storage.owner.data", data, transfer, signal);
-  }
-
-  async storagePlatformData(data: CoordinatorPlatformStorageData): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
-    const request = { kind: "storage.platform.data" as const, clientId: this.clientId, requestId: this.generateRequestId(), data, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
-    try {
-      const response = await this.sendRequest(request);
-      if (response.ack.status !== "ok") return response.ack;
-      return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
-    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
   }
 
   async storageClearRoot(input: { declaration: import("@keymaster/contracts").PluginStorageDeclaration; appStorageName?: string }): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
@@ -850,7 +805,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
   }
 
-  private async sendInternalStorageData<K extends "storage.owner.data" | "storage.platform.data">(kind: K, data: K extends "storage.owner.data" ? CoordinatorOwnerStorageData : CoordinatorPlatformStorageData, transfer: ArrayBuffer[] = [], signal?: AbortSignal): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
+  private async sendInternalStorageData<K extends "storage.owner.data">(kind: K, data: CoordinatorOwnerStorageData, transfer: ArrayBuffer[] = [], signal?: AbortSignal): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
     const requestId = this.generateRequestId();
     const request = { kind, clientId: this.clientId, requestId, data, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch } as Extract<CoordinatorClientCommandRequest, { kind: K }>;
     let onAbort: (() => void) | undefined;

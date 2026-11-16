@@ -62,7 +62,7 @@ function createDeferredOwnerAppStore(
     if (!current) {
       if (!opening) {
         // Resource loaders may enter concurrently before the first grant is ready.
-        const pending: Promise<KeyValueStore> = (declaration.authority === "platform-only" ? authority.openPlatformStore({ pluginId, declaration }) : authority.openOwnerAppStore({ pluginId, declaration })).then(opened => {
+        const pending: Promise<KeyValueStore> = authority.openOwnerAppStore({ pluginId, declaration }).then(opened => {
           try {
             scope.assertActive();
             if (closed || opening !== pending) throw new Error("Owner storage binding superseded while opening");
@@ -268,6 +268,7 @@ export function createScopedStorageClients(
     const declarations = unit?.storages ?? (unit?.storage ? [unit.storage] : []);
     const declaration = declarations.find(candidate => candidate.purposeId === purposeId && (model === "files" ? candidate.model === "files" : candidate.model !== "files"));
     if (!declaration) throw new Error(`${model === "files" ? "File" : "K-V"} purpose is not declared by this instance`);
+    if (declaration.moduleId !== consumer.pluginId) throw new Error("Storage module must match its plugin");
     return declaration;
   };
   return [
