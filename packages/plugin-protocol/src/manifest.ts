@@ -63,8 +63,9 @@ const protocolResources: I18nPluginResources = {
   namespace: "protocol",
   resources: {
     en: {
-      "protocol.applicationDisplay.title": "Application display",
-      "protocol.applicationDisplay.description": "Choose how the wallet opens applications. This preference is saved for the whole wallet.",
+      "protocol.applicationDisplay.title": "Application settings",
+      "protocol.applicationDisplay.description": "Manage application opening, reminder sounds and system notifications.",
+      "protocol.applicationDisplay.opening": "Application opening",
       "protocol.applicationDisplay.mode": "Open applications in",
       "protocol.applicationDisplay.iframe": "Embedded iframe (default)",
       "protocol.applicationDisplay.popup": "New window",
@@ -260,8 +261,9 @@ const protocolResources: I18nPluginResources = {
       "protocol.sessionWindow.appView.ready": "Session ready"
     },
     "zh-CN": {
-      "protocol.applicationDisplay.title": "应用打开方式",
-      "protocol.applicationDisplay.description": "整个钱包统一使用此设置，并持久保存。",
+      "protocol.applicationDisplay.title": "应用设置",
+      "protocol.applicationDisplay.description": "管理应用打开方式、提示音和系统通知。应用打开方式在整个钱包统一使用，并持久保存。",
+      "protocol.applicationDisplay.opening": "应用打开方式",
       "protocol.applicationDisplay.mode": "打开应用时使用",
       "protocol.applicationDisplay.iframe": "iframe 内嵌（默认）",
       "protocol.applicationDisplay.popup": "新窗口",
@@ -610,9 +612,9 @@ const protocolPluginDefinition = {
         }, invalidation: "immediate" });
       const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope).view;
       const DisplaySettings = bindProtocolUi(ctx, ApplicationDisplaySettings);
-      pages.register({ kind: "page", path: "/settings/application-display", id: "protocol.application-display", label: { key: "protocol.applicationDisplay.title", fallback: "Application display" }, render: () => createElement(DisplaySettings) });
+      pages.register({ kind: "page", path: "/settings/application-display", id: "protocol.application-display", label: { key: "protocol.applicationDisplay.title", fallback: "Application settings" }, render: () => createElement(DisplaySettings) });
       ctx.capability(BUSINESS_REGISTRY_CAPABILITY).registerFeature("protocol", "settings", {
-        id: "settings.application-display", label: { key: "protocol.applicationDisplay.title", fallback: "Application display" }, order: 30, icon: "PanelsTopLeft", entry: { path: "/settings/application-display", routeId: "protocol.application-display" },
+        id: "settings.application-display", label: { key: "protocol.applicationDisplay.title", fallback: "Application settings" }, order: 30, icon: "PanelsTopLeft", entry: { path: "/settings/application-display", routeId: "protocol.application-display" },
       });
       const Center = bindProtocolUi(ctx, ApplicationCenterPage);
       const Controls = bindProtocolUi(ctx, ApplicationConnectionControls);

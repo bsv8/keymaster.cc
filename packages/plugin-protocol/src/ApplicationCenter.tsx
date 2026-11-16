@@ -8,6 +8,7 @@ import { APPROVAL_METHODS, METHOD_LABELS } from "./applicationPermissions.js";
 import { CommandCard } from "./ProtocolCommandFeed.js";
 import { ApplicationAuthentication, MsFileApprovalSection } from "./ApplicationApprovals.js";
 import "./applicationCenter.css";
+import { useApplicationReminders } from "./applicationReminders.js";
 
 const EMPTY: ApplicationConnectionsSnapshot = { applications: [], connections: [], commands: [], events: [], historyAvailable: true };
 const terminal = (command: ProtocolCommandRecord) => ["approved", "rejected", "failed", "timed_out"].includes(command.phase);
@@ -41,15 +42,12 @@ export function ApplicationConnectionControls() {
   const pending = snapshot.commands.filter(needsAttention).filter(command => connectionFor(snapshot, command));
   const [reviewing, setReviewing] = useState<string>();
   const [open, setOpen] = useState(false);
-  const [sound, setSound] = useState<"off" | "ready" | "failed">("off");
-  const [notification, setNotification] = useState<string>("未开启");
+  const { controller: reminders, sound } = useApplicationReminders();
   const [seen, setSeen] = useState(false);
   const [reminder, setReminder] = useState("");
   const dialog = useRef<HTMLDialogElement>(null);
-  const audio = useRef<AudioContext>();
   const notified = useRef(new Set<string>());
   const automatic = useRef(new Set<string>());
-  const soundAt = useRef(0);
   const notifications = useRef<Notification[]>([]);
   const originalTitle = useRef(document.title);
   const originalIcon = useRef<string | null>(null);
@@ -61,39 +59,24 @@ export function ApplicationConnectionControls() {
     setSeen(true);
     setOpen(true);
   }
-  async function play(manual: boolean) {
-    if (!audio.current || audio.current.state !== "running") { if (sound !== "off") setSound("failed"); return; }
-    if (Date.now() - soundAt.current < 1200) return;
-    soundAt.current = Date.now();
-    try {
-      const oscillator = audio.current.createOscillator(), gain = audio.current.createGain();
-      oscillator.connect(gain); gain.connect(audio.current.destination);
-      oscillator.frequency.setValueAtTime(manual ? 740 : 440, audio.current.currentTime);
-      if (manual) oscillator.frequency.setValueAtTime(550, audio.current.currentTime + .13);
-      gain.gain.setValueAtTime(.075, audio.current.currentTime);
-      gain.gain.exponentialRampToValueAtTime(.001, audio.current.currentTime + .35);
-      oscillator.start(); oscillator.stop(audio.current.currentTime + .35);
-      oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); };
-    } catch { setSound("failed"); }
-  }
   useEffect(() => {
     const newPending = attention.filter(value => !notified.current.has(value.id));
     for (const command of newPending) notified.current.add(command.id);
     if (!newPending.length) return;
     setSeen(false);
-    void play(true);
+    void reminders.play(true);
     if (document.hidden && typeof Notification !== "undefined" && Notification.permission === "granted") {
       try {
         const notice = new Notification("Keymaster · 新的应用授权请求", { body: `有 ${count} 项待处理，请回到钱包核对来源和请求。`, tag: "keymaster-application-approval" });
         notifications.current.push(notice);
         notice.onclick = () => { window.focus(); review(newPending[0]!.id); notice.close(); };
-      } catch { setNotification("系统通知发送失败"); }
+      } catch { reminders.notificationFailed(); }
     }
   }, [pendingKey]);
   useEffect(() => {
     const ids = snapshot.commands.filter(command => command.autoApproved && command.applicationKey && terminal(command) && !automatic.current.has(command.id));
     for (const command of ids) automatic.current.add(command.id);
-    if (ids.length) { setReminder(`已有许可自动执行 ${ids.length} 项；请在应用日志查看实际结果。`); void play(false); }
+    if (ids.length) { setReminder(`已有许可自动执行 ${ids.length} 项；请在应用日志查看实际结果。`); void reminders.play(false); }
   }, [snapshot.commands]);
   useEffect(() => {
     const icon = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
@@ -107,7 +90,7 @@ export function ApplicationConnectionControls() {
     if (open && dialog.current && !dialog.current.open) dialog.current.showModal();
     if (!open && dialog.current?.open) dialog.current.close();
   }, [open]);
-  useEffect(() => () => { void audio.current?.close(); notifications.current.forEach(value => value.close()); }, []);
+  useEffect(() => () => { reminders.dispose(); notifications.current.forEach(value => value.close()); }, []);
   const command = snapshot.commands.find(value => value.id === reviewing);
   const connection = command ? connectionFor(snapshot, command) : undefined;
   const app = snapshot.applications.find(value => value.key === command?.applicationKey);
@@ -115,8 +98,7 @@ export function ApplicationConnectionControls() {
   return <>
     <span className="application-controls"><button type="button" onClick={() => navigateTo("/apps/connections")}>应用连接 {snapshot.connections.filter(value => !value.closedAt && !value.pausedAt).length}</button>
     <button type="button" disabled={!count} onClick={() => review()}>待处理 {count}</button>
-    <button type="button" onClick={async () => { try { audio.current ??= new AudioContext(); await audio.current.resume(); if (audio.current.state !== "running") throw new Error(); setSound("ready"); await play(true); } catch { setSound("failed"); } }}>{sound === "off" ? "启用 / 试听提示音" : sound === "failed" ? "声音未启用 · 重试" : "试听提示音"}</button>
-    <button type="button" title="浏览器可能限制后台发声和系统通知；静音、勿扰与挂起无法绕过" onClick={async () => { try { if (typeof Notification === "undefined") { setNotification("浏览器不支持"); return; } const permission = await Notification.requestPermission(); setNotification(permission === "granted" ? "已允许" : "未获允许"); } catch { setNotification("开启失败"); } }}>系统通知：{notification}</button></span>
+    </span>
     {createPortal(<>
       {count ? <aside className={`application-alert ${seen ? "" : "is-unseen"}`} aria-label="待处理应用授权"><strong><i />待授权 {count} 项</strong><span>{[...pending.map(value => METHOD_LABELS[value.method] ?? value.method), ...msApprovals.map(() => "MSFile 价格确认")].join(" · ")}</span><button type="button" onClick={() => review()}>查看并处理 →</button>{sound === "failed" ? <small role="status">提示音未播放</small> : null}</aside> : null}
       {reminder ? <aside className="application-automatic" role="status">{reminder}<button type="button" onClick={() => setReminder("")}>关闭</button></aside> : null}
