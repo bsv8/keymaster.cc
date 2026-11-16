@@ -63,7 +63,6 @@ export function createInMemoryModuleFileStore(
 
   return {
     walletGeneration: options.walletGeneration ?? "test-wallet",
-    sessionEpoch: options.sessionEpoch ?? "test-epoch",
     runGeneration: options.runGeneration ?? "test-run",
     async list(input = {}): Promise<ModuleFileListPage> {
       alive();

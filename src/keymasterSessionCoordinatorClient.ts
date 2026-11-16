@@ -54,7 +54,6 @@ import type {
 import type {
   CoordinatorOwnerStorageData,
   StorageBindingCoordinatorClient,
-  StorageBindingGrant,
 } from "@keymaster/contracts/storage-internal";
 import { toCoordinatorRpcRequest } from "@keymaster/contracts";
 import { connectSharedWorker, definePlugin, type HandlerCallContext, type RuntimeDrainResult, type RuntimeHandle, type RuntimePluginDefinition, type WindowApp } from "webloom-framework";
@@ -692,10 +691,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     return this.requestCommand(request);
   }
 
-  /** Trusted Window assembly reports cleanup against the authority's current attempt. */
-  async lockCleanup(cleanup: NonNullable<Extract<CoordinatorClientRequest, { kind: "lock" }>["cleanup"]>, epoch = this.bootstrapSnapshotCache.sessionEpoch): Promise<CoordinatorCommandResult> {
-    return this.requestCommand({ kind: "lock", clientId: this.clientId, requestId: this.generateRequestId(), expectedSessionEpoch: epoch, cleanup });
-  }
+
 
   async vaultOperation<O extends CoordinatorVaultOperation>(operation: O): Promise<CoordinatorValueResult<CoordinatorVaultOperationResultFor<O>>> {
     const request = { kind: "vault.operation" as const, clientId: this.clientId, requestId: this.generateRequestId(), operation, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
@@ -767,7 +763,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     const request = { kind: "storage.control" as const, clientId: this.clientId, requestId: this.generateRequestId(), control, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
     // 首次 initialize 与 unlock 包含 PBKDF2 派生和一次 IndexedDB 事务提交，
     // 时长由 Worker 的失败结果与事务原子性保证，不被通用 RPC 超时中断。
-    const longRunning = control.type === "initialize" || control.type === "unlock" || control.type === "reset-wallet";
+    const longRunning = control.type === "initialize" || control.type === "reset-wallet";
     try {
       const response = await this.sendRequest(request, longRunning ? 120_000 : undefined);
       if (response.ack.status !== "ok") return response.ack;
@@ -781,15 +777,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
   async storageSessionAbort(walletPublicKeyHex: string): Promise<CoordinatorCommandResult> {
     return this.requestCommand({ kind: "storage.session.abort", clientId: this.clientId, requestId: this.generateRequestId(), walletPublicKeyHex, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
-  }
-
-  async storageBindOwner(input: { pluginId: string; declaration: import("@keymaster/contracts").PluginStorageDeclaration }): Promise<import("@keymaster/contracts").CoordinatorValueResult<StorageBindingGrant>> {
-    const request = { kind: "storage.owner.bind" as const, clientId: this.clientId, requestId: this.generateRequestId(), ...input, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
-    try {
-      const response = await this.sendRequest(request);
-      if (response.ack.status !== "ok") return response.ack;
-      return { status: "ok", value: requiredCoordinatorOperationResult(response, request.kind), sessionEpoch: response.sessionEpoch };
-    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
   }
 
   async storageOwnerData(data: CoordinatorOwnerStorageData, transfer: ArrayBuffer[] = [], signal?: AbortSignal): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
@@ -1332,7 +1319,9 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         ...this.bootstrapSnapshotCache,
         sessionEpoch: event.sessionEpoch,
         vaultStatus: event.vaultStatus,
-        lockCleanup: event.lockCleanup,
+        screenMasked: event.screenMasked === true,
+        screenMaskTotalMs: event.screenMaskTotalMs,
+        screenMaskStartedAtMs: event.screenMaskStartedAtMs,
         activePublicKeyHex: event.activePublicKeyHex ?? undefined,
         activeKeyIdentity: event.vaultStatus === "unlocked" ? event.activeKeyIdentity : undefined,
         // session.state 是权威全量投影：运行世代与钱包身份世代都随它一起推进。
@@ -1619,6 +1608,12 @@ let singletonClient: KeymasterSessionCoordinatorClient | null = null;
 export function getCoordinatorClient(): KeymasterSessionCoordinatorClient {
   if (!singletonClient) singletonClient = createCoordinatorClient();
   return singletonClient;
+}
+
+/** 运行重建不能复用已经 shutdown 的 client，也不能让旧 facade 借用新连接。 */
+export function retireCoordinatorClient(client: KeymasterSessionCoordinatorClient): void {
+  client.shutdown();
+  if (singletonClient === client) singletonClient = null;
 }
 
 export function __testResetCoordinatorClient(): void {

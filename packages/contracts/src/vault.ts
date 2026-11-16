@@ -72,20 +72,18 @@ export interface KeyIdentity extends NetworkIdentity {
   createdAt: string;
 }
 
-/** Missing means cleanup completed (or cold-start locked). Pending/failed forbids unlock. */
-export type WalletLockCleanup = ({ phase: "pending"; attempt: number } | { phase: "failed"; attempt: number; error: string }) & {
-  /** First failure and recent failures survive retries for the current lock cycle. */
-  diagnostics?: string;
-};
-
 export interface VaultLifecycleSnapshot {
-  lockCleanup?: WalletLockCleanup;
+  /** 页面遮罩；不撤销已解密钱包、业务实例或运行权限。 */
+  screenMasked?: boolean;
+  /** Worker 权威：已完成遮罩的累计毫秒及当前遮罩起点（epoch ms）。 */
+  screenMaskTotalMs?: number;
+  screenMaskStartedAtMs?: number;
   /** 已解锁 Key 的公开元数据；与公钥同一提交点，锁定时省略。 */
   activeKeyIdentity?: KeyIdentity;
   status: VaultStatus;
   /** 唯一钱包 Key 的公钥；未初始化或锁定时省略。 */
   activePublicKeyHex?: string;
-  /** 会话世代；每次解锁、锁定和 Worker 重启都变化。 */
+  /** 钱包运行世代；首次激活、真实运行退出或身份替换时变化，遮罩和改密不变。 */
   sessionEpoch: string;
   /**
    * Worker 运行世代。

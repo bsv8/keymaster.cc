@@ -505,6 +505,7 @@ const protocolPluginDefinition = {
     const serviceDeps: import("./protocolService.js").ProtocolServiceDeps = {
         vault: vaultService,
         walletState: walletStateService,
+        runtimeSignal: ctx.scope.signal,
         msfileService,
         getMsfileService: () => {
           try {

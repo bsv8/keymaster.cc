@@ -1,4 +1,3 @@
-import { VaultLockCleanup } from "./VaultLockCleanup.js";
 import { NetworkIdentitySelect } from "./NetworkIdentitySelect.js";
 import type { BsvNetwork } from "@keymaster/contracts";
 import { KeyImportWizard } from "./import/KeyImportWizard.js";
@@ -134,7 +133,7 @@ export function VaultWalletEntry() {
   }
 
   async function unlock() {
-    if (busy || status !== "locked" || wallet.lockCleanup) return;
+    if (busy || status !== "locked") return;
     setError(null);
     setBusy(true);
     let accepted = false;
@@ -280,15 +279,14 @@ export function VaultWalletEntry() {
           type="password"
           autoComplete="current-password"
           value={password}
-          disabled={busy || status !== "locked" || !!wallet.lockCleanup}
+          disabled={busy || status !== "locked"}
           onChange={(e) => setPassword(e.currentTarget.value)}
           error={error ?? undefined}
         />
-        {wallet.lockCleanup && <VaultLockCleanup cleanup={wallet.lockCleanup} />}
         <div className="locked-shell__actions">
           {/* Worker acceptance precedes Window assembly. Keep the same loading
               feedback until App replaces this entry with the ready shell. */}
-          <Button onClick={unlock} loading={busy || status === "unlocked"} disabled={!password || status !== "locked" || !!wallet.lockCleanup}>
+          <Button onClick={unlock} loading={busy || status === "unlocked"} disabled={!password || status !== "locked"}>
             {t("common.action.unlock", { defaultValue: "解锁" })}
           </Button>
         </div>

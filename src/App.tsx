@@ -271,7 +271,7 @@ function RuntimeApp({ vaultStatus, walletEntry }: RuntimeAppProps) {
     return <ApplicationFrame slot="storage-guard"><ApplicationFrame slot="wallet-entry" /></ApplicationFrame>;
   }
 
-  return <ApplicationFrame slot="storage-guard"><ApplicationFrame slot="ai-onboarding"><ApplicationFrame slot="unlocked-shell" /></ApplicationFrame></ApplicationFrame>;
+  return <ApplicationFrame slot="screen-guard"><ApplicationFrame slot="storage-guard"><ApplicationFrame slot="ai-onboarding"><ApplicationFrame slot="unlocked-shell" /></ApplicationFrame></ApplicationFrame></ApplicationFrame>;
 }
 
 /** Trusted app selects a registered entry; Page retains every executable closure. */

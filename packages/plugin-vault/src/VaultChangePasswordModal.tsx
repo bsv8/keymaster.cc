@@ -7,7 +7,7 @@ import type { InternalVaultService } from "./internalVaultService.js";
 //   - 改密码是危险操作，必须显式输入旧密码，不允许借用当前 unlocked
 //     session 当作永久授权。
 //   - 提交时让 Vault 自己完成 maintenance / 原子重加密；UI 不拆事务。
-//   - 成功后 Vault 会锁定，modal 可能随壳层切换自然卸载；失败则保留
+//   - 成功后关闭 modal，业务保持运行；失败则保留
 //     输入方便重试。
 
 import { useEffect, useState } from "react";
@@ -108,7 +108,7 @@ export function VaultChangePasswordModal({
       <p className="vault-change-password-modal__hint">
         {t("vault.changePassword.hint", {
           defaultValue:
-            "修改后 Vault 会立即锁定；新密码将替换旧密码保护的所有 Vault 记录。"
+            "新密码用于以后启动钱包和解除页面遮罩；当前业务和应用连接继续运行。"
         })}
       </p>
       <TextInput

@@ -4,6 +4,7 @@ import type { UpgradeGate, UpgradeSession, UpgradeIoLease } from "webloom-framew
 import { COORDINATOR_SERVICE_CONTRACT_VERSION, type CoordinatorAuthorityRecovery, type CoordinatorVaultStatus } from "@keymaster/contracts";
 import { createFinalIoAudit, type FinalIoAuditOperation } from "./finalIoAudit.js";
 export interface CoordinatorWorkerAuthorityPorts {
+  retired?(): boolean;
   buildId: string; protocolVersion: string; identifierSuffix(): string;
   session(): { sessionEpoch: string; runGeneration: string; vaultStatus: CoordinatorVaultStatus };
   admission: { acquire(exclusive: boolean, signal?: AbortSignal): Promise<{ release(): void }> };
@@ -269,6 +270,7 @@ export function createCoordinatorWorkerAuthority(ports: CoordinatorWorkerAuthori
   }
 
   async function ensureCoordinatorUpgradeSession(): Promise<void> {
+    if (ports.retired?.()) throw coordinatorUpgradeError("upgrade.authority_stale", "Coordinator runtime was retired by reset");
     await ensureCoordinatorAuthorityClaim();
     if (
       coordinatorUpgradeGate
@@ -350,6 +352,7 @@ export function createCoordinatorWorkerAuthority(ports: CoordinatorWorkerAuthori
       }
       lease.assertActive();
       audit = options.auditOperation ? finalIoAudit.begin(options.auditOperation) : undefined;
+      if (ports.retired?.()) throw coordinatorUpgradeError("upgrade.authority_stale", "Coordinator runtime was retired by reset");
       const result = await run(lease.signal);
       // 某些有意完成锁定的 Vault 操作会在 callback 内关闭旧 gate，并由
       // performGlobalLock 建立新的 locked gate。此时旧 lease 被本地安全锁定

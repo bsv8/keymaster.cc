@@ -337,7 +337,6 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
 
   return {
     get walletGeneration() { return options.binding.walletGeneration; },
-    get sessionEpoch() { return options.binding.sessionEpoch; },
     get runGeneration() { return options.binding.runGeneration; },
     moduleId: declaration.moduleId,
     purposeId: declaration.purposeId,

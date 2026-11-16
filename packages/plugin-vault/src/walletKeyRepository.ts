@@ -1,7 +1,7 @@
 // 唯一钱包 Key 的仓储。
 //
 // 与旧「公钥派生文件名」的列表仓储相比只有两处差别,而且都是结构性的:
-//   - 路径固定为 key.json,不再由公钥派生文件名,因此取消「文件名与公钥一致」
+//   - 路径固定为 vault/key.json,不再由公钥派生文件名,因此取消「文件名与公钥一致」
 //     的要求;
 //   - 没有 list/readAll/delete:一个钱包只有一把 Key,多 Key、切换和逐 Key
 //     删除在产品上已不存在。更换身份只能通过重置钱包后重新创建或导入。
@@ -107,7 +107,7 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
   async function read(): Promise<WalletKeyFile | undefined> {
     let record;
     try {
-      record = await store.get(WALLET_KEYHOLD_FILE_PATH);
+      record = await store.readKey();
     } catch (caught) {
       return rethrowStorage(caught, "KeyHold file could not be read");
     }
@@ -116,11 +116,11 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
   }
 
   async function writeFresh(bytes: Uint8Array, document: NetworkKeyHoldDocument): Promise<WalletKeyFile> {
+    if (bytes.byteLength > KEYHOLD_LIMITS.maxSerializedBytes) throw fail("storage_limit_exceeded", "KeyHold import exceeds its size limit");
     try {
       // 条件创建与写入在同一事务:并发创建只能有一个成功。
-      const written = await store.put(WALLET_KEYHOLD_FILE_PATH, bytes, {
+      const written = await store.writeKey(bytes, {
         ifNoneMatch: true,
-        contentType: "application/json",
       });
       return { backend: "software", document, bytes: cloneBytes(bytes), revision: written.revision };
     } catch (caught) {
@@ -172,7 +172,8 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
     } catch {
       throw fail("storage_wallet_corrupt", "KeyHold import is invalid");
     }
-    return writeFresh(bytes.slice(), document);
+    document = { ...document, walletGeneration: crypto.randomUUID() };
+    return writeFresh(new TextEncoder().encode(serializeKeyHoldDocument(document)), document);
   }
 
   async function exportFile(): Promise<Uint8Array> {
@@ -190,19 +191,19 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
   async function changePassword(input: { oldPassword: string; newPassword: string; iterations?: number }): Promise<WalletKeyFile> {
     const unlocked = await unlock(input.oldPassword);
     try {
-      const nextDocument = await createKeyHoldDocument(
+      const nextDocument: NetworkKeyHoldDocument = await createKeyHoldDocument(
         { bsvNetwork: unlocked.document.bsvNetwork, label: unlocked.document.label, privateKey: unlocked.privateKeyBytes },
         input.newPassword,
         input.iterations === undefined ? undefined : { iterations: input.iterations }
       );
+      nextDocument.walletGeneration = unlocked.document.walletGeneration;
       if (nextDocument.publicKeyHex !== unlocked.document.publicKeyHex) {
         throw fail("storage_wallet_corrupt", "KeyHold public key changed");
       }
       const nextBytes = new TextEncoder().encode(serializeKeyHoldDocument(nextDocument));
       try {
-        const written = await store.put(WALLET_KEYHOLD_FILE_PATH, nextBytes, {
+        const written = await store.writeKey(nextBytes, {
           ifRevision: unlocked.revision,
-          contentType: "application/json",
         });
         return { backend: "software", document: nextDocument, bytes: cloneBytes(nextBytes), revision: written.revision };
       } catch (caught) {
@@ -223,9 +224,8 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
     const nextBytes = new TextEncoder().encode(serializeKeyHoldDocument(nextDocument));
     try {
       // 改名不要求密码,但也不能覆盖别人的并发更新。
-      const written = await store.put(WALLET_KEYHOLD_FILE_PATH, nextBytes, {
+      const written = await store.writeKey(nextBytes, {
         ifRevision: file.revision,
-        contentType: "application/json",
       });
       return parseFile(nextBytes, written.revision);
     } catch (caught) {
@@ -248,11 +248,12 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
       try { publicKeyHex = Point.fromPrivateKey(privateKey).toHex(true); }
       catch { throw fail("storage_identity_required","Exported migration Key is invalid"); }
       if (publicKeyHex !== source.document.publicKeyHex) throw fail("storage_identity_required","Exported migration Key does not match the current identity");
-      const document = await createKeyHoldDocument({bsvNetwork:source.document.bsvNetwork,label:source.document.label,privateKey},input.password,
+      const document: NetworkKeyHoldDocument = await createKeyHoldDocument({bsvNetwork:source.document.bsvNetwork,label:source.document.label,privateKey},input.password,
         input.iterations===undefined?undefined:{iterations:input.iterations});
+      document.walletGeneration = source.document.walletGeneration;
       const next = new TextEncoder().encode(serializeKeyHoldDocument(document));
       try {
-        const result = await store.put(WALLET_KEYHOLD_FILE_PATH,next,{ifRevision:source.revision,contentType:"application/json"});
+        const result = await store.writeKey(next,{ifRevision:source.revision});
         return parseFile(next,result.revision);
       } catch (caught) { return rethrowStorage(caught,"Software migration commit failed"); }
     } finally { privateKey.fill(0); }

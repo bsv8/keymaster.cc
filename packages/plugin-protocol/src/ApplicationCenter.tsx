@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { usePluginCapability } from "webloom-framework/react";
 import { navigateTo, usePluginI18n, useResourceView } from "@keymaster/runtime";
 import { APPLICATION_CONNECTIONS_CAPABILITY, type ApplicationConnection, type ApplicationConnectionsSnapshot, type ProtocolCommandRecord, type ProtocolMethod, type MsFilePendingApprovalView } from "@keymaster/contracts";
-import { useProtocolResources } from "./ProtocolResourceContext.js";
+import { useProtocolResources, useProtocolWalletState } from "./ProtocolResourceContext.js";
 import { APPROVAL_METHODS, METHOD_LABELS } from "./applicationPermissions.js";
 import { CommandCard } from "./ProtocolCommandFeed.js";
 import { ApplicationAuthentication, MsFileApprovalSection } from "./ApplicationApprovals.js";
@@ -34,6 +34,8 @@ function Command({ connection, command, kind }: { connection: ApplicationConnect
 
 export function ApplicationConnectionControls() {
   const { host, snapshot } = useApplications();
+  const wallet = useProtocolWalletState();
+  const masked = useSyncExternalStore(listener => wallet.subscribe(listener), () => wallet.snapshot().screenMasked === true);
   // 完整钱包壳层装配后才接纳 App 主动拉起钱包的真实 opener。
   useEffect(() => { host.acceptOpener(window.opener); }, [host]);
   const { t } = usePluginI18n();
@@ -57,7 +59,7 @@ export function ApplicationConnectionControls() {
   function review(id?: string) {
     setReviewing(id ?? attention[0]?.id);
     setSeen(true);
-    setOpen(true);
+    if (!wallet.snapshot().screenMasked) setOpen(true);
   }
   useEffect(() => {
     const newPending = attention.filter(value => !notified.current.has(value.id));
@@ -87,9 +89,9 @@ export function ApplicationConnectionControls() {
     return () => { document.body.removeAttribute("data-application-pending"); document.title = originalTitle.current; if (icon && originalIcon.current) icon.href = originalIcon.current; };
   }, [count]);
   useEffect(() => {
-    if (open && dialog.current && !dialog.current.open) dialog.current.showModal();
-    if (!open && dialog.current?.open) dialog.current.close();
-  }, [open]);
+    if (open && !masked && dialog.current && !dialog.current.open) dialog.current.showModal();
+    if ((!open || masked) && dialog.current?.open) dialog.current.close();
+  }, [open, masked]);
   useEffect(() => () => { reminders.dispose(); notifications.current.forEach(value => value.close()); }, []);
   const command = snapshot.commands.find(value => value.id === reviewing);
   const connection = command ? connectionFor(snapshot, command) : undefined;
@@ -100,8 +102,8 @@ export function ApplicationConnectionControls() {
     <button type="button" disabled={!count} onClick={() => review()}>待处理 {count}</button>
     </span>
     {createPortal(<>
-      {count ? <aside className={`application-alert ${seen ? "" : "is-unseen"}`} aria-label="待处理应用授权"><strong><i />待授权 {count} 项</strong><span>{[...pending.map(value => METHOD_LABELS[value.method] ?? value.method), ...msApprovals.map(() => "MSFile 价格确认")].join(" · ")}</span><button type="button" onClick={() => review()}>查看并处理 →</button>{sound === "failed" ? <small role="status">提示音未播放</small> : null}</aside> : null}
-      {reminder ? <aside className="application-automatic" role="status">{reminder}<button type="button" onClick={() => setReminder("")}>关闭</button></aside> : null}
+      {count && !masked ? <aside className={`application-alert ${seen ? "" : "is-unseen"}`} aria-label="待处理应用授权"><strong><i />待授权 {count} 项</strong><span>{[...pending.map(value => METHOD_LABELS[value.method] ?? value.method), ...msApprovals.map(() => "MSFile 价格确认")].join(" · ")}</span><button type="button" onClick={() => review()}>查看并处理 →</button>{sound === "failed" ? <small role="status">提示音未播放</small> : null}</aside> : null}
+      {reminder && !masked ? <aside className="application-automatic" role="status">{reminder}<button type="button" onClick={() => setReminder("")}>关闭</button></aside> : null}
       <dialog ref={dialog} data-application-approval className="application-drawer" onCancel={() => setOpen(false)} onClose={() => setOpen(false)} aria-labelledby="application-approval-title">
         <header><h2 id="application-approval-title">应用授权 · 待处理 {count} 项</h2><button type="button" aria-label="关闭审批，返回原工作" onClick={() => setOpen(false)}>✕</button></header>
         <div className="application-drawer-body">

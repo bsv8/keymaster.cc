@@ -2,7 +2,7 @@ import type {
   ApplicationOpenMode, ApplicationView, AppBootstrapPayload, ApplicationConnection, ApplicationConnections, ApplicationConnectionsSnapshot,
   ApplicationConnectionEvent, ConnectedApplication, ProtocolCommandRecord, ProtocolMethod, ProtocolStorageRepository, ApplicationAiTools, ConnectedAiTool,
 } from "@keymaster/contracts";
-import { requireUnlockedWalletIdentity, sameNetworkIdentity } from "@keymaster/contracts";
+import { requireUnlockedWalletIdentity, sameNetworkIdentity, traceDev } from "@keymaster/contracts";
 import { KeymasterAiToolReceiver, parseReconnectMessage } from "keymaster-connect/server";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
@@ -24,12 +24,13 @@ export class ApplicationConnectionHost implements ApplicationConnections {
   private listeners = new Set<() => void>();
   private history = new Map<string, ProtocolCommandRecord>();
   private events: ApplicationConnectionEvent[] = [];
-  private available = true;
+  private available = false;
   private error: string | undefined;
   private disposed = false;
   private timer: ReturnType<typeof setInterval>;
   private offWallet: () => void;
   private generation: string;
+  private loading?: { generation: string; promise: Promise<void> };
 
   constructor(private deps: ProtocolServiceDeps, private repo: ProtocolStorageRepository) {
     this.generation = this.walletGeneration();
@@ -37,11 +38,18 @@ export class ApplicationConnectionHost implements ApplicationConnections {
       const generation = this.walletGeneration();
       if (generation !== this.generation) {
         this.generation = generation;
+        this.openMode = null;
+        this.available = false;
+        this.error = undefined;
         for (const connection of this.connections.values()) this.pause(connection);
+        // The storage scope survives lock/unlock. Load its owner-bound data
+        // only after the new session is unlocked; old completions stay fenced.
+        void this.initialize();
       } else {
         for (const connection of this.connections.values()) if (!connection.closedAt && !connection.pausedAt) connection.service.syncWalletState();
       }
       this.tryAttachIncoming();
+      this.emit();
     });
     this.timer = setInterval(() => {
       for (const [source, view] of this.views) if (view.closed) this.closeView(source);
@@ -49,21 +57,48 @@ export class ApplicationConnectionHost implements ApplicationConnections {
     }, 1000);
   }
   private walletGeneration(): string {
+    if (this.disposed || this.deps.runtimeSignal?.aborted) return "released";
     const s = this.deps.walletState.snapshot();
     return JSON.stringify([s.status, s.walletGeneration, s.runGeneration, s.sessionEpoch]);
   }
   async initialize(): Promise<void> {
-    try {
-      const [apps, commands, , openMode] = await Promise.all([this.repo.listApplications!(), this.repo.listCommands!(), this.refreshEvents(), this.repo.getApplicationOpenMode()]);
-      if (this.disposed) return;
-      this.openMode = openMode;
-      for (const app of apps) if (!this.applications.has(app.key)) this.applications.set(app.key, app);
-      for (const command of commands) if (!this.history.has(command.id)) this.history.set(command.id, command);
-    } catch {
-      this.available = false;
-      this.error = "应用历史读取失败，不能将未知授权当成允许。";
-    }
-    this.emit();
+    if (this.disposed || this.deps.runtimeSignal?.aborted || this.deps.walletState.snapshot().status !== "unlocked") return;
+    const generation = this.walletGeneration();
+    if (this.loading?.generation === generation) return this.loading.promise;
+    const current = () => !this.disposed && generation === this.walletGeneration();
+    traceDev("protocol.applications", "storage.load.start");
+    const promise = (async () => {
+      try {
+        const [apps, commands, events, openMode] = await Promise.all([
+          this.repo.listApplications!(), this.repo.listCommands!(), this.repo.listApplicationEvents!(), this.repo.getApplicationOpenMode(),
+        ]);
+        if (!current()) {
+          traceDev("protocol.applications", "storage.load.discarded");
+          return;
+        }
+        this.openMode = openMode;
+        this.events = events;
+        for (const app of apps) if (!this.applications.has(app.key)) this.applications.set(app.key, app);
+        for (const command of commands) if (!this.history.has(command.id)) this.history.set(command.id, command);
+        this.available = true;
+        this.error = undefined;
+        traceDev("protocol.applications", "storage.load.ready", () => ({ applications: apps.length, commands: commands.length, events: events.length }));
+      } catch (error) {
+        if (!current()) {
+          traceDev("protocol.applications", "storage.load.discarded");
+          return;
+        }
+        this.available = false;
+        this.error = "应用历史读取失败，不能将未知授权当成允许。";
+        traceDev("protocol.applications", "storage.load.failed", () => ({
+          error,
+        }));
+      }
+      if (current()) this.emit();
+    })();
+    this.loading = { generation, promise };
+    try { await promise; }
+    finally { if (this.loading?.promise === promise) this.loading = undefined; }
   }
   applicationOpenMode(): ApplicationOpenMode {
     if (this.openMode === null || this.disposed) throw new Error("Application settings unavailable");
@@ -71,8 +106,9 @@ export class ApplicationConnectionHost implements ApplicationConnections {
   }
   async setApplicationOpenMode(mode: ApplicationOpenMode): Promise<void> {
     if (this.disposed) throw new Error("Application host stopped");
+    const generation = this.walletGeneration();
     await this.repo.setApplicationOpenMode(mode);
-    if (this.disposed) return;
+    if (this.disposed || generation !== this.walletGeneration()) return;
     this.openMode = mode;
     this.emit();
   }
@@ -291,7 +327,11 @@ export class ApplicationConnectionHost implements ApplicationConnections {
       const archived: ProtocolCommandRecord = terminal ? command : { ...command, phase: "failed", decision: "failed", status: "connection_expired", errorCode: "connection_expired", errorMessage: "Connection paused", finishedAt: connection.pausedAt, updatedAt: connection.pausedAt,
         ...(command.method === "payment.pay" ? { paymentStatus: command.phase === "executing" ? "unknown" : "not_signed" } : {}) };
       this.history.set(archived.id, archived);
-      if (!terminal) void this.repo.putCommand(archived).catch(() => { this.available = false; this.error = "暂停事件写入失败，未丢弃内存中的业务责任。"; this.emit(); });
+      const generation = this.walletGeneration();
+      if (!terminal) void this.repo.putCommand(archived).catch(() => {
+        if (this.disposed || generation !== this.walletGeneration()) return;
+        this.available = false; this.error = "暂停事件写入失败，未丢弃内存中的业务责任。"; this.emit();
+      });
     }
     connection.service.dispose();
     this.emit();
@@ -303,7 +343,13 @@ export class ApplicationConnectionHost implements ApplicationConnections {
     if (view) view.focus();
     else connection.source.focus();
   }
-  private async refreshEvents(): Promise<void> { this.events = await this.repo.listApplicationEvents!(); this.emit(); }
+  private async refreshEvents(): Promise<void> {
+    const generation = this.walletGeneration();
+    const events = await this.repo.listApplicationEvents!();
+    if (this.disposed || generation !== this.walletGeneration()) return;
+    this.events = events;
+    this.emit();
+  }
   private async recordEvent(event: ApplicationConnectionEvent): Promise<void> { this.events = [...this.events, event]; await this.repo.putApplicationEvent!(event); this.emit(); }
   dispose(): void {
     if (this.disposed) return;

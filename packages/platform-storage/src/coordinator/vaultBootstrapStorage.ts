@@ -1,4 +1,5 @@
 import type { WalletStore, WalletVaultKeyStore, WalletVaultLifecycleStore } from "@keymaster/contracts/storage-internal";
+import { WALLET_KEYHOLD_PATH } from "@keymaster/contracts";
 
 /**
  * 私有 Worker 装配：直接使用可信 Vault 调用，不发布整份 WalletStore。
@@ -10,14 +11,18 @@ export function createVaultBootstrapStorage(store: WalletStore): {
 } {
   return Object.freeze({
     keys: Object.freeze({
-      get: (path, options) => store.get(path, options),
-      put: (path, bytes, options) => store.put(path, bytes, options),
+      readKey: () => store.get(WALLET_KEYHOLD_PATH),
+      writeKey: (bytes, condition) => store.put(WALLET_KEYHOLD_PATH, bytes, { ...condition, contentType: "application/json" }),
     } satisfies WalletVaultKeyStore),
     lifecycle: Object.freeze({
-      readMeta: () => store.readMeta(),
       cleanupLegacyMarkers: () => store.cleanupLegacyMarkers?.() ?? Promise.resolve(),
-      batch: (input, options) => store.batch(input, options),
-      resetWallet: options => store.resetWallet(options),
+      async initializeKey(bytes) {
+        await store.batch({
+          operations: [{ type: "put", path: WALLET_KEYHOLD_PATH, bytes, contentType: "application/json" }],
+          conditions: [{ path: WALLET_KEYHOLD_PATH, ifNoneMatch: true }],
+        });
+      },
+      resetWallet: () => store.resetWallet(),
     } satisfies WalletVaultLifecycleStore),
   });
 }

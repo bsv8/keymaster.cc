@@ -1,244 +1,79 @@
 import { STORAGE_FILE_CLIENTS_CAPABILITY, STORAGE_KV_CLIENTS_CAPABILITY, type KeyValueStore, type PluginManifest, type PluginStorageDeclaration } from "@keymaster/contracts";
 import type { StorageBindingAuthority } from "@keymaster/contracts/storage-internal";
 import type { LifecycleScope, PluginConsumer } from "webloom-framework";
-const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
-function isStaleOwnerStorageBinding(error: unknown): boolean {
-  const code = error && typeof error === "object" && "code" in error
-    ? (error as { code?: unknown }).code
-    : undefined;
-  if (code === "storage_unavailable" || code === "storage_identity_required") return true;
-  return /owner storage (?:handle|grant|binding) .*?(?:stale|invalid|changed)|owner storage .*unavailable|owner storage owner changed|owner storage bucket generation changed/i.test(errorMessage(error));
-}
-
-
-function createDeferredOwnerAppStore(
-  authority: StorageBindingAuthority,
-  pluginId: string,
-  declaration: PluginStorageDeclaration,
-  scope: import("webloom-framework").LifecycleScope,
-): KeyValueStore {
-  // 第三方 App 只能拿到自己目录里的文件读写；K-V 与 snapshot 属于平台和
-  // 内置模块，不对 App 开放，所以这里拒绝而不是降级成别的句柄。
-  if (declaration.authority === "third-party-app") {
-    throw new Error("Third-party app storage cannot be bound to a K-V store");
-  }
+/** 稳定的实例存储接口：首次 I/O 打开一次，实例退出时关闭。
+ * 页面遮罩和改密不改变实例或访问范围，不维护解锁会话缓存与重绑。
+ */
+function scopedStore<Store extends { close(): void }>(
+  scope: LifecycleScope,
+  open: () => Promise<Store>,
+  valid: (store: Store) => boolean,
+) {
   let closed = false;
-  let current: KeyValueStore | undefined;
-  let opening: Promise<KeyValueStore> | undefined;
-  // 打开句柄时锁定的三件世代：任一变化都必须重新申请 grant，旧句柄不再复用。
-  let boundWalletGeneration: string | undefined;
-  let boundSessionEpoch: string | undefined;
-  let boundRunGeneration: string | undefined;
-
-  const invalidateCurrent = (): void => {
-    current?.close();
-    current = undefined;
-    opening = undefined;
-    boundWalletGeneration = undefined;
-    boundSessionEpoch = undefined;
-    boundRunGeneration = undefined;
-  };
-
-  const removeScopeRevoke = scope.onRevoke(() => {
-    closed = true;
-    invalidateCurrent();
-  });
-  scope.onDispose(() => {
-    removeScopeRevoke();
-    closed = true;
-    invalidateCurrent();
-  }, "owner-storage");
-
-  async function resolve(): Promise<KeyValueStore> {
+  let opened: Store | undefined;
+  let opening: Promise<Store> | undefined;
+  const close = () => { closed = true; opened?.close(); opened = undefined; };
+  const off = scope.onRevoke(close);
+  scope.onDispose(() => { off(); close(); }, "storage");
+  async function run<T>(operation: (store: Store) => Promise<T>): Promise<T> {
     scope.assertActive();
-    if (closed) throw new Error("Owner storage handle is closed");
-    // 会话 epoch 与运行世代只由 Worker 自己推进；Host 侧能观察到的是钱包
-    // 身份世代（重置/重新初始化后改变）。任何一个变了就丢弃旧 grant 重绑。
-    const liveWalletGeneration = authority.getWalletGeneration?.();
-    const walletChanged = liveWalletGeneration !== undefined
-      && boundWalletGeneration !== undefined
-      && boundWalletGeneration !== liveWalletGeneration;
-    if (walletChanged) invalidateCurrent();
-    if (!current) {
-      if (!opening) {
-        // Resource loaders may enter concurrently before the first grant is ready.
-        const pending: Promise<KeyValueStore> = authority.openOwnerAppStore({ pluginId, declaration }).then(opened => {
-          try {
-            scope.assertActive();
-            if (closed || opening !== pending) throw new Error("Owner storage binding superseded while opening");
-            const latestWalletGeneration = authority.getWalletGeneration?.();
-            if (latestWalletGeneration !== undefined && opened.walletGeneration !== latestWalletGeneration) {
-              throw new Error("Owner storage wallet generation changed while opening binding");
-            }
-            current = opened;
-            boundWalletGeneration = opened.walletGeneration;
-            boundSessionEpoch = opened.sessionEpoch;
-            boundRunGeneration = opened.runGeneration;
-            return opened;
-          } catch (error) {
-            opened.close();
-            throw error;
-          }
-        }).finally(() => { if (opening === pending) opening = undefined; });
-        opening = pending;
-      }
-      return opening;
-    }
+    if (closed) throw new Error("Storage instance has been released");
+    opening ??= open().then(store => {
+      if (closed || !valid(store)) { store.close(); throw new Error("Storage wallet changed while opening"); }
+      opened = store;
+      return store;
+    }).catch(error => { opening = undefined; throw error; });
+    const store = await opening;
     scope.assertActive();
-    return current;
+    if (!valid(store)) throw new Error("Storage wallet changed");
+    const value = await operation(store);
+    scope.assertActive();
+    if (!valid(store)) throw new Error("Storage wallet changed while operation was running");
+    return value;
   }
-
-  const run = async <T>(operation: (store: KeyValueStore) => Promise<T>): Promise<T> => {
-    const store = await resolve();
-    const boundEpoch = boundSessionEpoch;
-    const boundRun = boundRunGeneration;
-    const boundWallet = boundWalletGeneration;
-    try {
-      scope.assertActive();
-      const result = await operation(store);
-      scope.assertActive();
-      // 锁、改密、重置、撤权与 Worker 重启都会改变其中一项；跨过栅栏的迟到
-      // 结果在这里被丢弃，不允许把旧授权下的写入当作成功。
-      if (current !== store
-        || boundSessionEpoch !== boundEpoch
-        || boundRunGeneration !== boundRun
-        || boundWalletGeneration !== boundWallet
-        || (authority.getWalletGeneration?.() !== undefined
-          && boundWalletGeneration !== authority.getWalletGeneration?.())) {
-        throw new Error("Owner storage binding changed while operation was running");
-      }
-      return result;
-    } catch (error) {
-      if (current === store && isStaleOwnerStorageBinding(error)) invalidateCurrent();
-      throw error;
-    }
-  };
-
+  return { run, close, current: () => opened };
+}
+function bindWallet(authority: StorageBindingAuthority) {
+  // 在 consumer 取得接口时固定归属，而不是等旧回调首次 I/O 时采用新钱包。
+  const walletGeneration = authority.getWalletGeneration?.();
+  const runGeneration = authority.getRunGeneration?.();
+  return (store: { walletGeneration: string; runGeneration: string }): boolean =>
+    (walletGeneration === undefined || (store.walletGeneration === walletGeneration && authority.getWalletGeneration?.() === walletGeneration))
+    && (runGeneration === undefined || (store.runGeneration === runGeneration && authority.getRunGeneration?.() === runGeneration));
+}
+function createDeferredOwnerAppStore(authority: StorageBindingAuthority, pluginId: string, declaration: PluginStorageDeclaration, scope: LifecycleScope): KeyValueStore {
+  if (declaration.authority !== "built-in-module") throw new Error("Only internal plugins can use wallet storage");
+  const store = scopedStore(scope, () => authority.openOwnerAppStore({ pluginId, declaration }), bindWallet(authority));
   return {
-    get walletGeneration() { return boundWalletGeneration ?? "pending"; },
-    get sessionEpoch() { return boundSessionEpoch ?? "pending"; },
-    get runGeneration() { return boundRunGeneration ?? "pending"; },
-    moduleId: declaration.moduleId,
-    purposeId: declaration.purposeId,
-    authority: declaration.authority,
-    model: "kv",
-    schemaVersion: declaration.schemaVersion,
-    get: async (key, options) => run((store) => store.get(key, options)),
-    list: async (input) => run((store) => store.list(input)),
-    put: async (key, value, condition) => run((store) => store.put(key, value, condition)),
-    delete: async (key, condition) => { await run((store) => store.delete(key, condition)); },
-    commit: async (input) => run((store) => store.commit(input)),
-    close: () => {
-      if (closed) return;
-      closed = true;
-      invalidateCurrent();
-    },
+    get walletGeneration() { return store.current()?.walletGeneration ?? "pending"; },
+    get runGeneration() { return store.current()?.runGeneration ?? "pending"; },
+    moduleId: declaration.moduleId, purposeId: declaration.purposeId, authority: declaration.authority, model: "kv", schemaVersion: declaration.schemaVersion,
+    get: (key, input) => store.run(value => value.get(key, input)),
+    list: input => store.run(value => value.list(input)),
+    put: (key, value, condition) => store.run(target => target.put(key, value, condition)),
+    delete: (key, condition) => store.run(value => value.delete(key, condition)),
+    commit: input => store.run(value => value.commit(input)),
+    close: store.close,
   };
 }
-
-/** 创建延迟模块文件句柄（model: "files"）；authority 在最终 I/O 边界复核绑定。 */
-function createDeferredOwnerFileStore(
-  authority: StorageBindingAuthority,
-  pluginId: string,
-  declaration: PluginStorageDeclaration,
-  scope: import("webloom-framework").LifecycleScope,
-): import("@keymaster/contracts").ModuleFileStore {
-  let closed = false;
-  let current: import("@keymaster/contracts").ModuleFileStore | undefined;
-  let opening: Promise<import("@keymaster/contracts").ModuleFileStore> | undefined;
-
-  const invalidateCurrent = (): void => {
-    current?.close();
-    current = undefined;
-    opening = undefined;
-  };
-
-  const removeScopeRevoke = scope.onRevoke(() => {
-    closed = true;
-    invalidateCurrent();
-  });
-  scope.onDispose(() => {
-    removeScopeRevoke();
-    closed = true;
-    invalidateCurrent();
-  }, "owner-file-storage");
-
-  async function resolve(): Promise<import("@keymaster/contracts").ModuleFileStore> {
-    scope.assertActive();
-    if (closed) throw new Error("Owner file storage handle is closed");
-    const liveWalletGeneration = authority.getWalletGeneration?.();
-    if (current && liveWalletGeneration !== undefined && current.walletGeneration !== liveWalletGeneration) invalidateCurrent();
-    if (!current) {
-      if (!opening) {
-        const pending: Promise<import("@keymaster/contracts").ModuleFileStore> = authority.openOwnerFileStore({ pluginId, declaration }).then(opened => {
-          try {
-            scope.assertActive();
-            if (closed || opening !== pending) throw new Error("Owner file storage binding superseded while opening");
-            const latestWalletGeneration = authority.getWalletGeneration?.();
-            if (latestWalletGeneration !== undefined && opened.walletGeneration !== latestWalletGeneration) {
-              throw new Error("Owner file storage wallet generation changed while opening binding");
-            }
-            current = opened;
-            return opened;
-          } catch (error) {
-            opened.close();
-            throw error;
-          }
-        }).finally(() => { if (opening === pending) opening = undefined; });
-        opening = pending;
-      }
-      return opening;
-    }
-    return current;
-  }
-
-  const run = async <T>(operation: (store: import("@keymaster/contracts").ModuleFileStore) => Promise<T>): Promise<T> => {
-    const store = await resolve();
-    const boundEpoch = store.sessionEpoch;
-    const boundRun = store.runGeneration;
-    const boundWallet = store.walletGeneration;
-    try {
-      scope.assertActive();
-      const result = await operation(store);
-      scope.assertActive();
-      // 锁、改密、重置、撤权与 Worker 重启都会改变其中一项；跨过栅栏的迟到
-      // 结果在这里被丢弃。
-      if (current !== store
-        || store.sessionEpoch !== boundEpoch
-        || store.runGeneration !== boundRun
-        || store.walletGeneration !== boundWallet
-        || (authority.getWalletGeneration?.() !== undefined && boundWallet !== authority.getWalletGeneration?.())) {
-        throw new Error("Owner file storage binding changed while operation was running");
-      }
-      return result;
-    } catch (error) {
-      if (current === store && isStaleOwnerStorageBinding(error)) invalidateCurrent();
-      throw error;
-    }
-  };
-
+function createDeferredOwnerFileStore(authority: StorageBindingAuthority, pluginId: string, declaration: PluginStorageDeclaration, scope: LifecycleScope): import("@keymaster/contracts").ModuleFileStore {
+  const store = scopedStore(scope, () => authority.openOwnerFileStore({ pluginId, declaration }), bindWallet(authority));
   return {
-    get walletGeneration() { return current?.walletGeneration ?? "pending"; },
-    get sessionEpoch() { return current?.sessionEpoch ?? "pending"; },
-    get runGeneration() { return current?.runGeneration ?? "pending"; },
-    list: (input) => run((store) => store.list(input)),
-    get: (path, options) => run((store) => store.get(path, options)),
-    getRange: (path, range, options) => run((store) => store.getRange(path, range, options)),
-    put: (path, bytes, condition) => run((store) => store.put(path, bytes, condition)),
-    delete: (path, options) => { return run((store) => store.delete(path, options)); },
-    batch: (input, options) => run((store) => store.batch(input, options)),
-    close: () => {
-      if (closed) return;
-      closed = true;
-      invalidateCurrent();
-    },
+    get walletGeneration() { return store.current()?.walletGeneration ?? "pending"; },
+    get runGeneration() { return store.current()?.runGeneration ?? "pending"; },
+    get: (path, input) => store.run(value => value.get(path, input)),
+    list: input => store.run(value => value.list(input)),
+    getRange: (path, range, input) => store.run(value => value.getRange(path, range, input)),
+    put: (path, bytes, input) => store.run(value => value.put(path, bytes, input)),
+    delete: (path, input) => store.run(value => value.delete(path, input)),
+    batch: (input, options) => store.run(value => value.batch(input, options)),
+    close: store.close,
   };
 }
 
 function borrowKeyValueStore(store: KeyValueStore): import("@keymaster/contracts").BorrowedKeyValueStore {
   return {
     get walletGeneration() { return store.walletGeneration; },
-    get sessionEpoch() { return store.sessionEpoch; },
     get runGeneration() { return store.runGeneration; },
     get moduleId() { return store.moduleId; },
     get purposeId() { return store.purposeId; },

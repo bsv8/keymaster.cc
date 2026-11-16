@@ -5,7 +5,6 @@ export interface KeyValueMaintenanceDependencies {
   root(): StoragePrivateRootStore | undefined;
   rootToken(): object | undefined;
   isReady(): boolean;
-  ownerGrants(): Iterable<PluginStorageDeclaration>;
 }
 /** Storage owns namespace enumeration, tracked handles and the maintenance generation. */
 export function createKeyValueMaintenance(deps: KeyValueMaintenanceDependencies) {
@@ -52,20 +51,6 @@ export function createKeyValueMaintenance(deps: KeyValueMaintenanceDependencies)
     ]) {
       if (declaration.model !== "kv") continue;
       declarations.set(declarationMaintenanceKey(declaration), { ...declaration });
-    }
-    // Host-bound built-in namespaces are normally already in SYSTEM_STORAGE_DECLARATIONS.
-    // Include live grants too so a future centrally authorized dynamic namespace is not
-    // stranded merely because it has no long-lived Worker handle.
-    for (const grant of deps.ownerGrants()) {
-      if (grant.model !== "kv") continue;
-      const declaration: PluginStorageDeclaration = {
-        moduleId: grant.moduleId,
-        purposeId: grant.purposeId,
-        authority: grant.authority,
-        model: grant.model,
-        schemaVersion: grant.schemaVersion,
-      };
-      declarations.set(declarationMaintenanceKey(declaration), declaration);
     }
     return [...declarations.values()];
   }

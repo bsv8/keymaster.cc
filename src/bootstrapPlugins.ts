@@ -1,4 +1,3 @@
-import { watchWindowCleanupFailures } from "./coordinator/windowCleanupFailures.js";
 import { createScopedStorageClients } from "@keymaster/platform-storage/assembly";
 import { coordinatorClientBindings } from "./assembly/coordinatorClientBindings.js";
 // src/bootstrapPlugins.ts
@@ -367,7 +366,7 @@ export async function connectCoordinatorWithStartupRetry(
   }
 }
 
-export async function bootstrapPlugins(): Promise<PluginHost> {
+export async function bootstrapPlugins(onRuntimeReset?: (failed: boolean) => void): Promise<PluginHost> {
   // 装配层把缺 key warning 打开：开发期方便排查未翻译文案。
   // import.meta.env 是 Vite 注入的；通过 typeof 守卫避免 TS 在 node 环境下报错。
   const meta = import.meta as ImportMeta & { env?: { MODE?: string; DEV?: boolean } };
@@ -376,7 +375,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     : false;
   // 施工单 002：注入 Coordinator client
   // 在 bootstrap 阶段创建 Coordinator client 并注入到 PluginHost
-  const { getCoordinatorClient } = await withBootstrapErrorContext({
+  const { getCoordinatorClient, retireCoordinatorClient } = await withBootstrapErrorContext({
     stage: "coordinator",
     operation: "load-coordinator-client"
   }, () => import("./keymasterSessionCoordinatorClient.js"));
@@ -390,8 +389,8 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   let pageWindowApp: WindowApp | undefined;
   let pageLifecycleClosed = false;
   let runtimeReadyOff: (() => void) | undefined;
-  let lockCleanupErrorsOff: (() => void) | undefined;
-  let reportedLockAttempt = "";
+  let resetOff: (() => void) | undefined;
+  let removePageListeners: (() => void) | undefined;
   const disposePageLifecycle = (): void => {
     if (pageLifecycleClosed) return;
     pageLifecycleClosed = true;
@@ -401,15 +400,28 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     // 页面继续使用旧代理。Worker 资源由 SharedWorker Host 的 dispose 收口。
     // shutdown 本身只撤销当前页面连接并发送 disconnect；Host cleanup
     // 仍在后台尽力执行，不能反过来阻塞新 Worker 的接管判定。
-    lockCleanupErrorsOff?.(); lockCleanupErrorsOff = undefined;
     runtimeReadyOff?.();
     runtimeReadyOff = undefined;
-    coordinatorClient.shutdown();
+    resetOff?.();
+    removePageListeners?.();
+    pageHost?.rootScope.revoke("Page runtime retired");
+    retireCoordinatorClient(coordinatorClient);
     const cleanup = pageHost?.dispose("pagehide");
     if (cleanup) {
       void cleanup.catch(() => undefined);
     }
   };
+  const restartPageRuntime = (failed: boolean): void => {
+    if (pageLifecycleClosed || !onRuntimeReset) return;
+    disposePageLifecycle();
+    onRuntimeReset(failed);
+  };
+  // 不进入旧身份的异步 transition 队列；直接废弃整个 Window Host。
+  resetOff = coordinatorClient.subscribeTopic("session.state", event => {
+    if (event.type === "session.state.changed" && event.cause === "reset-wallet") {
+      restartPageRuntime(event.vaultStatus !== "uninitialized");
+    }
+  });
   if (typeof window !== "undefined") {
     // beforeunload 比 pagehide 更早，给 SharedWorker 的 disconnect 控制
     // 消息更大的投递窗口；pagehide 仍作为不触发 beforeunload 的宿主兜底。
@@ -428,6 +440,10 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     };
     window.addEventListener("beforeunload", onBeforeUnload);
     window.addEventListener("pagehide", onPageHide);
+    removePageListeners = () => {
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      window.removeEventListener("pagehide", onPageHide);
+    };
   }
   try {
     const runtimeUnitImplementationRegistry = runWithBootstrapErrorContext({
@@ -447,7 +463,11 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     privateCapabilities: storagePrivateCapabilities(),
     runtimeSlotBindings: storagePrivateSlotBindings("default"),
     capabilities: [...coordinatorClientBindings(pluginId => createPluginCoordinatorFacade(coordinatorClient, pluginId)),
-      ...createScopedStorageClients(createStorageBindingAuthority(coordinatorClient as SessionCoordinatorClient & StorageBindingCoordinatorClient & { getActivePublicKeyHex(): string | undefined }), id => host.getManifest(id))],
+      ...createScopedStorageClients(createStorageBindingAuthority(coordinatorClient as SessionCoordinatorClient & StorageBindingCoordinatorClient, {
+        getWalletGeneration: () => coordinatorClient.getBootstrapSnapshot().walletGeneration,
+        getSessionEpoch: () => coordinatorClient.getBootstrapSnapshot().sessionEpoch,
+        getRunGeneration: () => coordinatorClient.getBootstrapSnapshot().runGeneration,
+      }), id => host.getManifest(id))],
     // 真实 RuntimeHandle 在 WindowApp 建立后再 attach；Host 创建阶段不读取
     // Worker、不会把尚未完成的远端目录当成本地 capability。
     // 生产 Window Host 只从当前环境实现注册表取得 setup；静态 manifest
@@ -526,12 +546,18 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     stage: "transport",
     operation: "attach-coordinator-runtime"
   }, () => attachKeymasterRemoteRuntime(host, coordinatorRuntime));
+  const initialRunGeneration = coordinatorClient.getBootstrapSnapshot().runGeneration;
   runtimeReadyOff = coordinatorClient.subscribeRuntimeReady(runtime => {
+    if (pageLifecycleClosed) return;
     if (runtime === coordinatorRuntime) return;
+    // 冻结页面可能错过 reset 通知。新物理运行也必须换掉整个 Window Host，
+    // 不能让旧 root consumer 和尚未使用过的代理继续工作。
+    if (coordinatorClient.getBootstrapSnapshot().runGeneration !== initialRunGeneration) {
+      restartPageRuntime(false);
+      return;
+    }
     attachKeymasterRemoteRuntime(host, runtime);
     coordinatorRuntime = runtime;
-    reportedLockAttempt = "";
-    void coordinatorClient.lockCleanup({ action: "register" }).catch(error => console.error("[bootstrap] lock participant registration failed", error));
   });
   const storageStatus = await withBootstrapErrorContext({
     stage: "storage-status",
@@ -789,7 +815,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       operation: "subscribe-storage-ready"
     }, () => storageService.subscribe(() => {
       try {
-        if (!storageCanProceed()) return;
+        if (pageLifecycleClosed || !storageCanProceed()) return;
         storageReadyForBootstrap = true;
         void enterVaultSelectionStage().catch((error) => {
           // 异步回调不能再交给 bootstrapPlugins() 的 caller；状态页保留
@@ -807,7 +833,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
       storageReadyForBootstrap = true;
       await enterVaultSelectionStage();
     }
-    void offStorageReady;
+    host.rootScope.onRevoke(offStorageReady);
   } else {
     await enterVaultSelectionStage();
   }
@@ -819,7 +845,8 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     // 正常的 late result 会被误报成启动错误并污染浏览器 console。
     const runtimeAtStart = coordinatorClient.getRuntimeHandle();
     const isCurrentConnection = (): boolean => Boolean(
-      runtimeAtStart
+      !pageLifecycleClosed
+      && runtimeAtStart
       && coordinatorClient.getIsConnected()
       && coordinatorClient.getRuntimeHandle() === runtimeAtStart,
     );
@@ -906,51 +933,15 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     }
   };
 
-  const reportWindowLockCleanup = async (snapshot: Pick<import("@keymaster/contracts").CoordinatorBootstrapSnapshot, "sessionEpoch" | "lockCleanup">) => {
-    if (!snapshot.lockCleanup || snapshot.lockCleanup.phase !== "pending") return;
-    const key = `${snapshot.sessionEpoch}:${snapshot.lockCleanup.attempt}`;
-    if (key === reportedLockAttempt) return;
-    reportedLockAttempt = key;
-    let error: string | undefined;
-    try {
-      await sessionTransitionTail;
-      await host.transitionRuntimeIdentity(runtimeIdentityFromSnapshot(coordinatorClient.getBootstrapSnapshot()));
-    } catch (failure) { error = failure instanceof Error ? failure.stack ?? failure.message : String(failure); }
-    await coordinatorClient.lockCleanup({ action: "settled", attempt: snapshot.lockCleanup.attempt, ...(error ? { error: error.slice(0, 16384) } : {}) }, snapshot.sessionEpoch);
-  };
-
-  lockCleanupErrorsOff = watchWindowCleanupFailures(host, () => {
-    const snapshot = coordinatorClient.getBootstrapSnapshot();
-    return snapshot.vaultStatus === "locked" && snapshot.lockCleanup ? `${snapshot.sessionEpoch}:${snapshot.lockCleanup.attempt}` : undefined;
-  }, details => {
-    const snapshot = coordinatorClient.getBootstrapSnapshot();
-    if (!snapshot.lockCleanup) return;
-    console.error("[wallet-lock] Window cleanup failed", details);
-    void coordinatorClient.lockCleanup({ action: "settled", attempt: snapshot.lockCleanup.attempt, error: details.slice(0, 16384) }, snapshot.sessionEpoch)
-      .catch(error => console.error("[wallet-lock] error report failed", error));
-  });
-
   sessionStateOff = runWithBootstrapErrorContext({
     stage: "coordinator",
     operation: "subscribe-session-state"
   }, () => coordinatorClient.subscribeTopic("session.state", (event) => {
     if (event.type !== "session.state.changed") return;
+    if (pageLifecycleClosed) return;
     // session.state 事件顺序就是身份世代顺序；串行处理可避免 A -> B
     // 的旧异步阶段在 B -> A 时覆盖新阶段状态。
     sessionTransitionTail = sessionTransitionTail.catch(() => undefined)
-      .then(() => {
-        if (event.vaultStatus !== "locked") return;
-        // Let React paint the root lock screen before revoking Window scopes;
-        // their synchronous registry/unsubscribe callbacks can be expensive.
-        return new Promise<void>(resolve => {
-          if (typeof requestAnimationFrame === "function" && document.visibilityState === "visible") {
-            // A tab may become hidden after scheduling RAF; do not leave its
-            // cleanup acknowledgement waiting indefinitely for another paint.
-            const fallback = setTimeout(resolve, 50);
-            requestAnimationFrame(() => setTimeout(() => { clearTimeout(fallback); resolve(); }, 0));
-          } else setTimeout(resolve, 0);
-        });
-      })
       .then(handleSessionStateChanged)
       .catch((error) => {
         if (coordinatorClient.getBootstrapSnapshot().vaultStatus !== "locked") updateBootstrapStatus({
@@ -959,12 +950,9 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
         console.error("[bootstrap] session identity transition failed", error);
         throw error;
       });
-    void reportWindowLockCleanup(event).catch(error => console.error("[bootstrap] lock cleanup report failed", error));
     void sessionTransitionTail.catch(() => undefined);
   }));
-  await coordinatorClient.lockCleanup({ action: "register" });
-  void reportWindowLockCleanup(coordinatorClient.getBootstrapSnapshot()).catch(error => console.error("[bootstrap] lock cleanup report failed", error));
-  void sessionStateOff;
+  host.rootScope.onRevoke(sessionStateOff);
 
     return host;
   } catch (error) {

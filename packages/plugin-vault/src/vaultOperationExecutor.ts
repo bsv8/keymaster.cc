@@ -4,7 +4,6 @@ import { bytesToHex, hexToBytes, encryptBytesWithSaltBoundAad, decryptBytesWithS
 export interface VaultOperationDependencies {
   lifecycle(): WalletLifecycleService;
   currentKey(): KeyIdentity | undefined;
-  beforePasswordChange(): Promise<void>;
   passwordChanged(): void;
   renamed(label: string): void;
   assertSecretSession(): void;
@@ -28,7 +27,6 @@ export async function executeVaultOperation(operation: CoordinatorVaultOperation
       return true;
     case "changePassword": {
       const lifecycle = deps.lifecycle();
-      await deps.beforePasswordChange();
       await lifecycle.changePassword({ oldPassword: operation.oldPassword, newPassword: operation.newPassword });
       deps.passwordChanged();
       return true;

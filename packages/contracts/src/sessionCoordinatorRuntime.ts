@@ -11,9 +11,9 @@ import type {
 } from "./sessionCoordinator.js";
 import type { ChannelPublishResult, ChannelSubscriptionSetResult, OpenedPrivateEnvelope } from "./channel.js";
 import type { KeyRef, VaultSealedSecret } from "./vault.js";
-import type { StorageBindingGrant, CoordinatorOwnerStorageData } from "./storage/internal.js";
+import type { CoordinatorOwnerStorageData } from "./storage/internal.js";
 import type { StorageRuntimeControllerStatus, StorageRuntimeSummary } from "./storage/runtime.js";
-import type { WalletColdStartSnapshot, WalletInitializeResult, WalletUnlockResult } from "./storage/wallet.js";
+import type { WalletColdStartSnapshot, WalletInitializeResult } from "./storage/wallet.js";
 import type { KeyValueEntry, KeyValueEntryMeta, KeyValueListResult, KeyValueCommitResult } from "./storage/kv.js";
 import type {
   MsFileCollectorConfig,
@@ -51,7 +51,7 @@ export type CoordinatorVaultOperationResult = boolean | string | Uint8Array | un
 export type CoordinatorStorageControlResultFor<C extends CoordinatorStorageControl> =
   C extends { type: "status" } ? StorageRuntimeControllerStatus : C extends { type: "summary" } ? StorageRuntimeSummary | null :
   C extends { type: "cold-start" } ? WalletColdStartSnapshot : C extends { type: "initialize" } ? WalletInitializeResult :
-  C extends { type: "unlock" } ? WalletUnlockResult : C extends { type: "lock" | "change-key-password" | "rename-key" | "export-key-hold" } ? true :
+  C extends { type: "rename-key" | "export-key-hold" } ? true :
   C extends { type: "reset-wallet" } ? { walletGeneration: string; clearedAt: string } : never;
 export type CoordinatorStorageControlResult = CoordinatorStorageControlResultFor<CoordinatorStorageControl> | null | undefined;
 
@@ -103,7 +103,7 @@ export type CoordinatorRpcResultForRequest<R extends CoordinatorRpcRequest> =
   R extends { kind: "vault.operation"; operation: infer O extends CoordinatorVaultOperation } ? CoordinatorVaultOperationResultFor<O> :
   R extends { kind: "storage.control"; control: infer C extends CoordinatorStorageControl } ? CoordinatorStorageControlResultFor<C> :
   R extends { kind: "storage.owner.data"; data: infer D extends CoordinatorOwnerStorageData } ? CoordinatorOwnerStorageResultFor<D> :
-  R extends { kind: "msfile.grant" } ? string : R extends { kind: "storage.owner.bind" } ? StorageBindingGrant :
+  R extends { kind: "msfile.grant" } ? string :
   R extends { kind: "storage.clear.root" } ? true :
   R extends { kind: "msfile.control"; control: infer C extends CoordinatorMsFileControl } ? CoordinatorMsFileControlResultFor<C> :
   R extends { kind: "msfile.data"; data: infer D extends CoordinatorMsFileData } ? CoordinatorMsFileDataResultFor<D> :
@@ -160,7 +160,6 @@ function ack(value: unknown): CoordinatorCommandAck {
     status === "error" ? fields(value, "status message code") :
     status === "validation-error" ? fields(value, "status message") : fields(value, "status")) as unknown as CoordinatorCommandAck;
 }
-const lockCleanup = (value: unknown) => fields(value, "phase attempt error diagnostics");
 const recovery = (value: unknown) => fields(value, "status reason authorityBuildId activeIoLeaseCount handoverGeneration", { activeIoOperations: value => fields(value, "read write") });
 const storageOwner = (value: unknown) => fields(value, "peerId handoffRevision", { binding: value => fields(value, "runtimeInstanceId connectionId") });
 const task = (value: unknown) => fields(value, "id pluginId unitId instanceId label state lastStartedAt lastCompletedAt lastAttemptAt nextRunAt error", {
@@ -172,8 +171,8 @@ const workerUnit = (value: unknown) => fields(value, "productId unitId runtime s
   reasons: each(value => fields(value, "code dependencyId", { text: i18n })),
 });
 const schedule = (value: unknown) => fields(value, "", { taskIntervals: copy });
-const bootstrap = (value: unknown) => fields(value, "authorityInstanceId runGeneration buildId sessionEpoch vaultStatus activePublicKeyHex coordinatorWorkerUnitSnapshotRevision autoLockTimeoutMs walletGeneration", {
-  lockCleanup, activeKeyIdentity: keyIdentity, authorityRecovery: recovery, coordinatorWorkerUnits: each(workerUnit), taskSnapshots: each(task), scheduleSettings: schedule, storageIoOwnerPeer: storageOwner,
+const bootstrap = (value: unknown) => fields(value, "authorityInstanceId runGeneration buildId sessionEpoch vaultStatus screenMasked screenMaskTotalMs screenMaskStartedAtMs activePublicKeyHex coordinatorWorkerUnitSnapshotRevision autoLockTimeoutMs walletGeneration", {
+  activeKeyIdentity: keyIdentity, authorityRecovery: recovery, coordinatorWorkerUnits: each(workerUnit), taskSnapshots: each(task), scheduleSettings: schedule, storageIoOwnerPeer: storageOwner,
   sessionBinding: value => fields(value, "peerGeneration sessionEpoch leaseId"),
 });
 const persistence = (value: unknown) => fields(value, "persisted usageBytes quotaBytes");
@@ -186,12 +185,6 @@ const kvCommit = (value: unknown) => fields(value, "revision commitId committedA
 const fileEntry = (value: unknown) => fields(value, "path size revision lastModified");
 const fileObject = (value: unknown) => fields(value, "path revision lastModified", { bytes: copy });
 const batchResult = (value: unknown) => fields(value, "committedAt", { paths: copy });
-function storageGrant(value: unknown): Row {
-  const common = "bsvNetwork publicKeyHex storageGrantId walletGeneration runGeneration sessionEpoch authority model schemaVersion";
-  return (value as StorageBindingGrant).authority === "third-party-app"
-    ? fields(value, `${common} appStorageName`, { verifiedAppIdentity: value => fields(value, "publisherPublicKeyHex appId") })
-    : fields(value, `${common} moduleId purposeId`);
-}
 const walletError = (value: unknown) => fields(value, "title summary action code incidentId diagnostic phase");
 function storageControlResult(control: CoordinatorStorageControl, value: unknown): unknown {
   if (value === null || value === undefined) return value;
@@ -200,7 +193,6 @@ function storageControlResult(control: CoordinatorStorageControl, value: unknown
     case "summary": return storageSummary(value);
     case "cold-start": return fields(value, "state walletGeneration reason", { key: value => fields(value, "bsvNetwork publicKeyHex label backend") });
     case "initialize": return fields(value, "ok walletGeneration", { key: publicKey, error: walletError });
-    case "unlock": return fields(value, "bsvNetwork sessionEpoch walletGeneration publicKeyHex");
     case "reset-wallet": return fields(value, "walletGeneration clearedAt");
     case "export-key-hold": return copy(value);
     default: return value;
@@ -339,7 +331,6 @@ function resultFor(request: CoordinatorRpcRequest, value: unknown): unknown {
       }
     case "storage.control": return storageControlResult(request.control, value);
     case "storage.owner.data": return ownerResult(request.data, value);
-    case "storage.owner.bind": return storageGrant(value);
     case "msfile.grant": case "storage.clear.root": return value;
     case "msfile.control": return msControlResult(request.control, value);
     case "msfile.data": return request.data.type === "stat" ? fields(value, "seedHashHex", { sources: each(msStatSource) }) : fields(value, "contentHashHex", { content: binary });
@@ -392,8 +383,8 @@ function topicEvent(value: unknown): CoordinatorTopicEvent {
   const common = fields(source, "topic type sessionEpoch", { networkIdentity: value => fields(value, "bsvNetwork publicKeyHex") });
   let payload: Row;
   switch (source.topic) {
-    case "session.state": payload = fields(source, "sessionRevision runGeneration walletGeneration cause vaultStatus activePublicKeyHex autoLockTimeoutMs", {
-      lockCleanup, activeKeyIdentity: keyIdentity, authorityRecovery: recovery, storageIoOwnerPeer: storageOwner,
+    case "session.state": payload = fields(source, "sessionRevision runGeneration walletGeneration cause vaultStatus screenMasked screenMaskTotalMs screenMaskStartedAtMs activePublicKeyHex autoLockTimeoutMs", {
+      activeKeyIdentity: keyIdentity, authorityRecovery: recovery, storageIoOwnerPeer: storageOwner,
     }); break;
     case "background.snapshot": payload = fields(source, "backgroundSnapshotRevision", { snapshots: each(task), scheduleSettings: schedule }); break;
     case "worker.units": payload = fields(source, "authorityInstanceId workerUnitRevision", { units: each(workerUnit) }); break;

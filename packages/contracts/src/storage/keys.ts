@@ -141,6 +141,8 @@ export const validateKeyholdDocument = validateKeyHoldDocument;
 
 /** 钱包视图；序列化为 keymaster.network-keyhold，内部 KeyHold 使用官方 SDK。 */
 export interface NetworkKeyHoldDocument extends KeyHoldDocumentV1 {
+  /** 本地钱包实例代次；重建时生成，标准 KeyHold 导出不包含。旧封装可缺省。 */
+  walletGeneration?: string;
   bsvNetwork: import("../networkIdentity.js").BsvNetwork;
   networkAuthenticationHex: string;
 }

@@ -26,7 +26,6 @@ import type {
 import {
   validateBsvNetwork,
   KEYHOLD_LIMITS,
-  WALLET_KEYHOLD_PATH,
 } from "@keymaster/contracts";
 import * as secp256k1 from "@noble/secp256k1";
 import type { WalletVaultLifecycleStore } from "@keymaster/contracts/storage-internal";
@@ -142,8 +141,8 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
     deps.publish(event);
   };
 
-  function identityBinding(key: { bsvNetwork: string; publicKeyHex: string }): string {
-    return key.bsvNetwork + "/" + key.publicKeyHex;
+  function walletGenerationForKey(key: { bsvNetwork: string; publicKeyHex: string; walletGeneration?: string }): string {
+    return key.walletGeneration ?? key.bsvNetwork + "/" + key.publicKeyHex;
   }
 
   async function coldStart(): Promise<WalletColdStartSnapshot> {
@@ -151,7 +150,7 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
       const file = await deps.keys.read();
       await deps.store.cleanupLegacyMarkers?.();
       if (!file) { walletGeneration = ""; return { state: "uninitialized" }; }
-      walletGeneration = identityBinding(file.document);
+      walletGeneration = walletGenerationForKey(file.document);
       return { state: "ready", walletGeneration, key: {
         bsvNetwork: file.document.bsvNetwork, publicKeyHex: file.document.publicKeyHex,
         label: file.document.label, backend: file.backend,
@@ -261,6 +260,7 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
     let keyHoldBytes: Uint8Array;
     let publicKeyHex: string;
     let documentLabel: string;
+    let initialWalletGeneration: string;
     try {
       const document = await createKeyHoldDocument(
         { bsvNetwork: draft.bsvNetwork, label: draft.label, privateKey: privateKeyBytes },
@@ -273,6 +273,7 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
       }
       publicKeyHex = document.publicKeyHex;
       documentLabel = document.label;
+      initialWalletGeneration = document.walletGeneration;
       const serialized = serializeKeyHoldDocument(document);
       if (new TextEncoder().encode(serialized).byteLength > KEYHOLD_LIMITS.maxSerializedBytes) {
         throw new StorageRuntimeError("storage_limit_exceeded", "Key hold exceeds its size limit");
@@ -292,14 +293,11 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
       };
     }
 
-    const walletIdentity = draft.bsvNetwork + "/" + publicKeyHex;
 
     try {
-      // 唯一的提交边界：KeyHold、meta 与初始化记录同事务落盘。
+      // 唯一的提交边界：固定 Key 文件在 Storage 的事务内条件创建。
       // 条件创建保证并发初始化只有一个成功，另一方得到 conflict 而不是覆盖。
-      await deps.store.batch({ operations: [
-        { type: "put", path: WALLET_KEYHOLD_PATH, bytes: keyHoldBytes, contentType: "application/json" },
-      ], conditions: [{ path: WALLET_KEYHOLD_PATH, ifNoneMatch: true }] });
+      await deps.store.initializeKey(keyHoldBytes);
     } catch (caught) {
       privateKeyBytes.fill(0);
       const code = errorCode(caught);
@@ -321,22 +319,22 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
       };
     }
 
-    walletGeneration = walletIdentity;
+    walletGeneration = initialWalletGeneration;
     const sessionEpoch = deps.generateSessionEpoch();
     // 初始化直接进入已解锁：用户刚设的密码在本会话内有效。
-    deps.establishSession({ sessionEpoch, walletGeneration: walletIdentity, publicKeyHex });
+    deps.establishSession({ sessionEpoch, walletGeneration: initialWalletGeneration, publicKeyHex });
     // 提交已经成功；此时才把私钥副本交给 Worker，随后本方法立即清零。
     // 交接必须是独占副本：Worker 会一直持有它到锁定或换 Key。
     deps.adoptUnlockedKey?.({
       identity: { bsvNetwork: draft.bsvNetwork, publicKeyHex, label: documentLabel, capabilities: [...draft.capabilities], createdAt },
       privateKeyBytes: new Uint8Array(privateKeyBytes),
       publicKeyHex,
-      walletGeneration: walletIdentity,
+      walletGeneration: initialWalletGeneration,
       sessionEpoch,
     });
     privateKeyBytes.fill(0);
-    emit({ type: "initialized", walletGeneration: walletIdentity });
-    emit({ type: "unlocked", sessionEpoch, walletGeneration: walletIdentity });
+    emit({ type: "initialized", walletGeneration: initialWalletGeneration });
+    emit({ type: "unlocked", sessionEpoch, walletGeneration: initialWalletGeneration });
 
     return {
       ok: true,
@@ -349,7 +347,7 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
         createdAt,
         ...(source === undefined ? {} : { source }),
       }),
-      walletGeneration: walletIdentity,
+      walletGeneration: initialWalletGeneration,
     };
   }
 
@@ -432,21 +430,13 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
     if (typeof input.newPassword !== "string" || input.newPassword.length === 0) {
       throw new StorageRuntimeError("storage_identity_required", "New key password is required");
     }
-    const updated = await deps.keys.changePassword({ oldPassword: input.oldPassword, newPassword: input.newPassword });
-    // 改密后旧密码派生出的授权不应继续有效：换新会话 epoch。
-    const sessionEpoch = deps.generateSessionEpoch();
-    deps.establishSession({
-      sessionEpoch,
-      walletGeneration,
-      publicKeyHex: updated.document.publicKeyHex,
-    });
+    await deps.keys.changePassword({ oldPassword: input.oldPassword, newPassword: input.newPassword });
     emit({ type: "password-changed" });
-    emit({ type: "unlocked", sessionEpoch, walletGeneration });
   }
 
   async function rename(label: string): Promise<void> {
     const updated = await deps.keys.rename(label);
-    walletGeneration = identityBinding(updated.document);
+    walletGeneration = walletGenerationForKey(updated.document);
     emit({ type: "renamed", label: updated.document.label });
   }
 
@@ -458,8 +448,7 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
    * 重置钱包：撤销授权后原子清空新格式数据。
    *
    * 顺序很重要：先撤销，之后迟到的写入在任何数据层检查之前就已经被拒。数据
-   * 清空与新世代写入在同一事务内完成，失败时既不报告完成，也不会把旧授权
-   * 带进下一次初始化。
+   * Storage 永久封闭旧引擎后原子清空；成功或失败都由新的物理运行接管。
    */
   async function resetWallet(input: { confirmationLabel: string }): Promise<{ walletGeneration: string; clearedAt: string }> {
     const snapshot = await coldStart();

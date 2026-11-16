@@ -1,8 +1,8 @@
 import type { KeyValueStore, ModuleFileStore, StorageRuntimeController, SessionEpoch } from "@keymaster/contracts";
-import type { CoordinatorOwnerStorageData, StorageOwnerGrant } from "@keymaster/contracts/storage-internal";
+import type { CoordinatorOwnerStorageData, StorageOwnerBinding } from "@keymaster/contracts/storage-internal";
 import type { StoragePrivateRootStore } from "../storage-access/platform-root/platformRootStore.js";
 
-/** Trusted worker assembly supplies authenticated grants and transition fences.
+/** Trusted assembly supplies plugin declarations and wallet transition fences.
  * The executor owns physical Storage operations; callers cannot choose a root.
  */
 export interface StorageDataExecutorDependencies<Binding> {
@@ -11,7 +11,7 @@ export interface StorageDataExecutorDependencies<Binding> {
   sessionEpoch(): SessionEpoch;
   assertStorageDataAvailable(): void;
   storageUnavailableError(message: string): Error;
-  resolveOwnerStorageGrant(id: string, clientId: string): Promise<StorageOwnerGrant>;
+  resolveOwnerStorageBinding(binding: StorageOwnerBinding): import("@keymaster/contracts").PluginStorageDeclaration;
   beginStorageBindingRequest(): () => void;
   currentCoordinatorStorageBinding(): Binding | undefined;
   assertStorageBindingLive(binding: Binding): void;
@@ -21,7 +21,7 @@ export function createStorageDataExecutor<Binding>(deps: StorageDataExecutorDepe
 async function executeOwnerStorageDataUnsafe(data: CoordinatorOwnerStorageData, actualClientId: string, signal?: AbortSignal): Promise<unknown> {
   if (signal?.aborted) throw deps.storageUnavailableError("Owner storage request was cancelled");
   deps.assertStorageDataAvailable();
-  const grant = await deps.resolveOwnerStorageGrant(data.storageGrantId, actualClientId);
+  const grant = deps.resolveOwnerStorageBinding(data.binding);
   const expectedBinding = deps.currentCoordinatorStorageBinding();
   if (!expectedBinding) throw deps.storageUnavailableError("Owner storage binding is unavailable");
   const root = deps.root();

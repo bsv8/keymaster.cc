@@ -4,6 +4,7 @@ export interface WorkerUnlockPorts {
   coldStart(): Promise<WalletColdStartSnapshot | undefined>;
   lifecycle(): WalletLifecycleService;
   completeBinding(): Promise<void>;
+  revealScreen(password: string): Promise<void>;
   storageFailed(error: unknown): void;
   clearFailedSession(): void;
   storageError(requestId: string, error: unknown): CoordinatorResponse;
@@ -16,11 +17,16 @@ export async function executeWorkerUnlock(
   deps: WorkerUnlockPorts
 ): Promise<CoordinatorResponse> {
   if (deps.session().vaultStatus === "unlocked") {
-    return {
-      requestId,
-      sessionEpoch: deps.session().sessionEpoch,
-      ack: { status: "already-unlocked" },
-    };
+    try {
+      await deps.revealScreen(request.password);
+      return { requestId, sessionEpoch: deps.session().sessionEpoch, ack: { status: "accepted" } };
+    } catch (error) {
+      const code = (error as { code?: string })?.code;
+      return { requestId, sessionEpoch: deps.session().sessionEpoch, ack: {
+        status: code === "storage_identity_required" ? "validation-error" : "error",
+        message: code === "storage_identity_required" ? "Invalid password" : error instanceof Error ? error.message : String(error),
+      } };
+    }
   }
 
   if (deps.session().vaultStatus === "booting" || deps.session().vaultStatus === "fatal") {

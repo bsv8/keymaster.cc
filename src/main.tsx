@@ -93,7 +93,24 @@ function checkEnvironment(): string | null {
   return null;
 }
 
-async function start() {
+let pageRuntimeGeneration = 0;
+
+function restartPageRuntime(failed: boolean): void {
+  // 只重绘 root。Document、URL、浏览器历史和所有标签页文档均不重载。
+  currentRoot?.unmount();
+  currentRoot = null;
+  const container = document.getElementById("root");
+  if (container) {
+    const message = document.createElement("p");
+    message.setAttribute("role", "status");
+    message.textContent = "正在重新启动钱包…";
+    container.replaceChildren(message);
+  }
+  void start(failed);
+}
+
+async function start(resetFailed = false) {
+  const generation = ++pageRuntimeGeneration;
   const envError = checkEnvironment();
   if (envError) {
     // 不再散落 renderFatalError(...):统一走 fatal 通道。
@@ -110,7 +127,12 @@ async function start() {
     // Service Worker 只提供媒体虚拟 URL 的根作用域 HTTP 外壳；注册失败不应
     // 阻断钱包启动，媒体组件会把它明确降级为独立下载。
     await prepareMsFileMediaServiceWorker().catch(() => undefined);
-    const host = await bootstrapPlugins();
+    const host = await bootstrapPlugins(restartPageRuntime);
+    if (generation !== pageRuntimeGeneration) {
+      host.rootScope.revoke("Superseded page runtime");
+      void host.dispose("Superseded page runtime").catch(() => undefined);
+      return;
+    }
     // 二次确认：bootstrapPlugins 完成后若 fatal 已生效（plugin 自己
     // 上报了 fatal），就不必再 mount。
     if (getFatalError()) {
@@ -123,6 +145,7 @@ async function start() {
     root.render(
       <StrictMode>
         <AppCrashBoundary>
+          {resetFailed && <p role="alert">重置未完成。钱包运行已重新启动，请检查数据后重试。</p>}
           <PluginHostProvider host={host}>
             <App />
           </PluginHostProvider>
@@ -130,6 +153,7 @@ async function start() {
       </StrictMode>
     );
   } catch (err) {
+    if (generation !== pageRuntimeGeneration) return;
     // 不再调旧 renderFatalError；统一走 fatal 通道。
     const message = formatStartupErrorSummary(err);
     reportFatalError({

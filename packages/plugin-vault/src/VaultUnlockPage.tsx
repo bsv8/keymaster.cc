@@ -1,4 +1,3 @@
-import { VaultLockCleanup } from "./VaultLockCleanup.js";
 import { useInternalVault } from "./VaultInternalContext.js";
 // packages/plugin-vault/src/VaultUnlockPage.tsx
 // 解锁页面：输入密码，调用 vault.unlock。
@@ -19,7 +18,7 @@ export function VaultUnlockPage() {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (busy || wallet.status !== "locked" || wallet.lockCleanup) return;
+    if (busy || wallet.status !== "locked") return;
     setBusy(true);
     setError(null);
     try {
@@ -50,11 +49,10 @@ export function VaultUnlockPage() {
           value={password}
           onChange={(e) => setPassword(e.currentTarget.value)}
           required
-          disabled={busy || wallet.status !== "locked" || !!wallet.lockCleanup}
+          disabled={busy || wallet.status !== "locked"}
           error={error ?? undefined}
         />
-        {wallet.lockCleanup && <VaultLockCleanup cleanup={wallet.lockCleanup} />}
-        <Button type="submit" loading={busy} disabled={!password || wallet.status !== "locked" || !!wallet.lockCleanup}>
+        <Button type="submit" loading={busy} disabled={!password || wallet.status !== "locked"}>
           {t("vault.unlock.submit", { defaultValue: "解锁" })}
         </Button>
       </form>

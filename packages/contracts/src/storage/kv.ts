@@ -171,7 +171,6 @@ export interface KeyValueStore {
   /** 打开句柄时的钱包身份世代；重置后旧句柄永久失效。 */
   readonly walletGeneration: string;
   /** 打开句柄时的会话世代；锁定或重新解锁后旧句柄失效。 */
-  readonly sessionEpoch: string;
   /** 打开句柄时的 Worker 运行世代；Worker 重启后旧句柄失效。 */
   readonly runGeneration: string;
   /** 中央声明绑定的稳定模块身份。 */

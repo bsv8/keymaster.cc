@@ -4,10 +4,7 @@ export interface StorageWorkerControlPorts {
   root: Pick<ReturnType<typeof import("./workerRoot.js").createStorageWorkerRoot>, "root" | "failed" | "status" | "ensure" | "emit">;
   wallet: VaultWorkerWalletControl;
   session(): { sessionEpoch: string };
-  commit(patch: { sessionEpoch?: string; vaultStatus?: CoordinatorVaultStatus; walletGeneration?: string; activePublicKeyHex?: string }): void;
-  cleanupPending(): unknown; recoveryOperations(): readonly string[]; unavailable(message: string): Error;
-  lock(reason: string): Promise<void>; revokeBinding(reason: string): Promise<void>; discardBinding(): void;
-  publishSession(cause: "unlock" | "lock" | "change-password" | "reset-wallet"): void;
+  recoveryOperations(): readonly string[]; unavailable(message: string): Error;
   io: { run<T>(kind: "read" | "write", signal: AbortSignal | undefined, execute: (signal: AbortSignal) => Promise<T>, options: { auditOperation: "storage.control"; allowLocalLock: boolean; allowLocalOwnerTransition: boolean; allowLocalBindingDiscard: boolean; durableLease: boolean }): Promise<T> };
 }
 /** Storage 控制面管理介质投影；钱包命令调用 Vault 公开控制接口。 */
@@ -15,9 +12,6 @@ export function createStorageWorkerControl(ports: StorageWorkerControlPorts) {
   function clearStorageRequestSecrets(request: { kind: string }): void {
     if (request.kind === "storage.control") {
       const control = (request as Extract<CoordinatorClientRequest, { kind: "storage.control" }>).control;
-      if (control.type === "unlock") {
-        control.password = "";
-      }
       if (control.type === "initialize") {
         control.plan.firstKey.password = "";
         if (control.plan.firstKey.kind === "import") {
@@ -25,10 +19,7 @@ export function createStorageWorkerControl(ports: StorageWorkerControlPorts) {
           control.plan.firstKey.material.wif = undefined;
         }
       }
-      if (control.type === "change-key-password") {
-        control.oldPassword = "";
-        control.newPassword = "";
-      }
+
     }
   }
 
@@ -80,13 +71,8 @@ export function createStorageWorkerControl(ports: StorageWorkerControlPorts) {
       return ok(await service.summary());
     }
 
-    if (ports.cleanupPending() && ["unlock", "initialize", "reset-wallet", "change-key-password"].includes(control.type)) {
-      return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "blocked", reason: { key: "vault.lock.cleanupBlocked", fallback: "钱包清理尚未完成，请重试清理后再解锁" } } };
-    }
 
-    if (control.type === "lock") {
-      return ok(await ports.wallet.execute(control));
-    }
+
 
     if (control.type === "initialize") {
       return ok(await ports.wallet.execute(control));
@@ -113,14 +99,7 @@ export function createStorageWorkerControl(ports: StorageWorkerControlPorts) {
     signal?: AbortSignal,
     peerId?: string,
   ): Promise<CoordinatorResponse> {
-    // 解锁、锁定、改密与重置都会主动推进会话或钱包身份世代；这些有意的
-    // 本地状态迁移必须允许当前 storage control 的 final lease 观察到新
-    // gate，否则旧 lease 会把它们误判成「未知来源的本地锁」。
-    const transitionsSession = request.control.type === "unlock"
-      || request.control.type === "lock"
-      || request.control.type === "change-key-password"
-      || request.control.type === "initialize"
-      || request.control.type === "reset-wallet";
+    const transitionsSession = request.control.type === "initialize" || request.control.type === "reset-wallet";
     return ports.io.run(
       storageControlIoKind(request.control),
       signal,

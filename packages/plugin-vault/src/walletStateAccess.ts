@@ -44,7 +44,6 @@ export function createWalletStateAccess(
 export function immutableWalletSnapshot(snapshot: Readonly<VaultLifecycleSnapshot>): Readonly<VaultLifecycleSnapshot> {
   const { activePublicKeyHex, activeKeyIdentity, ...state } = snapshot;
   return Object.freeze({ ...state,
-    ...(state.lockCleanup ? { lockCleanup: Object.freeze({ ...state.lockCleanup }) } : {}),
     ...(state.status === "unlocked" && activePublicKeyHex ? { activePublicKeyHex,
       ...(activeKeyIdentity ? { activeKeyIdentity: Object.freeze({ ...activeKeyIdentity, capabilities: Object.freeze([...activeKeyIdentity.capabilities]) as unknown as string[] }) } : {}) } : {}),
   });

@@ -63,8 +63,6 @@ export interface BitfsWorkerDependencies {
   publishHashRequest(runtime: BitfsChannelPort, input: { hash: string; locator: "webrtc-sdp" }, signal: AbortSignal, prepared: (messageId: string) => void): Promise<{ messageId: string }>;
   unknownPublishFailure(error: unknown): boolean;
   executorLease(): BitfsExecutorLease | undefined;
-  resetAutoLock(): void;
-  pauseAutoLock(): void;
   allowLoopback(): boolean;
   isUnavailable(error: unknown): boolean;
   publishPrivate(input: { runtime: BitfsChannelPort; recipientPublicKeyHex: string; protocol: typeof WEBRTC_SIGNAL_PROTOCOL; body: ReturnType<typeof newOffer>; signal?: AbortSignal }): Promise<{ messageId: string }>;
@@ -333,10 +331,7 @@ const msfileBitfsWebRtcBuyerLinks = new Map<string, {
 /** 测试注入的卖方 bridge；生产为 undefined，使用 Window lane + 未就绪端口。 */
 let testMsfileSellerBridge: { transport: BitfsSellerStreamTransport; protocol: BitfsSellerProtocolPort } | undefined;
 
-function sellerKeepsVaultUnlocked(): boolean {
-  return deps.session().vaultStatus === "unlocked"
-    && deps.service()?.describeState().sellerSettings.sellerEnabled === true;
-}
+
 
 function msfileBitfsBuyerTaskKey(ownerPublicKeyHex: string, seedHashHex: string): string {
   return `${ownerPublicKeyHex.toLowerCase()}|${seedHashHex.toLowerCase()}`;
@@ -3022,12 +3017,8 @@ async function configureMsfileSellerRuntime(
   // 用户开关与实际可接单状态是两个正交维度：开关关 → 短路，不评估可用性，
   // 不残留索引与运行时。
   if (!settings.sellerEnabled) {
-    // 关闭后从当前时刻重新计算自动锁定，而不是沿用暂停前的旧 deadline。
-    deps.resetAutoLock();
     return "disabled";
   }
-  // 卖方需要持续接单；启用期间只暂停自动锁，手动锁定仍走全局释放路径。
-  deps.pauseAutoLock();
   if (settings.supportedArbiterPublicKeys.length === 0) return "configuration-error";
   // 依赖先判、且只判一次；同时订阅双向变化——依赖掉线如实报不可用，依赖回来
   // 自动重跑。收款运行时还在预热时这不是永久配置错误：不拆索引、不要求用户
@@ -4420,7 +4411,6 @@ async function handleInboxWebRtc(webrtcBody: import("bsv8-channel-protocol/webrt
     cancelMsfileBitfsBuyerPurchase,
     listMsfileBitfsBuyerTaskSnapshots,
     currentMsfileBitfsFundingLedger,
-    sellerKeepsVaultUnlocked,
     get msfileSellerRuntime() { return msfileSellerRuntime; },
     get testMsfileSellerBridge() { return testMsfileSellerBridge; },
     set testMsfileSellerBridge(value: typeof testMsfileSellerBridge) { testMsfileSellerBridge = value; },

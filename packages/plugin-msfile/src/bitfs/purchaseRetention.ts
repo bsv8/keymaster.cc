@@ -14,7 +14,7 @@ export async function withBitfsContentLock<T>(key: string, run: () => Promise<T>
   try { return await run(); } finally { release(); if (queues.get(key) === gate) queues.delete(key); }
 }
 export function bitfsContentLockKey(store: BorrowedModuleFileStore, owner: string, seed: string): string {
-  return `${store.walletGeneration}:${store.sessionEpoch}:${store.runGeneration}:${owner}:${seed}`;
+  return `${store.walletGeneration}:${store.runGeneration}:${owner}:${seed}`;
 }
 export async function readBitfsDeletedHistory(store: BorrowedModuleFileStore, seed: string): Promise<Set<string>> {
   if (!/^[0-9a-f]{64}$/.test(seed)) throw new Error("删除记录 Seed Hash 无效");
@@ -92,7 +92,7 @@ export function createBitfsRetainedContentStore(input: { store: BorrowedModuleFi
     return mapped;
   };
   return {
-    walletGeneration: store.walletGeneration, sessionEpoch: store.sessionEpoch, runGeneration: store.runGeneration,
+    walletGeneration: store.walletGeneration, runGeneration: store.runGeneration,
     get: (path, options) => withBitfsContentLock(key, async () => { const mapped = await map(path); const file = await store.get(mapped, options); return file ? { ...file, path } : undefined; }),
     getRange: (path, range, options) => withBitfsContentLock(key, async () => { const file = await store.getRange(await map(path), range, options); return file ? { ...file, path } : undefined; }),
     put: (path, bytes, options) => withBitfsContentLock(key, async () => store.put(await writePath(path), bytes, options)),

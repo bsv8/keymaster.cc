@@ -75,7 +75,6 @@ export interface ModuleFileStore {
   /** 打开句柄时的钱包身份世代。 */
   readonly walletGeneration: string;
   /** 打开句柄时的会话世代。 */
-  readonly sessionEpoch: string;
   /** 打开句柄时的 Worker 运行世代。 */
   readonly runGeneration: string;
   /** 分页列出根下文件；`prefix` 是根下的相对前缀。 */

@@ -9,23 +9,30 @@ function authentication(privateKey: Uint8Array, network: BsvNetwork, publicKeyHe
   return bytesToHex(hmac(sha256, privateKey, new TextEncoder().encode(`keymaster.network-identity.v1:${network}:${publicKeyHex}`)));
 }
 function hold(document: NetworkKeyHoldDocument) {
-  const { bsvNetwork: _network, networkAuthenticationHex: _authentication, ...keyHold } = document;
+  const { bsvNetwork: _network, networkAuthenticationHex: _authentication, walletGeneration: _generation, ...keyHold } = document;
   return keyHold;
 }
 export function parseKeyHoldDocument(input: string | Uint8Array): NetworkKeyHoldDocument {
   const raw = typeof input === "string" ? input : new TextDecoder("utf-8", { fatal: true }).decode(input);
   if (raw.startsWith("\ufeff")) throw new TypeError("KeyHold BOM is not allowed");
   const envelope = JSON.parse(raw) as Record<string, unknown>;
-  if (envelope.format !== "keymaster.network-keyhold" || envelope.version !== 1 || !["bsvNetwork,format,keyHold,networkAuthenticationHex,version", "backend,bsvNetwork,format,keyHold,networkAuthenticationHex,version"].includes(Object.keys(envelope).sort().join(",")) || (envelope.backend !== undefined && envelope.backend !== "software")) throw new TypeError("Wallet network is missing; explicit identity upgrade is required");
+  if (envelope.format !== "keymaster.network-keyhold" || envelope.version !== 1
+    || !["bsvNetwork", "format", "keyHold", "networkAuthenticationHex", "version"].every(key => Object.hasOwn(envelope, key))
+    || Object.keys(envelope).some(key => !["bsvNetwork", "format", "keyHold", "networkAuthenticationHex", "version", "backend", "walletGeneration"].includes(key))
+    || (envelope.backend !== undefined && envelope.backend !== "software")) throw new TypeError("Wallet network is missing; explicit identity upgrade is required");
+  if (envelope.walletGeneration !== undefined && (typeof envelope.walletGeneration !== "string"
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(envelope.walletGeneration))) {
+    throw new TypeError("Wallet generation is invalid");
+  }
   const bsvNetwork = validateBsvNetwork(envelope.bsvNetwork);
   if (typeof envelope.networkAuthenticationHex !== "string" || !/^[0-9a-f]{64}$/u.test(envelope.networkAuthenticationHex)) throw new TypeError("Wallet network authentication is invalid");
-  return { ...parseDocument(JSON.stringify(envelope.keyHold)), bsvNetwork, networkAuthenticationHex: envelope.networkAuthenticationHex };
+  return { ...parseDocument(JSON.stringify(envelope.keyHold)), bsvNetwork, networkAuthenticationHex: envelope.networkAuthenticationHex, ...(envelope.walletGeneration === undefined ? {} : { walletGeneration: envelope.walletGeneration as string }) };
 }
 export function exportPortableKeyHoldDocument(document: NetworkKeyHoldDocument): string {
   return serializeDocument(hold(document));
 }
 export function serializeKeyHoldDocument(document: NetworkKeyHoldDocument): string {
-  return JSON.stringify({ format: "keymaster.network-keyhold", version: 1, backend: "software", bsvNetwork: validateBsvNetwork(document.bsvNetwork), networkAuthenticationHex: document.networkAuthenticationHex, keyHold: JSON.parse(serializeDocument(hold(document))) });
+  return JSON.stringify({ format: "keymaster.network-keyhold", version: 1, backend: "software", ...(document.walletGeneration === undefined ? {} : { walletGeneration: document.walletGeneration }), bsvNetwork: validateBsvNetwork(document.bsvNetwork), networkAuthenticationHex: document.networkAuthenticationHex, keyHold: JSON.parse(serializeDocument(hold(document))) });
 }
 export async function decryptKeyHoldDocument(document: NetworkKeyHoldDocument, password: string): Promise<{ label: string; publicKeyHex: string; privateKey: Uint8Array }> {
   const result = await unlockDocument(hold(document), password);
@@ -39,10 +46,10 @@ export async function decryptKeyHoldDocument(document: NetworkKeyHoldDocument, p
   }
   return { label: document.label, publicKeyHex: result.publicKeyHex, privateKey: result.privateKey };
 }
-export async function createKeyHoldDocument(input: { label: string; privateKey: Uint8Array; bsvNetwork: BsvNetwork }, password: string, options?: { iterations?: number }): Promise<NetworkKeyHoldDocument> {
+export async function createKeyHoldDocument(input: { label: string; privateKey: Uint8Array; bsvNetwork: BsvNetwork }, password: string, options?: { iterations?: number }): Promise<NetworkKeyHoldDocument & { walletGeneration: string }> {
   const bsvNetwork = validateBsvNetwork(input.bsvNetwork);
   const recommended = recommendedParameters();
   const parameters = options?.iterations === undefined ? recommended : { ...recommended, keyDerivation: { ...recommended.keyDerivation, iterations: options.iterations } };
   const keyHold = parseDocument(await exportPrivateKey({ privateKey: input.privateKey, password, label: input.label, parameters }));
-  return { ...keyHold, bsvNetwork, networkAuthenticationHex: authentication(input.privateKey, bsvNetwork, keyHold.publicKeyHex) };
+  return { ...keyHold, walletGeneration: crypto.randomUUID(), bsvNetwork, networkAuthenticationHex: authentication(input.privateKey, bsvNetwork, keyHold.publicKeyHex) };
 }

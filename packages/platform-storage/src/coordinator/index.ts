@@ -33,6 +33,5 @@ export { createStorageDataQueue, STORAGE_DATA_CONCURRENCY, STORAGE_DATA_MAX_QUEU
 export { createStorageDataExecutor } from "./storageDataExecutor.js";
 export { createWorkerStorageClients } from "./workerStorageClients.js";
 export { createStorageRpcHandlers } from "./storageRpcHandlers.js";
-export { createStorageGrantAuthority } from "./storageGrantAuthority.js";
 export { createScopedStorageClients } from "./scopedStorageClients.js";
 export { createKeyValueMaintenance } from "./keyValueMaintenance.js";

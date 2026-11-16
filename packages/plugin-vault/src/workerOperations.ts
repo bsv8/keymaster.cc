@@ -11,19 +11,17 @@ export interface VaultWorkerOperationsPorts {
   wallet: ReturnType<typeof createVaultWalletWorker>;
   session(): Readonly<{ vaultStatus: CoordinatorVaultStatus; sessionEpoch: string; runGeneration: string; walletGeneration: string; activePublicKeyHex?: string }>;
   commit(patch: Partial<ReturnType<VaultWorkerOperationsPorts["session"]>>): void;
-  cleanupPending(): unknown;
+  revealScreen(password: string): Promise<void>;
+  beforeActivate(): Promise<void>;
   peerRevoked(peerId: string): boolean;
-  newEpoch(): string;
   publishWallet(): void;
   publishSession(cause: "unlock" | "lock" | "change-password" | "reset-wallet"): void;
   clearActivationCredential(): void;
   storage: {
-    token(): object | undefined; hasRoot(): boolean;
-    revokeGrants(): void; invalidateClients(): void; unavailable(message: string): Error; failure(error: unknown): void; errorResponse(requestId: string, error: unknown): CoordinatorResponse; changed(): void; revokeBindingAndDrain(reason: string): Promise<void>; discardBinding(): void
+    cancelRequests(): void; failure(error: unknown): void; errorResponse(requestId: string, error: unknown): CoordinatorResponse; changed(): void; discardBinding(): void
   };
-  binding: { installRoot(): Promise<void>; loadSettings(): Promise<void>; ensureStorage(): Promise<unknown>; ensureTasks(): Promise<void>; complete(cause?: "initialize" | "unlock"): Promise<void>; lock(reason: string): Promise<void> };
+  binding: { complete(cause?: "initialize" | "unlock"): Promise<void> };
   io: {
-    assertAuthority(): Promise<void>; closeSession(reason: string): void;
     run<T>(kind: "read" | "write", signal: AbortSignal | undefined, execute: () => Promise<T>, options: { auditOperation: "vault.operation" | "vault.unlock" | "service.crypto.sign"; allowLocalLock?: boolean; allowLocalOwnerTransition?: boolean; walletMigration?: boolean; durableLease?: boolean }): Promise<T>
   };
 }
@@ -63,9 +61,10 @@ export function createVaultWorkerOperations(ports: VaultWorkerOperationsPorts) {
   }
 
   async function handleUnlockUnsafe(requestId: string, request: { kind: "unlock"; password: string; expectedSessionEpoch: SessionEpoch }): Promise<CoordinatorResponse> {
-    if (ports.cleanupPending()) return { requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "locked" } };
+    if (ports.session().vaultStatus !== "unlocked") await ports.beforeActivate();
     return executeWorkerUnlock(requestId, request, {
       session: () => ports.session(),
+      revealScreen: ports.revealScreen,
       coldStart: async () => ports.wallet.storageColdStartState ?? await ports.wallet.walletLifecycle?.coldStart(),
       lifecycle: ports.wallet.requireWalletLifecycle,
       completeBinding: ports.binding.complete,
@@ -120,8 +119,7 @@ export function createVaultWorkerOperations(ports: VaultWorkerOperationsPorts) {
     walletGeneration: string;
     sessionEpoch: string;
   }): void {
-    if (ports.cleanupPending()) { input.privateKeyBytes.fill(0); throw new Error("Wallet cleanup has not completed"); }
-    ports.storage.revokeGrants();
+    ports.storage.cancelRequests();
     ports.commit({ walletGeneration: input.walletGeneration });
     ports.commit({ sessionEpoch: input.sessionEpoch });
     ports.commit({ vaultStatus: "unlocked" });
@@ -138,7 +136,6 @@ export function createVaultWorkerOperations(ports: VaultWorkerOperationsPorts) {
     return executeOwnedVaultOperation(operation, {
       lifecycle: ports.wallet.requireWalletLifecycle,
       currentKey: currentKeySummary,
-      beforePasswordChange: () => ports.storage.revokeBindingAndDrain("vault.changePassword"),
       passwordChanged: () => {
         ports.storage.changed();
         ports.publishSession("change-password");
@@ -220,27 +217,10 @@ export function createVaultWorkerOperations(ports: VaultWorkerOperationsPorts) {
     persistence: async () => await ports.wallet.walletStore?.persistence() ?? { persisted: false },
     async execute(control) {
       if (control.type === "initialize") return ports.wallet.initializeWallet(control.plan);
-      if (control.type === "lock") { await ports.binding.lock("storage-control"); return true; }
       if (control.type === "status" || control.type === "summary" || control.type === "cold-start") throw new Error("Storage projection is not a Vault command");
       const { executeWalletControl } = await import("./coordinator.js");
       return executeWalletControl(control, {
         lifecycle: ports.wallet.requireWalletLifecycle(),
-        beforeRevoke: ports.storage.revokeBindingAndDrain,
-        unlocked(result) {
-          ports.commit({ sessionEpoch: result.sessionEpoch });
-          ports.storage.changed();
-          ports.publishSession("unlock");
-        },
-        locked() {
-          ports.commit({ vaultStatus: "locked" });
-          ports.keys.setCoordinatorActiveKeySummary(undefined);
-          ports.storage.changed();
-          ports.publishSession("lock");
-        },
-        passwordChanged() {
-          ports.storage.changed();
-          ports.publishSession("change-password");
-        },
         reset() {
           ports.storage.discardBinding();
           ports.commit({ vaultStatus: "uninitialized" });
@@ -261,7 +241,6 @@ export function createVaultWorkerOperations(ports: VaultWorkerOperationsPorts) {
       return {
         scheduling: request.kind === "vault.operation" && ["getCurrentKey"].includes(request.operation.type) ? "parallel" : "serial",
         validateEpoch: true,
-        activatesWallet: request.kind === "unlock",
       };
     },
     async execute(request, call) {

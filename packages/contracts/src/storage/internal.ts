@@ -1,10 +1,8 @@
-import type { NetworkIdentity as importNetworkIdentity } from "../networkIdentity.js";
 import { defineCapability } from "webloom-framework";
 import type { OwnerAppStore } from "./access.js";
 import type { KeyValueStore } from "./kv.js";
 import type { ModuleFileStore } from "./files.js";
 import type { PluginStorageDeclaration } from "./access.js";
-import type { SessionEpoch } from "../sessionCoordinator.js";
 
 /**
  * Host/Coordinator 内部的存储绑定权威。
@@ -22,6 +20,7 @@ export interface StorageBindingAuthority {
    * 的句柄是否还属于当前钱包。
    */
   getWalletGeneration?(): string | undefined;
+  getRunGeneration?(): string | undefined;
   openOwnerAppStore(input: { pluginId: string; declaration: PluginStorageDeclaration }): Promise<OwnerAppStore>;
   /** 打开模块文件根（model: "files"）。 */
   openOwnerFileStore(input: { pluginId: string; declaration: PluginStorageDeclaration }): Promise<ModuleFileStore>;
@@ -35,73 +34,43 @@ export const STORAGE_BINDING_AUTHORITY_CAPABILITY = defineCapability<StorageBind
   version: "1",
 });
 
-/** 页面到 Coordinator 的内部模块数据面；请求只携带不透明 grant。 */
+/** 页面到 Coordinator 的内部模块数据面；请求携带装配层绑定的用途与钱包运行身份。 */
 export type CoordinatorOwnerStorageData =
-  | { type: "owner.get"; storageGrantId: string; key: string; partition?: string }
-  | { type: "owner.list"; storageGrantId: string; input?: { prefix?: string; cursor?: string; limit?: number; partition?: string } }
-  | { type: "owner.put"; storageGrantId: string; key: string; value: unknown; condition?: { ifRevision?: number; partition?: string } }
-  | { type: "owner.delete"; storageGrantId: string; key: string; condition?: { ifRevision?: number; partition?: string } }
-  | { type: "owner.commit"; storageGrantId: string; partition: string; ifRevision?: number; operations: import("./kv.js").KeyValueCommitOperation[] }
+  | { type: "owner.get"; binding: StorageOwnerBinding; key: string; partition?: string }
+  | { type: "owner.list"; binding: StorageOwnerBinding; input?: { prefix?: string; cursor?: string; limit?: number; partition?: string } }
+  | { type: "owner.put"; binding: StorageOwnerBinding; key: string; value: unknown; condition?: { ifRevision?: number; partition?: string } }
+  | { type: "owner.delete"; binding: StorageOwnerBinding; key: string; condition?: { ifRevision?: number; partition?: string } }
+  | { type: "owner.commit"; binding: StorageOwnerBinding; partition: string; ifRevision?: number; operations: import("./kv.js").KeyValueCommitOperation[] }
   /** 模块文件根（model: "files"）：一文件一对象，路径都是模块根下的相对路径。 */
-  | { type: "owner.file-list"; storageGrantId: string; input?: { prefix?: string; cursor?: string; limit?: number } }
-  | { type: "owner.file-get"; storageGrantId: string; path: string; ifRevision?: string }
-  | { type: "owner.file-range"; storageGrantId: string; path: string; range: { offset: number; length: number }; ifRevision?: string }
-  | { type: "owner.file-put"; storageGrantId: string; path: string; bytes: Uint8Array; ifNoneMatch?: boolean; ifRevision?: string; contentType?: string }
-  | { type: "owner.file-delete"; storageGrantId: string; path: string; ifRevision?: string }
+  | { type: "owner.file-list"; binding: StorageOwnerBinding; input?: { prefix?: string; cursor?: string; limit?: number } }
+  | { type: "owner.file-get"; binding: StorageOwnerBinding; path: string; ifRevision?: string }
+  | { type: "owner.file-range"; binding: StorageOwnerBinding; path: string; range: { offset: number; length: number }; ifRevision?: string }
+  | { type: "owner.file-put"; binding: StorageOwnerBinding; path: string; bytes: Uint8Array; ifNoneMatch?: boolean; ifRevision?: string; contentType?: string }
+  | { type: "owner.file-delete"; binding: StorageOwnerBinding; path: string; ifRevision?: string }
   | {
     type: "owner.file-batch";
-    storageGrantId: string;
+    binding: StorageOwnerBinding;
     operations: Array<{ type: "put"; path: string; bytes: Uint8Array; contentType?: string } | { type: "delete"; path: string }>;
     conditions?: Array<{ path: string; ifRevision?: string; ifNoneMatch?: boolean }>;
   };
 
 export interface StorageBindingCoordinatorClient {
-  storageBindOwner(input: { pluginId: string; declaration: PluginStorageDeclaration }): Promise<import("../sessionCoordinator.js").CoordinatorValueResult<StorageOwnerGrant | ThirdPartyAppStorageGrant>>;
   storageOwnerData(data: CoordinatorOwnerStorageData, transfer?: ArrayBuffer[], signal?: AbortSignal): Promise<import("../sessionCoordinator.js").CoordinatorValueResult<unknown>>;
   storageClearRoot(input: { declaration: PluginStorageDeclaration; appStorageName?: string }): Promise<import("../sessionCoordinator.js").CoordinatorValueResult<unknown>>;
 }
 
-/**
- * Worker 为某个内置模块发放的不透明存储授权。
- *
- * 授权只描述逻辑坐标（moduleId + purposeId）与四件世代身份；物理路径、
- * 数据库连接和 revision 编号留在 Worker 内，不穿过 wire。
- */
-export interface StorageOwnerGrant extends importNetworkIdentity {
-  storageGrantId: string;
+/** 由可信装配根据真实 consumer 与中央声明构造；不是每次解锁签发的许可。 */
+export interface StorageOwnerBinding {
+  /** 钱包运行实例标识；遮罩与改密不变，重置后重新激活必然不同。 */
+  sessionEpoch: string;
   walletGeneration: string;
   runGeneration: string;
   moduleId: string;
   purposeId: string;
   authority: "built-in-module";
-  /** 模块数据模型：K-V 或文件根。 */
   model: "kv" | "files";
   schemaVersion: number;
-  sessionEpoch: SessionEpoch;
 }
-
-/**
- * Worker 为一个已验证第三方 App 发放的目录不透明授权。
- *
- * 目录由平台登记的 `appStorageName` 决定，访问权由验证后的 App 身份决定；
- * 两者都不可由调用方自报，因此同名的两个 App 不可能共用目录。
- */
-export interface ThirdPartyAppStorageGrant extends importNetworkIdentity {
-  storageGrantId: string;
-  walletGeneration: string;
-  runGeneration: string;
-  /** 平台登记并规范化后的稳定存储名称；决定目录。 */
-  appStorageName: string;
-  /** 验证后的 App 身份；决定谁有权访问，不能只靠 name。 */
-  origin: string;
-  authority: "third-party-app";
-  model: "files";
-  schemaVersion: number;
-  sessionEpoch: SessionEpoch;
-}
-
-/** `storage.owner.bind` 的结果：内置模块授权或第三方 App 目录授权。 */
-export type StorageBindingGrant = StorageOwnerGrant | ThirdPartyAppStorageGrant;
 
 export type { WalletStore, WalletObject, WalletObjectMeta, WalletWriteCondition, WalletPutResult, WalletBatchOperation, WalletBatchCondition, WalletBatchInput, WalletBatchResult } from "./walletStoreInternal.js";
 export { StorageRuntimeError, storageErrorCode, type StorageDiagnostic } from "./runtimeError.js";

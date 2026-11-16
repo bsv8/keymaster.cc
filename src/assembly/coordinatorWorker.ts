@@ -1,3 +1,5 @@
+import { createRuntimeExit, RuntimeRestartRequiredError } from "../coordinator/runtimeExit.js";
+import { traceDev } from "@keymaster/contracts";
 import { requireWocNetwork } from "@keymaster/contracts";
 import { defaultChainFeePolicies, parseChainFeePolicy, type ChainFeePolicies } from "@keymaster/contracts";
 import { createCoordinatorWorkerAuthority, type CoordinatorAuthorityRecord } from "../coordinator/workerAuthority.js";
@@ -21,7 +23,6 @@ import type { SatP2pkhService } from "@keymaster/plugin-sat-subscription";
 import { createMsfileWorkerPlugin, createMsFileWorkerLifecycle, productArbitrationServices } from "@keymaster/plugin-msfile/worker";
 import { createP2pkhWorkerRuntime, createP2pkhWorkerOperations } from "@keymaster/plugin-p2pkh/worker";
 import { createWocWorkerRuntime } from "@keymaster/plugin-woc/worker";
-import { WalletLockBarrier } from "../walletLockBarrier.js";
 
 import { type NetworkIdentity } from "@keymaster/contracts";
 
@@ -226,6 +227,7 @@ const COORDINATOR_BUILD_ID = import.meta.env.VITE_KEYMASTER_BUILD_ID ?? import.m
 // 这里仅保留协议字段，供本次 Worker 的内存 gate 和旧页面/旧授权迟到检查使用。
 const COORDINATOR_UPGRADE_PROTOCOL_VERSION = COORDINATOR_SERVICE_PROTOCOL_VERSION;
 const coordinatorAuthority = createCoordinatorWorkerAuthority({  
+  retired: () => walletResetting,
 buildId: COORDINATOR_BUILD_ID, protocolVersion: COORDINATOR_UPGRADE_PROTOCOL_VERSION, identifierSuffix: randomIdentifierSuffix,
   session: () => ({ sessionEpoch: coordinatorState.sessionEpoch, runGeneration: coordinatorState.runGeneration, vaultStatus: coordinatorState.vaultStatus }), admission: { acquire: (exclusive, signal) => vaultWorkerKeys.migrationFence.acquire(exclusive, signal) },
 });
@@ -291,7 +293,7 @@ const vaultWalletWorker = createVaultWalletWorker({
   transitions: { revokeGrants: revokeWalletGrants, establishSession: establishWalletSession, adoptUnlockedKey: input => vaultWorkerOperations.adoptUnlockedKey(input) },
   binding: {
     installRoot: () => installPlatformStorage(), loadSettings: () => loadCoordinatorMeta(), ensureStorage: () => ensureStorageRuntime(),
-    ensureTasks: () => ensureCoordinatorTasksRegistered(), complete: cause => completeUnlockedBinding(cause), lock: reason => performGlobalLock(reason),
+    ensureTasks: () => ensureCoordinatorTasksRegistered(), complete: cause => completeUnlockedBinding(cause), lock: reason => closeWalletRuntime(reason),
   },
 });
 
@@ -330,8 +332,8 @@ const storageWorkerRoot = createStorageWorkerRoot({
     reconcile: () => { void reconcileCoordinatorRuntime(); }, maintenance: () => scheduleCoordinatorKeyValueMaintenance(),
   },
   abortSession: id => storageWorkerRequests.revokeStorageSessionRequests(id),
-  revokeRequests() { abortStorageRequests(); storageWorkerRequests.ownerStorageGrants.clear();  },
-  invalidateClients() { workerStorageClients.invalidateAll(); storageWorkerRequests.ownerStorageGrants.clear();  },
+  revokeRequests() { abortStorageRequests();  },
+  invalidateClients() { workerStorageClients.invalidateAll();  },
   recover: peerId => resumeAfterStorageReady(peerId), assertAuthority: ensureCoordinatorAuthorityClaim,
   recovery: () => coordinatorAuthority.coordinatorAuthorityRecovery,
   publish: event => { publishTopicEvent("storage.state", event); },
@@ -352,7 +354,7 @@ const vaultWorkerKeys = createVaultWorkerKeys({
     ready: () => storageWorkerRoot.ready && Boolean(storageWorkerRoot.root), token: () => storageWorkerRoot.token,
     unavailable: storageUnavailableError
   },
-  lock: reason => performGlobalLock(reason), providerScope: () => vaultWorkerRuntime.providerScope(),
+  lock: reason => closeWalletRuntime(reason), providerScope: () => vaultWorkerRuntime.providerScope(),
   allowUnscopedCrypto: () => testDomainUnitReadiness,
   io: { run: (operation, signal, execute, options) => withCoordinatorFinalIoLease(operation, signal, execute, { ...options, auditOperation: options.auditOperation }) },
 });
@@ -387,15 +389,16 @@ let testHarnessActivationSecret: string | undefined;
 
 const vaultWorkerOperations = createVaultWorkerOperations({
   keys: vaultWorkerKeys, wallet: vaultWalletWorker,
+  revealScreen: revealWalletScreen,
+  beforeActivate: waitForRuntimeExit,
   session: () => ({ vaultStatus: coordinatorState.vaultStatus, sessionEpoch: coordinatorState.sessionEpoch, runGeneration: coordinatorState.runGeneration, walletGeneration: coordinatorState.walletGeneration, activePublicKeyHex: coordinatorState.activePublicKeyHex }),
-  commit: patch => Object.assign(coordinatorState, patch), cleanupPending: () => walletLockBarrier.snapshot(), peerRevoked: peerId => revokedCoordinatorPeerIds.has(peerId), newEpoch: generateEpoch,
-  publishWallet: () => workerWalletState.publish(), publishSession: cause => publishSessionState(cause), clearActivationCredential: () => { testHarnessActivationSecret = undefined; },
+  commit: patch => Object.assign(coordinatorState, patch), peerRevoked: peerId => revokedCoordinatorPeerIds.has(peerId),
+  publishWallet: () => workerWalletState.publish(), publishSession: cause => { if (cause !== "reset-wallet") publishSessionState(cause); }, clearActivationCredential: () => { testHarnessActivationSecret = undefined; },
   storage: {
-    token: () => storageWorkerRoot.token, hasRoot: () => Boolean(storageWorkerRoot.root),
-    revokeGrants: () => storageWorkerRequests.revokeStorageSessionGrants(), invalidateClients: () => workerStorageClients.invalidateAll(), unavailable: storageUnavailableError, failure: markStorageIoFailure, errorResponse: storageErrorResponse, changed: () => emitStorageState(), revokeBindingAndDrain: reason => revokeStorageBindingAndDrain(reason), discardBinding: () => discardCurrentPlatformStorageBinding()
+    cancelRequests: () => storageWorkerRequests.cancelStorageRequests(), failure: markStorageIoFailure, errorResponse: storageErrorResponse, changed: () => emitStorageState(), discardBinding: () => discardCurrentPlatformStorageBinding()
   },
-  binding: { installRoot: () => installPlatformStorage(), loadSettings: () => loadCoordinatorMeta(), ensureStorage: () => ensureStorageRuntime(), ensureTasks: () => ensureCoordinatorTasksRegistered(), complete: cause => completeUnlockedBinding(cause), lock: reason => performGlobalLock(reason) },
-  io: { assertAuthority: () => assertCoordinatorAuthorityCurrent(), closeSession: reason => closeCoordinatorUpgradeSession(reason), run: (kind, signal, execute, options) => withCoordinatorFinalIoLease(kind, signal, execute, { ...options, auditOperation: options.auditOperation }) },
+  binding: { complete: cause => completeUnlockedBinding(cause) },
+  io: { run: (kind, signal, execute, options) => withCoordinatorFinalIoLease(kind, signal, execute, { ...options, auditOperation: options.auditOperation }) },
 });
 
 function registerCoordinatorProtocolMaintenanceStores(stores: CoordinatorProtocolStorageStores | undefined): void {
@@ -426,9 +429,22 @@ function walletControl(): VaultWorkerWalletControl {
   return coordinatorWalletControl;
 }
 const storageWorkerControl = createStorageWorkerControl({
-  root: storageWorkerRoot, wallet: { coldStart: () => walletControl().coldStart(), persistence: () => walletControl().persistence(), execute: control => walletControl().execute(control) },
-  session: () => ({ sessionEpoch: coordinatorState.sessionEpoch }), commit: patch => Object.assign(coordinatorState, patch), cleanupPending: () => walletLockBarrier.snapshot(), recoveryOperations: () => coordinatorAuthority.coordinatorAuthorityRecoveryOperationNames, unavailable: storageUnavailableError,
-  lock: reason => performGlobalLock(reason), revokeBinding: reason => revokeStorageBindingAndDrain(reason), discardBinding: () => discardCurrentPlatformStorageBinding(), publishSession: cause => publishSessionState(cause),
+  root: storageWorkerRoot,
+  wallet: {
+    coldStart: () => walletControl().coldStart(),
+    persistence: () => walletControl().persistence(),
+    async execute(control) {
+      if (control.type === "initialize") await waitForRuntimeExit();
+      try {
+        return await walletControl().execute(control);
+      } finally {
+        // 只有实际进入钱包控制面的重置，在清库成功或失败后安排退出。
+        // RPC 入口拒绝的重复请求不能提前结束仍在执行清库的 Worker。
+        if (control.type === "reset-wallet" && walletResetting) scheduleResetWorkerExit();
+      }
+    },
+  },
+  session: () => ({ sessionEpoch: coordinatorState.sessionEpoch }), recoveryOperations: () => coordinatorAuthority.coordinatorAuthorityRecoveryOperationNames, unavailable: storageUnavailableError,
   io: { run: (kind, signal, execute, options) => withCoordinatorFinalIoLease(kind, signal, execute, { ...options, auditOperation: options.auditOperation }) },
 });
 
@@ -446,7 +462,7 @@ const storageWorkerRequests = createStorageWorkerRequests({
   control: (...args) => storageWorkerControl.execute(...args),
 });
 
-const storageKeyValueMaintenance = createKeyValueMaintenance({ root: () => storageWorkerRoot.root, rootToken: () => storageWorkerRoot.token, isReady: () => storageWorkerRoot.ready, ownerGrants: () => storageWorkerRequests.ownerStorageGrants.values() });
+const storageKeyValueMaintenance = createKeyValueMaintenance({ root: () => storageWorkerRoot.root, rootToken: () => storageWorkerRoot.token, isReady: () => storageWorkerRoot.ready });
 const registerCoordinatorKeyValueMaintenanceStore = storageKeyValueMaintenance.register;
 const unregisterCoordinatorKeyValueMaintenanceStore = storageKeyValueMaintenance.unregister;
 const stopCoordinatorKeyValueMaintenance = storageKeyValueMaintenance.stop;
@@ -602,9 +618,80 @@ function normalizedCoordinatorOwner(): string | null {
 }
 
 
-const walletLockBarrier = new WalletLockBarrier(() => publishSessionState("lock", lockRevocationPending));
-let lockRevocationPending = false;
-let globalLockRunning: Promise<void> | undefined;
+let screenMasked = false;
+let walletResetting = false;
+let resetExitScheduled = false;
+let terminateResetWorker: (() => void) | undefined;
+
+/** 物理 Worker 的结束由入口注入；不经过插件 teardown。 */
+export function installCoordinatorResetExit(terminate: () => void): void {
+  terminateResetWorker = terminate;
+}
+
+function abandonWalletRuntime(): void {
+  walletResetting = true;
+  coordinatorState.sessionEpoch = generateEpoch();
+  coordinatorState.vaultStatus = "locked";
+  coordinatorState.activePublicKeyHex = undefined;
+  vaultWorkerKeys.dropActivePrivateKey();
+  vaultWorkerKeys.setCoordinatorActiveKeySummary(undefined);
+  testHarnessActivationSecret = undefined;
+  screenMasked = false;
+  screenMaskTotalMs = 0;
+  screenMaskStartedAtMs = undefined;
+  screenMaskRevision += 1;
+  vaultAutoLock.pause();
+  closeCoordinatorUpgradeSession("Wallet reset");
+  storageWorkerRequests.cancelStorageRequests();
+  storageWorkerRequests.storageBrowseCoordinator.revokeAll();
+  workerStorageClients.invalidateAll();
+  traceDev("vault.runtime", "reset.abandoned");
+}
+
+function scheduleResetWorkerExit(): void {
+  if (resetExitScheduled) return;
+  resetExitScheduled = true;
+  // 先交付 reset RPC 的提交结果，再通知页面重建。只给消息投递一个短窗口，
+  // 不调用 app.dispose，不等待任何插件或远端任务。
+  setTimeout(() => {
+    publishSessionState("reset-wallet", true);
+    setTimeout(() => terminateResetWorker?.(), 25);
+  }, 0);
+}
+let screenMaskTotalMs = 0;
+let screenMaskStartedAtMs: number | undefined;
+let screenMaskRevision = 0;
+
+function maskWalletScreen(): void {
+  if (coordinatorState.vaultStatus !== "unlocked") return;
+  if (!screenMasked) screenMaskStartedAtMs = Date.now();
+  screenMasked = true;
+  screenMaskRevision += 1;
+  traceDev("vault.screen", "mask", () => ({ revision: screenMaskRevision }));
+  vaultAutoLock.pause();
+  publishSessionState("lock");
+}
+
+async function revealWalletScreen(password: string): Promise<void> {
+  if (!screenMasked) return;
+  const revision = screenMaskRevision;
+  const epoch = coordinatorState.sessionEpoch;
+  await vaultWalletWorker.requireWalletLifecycle().verifyPassword(password);
+  if (revision !== screenMaskRevision || epoch !== coordinatorState.sessionEpoch || coordinatorState.vaultStatus !== "unlocked") {
+    throw storageUnavailableError("Wallet screen changed while verifying password");
+  }
+  screenMaskTotalMs += Math.max(0, Date.now() - (screenMaskStartedAtMs ?? Date.now()));
+  screenMaskStartedAtMs = undefined;
+  screenMasked = false;
+  traceDev("vault.screen", "reveal", () => ({ revision: screenMaskRevision }));
+  resetAutoLockTimer();
+  publishSessionState("unlock");
+}
+let runtimeClosing: Promise<void> | undefined;
+let runtimeExitCleanup: (() => Promise<void>) | undefined;
+async function waitForRuntimeExit(): Promise<void> {
+  if (runtimeExitCleanup) await runtimeExitCleanup();
+}
 let walletRevocationCleanup: Promise<void>[] | undefined;
 
 /**
@@ -615,7 +702,9 @@ let walletRevocationCleanup: Promise<void>[] | undefined;
  */
 function readSessionProjection(): {
   vaultStatus: typeof coordinatorState.vaultStatus;
-  lockCleanup: ReturnType<typeof walletLockBarrier.snapshot>;
+  screenMasked: boolean;
+  screenMaskTotalMs: number;
+  screenMaskStartedAtMs?: number;
   activePublicKeyHex?: string;
   activeKeyIdentity?: NonNullable<ReturnType<typeof vaultWorkerKeys.coordinatorActiveKeySummary>>;
   runGeneration: string;
@@ -630,7 +719,9 @@ function readSessionProjection(): {
   const activeKeyIdentity = unlocked ? vaultWorkerKeys.coordinatorActiveKeySummary() ?? undefined : undefined;
   return {
     vaultStatus: coordinatorState.vaultStatus,
-    lockCleanup: walletLockBarrier.snapshot(),
+    screenMasked: unlocked && screenMasked,
+    screenMaskTotalMs,
+    screenMaskStartedAtMs,
     ...(activePublicKeyHex ? { activePublicKeyHex } : {}),
     ...(activeKeyIdentity ? { activeKeyIdentity } : {}),
     runGeneration: coordinatorState.runGeneration,
@@ -654,7 +745,9 @@ function publishSessionState(cause: SessionStateEvent["cause"], deferCleanup = f
     sessionRevision: 0,
     sessionEpoch: coordinatorState.sessionEpoch,
     vaultStatus: projection.vaultStatus,
-    lockCleanup: projection.lockCleanup,
+    screenMasked: projection.screenMasked,
+    screenMaskTotalMs: projection.screenMaskTotalMs,
+    screenMaskStartedAtMs: projection.screenMaskStartedAtMs,
     activePublicKeyHex: projection.activePublicKeyHex ?? null,
     ...(projection.activeKeyIdentity ? { activeKeyIdentity: projection.activeKeyIdentity } : {}),
     runGeneration: projection.runGeneration,
@@ -708,38 +801,6 @@ function storageConflictError(message: string): Error & { code: string } {
 
 function isStorageConflictError(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && (error as { code?: unknown }).code === "storage_conflict");
-}
-
-/**
- * 撤销当前存储绑定的统一入口。
- *
- * 顺序固定为：推进绑定世代 → 撤销 grant、任务与 Connect 运行绑定 →
- * 拒绝新 I/O → 等待旧 I/O 排空。调用方在它返回之后才可以清空或改写数据。
- */
-async function revokeStorageBindingAndDrain(reason: string): Promise<void> {
-  // 先推进会话世代：已经拿到 wrapper 的旧请求会在完成后被
-  // assertStorageBindingLive 拒绝，新请求从入口直接拒绝。
-  coordinatorState.sessionEpoch = generateEpoch();
-  closeCoordinatorUpgradeSession(`Storage binding revoked: ${reason}`);
-  storageWorkerRequests.revokeStorageSessionGrants();
-  releaseMsfileRuntime(reason);
-  await releaseSatRuntime(reason);
-  windowP2pWorkerRuntime.clearWindowP2pExecutorLeaseLocked();
-  stopCoordinatorOwnerWorkerUnits();
-  // 任务 completion 由自己的绑定栅栏收口；这里不等待一个可能永不响应
-  // AbortSignal 的业务 task，存储排空才是数据变更前的硬门禁。
-  if (coordinatorState.activePublicKeyHex) {
-    void cancelTaskRuntimesByKey(vaultWorkerKeys.requireCoordinatorNetworkIdentity()).catch((error) => {
-      console.warn("[coordinator] task cancellation deferred", error instanceof Error ? error.message : String(error));
-    });
-  }
-  const drain = storageWorkerRequests.drainStorageBindingRequests();
-  try {
-    await drain;
-  } catch (error) {
-    storageWorkerRequests.rememberStorageBindingDrain(drain);
-    throw error;
-  }
 }
 
 const msfileWorkerProjection = createMsFileWorkerProjection({ session: () => ({ epoch: coordinatorState.sessionEpoch, unlocked: coordinatorState.vaultStatus === "unlocked" }), service: () => msfileWorkerLifecycle.service(), configChanged: () => windowP2pWorkerRuntime.syncWindowP2pExecutorConfig(), pump: () => msfileWorkerRequests.pumpMsfileDataWaiters(), publish: event => { publishTopicEvent("msfile.state", event); } });
@@ -889,11 +950,6 @@ const msfileBitfsRuntime = createBitfsWorkerRuntime({
   },
   unknownPublishFailure: isUnknownChannelPublishFailure,
   executorLease: () => windowP2pWorkerRuntime.windowP2pExecutorLease,
-  resetAutoLock: resetAutoLockTimer,
-  pauseAutoLock: () => {
-    vaultAutoLock.pause();
-    coordinatorState.autoLockDeadline = undefined;
-  },
   allowLoopback: bitfsAllowsLoopbackWebsocket,
   isUnavailable: isCoordinatorUnitUnavailableError,
   publishPrivate: async (input) => {
@@ -930,7 +986,6 @@ const msfileBitfsBuyerTaskKey = msfileBitfsRuntime.msfileBitfsBuyerTaskKey;
 const startMsfileBitfsBuyerPurchase = msfileBitfsRuntime.startMsfileBitfsBuyerPurchase;
 const cancelMsfileBitfsBuyerPurchase = msfileBitfsRuntime.cancelMsfileBitfsBuyerPurchase;
 const listMsfileBitfsBuyerTaskSnapshots = msfileBitfsRuntime.listMsfileBitfsBuyerTaskSnapshots;
-const sellerKeepsVaultUnlocked = msfileBitfsRuntime.sellerKeepsVaultUnlocked;
 export const recoverMsfileBitfsFundingSplit = msfileFundingRuntime.recoverSplit;
 
 /* ---------- SatSubscription runtime（唯一 owner：SharedWorker） ---------- */
@@ -1403,7 +1458,6 @@ function abortCoordinatorPeerInflight(peerId: string): void {
   for (const [requestId, request] of windowP2pWorkerRuntime.windowP2pExecutorIdentityRequests) {
     if (request.clientId === peerId) { request.controller.abort(); windowP2pWorkerRuntime.windowP2pExecutorIdentityRequests.delete(requestId); }
   }
-  for (const [grantId, grant] of storageWorkerRequests.ownerStorageGrants) if (grant.clientId === peerId) storageWorkerRequests.ownerStorageGrants.delete(grantId);
   for (const [grantId, grant] of msfileWorkerRequests.msfileGrants) if (grant.clientId === peerId) msfileWorkerRequests.msfileGrants.delete(grantId);
   // 浏览授权是专属授权：peer 一旦脱离 committed session，它名下签发的授权当场作废，
   // 随后任何 browse 调用都只能得到「不可用」。
@@ -1461,7 +1515,6 @@ function fenceCoordinatorPeerSession(
   }
   if (options.physical) {
     coordinatorPeers.delete(state.peer.peerId);
-    walletLockBarrier.remove(state.peer.peerId);
   }
   void drainCoordinatorPeer(state);
   return true;
@@ -1883,10 +1936,10 @@ const vaultAutoLock = createWorkerAutoLock({
   commitTimeout: timeout => { coordinatorMeta.autoLockTimeoutMs = timeout; coordinatorState.autoLockTimeoutMs = timeout; },
   deadline: () => coordinatorState.autoLockDeadline,
   commitDeadline: deadline => { coordinatorState.autoLockDeadline = deadline; },
-  keepUnlocked: sellerKeepsVaultUnlocked,
+  keepUnlocked: () => screenMasked || coordinatorState.vaultStatus !== "unlocked",
   persistTimeout: autoLockTimeoutMs => persistCoordinatorSettings({ scheduleSettings: coordinatorMeta.scheduleSettings, autoLockTimeoutMs, chainFeePolicies: coordinatorMeta.chainFeePolicies }),
   publishSettings: () => publishSessionState("autolock-settings"),
-  lock: () => performGlobalLock("auto-lock-timeout"),
+  lock: async () => maskWalletScreen(),
 });
 function resetAutoLockTimer(): void { vaultAutoLock.reset(); }
 const handleAutolockSettingsUpdate = vaultAutoLock.update;
@@ -1983,7 +2036,7 @@ function workerWalletSnapshot(): import("@keymaster/contracts").VaultLifecycleSn
     activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex : undefined,
     activeKeyIdentity: coordinatorState.vaultStatus === "unlocked" ? vaultWorkerKeys.coordinatorActiveKeySummary() : undefined,
     sessionEpoch: coordinatorState.sessionEpoch, runGeneration: coordinatorState.runGeneration,
-    walletGeneration: coordinatorState.walletGeneration, vaultLifecycleRevision: sessionRevision, lockCleanup: walletLockBarrier.snapshot()
+    walletGeneration: coordinatorState.walletGeneration, vaultLifecycleRevision: sessionRevision
   };
 }
 const workerWalletState = createWalletStateSource(workerWalletSnapshot);
@@ -1995,7 +2048,7 @@ const createWorkerWalletState = () => workerWalletState;
  * Worker 内置模块使用的文件根（model: "files"）。
  *
  * 逻辑路径由中央声明的 moduleId/purposeId 决定，没有 Owner 前缀也没有桶。
- * 句柄按四维绑定惰性重建：锁定、改密、重置、Worker 重启和 Root 换绑都会让
+ * 句柄按钱包运行绑定惰性创建：重置、Worker 重启和 Root 换绑会让
  * 旧绑定失效，并在下一次调用时重新打开。
  */
 const workerStorageClients = createWorkerStorageClients({
@@ -2027,6 +2080,7 @@ const createWorkerKeyValueStore = workerStorageClients.keyValue;
 const workerStorageClientCapabilities = createScopedStorageClients({
   getActivePublicKeyHex: () => coordinatorState.activePublicKeyHex,
   getWalletGeneration: () => coordinatorState.walletGeneration,
+  getRunGeneration: () => coordinatorState.runGeneration,
   async openOwnerFileStore({ pluginId, declaration }) {
     const binding = storageWorkerRequests.currentCoordinatorStorageBinding();
     if (!binding) throw storageUnavailableError("Worker file binding is unavailable");
@@ -2255,7 +2309,7 @@ async function buildTopicBaselines(
         const sessionProjection = readSessionProjection();
         return {
           topic, type: "session.state.changed" as const, sessionRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, cause: "bootstrap" as const, vaultStatus: sessionProjection.vaultStatus,
-          lockCleanup: sessionProjection.lockCleanup, activePublicKeyHex: sessionProjection.activePublicKeyHex ?? null,
+          screenMasked: sessionProjection.screenMasked, screenMaskTotalMs: sessionProjection.screenMaskTotalMs, screenMaskStartedAtMs: sessionProjection.screenMaskStartedAtMs, activePublicKeyHex: sessionProjection.activePublicKeyHex ?? null,
           ...(sessionProjection.activeKeyIdentity ? { activeKeyIdentity: sessionProjection.activeKeyIdentity } : {}), runGeneration: sessionProjection.runGeneration, ...(sessionProjection.walletGeneration ? { walletGeneration: sessionProjection.walletGeneration } : {}), autoLockTimeoutMs: sessionProjection.autoLockTimeoutMs,
           ...(sessionProjection.authorityRecovery ? { authorityRecovery: sessionProjection.authorityRecovery } : {}),
           ...(sessionProjection.storageIoOwnerPeer ? { storageIoOwnerPeer: sessionProjection.storageIoOwnerPeer } : {}),
@@ -2409,10 +2463,9 @@ async function executeProcessRequest(request: CoordinatorClientRequest, actualCl
 
 async function processRequestCore(request: CoordinatorClientRequest, actualClientId = (request as { clientId?: string }).clientId ?? "unknown", requestSignal?: AbortSignal): Promise<CoordinatorResponse> {
   const requestId = "requestId" in request ? request.requestId : generateRequestId();
+  if (walletResetting) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", code: "storage_unavailable", message: "Wallet runtime is restarting after reset" } };
   if (revokedCoordinatorPeerIds.has(actualClientId) || requestSignal?.aborted) return disconnectedClientResponse(requestId);
   const policy = coordinatorRequestRoutes.get(request.kind)?.policy(request);
-  const cleanup = walletLockBarrier.snapshot();
-  if (cleanup && policy?.activatesWallet) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "blocked", reason: { key: "vault.lock.cleanupBlocked", fallback: cleanup.phase === "failed" ? "钱包清理失败，请重试清理后再解锁" : "钱包正在锁定，请等待清理完成" } } };
   // 清理声明允许本地 fail-closed 撤权，其余请求必须经过 origin authority。
   if (!policy?.cleanupOnly && storageWorkerRoot.root && storageWorkerRoot.ready) {
     try { await assertCoordinatorAuthorityCurrent(); }
@@ -2455,7 +2508,6 @@ async function processRequest(request: CoordinatorClientRequest, actualClientId 
 async function completeUnlockedBinding(cause: SessionStateEvent["cause"] = "unlock"): Promise<void> {
   const publicKeyHex = coordinatorState.activePublicKeyHex;
   const bindingEpoch = coordinatorState.sessionEpoch;
-  if (walletLockBarrier.snapshot()) throw storageUnavailableError("Wallet cleanup has not completed");
   if (!publicKeyHex) throw storageUnavailableError("Unlocked wallet has no active key");
   try {
     await ensureCoordinatorUpgradeSession();
@@ -2476,7 +2528,7 @@ async function completeUnlockedBinding(cause: SessionStateEvent["cause"] = "unlo
     await reconcileCoordinatorRuntime();
     if (coordinatorState.sessionEpoch !== bindingEpoch || coordinatorState.vaultStatus !== "unlocked") throw storageUnavailableError("Wallet unlock was revoked during runtime binding");
   } catch (error) {
-    await performGlobalLock("worker-unit-bind-failed");
+    await closeWalletRuntime("worker-unit-bind-failed");
     throw error;
   }
   emitStorageState();
@@ -2511,8 +2563,8 @@ async function completeUnlockedBinding(cause: SessionStateEvent["cause"] = "unlo
  * 让已经拿到句柄的迟到写入在任何数据检查之前就被拒绝。
  */
 function revokeWalletGrants(reason: "lock" | "reset"): void {
-  void reason;
-  storageWorkerRequests.revokeStorageSessionGrants();
+  if (reason === "reset") { abandonWalletRuntime(); return; }
+  storageWorkerRequests.cancelStorageRequests();
   releaseMsfileRuntime(reason);
   // 授权已经撤销，不能让退出依赖旧存储句柄写入或旧身份签名。
   // 本地关闭连接并停止重试；远端订阅由下次启动的历史订阅查询对账。
@@ -2529,7 +2581,6 @@ function establishWalletSession(input: {
   walletGeneration: string;
   publicKeyHex: string;
 }): void {
-  if (walletLockBarrier.snapshot()) throw new Error("Wallet cleanup has not completed");
   coordinatorState.walletGeneration = input.walletGeneration;
   coordinatorState.sessionEpoch = input.sessionEpoch;
   coordinatorState.activePublicKeyHex = input.publicKeyHex;
@@ -2540,9 +2591,7 @@ async function handleLock(
   request: Extract<CoordinatorClientRequest, { kind: "lock" }>,
   peerId: string,
 ): Promise<CoordinatorResponse> {
-  if (request.cleanup?.action === "register") walletLockBarrier.register(peerId);
-  else if (request.cleanup?.action === "settled") walletLockBarrier.report(peerId, request.expectedSessionEpoch, request.cleanup.attempt, request.cleanup.error);
-  else void performGlobalLock("manual").catch(error => console.error("[wallet] lock cleanup failed", error));
+  maskWalletScreen();
   return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "accepted" } };
 }
 
@@ -2552,78 +2601,74 @@ async function handleLock(
  * 不再有任何跨浏览器 Key 锁、lock.json 租约或持久化心跳：本地钱包只保证
  * 本浏览器本 Origin 的单实例，锁定是完全的内存态迁移。
  */
-function performGlobalLock(reason: string): Promise<void> {
-  if (globalLockRunning && walletLockBarrier.snapshot()?.phase !== "failed") return globalLockRunning;
-  if (walletLockBarrier.snapshot()) return walletLockBarrier.retry();
-  const backgroundCompletions = backgroundWorkerRuntime.completions();
-  const previousOwnerUnits = new Set(COORDINATOR_WORKER_UNIT_CATALOG.filter(unit => unit.scopeKind === "owner-session").map(unit => unit.unitId));
-  // Only the security commit precedes the lock event. A new epoch fences old
-  // RPC/I/O immediately and clearing the key prevents signing. Plugin teardown,
-  // abort callbacks, connection shutdown and directory updates run AFTER it.
+/** 真实运行终止：用于失败恢复或身份退出，不由页面遮罩触发。 */
+function closeWalletRuntime(reason: string): Promise<void> {
+  if (runtimeExitCleanup) return runtimeExitCleanup();
+  screenMasked = false;
+  screenMaskTotalMs = 0;
+  screenMaskStartedAtMs = undefined;
+  screenMaskRevision += 1;
   coordinatorState.sessionEpoch = generateEpoch();
   coordinatorState.vaultStatus = "locked";
   coordinatorState.activePublicKeyHex = undefined;
-  vaultWorkerKeys.dropActivePrivateKey(); vaultWorkerKeys.setCoordinatorActiveKeySummary(undefined);
+  vaultWorkerKeys.dropActivePrivateKey();
+  vaultWorkerKeys.setCoordinatorActiveKeySummary(undefined);
   testHarnessActivationSecret = undefined;
-  coordinatorState.autoLockDeadline = undefined;
-  lockRevocationPending = true;
-
-  let revokePending: Promise<Promise<void>[]> | undefined;
-  const revoke = (): Promise<Promise<void>[]> => {
-    if (revokePending) return revokePending;
-    const run = Promise.resolve().then(() => {
-      cancelSmartSyncIdleTimer(); vaultAutoLock.pause();
-      backgroundWorkerRuntime.block("Vault is locked");
-      walletRevocationCleanup = [];
-      try {
-        revokeWalletGrants("lock"); storageWorkerRequests.storageBrowseCoordinator.revokeAll();
-        workerStorageClients.invalidateAll(); stopCoordinatorOwnerWorkerUnits();
-        closeCoordinatorUpgradeSession(`Coordinator locked: ${reason}`);
-        reconcileCoordinatorSessionExposures();
-        lockRevocationPending = false;
-        workerWalletState.publish();
-        return walletRevocationCleanup;
-      } finally { walletRevocationCleanup = undefined; }
-    }).catch(error => { revokePending = undefined; throw error; });
-    revokePending = run;
-    return run;
+  vaultAutoLock.pause();
+  backgroundWorkerRuntime.block("Vault is locked");
+  const backgroundCompletions = backgroundWorkerRuntime.completions();
+  const exitingUnits = new Set(COORDINATOR_WORKER_UNIT_CATALOG.filter(unit => unit.scopeKind === "owner-session").map(unit => unit.unitId));
+  walletRevocationCleanup = [];
+  revokeWalletGrants("lock");
+  const revocations = walletRevocationCleanup;
+  walletRevocationCleanup = undefined;
+  storageWorkerRequests.storageBrowseCoordinator.revokeAll();
+  workerStorageClients.invalidateAll();
+  stopCoordinatorOwnerWorkerUnits();
+  closeCoordinatorUpgradeSession(reason);
+  publishSessionState("lock");
+  let firstConnectionAttempt = true;
+  let terminalCleanupFailure: RuntimeRestartRequiredError | undefined;
+  const cleanup = createRuntimeExit([
+    { label: "connections", run: async () => {
+      if (firstConnectionAttempt) {
+        firstConnectionAttempt = false;
+        const results = await Promise.allSettled(revocations);
+        const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+        if (failures.length) throw new AggregateError(failures.map(result => result.reason), "Connection cleanup failed");
+      }
+      await satWorkerLifecycle.retryCleanup();
+    } },
+    { label: "storage drain", run: () => storageWorkerRequests.drainStorageBindingRequests() },
+    { label: "background tasks", run: async () => { await Promise.allSettled(backgroundCompletions); } },
+    { label: "runtime instances", run: async () => {
+      if (terminalCleanupFailure) throw terminalCleanupFailure;
+      if (!coordinatorRuntimeApp) return;
+      await coordinatorRuntimeApp.reconcile();
+      for (const plugin of coordinatorRuntimeApp.inspect().plugins.filter(plugin => plugin.units.some(unit => exitingUnits.has(unit.unitId)))) {
+        if (plugin.cleanup?.errors.some(error => error.code === "lifecycle.cleanup_failed")) {
+          terminalCleanupFailure = new RuntimeRestartRequiredError(plugin.id);
+          throw terminalCleanupFailure;
+        }
+        if (plugin.cleanup?.cleanupIncomplete || plugin.kind === "stopping" || plugin.kind === "cleanup-pending") {
+          throw new Error(`${plugin.id}: ${plugin.error ?? "Runtime instance cleanup is incomplete"}`);
+        }
+      }
+    } },
+  ]);
+  const finish = (): Promise<void> => {
+    const attempt = cleanup().then(() => {
+      if (runtimeExitCleanup === finish) {
+        runtimeExitCleanup = undefined;
+        runtimeClosing = undefined;
+        emitMsFileState(); emitStorageState();
+      }
+    });
+    runtimeClosing = attempt;
+    return attempt;
   };
-  let firstConnectionCleanup = true;
-  const operations = [
-    {
-      label: "钱包连接", run: async () => {
-        const revocations = await revoke();
-        if (firstConnectionCleanup) {
-          firstConnectionCleanup = false;
-          // The first rejection must reach the UI. Do not silently repeat it
-          // before recording the failure; retries come from the user's button.
-          await Promise.all(revocations);
-        }
-        await satWorkerLifecycle.retryCleanup();
-      }
-    },
-    {
-      label: "后台插件", run: async () => {
-        await revoke();
-        if (coordinatorRuntimeApp) {
-          await coordinatorRuntimeApp.reconcile();
-          for (const state of coordinatorRuntimeApp.inspect().plugins.filter(plugin => plugin.units.some(unit => previousOwnerUnits.has(unit.unitId)))) {
-            if (state.cleanup?.cleanupIncomplete || state.kind === "stopping" || state.kind === "cleanup-pending") throw new Error(`${state.id}: ${state.error ?? "清理未完成"}\n${JSON.stringify(state.cleanup, null, 2)}`);
-          }
-          synchronizeCoordinatorTaskUnitInstances();
-        }
-      }
-    },
-    { label: "钱包生命周期", run: async () => { await revoke(); if (vaultWalletWorker.walletLifecycle) await vaultWalletWorker.walletLifecycle.lock(); } },
-    { label: "后台任务", run: async () => { await revoke(); await Promise.allSettled(backgroundCompletions); } },
-  ];
-  const running = walletLockBarrier.begin(coordinatorState.sessionEpoch, operations).finally(() => {
-    if (globalLockRunning === running) globalLockRunning = undefined;
-    emitMsFileState(); emitStorageState();
-    publishTopicEvent("background.snapshot", { type: "background.snapshot.changed", sessionEpoch: coordinatorState.sessionEpoch, snapshots: getTaskSnapshots() });
-  });
-  globalLockRunning = running;
-  return running;
+  runtimeExitCleanup = finish;
+  return finish();
 }
 
 // ============================================================
@@ -2781,7 +2826,9 @@ function buildSnapshot(): CoordinatorBootstrapSnapshot {
     buildId: COORDINATOR_BUILD_ID,
     sessionEpoch: coordinatorState.sessionEpoch,
     vaultStatus: projection.vaultStatus,
-    lockCleanup: projection.lockCleanup,
+    screenMasked: projection.screenMasked,
+    screenMaskTotalMs: projection.screenMaskTotalMs,
+    screenMaskStartedAtMs: projection.screenMaskStartedAtMs,
     ...(projection.activePublicKeyHex ? { activePublicKeyHex: projection.activePublicKeyHex } : {}),
     ...(projection.activeKeyIdentity ? { activeKeyIdentity: projection.activeKeyIdentity } : {}),
     // 钱包身份世代：单 Key 模型下没有 selectedPublicKeyHex（没有可切换的
@@ -3602,8 +3649,8 @@ export function coordinatorTestingPorts(): CoordinatorTestingPorts {
     get ensureStorageRuntime() { return ensureStorageRuntime; },
     get executeTask() { return executeTask; },
     get generateEpoch() { return generateEpoch; },
-    get globalLockRunning() { return globalLockRunning; },
-    set globalLockRunning(value: typeof globalLockRunning) { globalLockRunning = value; },
+    get runtimeClosing() { return runtimeClosing; },
+    set runtimeClosing(value: typeof runtimeClosing) { runtimeClosing = value; },
     get handleActivity() { return handleActivity; },
     get handleAutolockSettingsUpdate() { return handleAutolockSettingsUpdate; },
     get handleBackgroundRunNow() { return handleBackgroundRunNow; },
@@ -3618,8 +3665,6 @@ export function coordinatorTestingPorts(): CoordinatorTestingPorts {
     get lastSatState() { return lastSatState; },
     set lastSatState(value: typeof lastSatState) { lastSatState = value; },
     get loadCoordinatorMeta() { return loadCoordinatorMeta; },
-    get lockRevocationPending() { return lockRevocationPending; },
-    set lockRevocationPending(value: typeof lockRevocationPending) { lockRevocationPending = value; },
     get makeCoordinatorAuthorityInstanceId() { return makeCoordinatorAuthorityInstanceId; },
     get msfileBitfsRuntime() { return msfileBitfsRuntime; },
     get msfileWorkerLifecycle() { return msfileWorkerLifecycle; },
@@ -3680,7 +3725,6 @@ export function coordinatorTestingPorts(): CoordinatorTestingPorts {
     get vaultWalletWorker() { return vaultWalletWorker; },
     get vaultWorkerKeys() { return vaultWorkerKeys; },
     get vaultWorkerOperations() { return vaultWorkerOperations; },
-    get walletLockBarrier() { return walletLockBarrier; },
     get walletRevocationCleanup() { return walletRevocationCleanup; },
     set walletRevocationCleanup(value: typeof walletRevocationCleanup) { walletRevocationCleanup = value; },
     get windowP2pWorkerRuntime() { return windowP2pWorkerRuntime; },
@@ -3755,7 +3799,7 @@ export interface CoordinatorTestingPorts {
   ensureStorageRuntime: typeof ensureStorageRuntime;
   executeTask: typeof executeTask;
   generateEpoch: typeof generateEpoch;
-  globalLockRunning: Promise<void> | undefined;
+  runtimeClosing: Promise<void> | undefined;
   handleActivity: typeof handleActivity;
   handleAutolockSettingsUpdate: typeof handleAutolockSettingsUpdate;
   handleBackgroundRunNow: typeof handleBackgroundRunNow;
@@ -3769,7 +3813,6 @@ export interface CoordinatorTestingPorts {
   installPlatformStorage: typeof installPlatformStorage;
   lastSatState: CoordinatorSatStateEvent | undefined;
   loadCoordinatorMeta: typeof loadCoordinatorMeta;
-  lockRevocationPending: boolean;
   makeCoordinatorAuthorityInstanceId: typeof makeCoordinatorAuthorityInstanceId;
   msfileBitfsRuntime: ReturnType<typeof createBitfsWorkerRuntime>;
   msfileWorkerLifecycle: ReturnType<typeof createMsFileWorkerLifecycle>;
@@ -3816,7 +3859,6 @@ export interface CoordinatorTestingPorts {
   vaultWalletWorker: ReturnType<typeof createVaultWalletWorker>;
   vaultWorkerKeys: ReturnType<typeof createVaultWorkerKeys>;
   vaultWorkerOperations: ReturnType<typeof createVaultWorkerOperations>;
-  walletLockBarrier: typeof walletLockBarrier;
   walletRevocationCleanup: Promise<void>[] | undefined;
   windowP2pWorkerRuntime: ReturnType<typeof createWindowP2pWorkerRuntime>;
   wocWorkerRuntime: ReturnType<typeof createWocWorkerRuntime>;

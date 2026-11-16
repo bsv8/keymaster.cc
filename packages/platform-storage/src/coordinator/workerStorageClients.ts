@@ -109,7 +109,6 @@ export function createWorkerStorageClients<Binding extends WorkerStorageBinding>
     const borrowed = borrow<ModuleFileStore>(moduleId, purposeId, "files", (root, declaration) => root.openModuleFileStore({ declaration, ...(appStorageName === undefined ? {} : { appStorageName }) }));
     const handle: BorrowedModuleFileStore = {
       get walletGeneration() { return borrowed.binding()?.walletGeneration ?? ""; },
-      get sessionEpoch() { return borrowed.binding()?.sessionEpoch ?? ""; },
       get runGeneration() { return borrowed.binding()?.runGeneration ?? ""; },
       list: input => borrowed.run("read", store => store.list(input)),
       get: (path, options) => borrowed.run("read", store => store.get(path, options)),
@@ -128,7 +127,6 @@ export function createWorkerStorageClients<Binding extends WorkerStorageBinding>
     const borrowed = borrow<KeyValueStore>(moduleId, purposeId, "kv", (root, declaration) => root.openKeyValueStore({ declaration }));
     const handle: WorkerMaintenanceStore = {
       get walletGeneration() { return borrowed.binding()?.walletGeneration ?? ""; },
-      get sessionEpoch() { return borrowed.binding()?.sessionEpoch ?? ""; },
       get runGeneration() { return borrowed.binding()?.runGeneration ?? ""; },
       moduleId: declaration.moduleId,
       purposeId: declaration.purposeId,

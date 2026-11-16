@@ -90,7 +90,6 @@ export function createModuleFileStore(options: ModuleFileStoreOptions): ModuleFi
 
   return {
     get walletGeneration() { return options.binding.walletGeneration; },
-    get sessionEpoch() { return options.binding.sessionEpoch; },
     get runGeneration() { return options.binding.runGeneration; },
     async list(input = {}): Promise<ModuleFileListPage> {
       assertOpen();

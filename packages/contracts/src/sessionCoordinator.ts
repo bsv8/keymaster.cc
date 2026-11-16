@@ -203,12 +203,6 @@ export type CoordinatorStorageControl =
   | { type: "cold-start" }
   /** 创建或导入唯一 Key；Key、meta 与初始系统数据在同一事务提交。 */
   | { type: "initialize"; plan: WalletInitializePlan }
-  /** 用 Key 密码解锁唯一 Key。 */
-  | { type: "unlock"; password: string }
-  /** 锁定：撤销会话、grant 与任务授权。 */
-  | { type: "lock" }
-  /** 修改 Key 密码。 */
-  | { type: "change-key-password"; oldPassword: string; newPassword: string }
   /** 只修改显示名称。 */
   | { type: "rename-key"; label: string }
   /** 原样导出加密 KeyHold；不是完整钱包备份。 */
@@ -224,7 +218,6 @@ export type CoordinatorClientRequestWithStorage =
 
 /** Host/Coordinator 内部存储请求，不属于插件可见的 SessionCoordinatorClient。 */
 export type CoordinatorClientRequestWithInternalStorage =
-  | { kind: "storage.owner.bind"; clientId: string; requestId: string; pluginId: string; declaration: import("./storage/access.js").PluginStorageDeclaration; expectedSessionEpoch: SessionEpoch }
   | { kind: "storage.owner.data"; clientId: string; requestId: string; data: import("./storage/internal.js").CoordinatorOwnerStorageData; expectedSessionEpoch: SessionEpoch }
   /** 清空一个已绑定根下的全部对象；只由重置与单 App 清理流程调用。 */
   | { kind: "storage.clear.root"; clientId: string; requestId: string; input: { declaration: import("./storage/access.js").PluginStorageDeclaration; appStorageName?: string }; expectedSessionEpoch: SessionEpoch };
@@ -382,7 +375,7 @@ export type CoordinatorClientRequest =
   | ({ kind: "hello"; clientId: string; requestId: string; /** Coordinator 服务桥的专用双工端口。 */ servicePort?: MessagePort }
     | { kind: "subscribe"; clientId: string; requestId: string; topics: CoordinatorTopic[] }
     | { kind: "unlock"; clientId: string; requestId: string; password: string; expectedSessionEpoch: SessionEpoch }
-    | { kind: "lock"; clientId: string; requestId: string; expectedSessionEpoch: SessionEpoch; cleanup?: { action: "register" } | { action: "settled"; attempt: number; error?: string } }
+    | { kind: "lock"; clientId: string; requestId: string; expectedSessionEpoch: SessionEpoch;  }
     | { kind: "vault.operation"; clientId: string; requestId: string; operation: CoordinatorVaultOperation; expectedSessionEpoch: SessionEpoch }
     | { kind: "crypto"; clientId: string; requestId: string; operation: CoordinatorCryptoOperation; expectedSessionEpoch: SessionEpoch }
     | { kind: "background.run-now"; clientId: string; requestId: string; taskId: string; expectedSessionEpoch: SessionEpoch }
@@ -593,7 +586,11 @@ export interface CoordinatorStorageStateEvent {
 
 /** The complete public session snapshot. This is the sole cross-tab session event. */
 export interface SessionStateEvent {
-  lockCleanup?: import("./vault.js").WalletLockCleanup;
+  /** 页面遮罩；不撤销已解密钱包、业务实例或运行权限。 */
+  screenMasked?: boolean;
+  /** Worker 权威：已完成遮罩的累计毫秒及当前遮罩起点（epoch ms）。 */
+  screenMaskTotalMs?: number;
+  screenMaskStartedAtMs?: number;
   activeKeyIdentity?: import("./vault.js").KeyIdentity;
   topic: "session.state";
   type: "session.state.changed";
@@ -685,7 +682,11 @@ export interface CoordinatorSubscribeTopicsResult {
 
 /** Coordinator 公开状态快照。 */
 export interface CoordinatorBootstrapSnapshot {
-  lockCleanup?: import("./vault.js").WalletLockCleanup;
+  /** 页面遮罩；不撤销已解密钱包、业务实例或运行权限。 */
+  screenMasked?: boolean;
+  /** Worker 权威：已完成遮罩的累计毫秒及当前遮罩起点（epoch ms）。 */
+  screenMaskTotalMs?: number;
+  screenMaskStartedAtMs?: number;
   activeKeyIdentity?: import("./vault.js").KeyIdentity;
   /** SharedWorker 启动身份；意图命令必须绑定此值。 */
   authorityInstanceId: string;

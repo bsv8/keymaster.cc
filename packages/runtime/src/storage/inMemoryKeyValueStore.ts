@@ -101,7 +101,6 @@ export function createInMemoryKeyValueStore(
   };
   const store: KeyValueStore = {
     walletGeneration: binding.walletGeneration,
-    sessionEpoch: binding.sessionEpoch,
     runGeneration: binding.runGeneration,
     moduleId: binding.moduleId,
     purposeId: binding.purposeId,

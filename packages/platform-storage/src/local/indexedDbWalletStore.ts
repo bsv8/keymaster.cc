@@ -47,8 +47,6 @@ export interface IndexedDbWalletStoreOptions {
   indexStoreName?: string;
   /** 测试可注入时钟。 */
   now?: () => number;
-  /** 生成钱包身份世代;缺省使用 crypto.randomUUID。 */
-  generateWalletGeneration?: () => string;
 }
 
 /** 字节仓库的物理形状:内嵌元数据,单仓库即可完成读取。 */
@@ -258,11 +256,13 @@ export function createIndexedDbWalletStore(options: IndexedDbWalletStoreOptions 
   const indexStoreName = options.indexStoreName ?? WALLET_INDEX_STORE;
   const now = options.now ?? (() => Date.now());
   let closed = false;
+  let retired = false;
   let connectionError: StorageRuntimeError | undefined;
   let databasePromise: Promise<IDBDatabase> | undefined;
 
   function assertOpen(): void {
     if (closed) throw fail("storage_unavailable", "IndexedDB wallet store is closed");
+    if (retired) throw fail("storage_unavailable", "IndexedDB wallet store was retired by reset");
     if (connectionError) throw connectionError;
   }
 
@@ -490,22 +490,29 @@ export function createIndexedDbWalletStore(options: IndexedDbWalletStoreOptions 
     return { paths, committedAt: timestamp };
   }
 
-  /**
-   * 重置钱包:同一事务内清空新格式全部数据,并写入新的钱包身份世代。
-   *
-   * 调用方必须先撤销会话、grant 与任务权限——本方法只负责数据层。清空与世代递增
-   * 同事务,所以失败时既不会留下「数据已清但世代没变」的中间态,也不会把旧授权
-   * 带进新钱包。旧桶数据库不在清理范围内。
+  /** 永久封闭旧实例的事务入口，再清空两个仓库。已创建的事务排在清空之前；
+   * 尚在等待数据库连接的旧调用会被 beginTransaction 的二次检查拒绝。
+   * 成功或失败均不复用此实例，新运行必须创建自己的引擎。
    */
   async function resetWallet(options: { signal?: AbortSignal } = {}): Promise<{ walletGeneration: string; clearedAt: string }> {
     assertOpen();
     if (options.signal?.aborted) throw fail("storage_unavailable", "Storage operation was cancelled");
+    const connection = database();
+    retired = true;
     const clearedAt = new Date(now()).toISOString();
-    await withStores("readwrite", async (stores) => {
-      await Promise.all([requestToPromise(stores.objects.clear()), requestToPromise(stores.index.clear())]);
-    });
-    const walletGeneration = "";
-    return { walletGeneration, clearedAt };
+    try {
+      const opened = await connection;
+      const transaction = opened.transaction([storeName, indexStoreName], "readwrite");
+      const completed = transactionDone(transaction);
+      transaction.objectStore(storeName).clear();
+      transaction.objectStore(indexStoreName).clear();
+      await completed;
+      return { walletGeneration: "", clearedAt };
+    } catch (caught) {
+      throw mapIndexedDbError(caught);
+    } finally {
+      close();
+    }
   }
 
   async function cleanupLegacyMarkers(): Promise<void> {
@@ -531,6 +538,13 @@ export function createIndexedDbWalletStore(options: IndexedDbWalletStoreOptions 
     }
   }
 
+  function close(): void {
+    closed = true;
+    const pending = databasePromise;
+    databasePromise = undefined;
+    if (pending) void pending.then((open) => open.close()).catch(() => undefined);
+  }
+
   return {
     readMeta,
     cleanupLegacyMarkers,
@@ -543,12 +557,7 @@ export function createIndexedDbWalletStore(options: IndexedDbWalletStoreOptions 
     batch,
     resetWallet,
     persistence,
-    close() {
-      closed = true;
-      const pending = databasePromise;
-      databasePromise = undefined;
-      if (pending) void pending.then((open) => open.close()).catch(() => undefined);
-    },
+    close,
   };
 }
 

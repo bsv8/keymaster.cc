@@ -231,6 +231,8 @@ function normalizeOriginSettings(
 
 /** ProtocolService 构造依赖。 */
 export interface ProtocolServiceDeps {
+  /** 提供实例撤销时立即失效，早于异步 dispose。 */
+  runtimeSignal?: AbortSignal;
   vault: VaultService;
   walletState: VaultWalletState;
   /**
@@ -425,12 +427,13 @@ export type ProtocolCommandPhase =
 
 /** 单条 confirming request 的 timeout 状态。 */
 interface ConfirmTimeoutState {
-  /** timeout 截止时间（epoch ms）。 */
-  deadlineMs: number;
+  /** 审批可操作时长；不含 Worker 记录的遮罩时间。 */
+  timeoutMs: number;
   /** setInterval handle；每 1s 触发一次 emitFeed 让 UI 倒计时重渲染。 */
   tickHandle: ReturnType<typeof setInterval>;
   /** 起点（epoch ms）；用于 cache-miss clamp 时维持总等待时长稳定。 */
   startedAtMs: number;
+  maskTimeAtStartMs: number;
   /**
    * 进入 confirming 时是否走了默认 30s 兜底（true）还是同步 cache
    * 命中（false）。决定 `refreshTimeoutFromOriginConfig` 是否允许
@@ -510,6 +513,7 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /** 每条 confirming request 独立的 timeout 状态。 */
   private timersByRecordId: Map<string, ConfirmTimeoutState> = new Map();
+  private screenStateOff?: () => void;
 
   /** feepool pending operations：仅本 popup 会话内存有效，endSession 清空。 */
   private pendingOps: FeepoolPendingOpsMap = new Map();
@@ -685,6 +689,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         else target.postMessage(message, "*");
       },
     });
+    this.screenStateOff = deps.walletState.subscribe(() => this.emitFeed());
     // Channel 事件已经在 Coordinator 完成验签、解密和固定协议分派。
     // Session Window 只做当前 session + exact channel 的最后一层隔离。
     if (deps.connectChannelRuntime) {
@@ -1088,6 +1093,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 新 UI 应始终传 recordId。
    */
   async confirmByUser(recordId?: string, rememberApplicationPermission = false): Promise<void> {
+    if (this.deps.walletState.snapshot().screenMasked) throw new Error("解除页面遮罩后才能审批应用请求");
     const rec = this.resolveRecordForConfirm(recordId);
     if (!rec || rec.phase !== "confirming") return;
     try {
@@ -1276,6 +1282,7 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /** Dispose subscriptions as well as runtime authority; only used when the host drops this instance. */
   dispose(): void {
+    this.screenStateOff?.(); this.screenStateOff = undefined;
     this.endSession();
     this.channelRuntimeUnsubscribe?.();
     this.channelRuntimeUnsubscribe = undefined;
@@ -1340,13 +1347,23 @@ export class ProtocolServiceImpl implements ProtocolService {
    * recordId 缺省时返回任意一张 confirming 的 deadline（兼容旧 UI）。
    * 新 UI 应**始终**传 recordId。
    */
+  private maskTimeMs(now = Date.now()): number {
+    const state = this.deps.walletState.snapshot();
+    return (state.screenMaskTotalMs ?? 0) + (state.screenMasked && state.screenMaskStartedAtMs !== undefined
+      ? Math.max(0, now - state.screenMaskStartedAtMs) : 0);
+  }
+
+  private effectiveConfirmDeadline(timer: ConfirmTimeoutState): number {
+    return timer.startedAtMs + timer.timeoutMs + Math.max(0, this.maskTimeMs() - timer.maskTimeAtStartMs);
+  }
+
   confirmDeadlineMs(recordId?: string): number | null {
     if (recordId) {
       const t = this.timersByRecordId.get(recordId);
-      return t ? t.deadlineMs : null;
+      return t ? this.effectiveConfirmDeadline(t) : null;
     }
     for (const [, t] of this.timersByRecordId) {
-      return t.deadlineMs;
+      return this.effectiveConfirmDeadline(t);
     }
     return null;
   }
@@ -1424,6 +1441,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *     其它请求。
    */
   async confirmConnectLogin(recordId: string): Promise<void> {
+    if (this.deps.walletState.snapshot().screenMasked) throw new Error("解除页面遮罩后才能审批应用请求");
     const rec = this.requestsByRecordId.get(recordId);
     if (!rec) return;
     if (rec.method !== "connect.login") return;
@@ -1462,6 +1480,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *     "该会话已失效，请重新登录"。
    */
   async confirmConnectResume(recordId: string): Promise<void> {
+    if (this.deps.walletState.snapshot().screenMasked) throw new Error("解除页面遮罩后才能审批应用请求");
     const rec = this.requestsByRecordId.get(recordId);
     if (!rec) return;
     if (rec.method !== "connect.resume") return;
@@ -2711,7 +2730,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.clearConfirmTimeout(recordId);
     const now = Date.now();
     const startedAtMs = now;
-    const deadlineMs = now + initialSeconds * 1000;
+    const timeoutMs = initialSeconds * 1000;
     const tickHandle = setInterval(() => {
       const t = this.timersByRecordId.get(recordId);
       if (!t || !t.tickHandle) return;
@@ -2721,7 +2740,9 @@ export class ProtocolServiceImpl implements ProtocolService {
         this.clearConfirmTimeout(recordId);
         return;
       }
-      if (Date.now() >= t.deadlineMs) {
+      if (this.deps.walletState.snapshot().screenMasked) return;
+      const tickNow = Date.now();
+      if (tickNow >= this.effectiveConfirmDeadline(t)) {
         this.clearConfirmTimeout(recordId);
         void this.finalizeRequestByTimeout(recordId);
         return;
@@ -2729,9 +2750,10 @@ export class ProtocolServiceImpl implements ProtocolService {
       this.emitFeed();
     }, 1000);
     this.timersByRecordId.set(recordId, {
-      deadlineMs,
+      timeoutMs,
       tickHandle,
       startedAtMs,
+      maskTimeAtStartMs: this.maskTimeMs(now),
       startedFromFallback
     });
     this.emit();
@@ -2760,15 +2782,11 @@ export class ProtocolServiceImpl implements ProtocolService {
     const actualSeconds = cached.confirmTimeoutSeconds;
     if (!actualSeconds || actualSeconds <= 0) return;
     const actualMs = actualSeconds * 1000;
-    const currentDeadline = t.deadlineMs;
-    const newDeadline = t.startedAtMs + actualMs;
-    if (newDeadline < currentDeadline) {
-      t.deadlineMs = newDeadline;
+    if (actualMs < t.timeoutMs) {
+      t.timeoutMs = actualMs;
       this.emitFeed();
       this.emit();
-      if (newDeadline <= Date.now()) {
-        // 新 deadline 已过去 / 即将过去（不变量 cache miss → 5s 真值晚到
-        // 仍应立即 timeout，不等下一个 tick）。
+      if (!this.deps.walletState.snapshot().screenMasked && this.effectiveConfirmDeadline(t) <= Date.now()) {
         await this.finalizeRequestByTimeout(recordId);
       }
     }

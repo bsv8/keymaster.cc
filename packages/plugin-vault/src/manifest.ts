@@ -1,3 +1,4 @@
+import { WalletScreenMask } from "./WalletScreenMask.js";
 import { createPublicVaultService } from "./publicVaultService.js";
 import { createVaultImporters } from "./VaultInternalContext.js";
 import { keyImportResources, hexResources, wifResources, jsonFileResources } from "./import/resources.js";
@@ -86,13 +87,9 @@ const vaultResources: I18nPluginResources = {
   namespace: "vault",
   resources: {
     en: {
-      "vault.lock.cleaning": "Locking wallet. Waiting for services to exit before unlocking is available.",
-      "vault.lock.cleanupFailed": "Wallet locked. Some services could not finish cleaning up. Retry cleanup before unlocking.",
-      "vault.lock.details": "Lock error details",
       "vault.lock.retry": "Retry cleanup",
       "vault.lock.retryFailed": "Cleanup retry failed. Please try again.",
       "vault.lock.requestFailed": "Lock request failed. Please try again.",
-      "vault.lock.cleanupBlocked": "Wallet cleanup has not completed. Retry cleanup before unlocking.",
 
       "vault.import.title": "Move to RocKey",
       "vault.import.cancel": "Cancel",
@@ -313,7 +310,7 @@ const vaultResources: I18nPluginResources = {
       "vault.keyHoldExport.err.failed": "Export failed",
       "vault.changePassword.title": "Change password",
       "vault.changePassword.submit": "Confirm change",
-      "vault.changePassword.hint": "Changing the password locks the wallet immediately. You will need to unlock again with the new password.",
+      "vault.changePassword.hint": "The new password is used for wallet startup and revealing the screen. Current tasks and connections keep running.",
       "vault.changePassword.oldPassword": "Current password",
       "vault.changePassword.newPassword": "New password",
       "vault.changePassword.confirmPassword": "Confirm new password",
@@ -362,13 +359,9 @@ const vaultResources: I18nPluginResources = {
       "vault.autolock.saveFailed": "Save failed. Please try again later."
     },
     "zh-CN": {
-      "vault.lock.cleaning": "正在锁定钱包，等待服务退出…完成后可解锁。",
-      "vault.lock.cleanupFailed": "钱包已锁定，但部分服务清理失败。请重试清理，完成后才能解锁。",
-      "vault.lock.details": "锁定错误详情",
       "vault.lock.retry": "重试清理",
       "vault.lock.retryFailed": "重试清理失败，请再次重试",
       "vault.lock.requestFailed": "锁定请求失败，请重试",
-      "vault.lock.cleanupBlocked": "钱包清理尚未完成，请重试清理后再解锁",
 
       "vault.import.title": "迁入 RocKey",
       "vault.import.cancel": "取消",
@@ -589,7 +582,7 @@ const vaultResources: I18nPluginResources = {
       "vault.keyHoldExport.err.failed": "导出失败",
       "vault.changePassword.title": "修改密码",
       "vault.changePassword.submit": "确认修改",
-      "vault.changePassword.hint": "修改密码后钱包会立即锁定，你需要用新密码重新解锁。",
+      "vault.changePassword.hint": "新密码用于启动钱包和解除页面遮罩；当前业务、连接和任务继续运行。",
       "vault.changePassword.oldPassword": "当前密码",
       "vault.changePassword.newPassword": "新密码",
       "vault.changePassword.confirmPassword": "确认新密码",
@@ -751,6 +744,8 @@ const vaultPluginDefinition = {
     const sendActivity = () => coordinatorClient.sendActivity();
     pages.register({ kind: "frame", slot: "wallet-guard", id: "vault.wallet-guard", label: "Wallet", render: location => createElement(Guard, { children: location.children, sendActivity }) });
     pages.register({ kind: "header", slot: "topbar", id: "vault.lock-button", order: 1000, label: "Lock", render: () => createElement(Lock) });
+    const ScreenMask = bindVaultUi(ctx, WalletScreenMask, service, importers);
+    pages.register({ kind: "frame", slot: "screen-guard", id: "vault.screen-guard", label: "Screen", render: location => createElement(ScreenMask, { children: location.children }) });
     const WalletEntry = bindVaultUi(ctx, VaultWalletEntry, service, importers);
     pages.register({ kind: "frame", slot: "wallet-entry", id: "vault.wallet-entry", label: "Wallet", render: () => createElement(WalletEntry) });
     const Unlock = bindVaultUi(ctx, VaultUnlockPage, service, importers);

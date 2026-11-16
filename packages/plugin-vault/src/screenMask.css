@@ -1,0 +1,16 @@
+.wallet-screen-mask {
+  color: CanvasText;
+  background: Canvas;
+  border: 1px solid ButtonBorder;
+  border-radius: 16px;
+  padding: 28px;
+  inline-size: min(440px, calc(100vw - 32px));
+  max-block-size: calc(100dvh - 32px);
+  box-sizing: border-box;
+}
+.wallet-screen-mask:modal { overscroll-behavior: contain; }
+.wallet-screen-mask::backdrop { background: Canvas; overflow: hidden; overscroll-behavior: contain; }
+.wallet-screen-mask form { display: grid; gap: 16px; }
+.wallet-screen-mask h1 { font-size: 1.5rem; margin: 0; }
+.wallet-screen-mask p { margin: 0; }
+.wallet-screen-mask input, .wallet-screen-mask button { font: inherit; min-block-size: 44px; padding: 8px 12px; }

@@ -1,16 +1,16 @@
 import { defineWorkerRequestRoute } from "@keymaster/contracts";
 import {
   type CoordinatorClientRequest as PublicCoordinatorClientRequest, type CoordinatorResponse, type SessionEpoch,
-  type StorageRuntimeController, SYSTEM_STORAGE_DECLARATIONS, CENTRAL_STORAGE_DECLARATIONS,
+  type StorageRuntimeController, type PluginStorageDeclaration, SYSTEM_STORAGE_DECLARATIONS, CENTRAL_STORAGE_DECLARATIONS,
 } from "@keymaster/contracts";
-import type { CoordinatorOwnerStorageData, StorageOwnerGrant } from "@keymaster/contracts/storage-internal";
-import { createStorageGrantAuthority, createStorageDataQueue, createStorageDataExecutor, type StoragePrivateRootStore } from "./coordinator/index.js";
+import type { CoordinatorOwnerStorageData, StorageOwnerBinding } from "@keymaster/contracts/storage-internal";
+import { createStorageDataQueue, createStorageDataExecutor, type StoragePrivateRootStore } from "./coordinator/index.js";
 import { StorageBrowseCoordinator, type StorageBrowsePrivateCommand } from "./assembly.js";
 type CoordinatorClientRequest = PublicCoordinatorClientRequest | StorageBrowsePrivateCommand;
 export interface CoordinatorStorageBinding {
   /** 钱包身份世代；重置或重新初始化后改变。 */
   walletGeneration: string;
-  /** 会话世代；锁定、解锁、改密后改变。 */
+  /** 钱包运行世代；页面遮罩和改密不改变。 */
   sessionEpoch: SessionEpoch;
   /** Worker 运行世代；每次 Worker 启动生成。 */
   runGeneration: string;
@@ -53,17 +53,14 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
 
   const storagePortCounts = new Map<string, number>();
 
-  const storageGrantAuthority = createStorageGrantAuthority({
-    session: () => ({ sessionEpoch: ports.session().sessionEpoch, walletGeneration: ports.session().walletGeneration, runGeneration: ports.session().runGeneration, unlocked: ports.session().vaultStatus === "unlocked", rootAvailable: ports.root() !== undefined }),
-  });
-
-
-  const ownerStorageGrants = storageGrantAuthority.owners;
-
-
-
-  const resolveOwnerStorageGrant = storageGrantAuthority.resolveOwner;
-
+  function resolveOwnerStorageBinding(binding: StorageOwnerBinding): PluginStorageDeclaration {
+    const expected = SYSTEM_STORAGE_DECLARATIONS[binding.moduleId]?.find(value => value.purposeId === binding.purposeId);
+    const live = ports.session();
+    if (!expected || expected.authority !== "built-in-module" || binding.authority !== expected.authority
+      || binding.model !== expected.model || binding.schemaVersion !== expected.schemaVersion) throw ports.unavailable("Unknown plugin storage declaration");
+    if (binding.sessionEpoch !== live.sessionEpoch || binding.walletGeneration !== live.walletGeneration || binding.runGeneration !== live.runGeneration) throw ports.unavailable("Storage wallet has changed");
+    return expected;
+  }
 
   let storageMutationTail: Promise<void> = Promise.resolve();
 
@@ -165,8 +162,8 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
     return beginStorageBindingRequest();
   }
 
-  function revokeStorageSessionGrants(): void {
-    ownerStorageGrants.clear();
+  function cancelStorageRequests(): void {
+    for (const request of storageRequests.values()) request.controller.abort();
     storageRequests.clear();
   }
 
@@ -188,7 +185,7 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
     sessionEpoch: () => ports.session().sessionEpoch,
     assertStorageDataAvailable: ports.assertAvailable,
     storageUnavailableError: ports.unavailable,
-    resolveOwnerStorageGrant,
+    resolveOwnerStorageBinding,
     beginStorageBindingRequest,
     currentCoordinatorStorageBinding,
     assertStorageBindingLive,
@@ -220,7 +217,7 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
     await service.abortSession(walletPublicKeyHex);
   }
 
-  async function executeStorageRequest(request: Extract<CoordinatorClientRequest, { kind: "storage.control" | "storage.cancel" | "storage.session.abort" | "storage.browse.open" | "storage.browse.data" | "storage.browse.close" | "storage.owner.bind" | "storage.owner.data" | "storage.clear.root" }>, actualClientId: string, requestSignal?: AbortSignal): Promise<CoordinatorResponse> {
+  async function executeStorageRequest(request: Extract<CoordinatorClientRequest, { kind: "storage.control" | "storage.cancel" | "storage.session.abort" | "storage.browse.open" | "storage.browse.data" | "storage.browse.close" | "storage.owner.data" | "storage.clear.root" }>, actualClientId: string, requestSignal?: AbortSignal): Promise<CoordinatorResponse> {
     if (request.kind === "storage.browse.open" || request.kind === "storage.browse.data" || request.kind === "storage.browse.close") {
       return storageBrowseCoordinator.execute(request, actualClientId, requestSignal);
     }
@@ -232,35 +229,6 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
     if (request.kind === "storage.session.abort") {
       await abortStorageSession(request.walletPublicKeyHex, actualClientId);
       return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "ok" } };
-    }
-    if (request.kind === "storage.owner.bind") {
-      const expected = SYSTEM_STORAGE_DECLARATIONS[request.pluginId]?.find((candidate) => candidate.authority === "built-in-module" && candidate.purposeId === request.declaration.purposeId);
-      if (!expected || expected.moduleId !== request.pluginId || expected.authority !== "built-in-module"
-        || (expected.model !== "kv" && expected.model !== "files")
-        || request.declaration.moduleId !== expected.moduleId
-        || request.declaration.purposeId !== expected.purposeId
-        || request.declaration.authority !== expected.authority
-        || request.declaration.model !== expected.model
-        || request.declaration.schemaVersion !== expected.schemaVersion) {
-        return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "error", message: "Owner storage declaration is not authorized", code: "storage_forbidden" } };
-      }
-      if (ports.session().vaultStatus !== "unlocked" || !ports.session().activePublicKeyHex || !ports.root()) return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "error", message: "Owner storage requires an unlocked wallet", code: "storage_unavailable" } };
-      if (ports.admission.revoked(actualClientId)) return ports.admission.response(request.requestId);
-      const grant: StorageOwnerGrant & { clientId: string } = {
-        ...ports.root()!.identity,
-        storageGrantId: `owner-${crypto.randomUUID()}`,
-        walletGeneration: ports.session().walletGeneration,
-        runGeneration: ports.session().runGeneration,
-        moduleId: expected.moduleId,
-        purposeId: expected.purposeId,
-        authority: expected.authority,
-        model: expected.model,
-        schemaVersion: expected.schemaVersion,
-        sessionEpoch: ports.session().sessionEpoch,
-        clientId: actualClientId,
-      };
-      ownerStorageGrants.set(grant.storageGrantId, grant);
-      return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "ok" }, operationResult: grant };
     }
     if (request.kind === "storage.clear.root") {
       // 只清空一个已绑定根：中央声明目录里登记过的 namespace，或某个已验证 App
@@ -343,11 +311,10 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
   }
 
   const route = defineWorkerRequestRoute<Extract<CoordinatorClientRequest, { kind: `storage.${string}` }>>({
-    kinds: ["storage.control", "storage.cancel", "storage.session.abort", "storage.browse.open", "storage.browse.data", "storage.browse.close", "storage.clear.root", "storage.owner.bind", "storage.owner.data"],
+    kinds: ["storage.control", "storage.cancel", "storage.session.abort", "storage.browse.open", "storage.browse.data", "storage.browse.close", "storage.clear.root", "storage.owner.data"],
     policy: request => ({
       scheduling: "parallel", validateEpoch: false,
       cleanupOnly: request.kind === "storage.cancel" || request.kind === "storage.session.abort",
-      activatesWallet: request.kind === "storage.control" && ["unlock", "initialize", "reset-wallet", "change-key-password"].includes(request.control.type)
     }),
     execute: (request, call) => executeStorageRequest(request, call.peerId, call.signal).catch(error => { ports.failure(error); return ports.errorResponse(call.requestId, error); }).finally(() => ports.clearSecrets(request)),
   });
@@ -357,9 +324,7 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
     storageRequests,
     storageRequestKey,
     storagePortCounts,
-    storageGrantAuthority,
-    ownerStorageGrants,
-    resolveOwnerStorageGrant,
+    resolveOwnerStorageBinding,
     get storageMutationTail() { return storageMutationTail; }, set storageMutationTail(value: typeof storageMutationTail) { storageMutationTail = value; },
     STORAGE_DATA_MAX_PER_PORT,
     storageDataQueue,
@@ -375,7 +340,7 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
     rememberStorageBindingDrain,
     waitForPendingStorageBindingDrain,
     beginStorageBindingRequestForTest,
-    revokeStorageSessionGrants,
+    cancelStorageRequests,
     reserveStoragePortSlot,
     releaseStoragePortSlot,
     executeOwnerStorageDataUnsafe,

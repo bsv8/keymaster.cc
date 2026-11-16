@@ -39,7 +39,6 @@ export interface WorkerCallAdmission {
 export interface WorkerRequestPolicy {
   scheduling: "serial" | "parallel";
   cleanupOnly?: boolean;
-  activatesWallet?: boolean;
   validateEpoch?: boolean;
 }
 export interface WorkerRequestCall { peerId: string; requestId: string; signal?: AbortSignal }
