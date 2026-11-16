@@ -1,16 +1,17 @@
-import { projectNetworkIdentity, type AppBootstrapPayload, type AppIdentitySnapshot, type NetworkIdentity, type SessionRuntimeBootstrap } from "@keymaster/contracts";
+import { projectNetworkIdentity, type AppBootstrapPayload, type NetworkIdentity, type SessionRuntimeBootstrap } from "@keymaster/contracts";
 
 /** 钱包内部启动材料；不经 URL、消息帧或另一个钱包页面传递 crypto 句柄。 */
 export interface ApplicationLaunchInput {
+  stagedSession: import("@keymaster/contracts").ConnectSessionRecord;
+  expectedAppPublicKeyHex?: string;
+  directoryUrl?: string;
   networkIdentity: NetworkIdentity;
-  appId: string;
   appOrigin: string;
   appUrl: string;
   walletPublicKeyHex: string;
   ownerPublicKeyHex: string;
   resolvedClaims: Record<string, unknown>;
   resolvedAt: number;
-  appIdentity?: AppIdentitySnapshot;
   launchToken: string;
   expiresAt: number;
   sessionRuntimeBootstrap: SessionRuntimeBootstrap;
@@ -19,11 +20,11 @@ export interface ApplicationLaunchInput {
 export function buildAppBootstrapPayload(input: ApplicationLaunchInput): AppBootstrapPayload {
   input.sessionRuntimeBootstrap.crypto.getIdentity();
   return {
+    stagedSession: input.stagedSession,
     networkIdentity: projectNetworkIdentity(input.networkIdentity),
-    app: { appId: input.appId, appOrigin: input.appOrigin, appUrl: input.appUrl },
+    app: { appOrigin: input.appOrigin, appUrl: input.appUrl, expectedAppPublicKeyHex: input.expectedAppPublicKeyHex, directoryUrl: input.directoryUrl },
     walletPublicKeyHex: input.walletPublicKeyHex, ownerPublicKeyHex: input.ownerPublicKeyHex,
     resolvedClaims: input.resolvedClaims as AppBootstrapPayload["resolvedClaims"], resolvedAt: input.resolvedAt,
-    ...(input.appIdentity ? { appIdentity: input.appIdentity } : {}),
     launchToken: input.launchToken, sessionRuntimeBootstrap: input.sessionRuntimeBootstrap,
   };
 }

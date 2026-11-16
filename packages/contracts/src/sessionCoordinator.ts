@@ -235,7 +235,7 @@ export type CoordinatorStorageData =
   | { type: "batch"; grantId: string; input: { operations: Array<{ type: "put"; path: string; content: { $type: "binary"; bytes: ArrayBuffer; mime?: string }; contentType?: string } | { type: "delete"; path: string }>; conditions?: Array<{ path: string; ifMatch?: string }> } };
 
 export type CoordinatorClientRequestWithStorage =
-  | { kind: "storage.grant"; networkIdentity: import("./networkIdentity.js").NetworkIdentity; clientId: string; requestId: string; walletPublicKeyHex: string; transportOrigin: string; expectedSessionEpoch: SessionEpoch }
+  | { kind: "storage.grant"; authorizationId: string; networkIdentity: import("./networkIdentity.js").NetworkIdentity; clientId: string; requestId: string; walletPublicKeyHex: string; transportOrigin: string; expectedSessionEpoch: SessionEpoch }
   | { kind: "storage.control"; clientId: string; requestId: string; control: CoordinatorStorageControl; expectedSessionEpoch: SessionEpoch }
   | { kind: "storage.data"; clientId: string; requestId: string; data: CoordinatorStorageData; expectedSessionEpoch: SessionEpoch }
   | { kind: "storage.cancel"; clientId: string; requestId: string; targetRequestId: string }
@@ -457,7 +457,8 @@ export interface CoordinatorMsFileStateEvent {
 export type CoordinatorCryptoOperation =
   | { type: "signConnectEnvelope"; kind: "identity" | "intent"; envelope: Uint8Array; content?: Uint8Array; appSessionId: string }
   | { type: "signDigest"; digestHex: string; format: EcdsaSignatureFormat }
-  | { type: "deriveP2pkhAddress"; network: "main" | "test" };
+  | { type: "deriveP2pkhAddress"; network: "main" | "test" }
+  | { type: "deriveCipherSiteKey"; origin: string; network: "main" | "test"; appPublicKeyHex?: string };
 
 /** Channel 运行时调用；owner 由 Coordinator 当前解锁状态决定。 */
 export type CoordinatorChannelOperation =
@@ -534,7 +535,8 @@ export type CoordinatorValueResult<T> =
 export type CoordinatorCryptoResult =
   | { type: "signConnectEnvelope"; signatureHex: string; format: "compact" }
   | { type: "signDigest"; signatureHex: string; format: EcdsaSignatureFormat }
-  | { type: "deriveP2pkhAddress"; address: string };
+  | { type: "deriveP2pkhAddress"; address: string }
+  | { type: "deriveCipherSiteKey"; siteKeyHex: string };
 
 // ============================================================
 // 4. Coordinator -> Client Events

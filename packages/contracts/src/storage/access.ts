@@ -1,5 +1,4 @@
 import { networkIdentityStorageRoot, type NetworkIdentity as importNetworkIdentity } from "../networkIdentity.js";
-import { deriveThirdPartyStorageModuleId } from "../appIdentity.js";
 import type { KeyValueStore } from "./kv.js";
 import type { SnapshotStore, StorageSnapshotJsonCompatible } from "./snapshot.js";
 import {
@@ -61,7 +60,7 @@ export interface StorageNamespaceBinding extends PluginStorageDeclaration, impor
   /** 仅 third-party-app 需要：平台登记并规范化后的稳定存储名称。 */
   appStorageName?: string;
   /** 仅 third-party-app 需要：验证后的 App 身份摘要。 */
-  verifiedAppIdentity?: { publisherPublicKeyHex: string; appId: string };
+  origin?: string;
 }
 
 const STORAGE_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,62}$/u;
@@ -106,14 +105,6 @@ export function validatePluginStorageDeclaration(input: PluginStorageDeclaration
   }
   return { moduleId, purposeId, authority: input.authority, model: input.model, schemaVersion: input.schemaVersion };
 }
-
-/**
- * 由 verified identity 派生三方 App 的稳定模块身份。
- *
- * 这是三方 App 唯一可用的 moduleId 来源；caller 不能在 grant 中自报另一个
- * moduleId 或目标 name。
- */
-export { deriveThirdPartyStorageModuleId };
 
 /**
  * 构造绑定后的逻辑 namespace 根。
@@ -206,7 +197,7 @@ export interface PlatformRootStore {
     /** 三方 App 目录：仅 third-party-app 声明允许携带。 */
     appStorageName?: string;
     /** 三方 App 已验证身份：仅 third-party-app 声明允许携带。 */
-    verifiedAppIdentity?: { publisherPublicKeyHex: string; appId: string };
+    origin?: string;
   }): Promise<import("./files.js").ModuleFileStore>;
   /** 打开平台专属 snapshot。 */
   openPlatformSnapshot<T>(input: {

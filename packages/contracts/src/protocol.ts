@@ -27,7 +27,6 @@ import type { NetworkIdentity } from "./networkIdentity.js";
 
 import { defineCapability } from "webloom-framework";
 import type { ActiveKeyCrypto } from "./activeKeyCrypto.js";
-import type { AppIdentityProofV1, AppIdentitySnapshot } from "./appIdentity.js";
 import type {
   StorageDeleteParams,
   StorageDeleteResult,
@@ -668,8 +667,7 @@ export interface ProtocolConnectPaymentRecord {
   origin: string;
   ownerPublicKeyHex: string;
   networkIdentity: NetworkIdentity;
-  appId: string;
-  publisherPublicKeyHex: string;
+  appPublicKeyHex: string;
   requestDigest: string;
   params: PaymentPayParams;
   status: ConnectPaymentStatus;
@@ -1179,8 +1177,15 @@ export interface ConnectSessionRecord {
   lastUsedAt: number;
   /** 吊销时间；null = 未吊销。 */
   revokedAt: number | null;
+  /**
+   * 建连时验证的 App 公钥快照（应用发布与公钥身份 §二）。
+   * 来自 URL 来源证明验签或可信本地部署登记，不接受业务请求自带；
+   * 缺省表示未经验证的传输（旧入口/本地调试），不得继承已有许可。
+   * 同一授权的后续 resume 沿用该快照，不重复发布验签。
+   */
+  appPublicKeyHex?: string;
+  appDisplay?:{name:string;description:string;icon:string};
   /** Keymaster 本地 catalog metadata 信任快照；digest 是稳定指纹而非签名证明。 */
-  appIdentity?: AppIdentitySnapshot;
 }
 
 /**
@@ -1206,8 +1211,6 @@ export interface ConnectLoginParams {
    * 缺省 = `[]`，不返回任何 claim；通常 caller 想获取 profile.* 时必须显式列出。
    */
   claims?: string[];
-  /** 发布者签名的 caller identity proof；缺省时建立无 storage 的普通 session。 */
-  appIdentity?: AppIdentityProofV1;
 }
 
 /**
@@ -1230,7 +1233,6 @@ export interface ConnectLoginResult {
   resolvedClaims: Record<string, ResolvedClaimValue>;
   /** 本次解析时间（unix milliseconds）。 */
   resolvedAt: number;
-  appIdentity?: AppIdentitySnapshot;
 }
 
 /**
@@ -1241,7 +1243,6 @@ export interface ConnectLoginResult {
  */
 export interface ConnectResumeParams {
   /** 本地数据重置后重新验证已有发行人签名 proof。 */
-  appIdentity?: AppIdentityProofV1;
   /**
    * 由 `connect.login` 返回的钱包公钥。
    * caller 持公钥，popup 的运行句柄独立受会话世代约束。
@@ -1267,7 +1268,6 @@ export interface ConnectResumeResult {
    * 给 caller 用来做"是否要重新登录"的客户端超时策略。
    */
   resolvedAt: number;
-  appIdentity?: AppIdentitySnapshot;
 }
 
 /**
@@ -1353,7 +1353,6 @@ export interface ConnectLaunchParams {
   /** 由 launcher 写入 client app 启动 URL 的 launchToken。一次性消费。 */
   launchToken: string;
   /** 与 launcher 预建 session 绑定的完整签名 proof。 */
-  appIdentity: AppIdentityProofV1;
 }
 
 /** `connect.launch` 成功结果（与 `connect.login` 对齐）。 */
@@ -1364,7 +1363,6 @@ export interface ConnectLaunchResult {
   ownerPublicKeyHex: string;
   resolvedClaims: Record<string, ResolvedClaimValue>;
   resolvedAt: number;
-  appIdentity?: AppIdentitySnapshot;
 }
 
 /* ============== channel.*（施工单 2026-09-02） ============== */
@@ -1392,8 +1390,8 @@ export type ChannelSubscriptionSetResultV1 = ChannelSubscriptionSetResult;
  *     列表；与 `identity.get.claims` 同语义。V1 不传时取空数组。
  */
 export interface LaunchAppViewInput {
-  /** app 注册 id，例如 "justnote"。 */
-  appId: string;
+  /** 目录目标的比对条件，不能替代连接证明。 */
+  expectedAppPublicKeyHex?: string;
   /** app 的 exact origin（必须等于 `new URL(appUrl).origin`）。 */
   appOrigin: string;
   /** client app 真正打开的 URL（appView bootstrap 后会带上 `?launchToken=`）。 */
@@ -1403,8 +1401,6 @@ export interface LaunchAppViewInput {
    * 同语义。V1 不传时取空数组。
    */
   claims?: string[];
-  /** launcher 从本地 catalog 绑定的签名 proof；调用方不能自报覆盖。 */
-  appIdentity: AppIdentityProofV1;
 }
 
 /**
@@ -1493,7 +1489,6 @@ export class LaunchAppViewError extends Error {
  *     `connect` mode 下恒为 null。
  */
 export interface AppViewContext {
-  appId: string;
   appOrigin: string;
   /** 启动 client app 用的 URL（含 launchToken）。 */
   appUrl: string;
@@ -1505,7 +1500,6 @@ export interface AppViewContext {
   resolvedClaims: Record<string, ResolvedClaimValue>;
   /** bootstrap 时间（unix milliseconds）。 */
   resolvedAt: number;
-  appIdentity?: AppIdentitySnapshot;
 }
 
 /** 主钱包为目录启动的单个 App 创建的受控 crypto 句柄，仅保留在当前钱包内存。
@@ -1529,10 +1523,12 @@ export interface SessionRuntimeBootstrap {
  * 只有一次性 launchToken 与钱包精确 origin 注入外部 App URL。
  */
 export interface AppBootstrapPayload {
+  stagedSession: ConnectSessionRecord;
   networkIdentity: import("./networkIdentity.js").NetworkIdentity;
   /** 当前 app 信息（仅 UI / 启动用）。 */
   app: {
-    appId: string;
+    expectedAppPublicKeyHex?: string;
+    directoryUrl?: string;
     appOrigin: string;
     appUrl: string;
   };
@@ -1541,7 +1537,6 @@ export interface AppBootstrapPayload {
   ownerPublicKeyHex: string;
   resolvedClaims: Record<string, ResolvedClaimValue>;
   resolvedAt: number;
-  appIdentity?: AppIdentitySnapshot;
   /** 主钱包内缓存的一次性 token；外部 App 用 connect.launch 消费。 */
   launchToken: string;
   /**
@@ -2040,16 +2035,11 @@ export interface ProtocolStorageRepository {
    */
   putConnectSession(record: ConnectSessionRecord): Promise<void>;
   /** 按完整网络身份和实际来源读取连接记录。 */
-  getConnectSession(identity: import("./networkIdentity.js").NetworkIdentity, origin: string): Promise<ConnectSessionRecord | null>;
+  getConnectSession(identity: import("./networkIdentity.js").NetworkIdentity, origin: string, authorizationId?:string): Promise<ConnectSessionRecord | null>;
   /** 按 origin 列出该站点下所有 connect session（含 revoked）。 */
+  listConnectSessions(): Promise<ConnectSessionRecord[]>;
   listConnectSessionsByOrigin(origin: string): Promise<ConnectSessionRecord[]>;
-  /**
-   * 写一条新 connect session，并原子吊销同 origin 下其它仍有效 session。
-   *
-   * 设计缘由：connect.login 成功后要先落新 session，再把同 origin 旧
-   * session 收口；这两个写入必须绑在同一条存储事务里，避免半成功。
-   */
-  putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord): Promise<void>;
+
 
   /* ----- launchTokens（施工单 2026-06-29 001 硬切换） ----- */
   /**

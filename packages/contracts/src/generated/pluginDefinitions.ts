@@ -1077,16 +1077,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             "sourceRuntime": "window-main",
             "reason": "可选 P2PKH 方法",
             "optional": true
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "app.catalog",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "可选 app catalog",
-            "optional": true
           }
         ],
         "connect": {
@@ -1662,16 +1652,34 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
       {
         "id": "apps.window",
         "runtime": "window-main",
-        "scopeKind": "root",
+        "scopeKind": "storage",
         "provides": [
           {
             "kind": "local",
-            "id": "app.catalog",
+            "id": "app.directory",
             "version": "1"
           }
         ],
         "privateProvides": [],
         "dependencies": [
+          {
+            "capability": {
+              "kind": "local",
+              "id": "storage.kv-clients",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "目录完整状态的原子持久化"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "protocol.application-connections",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "真实连接验证成功后解析 pending URL 身份"
+          },
           {
             "capability": {
               "kind": "local",
@@ -1719,7 +1727,15 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           }
         ],
         "permissions": [],
-        "storages": []
+        "storages": [
+          {
+            "moduleId": "apps",
+            "purposeId": "directory",
+            "authority": "built-in-module",
+            "model": "kv",
+            "schemaVersion": 2
+          }
+        ]
       }
     ]
   },

@@ -779,7 +779,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   }
 
   async storageGrant(context: import("@keymaster/contracts").OwnerAppStorageGrant): Promise<import("@keymaster/contracts").CoordinatorValueResult<string>> {
-    const request = { kind: "storage.grant" as const, networkIdentity: { bsvNetwork: context.bsvNetwork, publicKeyHex: context.publicKeyHex }, clientId: this.clientId, requestId: this.generateRequestId(), walletPublicKeyHex: context.walletPublicKeyHex, transportOrigin: context.transportOrigin, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    const request = { kind: "storage.grant" as const, authorizationId:context.authorizationId, networkIdentity: { bsvNetwork: context.bsvNetwork, publicKeyHex: context.publicKeyHex }, clientId: this.clientId, requestId: this.generateRequestId(), walletPublicKeyHex: context.walletPublicKeyHex, transportOrigin: context.transportOrigin, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
     try {
       const response = await this.sendRequest(request);
       if (response.ack.status !== "ok") return response.ack;

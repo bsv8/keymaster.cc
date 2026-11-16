@@ -8,16 +8,17 @@ import type { NetworkIdentity as importNetworkIdentity } from "./networkIdentity
 // 当前 wire 保留整对象 put，不提供 multipart 或断点续传。
 
 import type { BinaryField } from "./protocol.js";
-import type { AppIdentitySnapshot } from "./appIdentity.js";
 
 /** 已验证 Connect App 的 owner 访问授权。 */
 export interface OwnerAppStorageGrant extends importNetworkIdentity {
+  authorizationId: string;
+  appPublicKeyHex: string;
   /** 钱包压缩公钥；与消息外层网络身份及实际来源一起定位连接。 */
   walletPublicKeyHex: string;
   /** 发起请求的精确 Origin。 */
   transportOrigin: string;
-  /** 装配层验证后的 App 身份。 */
-  appIdentity: AppIdentitySnapshot;
+  /** 可信来源 origin；由 Receiver 上下文提供，应用不得自报。 */
+  origin: string;
   /** 平台登记并规范化后的稳定存储名称；决定该 App 的独立目录。 */
   appStorageName: string;
   /** 从验证后的 App 身份派生的稳定中央 moduleId。 */

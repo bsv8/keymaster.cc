@@ -1,4 +1,4 @@
-import { deriveP2pkhAddress } from "@keymaster/contracts";
+import { deriveP2pkhAddress, deriveAppCipherSiteKeyHKDF } from "@keymaster/contracts";
 import type { CoordinatorCryptoOperation, CoordinatorCryptoResult, EcdsaSignatureFormat } from "@keymaster/contracts";
 import { parsePrivateKey, parsePublicKey, publicKeyFromPrivate, inboxChannel, parseMessageID } from "bsv8-channel-protocol";
 import { sign as signPublic } from "bsv8-channel-protocol/public-message";
@@ -53,9 +53,22 @@ export function createWorkerKeySession(identity: () => WorkerKeyIdentity) {
       const signature = await signEcdsaDigest({ privateKeyBytes: privateKeyBytes!, digest, format });
       assert(captured); return signature;
     },
+    async deriveCipherSiteKey(origin: string, network: "main" | "test", appPublicKeyHex?: string): Promise<Uint8Array> {
+      const captured = assert();
+      if (appPublicKeyHex !== undefined && !/^(02|03)[0-9a-f]{64}$/.test(appPublicKeyHex)) throw new Error("Invalid app public key");
+      if (!appPublicKeyHex) throw new Error("Verified App public key is required");
+      const siteKey = deriveAppCipherSiteKeyHKDF(privateKeyBytes!, captured.publicKeyHex!, network, appPublicKeyHex);
+      assert(captured);
+      return siteKey;
+    },
     async execute(operation: CoordinatorCryptoOperation): Promise<CoordinatorCryptoResult> {
       const current = assert();
       if (operation.type === "deriveP2pkhAddress") return { type: operation.type, address: deriveP2pkhAddress(current.publicKeyHex!, operation.network) };
+      if (operation.type === "deriveCipherSiteKey") {
+        const siteKey = await session.deriveCipherSiteKey(operation.origin, operation.network, operation.appPublicKeyHex);
+        assert(current);
+        return { type: operation.type, siteKeyHex: bytesToHex(siteKey) };
+      }
       if (operation.type === "signDigest") {
         const signature = await session.signDigest(hexToBytes(operation.digestHex), operation.format, current.publicKeyHex);
         assert(current); return { type: operation.type, signatureHex: bytesToHex(signature), format: operation.format };

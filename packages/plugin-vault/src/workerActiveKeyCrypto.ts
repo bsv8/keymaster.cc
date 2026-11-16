@@ -7,8 +7,8 @@ import type { createWorkerKeySession } from "./workerKeySession.js";
 export interface WorkerActiveKeyCryptoDependencies {
   summary(): KeyIdentity | undefined;
   sessionEpoch(): SessionEpoch;
-  keySession: Pick<ReturnType<typeof createWorkerKeySession>, "assert" | "signDigest">;
-  withIoLease<T>(operation: "sign" | "derive-address", execute: () => Promise<T>): Promise<T>;
+  keySession: Pick<ReturnType<typeof createWorkerKeySession>, "assert" | "signDigest" | "deriveCipherSiteKey">;
+  withIoLease<T>(operation: "sign" | "derive-address" | "derive-cipher", execute: () => Promise<T>): Promise<T>;
   signConnectEnvelope?(input: Parameters<NonNullable<ActiveKeyCrypto["signConnectEnvelope"]>>[0] & { publicKeyHex: string }): ReturnType<NonNullable<ActiveKeyCrypto["signConnectEnvelope"]>>;
   signBitfsWire?(input: Parameters<NonNullable<ActiveKeyCrypto["signBitfsWire"]>>[0] & { publicKeyHex: string }, signal?: AbortSignal): ReturnType<NonNullable<ActiveKeyCrypto["signBitfsWire"]>>;
 }
@@ -74,6 +74,23 @@ export function createWorkerActiveKeyCryptoFactory(deps: WorkerActiveKeyCryptoDe
         });
         assert();
         return result;
+      },
+      async deriveCipherSiteKey(input) {
+        assert();
+        if (!input || typeof input !== "object" || Object.keys(input).some(key => !["origin", "bsvNetwork", "appPublicKeyHex"].includes(key))) throw new Error("Unknown cipher derivation field");
+        if (typeof input.origin !== "string" || !input.origin) throw new Error("Invalid origin");
+        if (input.bsvNetwork !== "main" && input.bsvNetwork !== "test") throw new Error("Unknown network");
+        if (input.appPublicKeyHex !== undefined && (typeof input.appPublicKeyHex !== "string" || !/^(02|03)[0-9a-f]{64}$/.test(input.appPublicKeyHex))) throw new Error("Invalid app public key");
+        const siteKey = await deps.withIoLease("derive-cipher", async () => {
+          assert();
+          const key = await deps.keySession.deriveCipherSiteKey(input.origin, input.bsvNetwork, input.appPublicKeyHex);
+          assert();
+          return key;
+        });
+        assert();
+        const copy = new Uint8Array(siteKey).slice();
+        if (copy.length !== 32) throw new Error("Cipher derivation failed");
+        return { publicKeyHex, siteKey: copy.buffer as ArrayBuffer };
       },
       dispose,
     } satisfies ActiveKeyCrypto);

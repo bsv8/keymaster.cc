@@ -5,7 +5,7 @@
 //   - trusted stat/readSeed/readBlock 只使用全局额度；全局额度由 Coordinator
 //     的有界公平队列执行，服务本身不把设置解释为金额预算；
 //     不进入确认流程；
-//   - connect gateway 按 (owner, publisher, appId) 解析 override ?? global；
+//   - connect gateway 按 (owner, origin) 解析 override ?? global；
 //   - 一次 Connect 调用最多进入一次确认；重新发送仍超额返回稳定错误；
 //   - "仅本次"不落库；"始终"只更新对应 Seed/Block 字段。
 
@@ -39,6 +39,7 @@ import {
   MSFILE_SELLER_SETTINGS_DEFAULT,
   MSFILE_MAX_BLOCK_BYTES,
   MSFILE_MAX_SEED_BYTES,
+  canonicalOrigin,
   isValidMsFileHashHex,
   isValidMsFileSourceId,
   isValidMsFileSupplierPublicKeyHex,
@@ -675,8 +676,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     const repository = await this.repository;
     const key: MsFileAppIdentityKey = {
       ownerPublicKeyHex: record.ownerPublicKeyHex,
-      publisherPublicKeyHex: record.publisherPublicKeyHex,
-      appId: record.appId,
+      origin: record.transportOrigin,
     };
     const existing = (await repository.getAppPolicy(key))?.override ?? {};
     const override =
@@ -902,10 +902,11 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     }
     assertAppKeyShape(ctx);
     const repository = await this.repository;
-    // 首次调用只记录脱敏 App 摘要与 lastSeenAt，不创建任何文件许可。
+    // 首次调用只记录可信来源摘要与 lastSeenAt，不创建任何文件许可。
+    // 展示名取来源本身，不参与许可判定。
     await repository.touchAppUsage(
-      { ownerPublicKeyHex: ctx.ownerPublicKeyHex, publisherPublicKeyHex: ctx.appIdentity.publisherPublicKeyHex, appId: ctx.appIdentity.appId },
-      ctx.appIdentity.appName,
+      { ownerPublicKeyHex: ctx.ownerPublicKeyHex, origin: ctx.origin },
+      ctx.origin,
       this.now()
     );
     return run();
@@ -927,8 +928,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     const repository = await this.repository;
     const key: MsFileAppIdentityKey = {
       ownerPublicKeyHex: ctx.ownerPublicKeyHex,
-      publisherPublicKeyHex: ctx.appIdentity.publisherPublicKeyHex,
-      appId: ctx.appIdentity.appId,
+      origin: ctx.origin,
     };
     const [globalSettings, appPolicy] = await Promise.all([repository.getGlobalSettings(), repository.getAppPolicy(key)]);
     const effectiveCap =
@@ -944,9 +944,9 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
       walletPublicKeyHex: ctx.walletPublicKeyHex,
       transportOrigin: ctx.transportOrigin,
       ownerPublicKeyHex: ctx.ownerPublicKeyHex,
-      publisherPublicKeyHex: ctx.appIdentity.publisherPublicKeyHex,
-      appId: ctx.appIdentity.appId,
-      appName: ctx.appIdentity.appName,
+      publisherPublicKeyHex: ctx.ownerPublicKeyHex,
+      appId: ctx.origin,
+      appName: ctx.origin,
       kind,
       supplierPublicKeyHex,
       contentHashHex: hashHex,
@@ -1212,20 +1212,22 @@ function mapLocalContentError(error: unknown): MsFileServiceError {
 function assertAppKeyShape(ctx: MsFileConnectAppContext): void {
   assertAppKey({
     ownerPublicKeyHex: ctx.ownerPublicKeyHex,
-    publisherPublicKeyHex: ctx.appIdentity?.publisherPublicKeyHex,
-    appId: ctx.appIdentity?.appId,
+    origin: ctx.origin,
   });
+  try {
+    canonicalOrigin(ctx.transportOrigin);
+  } catch {
+    throw new MsFileServiceError("msfile_identity_required");
+  }
 }
 
 function assertAppKey(key: Partial<MsFileAppIdentityKey> | undefined): void {
-  if (
-    !key ||
-    !isValidMsFileSupplierPublicKeyHex(key.ownerPublicKeyHex) ||
-    !isValidMsFileSupplierPublicKeyHex(key.publisherPublicKeyHex) ||
-    typeof key.appId !== "string" ||
-    key.appId.length === 0 ||
-    key.appId.length > 256
-  ) {
+  if (!key || !isValidMsFileSupplierPublicKeyHex(key.ownerPublicKeyHex)) {
+    throw new MsFileServiceError("msfile_identity_required");
+  }
+  try {
+    canonicalOrigin(key.origin);
+  } catch {
     throw new MsFileServiceError("msfile_identity_required");
   }
 }

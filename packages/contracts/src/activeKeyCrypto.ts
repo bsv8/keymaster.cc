@@ -64,6 +64,23 @@ export interface ActiveKeyCryptoDeriveP2pkhAddressResult {
 
 
 
+export interface ActiveKeyCryptoDeriveCipherSiteKeyInput {
+  /** 精确 origin 或入口 URL；Worker 内按 WHATWG 归一为 canonical origin 后派生。 */
+  origin: string;
+  bsvNetwork: "main" | "test";
+  /**
+   * 已验证的 App 公钥（钱包 session 快照，不接受业务请求自带）。
+   * 存在时按 App 公钥派生且 origin 不进入 KDF；缺省沿用来源派生（过渡行为）。
+   */
+  appPublicKeyHex?: string;
+}
+
+export interface ActiveKeyCryptoDeriveCipherSiteKeyResult {
+  publicKeyHex: string;
+  /** 32 字节站点密钥；调用方不得持久化裸密钥之外的秘密。 */
+  siteKey: ArrayBuffer;
+}
+
 export interface ActiveKeyCrypto {
   getIdentity(): ActiveKeyCryptoIdentity;
   /** 软件和硬件都按完整 Connect 正文使用专属签名渠道；网络身份随信封认证。 */
@@ -72,5 +89,7 @@ export interface ActiveKeyCrypto {
   signBitfsWire?(input:{kind:number;document:ArrayBuffer},signal?:AbortSignal):Promise<ActiveKeyCryptoSignDigestResult>;
   signDigest(input: ActiveKeyCryptoSignDigestInput): Promise<ActiveKeyCryptoSignDigestResult>;
   deriveP2pkhAddress(): Promise<ActiveKeyCryptoDeriveP2pkhAddressResult>;
+  /** 受控 HKDF 站点密钥派生：私钥不出 Worker，调用方只传 origin 与网络。 */
+  deriveCipherSiteKey(input: ActiveKeyCryptoDeriveCipherSiteKeyInput): Promise<ActiveKeyCryptoDeriveCipherSiteKeyResult>;
   dispose(reason?: string): void;
 }

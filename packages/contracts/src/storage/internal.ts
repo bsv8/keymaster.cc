@@ -5,7 +5,6 @@ import type { KeyValueStore } from "./kv.js";
 import type { ModuleFileStore } from "./files.js";
 import type { PluginStorageDeclaration } from "./access.js";
 import type { SessionEpoch } from "../sessionCoordinator.js";
-import type { AppIdentitySnapshot } from "../appIdentity.js";
 
 /**
  * Host/Coordinator 内部的存储绑定权威。
@@ -117,7 +116,7 @@ export interface ThirdPartyAppStorageGrant extends importNetworkIdentity {
   /** 平台登记并规范化后的稳定存储名称；决定目录。 */
   appStorageName: string;
   /** 验证后的 App 身份；决定谁有权访问，不能只靠 name。 */
-  verifiedAppIdentity: Pick<AppIdentitySnapshot, "publisherPublicKeyHex" | "appId">;
+  origin: string;
   authority: "third-party-app";
   model: "files";
   schemaVersion: number;

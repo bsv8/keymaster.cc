@@ -82,11 +82,15 @@ export function createVaultWorkerKeys(ports: VaultWorkerKeyPorts) {
         assertActiveWalletIdentity(publicKeyHex);
         return vaultKeySession.signDigest(digest, format, publicKeyHex);
       },
+      deriveCipherSiteKey: (origin, network, appPublicKeyHex?) => {
+        assertActiveWalletIdentity();
+        return vaultKeySession.deriveCipherSiteKey(origin, network, appPublicKeyHex);
+      },
     },
     withIoLease(operation, execute) {
-      return operation === "sign"
-        ? ports.io.run("write", undefined, execute, { auditOperation: "vault.digest.sign" })
-        : ports.io.run("write", undefined, execute, { auditOperation: "vault.address.derive" });
+      if (operation === "sign") return ports.io.run("write", undefined, execute, { auditOperation: "vault.digest.sign" });
+      if (operation === "derive-cipher") return ports.io.run("write", undefined, execute, { auditOperation: "vault.digest.sign" });
+      return ports.io.run("write", undefined, execute, { auditOperation: "vault.address.derive" });
     },
   });
 

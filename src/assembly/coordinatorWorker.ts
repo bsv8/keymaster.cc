@@ -141,7 +141,7 @@ import { validatePublicKey } from "bitcoin-libp2p/identity";
 // Channel 密码学和固定 inbox 路由只在 SharedWorker 调用；Window executor
 // 只看 SSP wire，不会收到私钥或明文。
 
-import { configureProtocolStorageRepository, getConnectSession as getAuthoritativeConnectSession, isVerifiedAppIdentitySnapshot } from "@keymaster/plugin-protocol/coordinator";
+import { configureProtocolStorageRepository, getConnectSession as getAuthoritativeConnectSession } from "@keymaster/plugin-protocol/coordinator";
 import { type SatDefaultNetwork, type SatSupplierConnection } from "@keymaster/plugin-sat-subscription/coordinator";
 
 function decodePersisted(value: string): Uint8Array {
@@ -586,10 +586,10 @@ function isStorageConflict(error: unknown): boolean {
     || (error instanceof Error && /partition revision changed|concurrently|conflict/i.test(error.message));
 }
 
-let testStorageSessionResolver: ((sessionId: string) => Promise<{ sessionId: string; origin: string; networkIdentity?: import("@keymaster/contracts").NetworkIdentity; ownerPublicKeyHex?: string; appIdentity: import("@keymaster/contracts").OwnerAppStorageGrant["appIdentity"]; revokedAt: number | null } | null>) | undefined;
+let testStorageSessionResolver: ((sessionId: string) => Promise<{ sessionId: string; origin: string; networkIdentity?: import("@keymaster/contracts").NetworkIdentity; ownerPublicKeyHex?: string; revokedAt: number | null } | null>) | undefined;
 
-function isValidStorageIdentity(identity: unknown): identity is import("@keymaster/contracts").OwnerAppStorageGrant["appIdentity"] {
-  return isVerifiedAppIdentitySnapshot(identity);
+function isValidStorageIdentity(identity: unknown): identity is string {
+  return typeof identity === "string" && identity.length > 0;
 }
 
 /**
@@ -599,11 +599,8 @@ function isValidStorageIdentity(identity: unknown): identity is import("@keymast
  * 不同身份即使显示名称相同也得到不同目录。这样「同名不同身份」在没有任何
  * 显式登记记录时也不会共用目录，而显示名称或本地化变化不会移动已有目录。
  */
-function resolveConnectAppStorageName(verifiedAppIdentity: { publisherPublicKeyHex: string; appId: string }): string {
-  return deriveAppStorageName({
-    publisherPublicKeyHex: verifiedAppIdentity.publisherPublicKeyHex,
-    appId: verifiedAppIdentity.appId,
-  });
+function resolveConnectAppStorageName(origin: string): string {
+  return deriveAppStorageName({ appPublicKeyHex:origin });
 }
 
 /**
@@ -623,16 +620,16 @@ const THIRD_PARTY_APP_FILES_DECLARATION = Object.freeze({
   schemaVersion: 1,
 } satisfies PluginStorageDeclaration);
 
-async function readProtocolConnectSession(identity: import("@keymaster/contracts").NetworkIdentity, origin: string): Promise<{ sessionId: string; origin: string; networkIdentity: import("@keymaster/contracts").NetworkIdentity; ownerPublicKeyHex: string; appIdentity: import("@keymaster/contracts").OwnerAppStorageGrant["appIdentity"]; revokedAt: number | null } | null> {
+async function readProtocolConnectSession(identity: import("@keymaster/contracts").NetworkIdentity, origin: string, authorizationId?: string): Promise<{ authorizationId?:string; appPublicKeyHex?:string; sessionId: string; origin: string; networkIdentity: import("@keymaster/contracts").NetworkIdentity; ownerPublicKeyHex: string; revokedAt: number | null } | null> {
   if (testStorageSessionResolver) {
     const resolved = await testStorageSessionResolver(identity.publicKeyHex);
-    return resolved && resolved.revokedAt === null && Boolean(resolved.sessionId && resolved.origin) && isValidStorageIdentity(resolved.appIdentity)
-      ? { sessionId: resolved.sessionId, origin: resolved.origin, networkIdentity: resolved.networkIdentity!, ownerPublicKeyHex: resolved.ownerPublicKeyHex ?? "", appIdentity: resolved.appIdentity, revokedAt: null }
+    return resolved && resolved.revokedAt === null && Boolean(resolved.sessionId && resolved.origin)
+      ? { sessionId: resolved.sessionId, origin: resolved.origin, networkIdentity: resolved.networkIdentity!, ownerPublicKeyHex: resolved.ownerPublicKeyHex ?? "", revokedAt: null }
       : null;
   }
-  const record = await getAuthoritativeConnectSession(identity, origin);
-  return record && isValidStorageIdentity(record.appIdentity)
-    ? { sessionId: record.sessionId, origin: record.origin, networkIdentity: record.networkIdentity, ownerPublicKeyHex: record.ownerPublicKeyHex, appIdentity: record.appIdentity, revokedAt: null }
+  const record = await getAuthoritativeConnectSession(identity, origin, authorizationId);
+  return record && record.revokedAt === null && Boolean(record.sessionId && record.origin)
+    ? { authorizationId:record.authorizationId, appPublicKeyHex:record.appPublicKeyHex, sessionId: record.sessionId, origin: record.origin, networkIdentity: record.networkIdentity, ownerPublicKeyHex: record.ownerPublicKeyHex, revokedAt: null }
     : null;
 }
 
@@ -3880,7 +3877,7 @@ export interface CoordinatorTestingPorts {
   testP2pkhUnspentAllProvider: ((network: "main" | "test", address: string) => Promise<WocUtxoResponse[]>) | undefined;
   testPersistCoordinatorSnapshotFailure: boolean;
   testSatBroadcastRetryOverrides: { maxAttempts?: number; deadlineMs?: number; initialBackoffMs?: number; maxBackoffMs?: number } | undefined;
-  testStorageSessionResolver: ((sessionId: string) => Promise<{ sessionId: string; origin: string; networkIdentity?: import("@keymaster/contracts").NetworkIdentity; ownerPublicKeyHex?: string; appIdentity: import("@keymaster/contracts").OwnerAppStorageGrant["appIdentity"]; revokedAt: number | null } | null>) | undefined;
+  testStorageSessionResolver: ((sessionId: string) => Promise<{ sessionId: string; origin: string; networkIdentity?: import("@keymaster/contracts").NetworkIdentity; ownerPublicKeyHex?: string; revokedAt: number | null } | null>) | undefined;
   triggerImmediateSync: typeof triggerImmediateSync;
   vaultAutoLock: ReturnType<typeof createWorkerAutoLock>;
   vaultWalletWorker: ReturnType<typeof createVaultWalletWorker>;

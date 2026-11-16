@@ -12,7 +12,6 @@ import { defineCapability } from "webloom-framework";
 //     避免 JavaScript number 丢失精度；
 //   - 本文件只允许类型、字面量常量与无依赖纯函数。
 
-import type { AppIdentitySnapshot } from "./appIdentity.js";
 import type { BinaryField } from "./protocol.js";
 
 /** libp2p protocol ID；wire 真值来自 MSFile Proxy Wire Messages v1。 */
@@ -194,15 +193,14 @@ export function isValidMsFileSourceId(input: unknown): input is string {
     && (input === MSFILE_LOCAL_SOURCE_ID || /^remote-proxy:(02|03)[0-9a-f]{64}$/u.test(input));
 }
 
-/** 稳定 App 策略键：owner + publisher + appId。不使用 origin 或 identityDigestHex。 */
+/** 稳定来源策略键：owner + origin。展示名和市场收录状态不改变许可。 */
 export interface MsFileAppIdentityKey {
   ownerPublicKeyHex: string;
-  publisherPublicKeyHex: string;
-  appId: string;
+  origin: string;
 }
 
 export function msFileAppPolicyKeyString(key: MsFileAppIdentityKey): string {
-  return `${key.ownerPublicKeyHex}|${key.publisherPublicKeyHex}|${key.appId}`;
+  return `${key.ownerPublicKeyHex}|${key.origin}`;
 }
 
 /* ============== Stat ============== */
@@ -890,7 +888,7 @@ export interface MsFileConnectAppContext extends NetworkIdentity {
   walletPublicKeyHex: string;
   transportOrigin: string;
   ownerPublicKeyHex: string;
-  appIdentity: AppIdentitySnapshot;
+  origin: string;
 }
 
 /**

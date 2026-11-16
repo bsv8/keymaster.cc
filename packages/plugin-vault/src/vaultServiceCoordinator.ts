@@ -401,6 +401,17 @@ export class VaultServiceCoordinator implements InternalVaultService {
         if (r.ack.status !== "ok" || !r.result) throw new Error(commandResultMessage(r.ack, "Derive failed"));
         return { publicKeyHex, address: (r.result as { address: string }).address };
       },
+      async deriveCipherSiteKey(input) {
+        guard();
+        if (!input || typeof input !== "object" || Object.keys(input).some(key => !["origin", "bsvNetwork", "appPublicKeyHex"].includes(key))) throw new TypeError("Crypto requests do not accept wallet selectors or unknown fields");
+        if (typeof input.origin !== "string" || !input.origin) throw new TypeError("Invalid origin");
+        if (input.bsvNetwork !== "main" && input.bsvNetwork !== "test") throw new TypeError("Unknown network");
+        if (input.appPublicKeyHex !== undefined && (typeof input.appPublicKeyHex !== "string" || !/^(02|03)[0-9a-f]{64}$/.test(input.appPublicKeyHex))) throw new TypeError("Invalid app public key");
+        const r = await client.crypto!({ type: "deriveCipherSiteKey", origin: input.origin, network: input.bsvNetwork, ...(input.appPublicKeyHex ? { appPublicKeyHex: input.appPublicKeyHex } : {}) });
+        guard();
+        if (r.ack.status !== "ok" || !r.result || r.result.type !== "deriveCipherSiteKey") throw new Error(commandResultMessage(r.ack, "Cipher derivation failed"));
+        return { publicKeyHex, siteKey: hexToArrayBuffer((r.result as { siteKeyHex: string }).siteKeyHex) };
+      },
       dispose: () => {
         if (revoked) return;
         revoked = true;

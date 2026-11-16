@@ -1,7 +1,6 @@
 // Worker-safe protocol storage access. No UI/runtime barrels are imported.
 import { openProtocolStorageRepository as openRawProtocolStorageRepository, type ProtocolStorageStores } from "./storage/protocolStorageRepository.js";
 import type { ConnectSessionRecord, ProtocolStorageRepository } from "@keymaster/contracts";
-import { isVerifiedAppIdentitySnapshot } from "./appIdentity.js";
 
 let dbPromise: Promise<ProtocolStorageRepository> | undefined;
 
@@ -17,10 +16,8 @@ export function configureProtocolStorageRepository(
   dbPromise = Promise.resolve(openRawProtocolStorageRepository(stores));
 }
 
-export async function getConnectSession(identity: import("@keymaster/contracts").NetworkIdentity, origin: string): Promise<ConnectSessionRecord | null> {
-  const record = await (await openProtocolStorageRepository()).getConnectSession(identity, origin);
-  if (!record || record.revokedAt !== null || !record.origin || !isVerifiedAppIdentitySnapshot(record.appIdentity)) return null;
+export async function getConnectSession(identity: import("@keymaster/contracts").NetworkIdentity, origin: string,authorizationId?:string): Promise<ConnectSessionRecord | null> {
+  const record = await (await openProtocolStorageRepository()).getConnectSession(identity, origin,authorizationId);
+  if (!record || record.revokedAt !== null || !record.origin || !record.appPublicKeyHex) return null;
   return record;
 }
-
-export { isVerifiedAppIdentitySnapshot };

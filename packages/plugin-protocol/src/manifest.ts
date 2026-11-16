@@ -34,7 +34,6 @@ import type {
 } from "@keymaster/contracts";
 import { defineCapability } from "webloom-framework";
 import {
-  APP_CATALOG_CAPABILITY,
   MSFILE_SERVICE_CAPABILITY,
   PROTOCOL_SERVICE_CAPABILITY,
   PROTOCOL_STORAGE_REPOSITORY_CAPABILITY,
@@ -493,7 +492,6 @@ const protocolPluginDefinition = {
       { capability: STORAGE_RUNTIME_CONTROLLER_CAPABILITY, optional: true, reason: "可选 Storage 方法" },
       { capability: MSFILE_SERVICE_CAPABILITY, optional: true, reason: "可选 MSFile 方法" },
       { capability: P2PKH_SERVICE_CAPABILITY, optional: true, reason: "可选 P2PKH 方法" },
-      { capability: APP_CATALOG_CAPABILITY, optional: true, reason: "可选 app catalog" },
     ]),
   }],
   i18n: protocolResources,
@@ -560,13 +558,6 @@ const protocolPluginDefinition = {
         },
         getP2pkhService,
         connectChannelRuntime,
-        getAppCatalogResolver: () => {
-          try {
-            return ctx.optionalCapability(APP_CATALOG_CAPABILITY);
-          } catch {
-            return undefined;
-          }
-        },
         // 根服务只作为钱包内启动器；连接实例的方向由主钱包宿主装配。
         bootMode: "connect",
         getApplicationOpenMode: () => applicationHost.applicationOpenMode(),

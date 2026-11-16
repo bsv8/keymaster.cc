@@ -1,4 +1,4 @@
-import { deriveP2pkhAddress } from "@keymaster/contracts";
+import { deriveP2pkhAddress, deriveAppCipherSiteKeyHKDF } from "@keymaster/contracts";
 // appView Session Window 的专用密码学 Worker。
 // 私钥只存在 worker 状态中；Channel 消息格式由 Coordinator 使用 ChannelProtocol
 // 处理，本 Worker 不实现消息信封。
@@ -84,6 +84,19 @@ function createHandler(ref: WorkerStateRef) {
           post({ requestId: message.requestId, ok: true, result: {
             publicKeyHex: state.publicKeyHex,
             address: deriveP2pkhAddress(state.publicKeyHex, message.network)
+          } });
+          return;
+        }
+        case "deriveCipherSiteKey": {
+          const state = ensureState(ref);
+          if (message.publicKeyHex !== state.publicKeyHex) throw new Error("session_key_mismatch");
+          if (message.bsvNetwork !== "main" && message.bsvNetwork !== "test") throw new Error("Unknown network");
+          if (message.appPublicKeyHex !== undefined && !/^(02|03)[0-9a-f]{64}$/.test(message.appPublicKeyHex)) throw new Error("Invalid app public key");
+          if (!message.appPublicKeyHex) throw new Error("Verified App public key is required");
+          const siteKey = deriveAppCipherSiteKeyHKDF(state.privateKeyBytes, state.publicKeyHex, message.bsvNetwork, message.appPublicKeyHex);
+          post({ requestId: message.requestId, ok: true, result: {
+            publicKeyHex: state.publicKeyHex,
+            siteKey: siteKey.slice().buffer as ArrayBuffer
           } });
           return;
         }

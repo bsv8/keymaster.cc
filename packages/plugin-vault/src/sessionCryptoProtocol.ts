@@ -41,6 +41,15 @@ export interface SessionCryptoDeriveAddressMessage {
   network: "main" | "test";
 }
 
+export interface SessionCryptoDeriveCipherMessage {
+  kind: "deriveCipherSiteKey";
+  requestId: string;
+  publicKeyHex: string;
+  origin: string;
+  bsvNetwork: "main" | "test";
+  appPublicKeyHex?: string;
+}
+
 export interface SessionCryptoDisposeMessage {
   kind: "dispose";
   requestId: string;
@@ -51,6 +60,7 @@ export type SessionCryptoRequestMessage =
   | SessionCryptoInitMessage
   | SessionCryptoSignDigestMessage
   | SessionCryptoDeriveAddressMessage
+  | SessionCryptoDeriveCipherMessage
   | SessionCryptoDisposeMessage;
 
 export type SessionCryptoResponseMessage<T = unknown> =

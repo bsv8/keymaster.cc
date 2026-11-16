@@ -1,4 +1,4 @@
-import { sameNetworkIdentity } from "@keymaster/contracts";
+import { canonicalOrigin, sameNetworkIdentity } from "@keymaster/contracts";
 import type { OwnerAppStorageGrant, SessionEpoch } from "@keymaster/contracts";
 import type { StorageOwnerGrant, StoragePlatformGrant } from "@keymaster/contracts/storage-internal";
 export interface StorageGrantSessionFacts {
@@ -10,7 +10,7 @@ export interface StorageGrantSessionFacts {
 }
 export interface StorageGrantAuthorityDependencies {
   session(): StorageGrantSessionFacts;
-  appSession(identity: import("@keymaster/contracts").NetworkIdentity, origin: string): Promise<{ origin: string; appIdentity: OwnerAppStorageGrant["appIdentity"]; networkIdentity: import("@keymaster/contracts").NetworkIdentity; ownerPublicKeyHex: string; revokedAt: number | null } | null>;
+  appSession(identity: import("@keymaster/contracts").NetworkIdentity, origin: string, authorizationId?: string): Promise<{ authorizationId?: string; appPublicKeyHex?: string; origin: string; networkIdentity: import("@keymaster/contracts").NetworkIdentity; ownerPublicKeyHex: string; revokedAt: number | null } | null>;
 }
 /** Worker-only authorization state. Grants stay tied to the issuing page and
  * wallet/session/run generation; a retained grant is never a new namespace.
@@ -44,15 +44,18 @@ export function createStorageGrantAuthority(deps: StorageGrantAuthorityDependenc
   async function resolveApp(id: string, clientId: string): Promise<{ context: OwnerAppStorageGrant; walletPublicKeyHex: string }> {
     const grant = apps.get(id);
     if (!grant || grant.clientId !== clientId || grant.sessionEpoch !== deps.session().sessionEpoch) throw identityError("Storage grant is invalid");
-    const authoritative = await deps.appSession(grant.context, grant.context.transportOrigin);
+    const authoritative = await deps.appSession(grant.context, grant.context.transportOrigin, grant.context.authorizationId);
     // Querying the durable Connect session yields. Revocation or replacement
     // during that query must fail before the physical storage handler runs.
     if (apps.get(id) !== grant) throw identityError("Storage grant was revoked during session lookup");
     const facts = deps.session();
     if (!authoritative || authoritative.revokedAt !== null
       || !authoritative.networkIdentity || !sameNetworkIdentity(authoritative.networkIdentity, grant.context)
+      || authoritative.authorizationId !== grant.context.authorizationId
+      || authoritative.appPublicKeyHex !== grant.context.appPublicKeyHex
       || authoritative.origin !== grant.context.transportOrigin
-      || JSON.stringify(authoritative.appIdentity) !== JSON.stringify(grant.context.appIdentity)
+      || canonicalOrigin(authoritative.origin) !== grant.context.origin
+      || authoritative.ownerPublicKeyHex !== grant.context.walletPublicKeyHex
       || grant.context.sessionEpoch !== facts.sessionEpoch
       || grant.context.walletGeneration !== facts.walletGeneration
       || grant.context.runGeneration !== facts.runGeneration

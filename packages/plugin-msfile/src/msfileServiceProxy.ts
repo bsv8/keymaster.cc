@@ -199,7 +199,7 @@ export class MsFileServiceProxy implements MsFileService {
   }
 
   #grantFor(ctx: MsFileConnectAppContext): Promise<string> {
-    const key = `${ctx.walletPublicKeyHex}|${ctx.bsvNetwork}|${ctx.transportOrigin}|${ctx.appIdentity.identityDigestHex}`;
+    const key = `${ctx.walletPublicKeyHex}|${ctx.bsvNetwork}|${ctx.transportOrigin}|${ctx.origin}`;
     const existing = this.#grants.get(key);
     if (existing) return existing;
     const pending = this.#coordinator

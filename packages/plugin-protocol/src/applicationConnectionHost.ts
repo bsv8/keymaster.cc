@@ -1,5 +1,5 @@
 import type {
-  ApplicationOpenMode, ApplicationView, AppBootstrapPayload, AppIdentitySnapshot, ApplicationConnection, ApplicationConnections, ApplicationConnectionsSnapshot,
+  ApplicationOpenMode, ApplicationView, AppBootstrapPayload, ApplicationConnection, ApplicationConnections, ApplicationConnectionsSnapshot,
   ApplicationConnectionEvent, ConnectedApplication, ProtocolCommandRecord, ProtocolMethod, ProtocolStorageRepository, ApplicationAiTools, ConnectedAiTool,
 } from "@keymaster/contracts";
 import { requireUnlockedWalletIdentity, sameNetworkIdentity } from "@keymaster/contracts";
@@ -7,9 +7,10 @@ import { KeymasterAiToolReceiver, parseReconnectMessage } from "keymaster-connec
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { createProtocolService, type ProtocolServiceDeps, type ProtocolServiceImpl } from "./protocolService.js";
-import { applicationKey, readApplicationPermissions, setApplicationPermission } from "./applicationPermissions.js";
+import { applicationKey, permissionKeyFor, readApplicationPermissions, setApplicationPermission } from "./applicationPermissions.js";
+import { assertAppPublicKeyHex } from "@keymaster/contracts";
 
-type HostedConnection = ApplicationConnection & { source: Window; service: ProtocolServiceImpl; tools: KeymasterAiToolReceiver; off: () => void; authorizationId?: string; identifyingKey?: string };
+type HostedConnection = ApplicationConnection & { origin?:string; source: Window; service: ProtocolServiceImpl; tools: KeymasterAiToolReceiver; off: () => void; authorizationId?: string; identifyingKey?: string };
 
 /** 持久授权与运行期分离；每次恢复重新登记实际来源、创建 Receiver 和执行句柄。 */
 export class ApplicationConnectionHost implements ApplicationConnections {
@@ -91,20 +92,20 @@ export class ApplicationConnectionHost implements ApplicationConnections {
   private createConnection(source: Window, bootMode: "connect" | "appView" = "connect"): HostedConnection {
     const id = crypto.randomUUID();
     const service = createProtocolService({ ...this.deps, bootMode, hostedApplication: true, resolveOpener: () => source, storageRepository: this.repo,
-      applicationIdentified: (origin, identity) => this.identifyIncoming(id, origin, identity),
+      applicationIdentified: (origin, key, url,display) => this.identifyIncoming(id, origin, key, url,display),
       applicationLoggedOut: () => { const connection = this.connections.get(id); if (connection) { this.pause(connection); connection.closedAt = Date.now(); this.emit(); } },
       applicationPermissionChanged: () => this.refreshEvents() });
     const tools = new KeymasterAiToolReceiver({
       isCurrent: bindingId => {
         const connection = this.connections.get(id);
         const app = connection && this.applications.get(connection.applicationKey);
-        return !!connection && !!app && !this.disposed && !connection.closedAt && !connection.pausedAt && !source.closed && this.deps.walletState.snapshot().status === "unlocked" && service.matchesBinding(source, app.origin, bindingId);
+        return !!connection && !!app && !this.disposed && !connection.closedAt && !connection.pausedAt && !source.closed && this.deps.walletState.snapshot().status === "unlocked" && service.matchesBinding(source, connection.origin??app.origin, bindingId);
       },
       send: message => {
         const connection = this.connections.get(id);
         const app = connection && this.applications.get(connection.applicationKey);
         if (!app || source.closed) throw new Error("Application unavailable");
-        source.postMessage(message, app.origin);
+        source.postMessage(message, connection!.origin??app.origin);
       },
       names: definitions => {
         const connection = this.connections.get(id);
@@ -123,24 +124,15 @@ export class ApplicationConnectionHost implements ApplicationConnections {
   async acceptLaunch(payload: AppBootstrapPayload, source: Window, view: ApplicationView): Promise<void> {
     if (this.disposed) throw new Error("Application host stopped");
     const generation = this.walletGeneration();
-    const key = applicationKey(payload.app.appOrigin, payload.appIdentity);
-    const app: ConnectedApplication = { key, origin: payload.app.appOrigin, name: payload.appIdentity?.appName ?? payload.app.appId, identity: payload.appIdentity, updatedAt: Date.now() };
-    await this.repo.putApplication!(app);
-    if (this.disposed || this.walletGeneration() !== generation) throw new Error("Application host stopped or wallet changed");
-    for (const previous of this.connections.values()) {
-      if (this.applications.get(previous.applicationKey)?.origin === app.origin) this.pause(previous);
-    }
     if (view.closed) throw new Error("Application closed during launch");
     this.views.set(source, view);
     const connection = this.createConnection(source, "appView");
     try {
       await connection.service.acceptLaunchedApplication(payload, source);
       if (this.disposed || this.walletGeneration() !== generation) throw new Error("Application host stopped or wallet changed");
-      connection.applicationKey = key;
-      await this.recordEvent({ id: crypto.randomUUID(), applicationKey: key, at: connection.createdAt, kind: "connected", connectionId: connection.id });
+
       if (this.disposed || this.walletGeneration() !== generation) throw new Error("Wallet changed while recording connection");
     } catch (error) { this.pause(connection); throw error; }
-    this.applications.set(key, app);
     this.emit();
   }
   closeView(source: Window): void {
@@ -153,15 +145,16 @@ export class ApplicationConnectionHost implements ApplicationConnections {
     }
     this.emit();
   }
-  private async identifyIncoming(id: string, origin: string, identity?: AppIdentitySnapshot): Promise<void> {
+  private async identifyIncoming(id: string, origin: string, appPublicKeyHex: string, verifiedUrl?: string,display?:{name:string;description:string;icon:string}): Promise<void> {
     const connection = this.connections.get(id);
     if (!connection || connection.closedAt || connection.pausedAt || this.disposed) throw new Error("Connection expired");
-    const key = applicationKey(origin, identity);
+    const key = applicationKey(appPublicKeyHex);
     if ((connection.applicationKey && connection.applicationKey !== key) || (connection.identifyingKey && connection.identifyingKey !== key)) throw new Error("Application identity changed");
     if (connection.applicationKey === key) return;
     connection.identifyingKey = key;
+    connection.origin=origin;
     try {
-      const app: ConnectedApplication = { key, origin, name: identity?.appName ?? new URL(origin).host, identity, updatedAt: Date.now() };
+      const app: ConnectedApplication = { key, origin, ...(verifiedUrl ? {verifiedUrl} : {}),...(display?{display}:{}), name: display?.name??new URL(origin).host, updatedAt: Date.now() };
       await this.repo.putApplication!(app);
       if (connection.closedAt || connection.pausedAt || this.disposed) throw new Error("Connection expired");
       await this.recordEvent({ id: crypto.randomUUID(), applicationKey: key, at: connection.createdAt, kind: "connected", connectionId: id });
@@ -199,7 +192,7 @@ export class ApplicationConnectionHost implements ApplicationConnections {
         // 身份变化只能暂停原授权，绝不让旧任务无感换钱包。
         const identity = requireUnlockedWalletIdentity(this.deps.walletState.snapshot());
         if (!sameNetworkIdentity(identity, grant.networkIdentity)) return;
-        if (current && applicationKey(event.origin, grant.appIdentity) === current.applicationKey) {
+        if (current && grant.appPublicKeyHex === current.applicationKey) {
           current.authorizationId = grant.authorizationId;
           if (current.service.matchesBinding(source, event.origin, reconnect.bindingId)) return;
         }
@@ -247,7 +240,9 @@ export class ApplicationConnectionHost implements ApplicationConnections {
     const commands = new Map(this.history);
     for (const connection of this.connections.values()) {
       for (const command of connection.service.feedSnapshot().commands) {
-        if (command.applicationKey === connection.applicationKey) commands.set(command.id, command);
+        // 首次登录已经验过 proof，但授权尚待用户批准；此时连接还没有正式身份。
+        // 仅展示该 Receiver 自己的登录待办，不提前认领应用或发放数据权限。
+        if (command.applicationKey === connection.applicationKey || (!connection.applicationKey && command.method === "connect.login")) commands.set(command.id, command);
       }
     }
     return {
@@ -261,24 +256,25 @@ export class ApplicationConnectionHost implements ApplicationConnections {
   }
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private emit(): void { if (!this.disposed) for (const listener of this.listeners) listener(); }
-  permissions(key: string): Promise<ProtocolMethod[]> { return readApplicationPermissions(this.repo, key); }
-  async revokePermission(key: string, method: ProtocolMethod): Promise<void> {
-    await setApplicationPermission(this.repo, key, method, false);
-    await this.refreshEvents();
-    this.emit();
-  }
+  /**
+   * 许可主键解析：已验证发布身份的连接按 App 公钥归属；为兼容未验证传输，
+   * 同时读取来源键与该来源各会话快照中的 App 公钥（过渡行为，见 permissionKeyFor）。
+   * 展示取并集，撤销扇出到实际持有该方法的键，避免静默漏撤。
+   */
+  async permissions(key: string): Promise<ProtocolMethod[]> {return readApplicationPermissions(this.repo,assertAppPublicKeyHex(key));}
+  async revokePermission(key: string, method: ProtocolMethod): Promise<void> {await setApplicationPermission(this.repo,assertAppPublicKeyHex(key),method,false);await this.refreshEvents();this.emit();}
   /** 唯一的显式断开入口：先持久撤销，再撤回所有关联窗口的瞬时权限。 */
   async disconnect(key: string): Promise<void> {
     const app = this.applications.get(key);
     if (!app) throw new Error("Application is not registered");
-    const grants = await this.repo.listConnectSessionsByOrigin(app.origin);
-    for (const grant of grants.filter(value => applicationKey(value.origin, value.appIdentity) === key && value.revokedAt === null)) {
+    const grants = await this.repo.listConnectSessions();
+    for (const grant of grants.filter(value => value.appPublicKeyHex === key && value.revokedAt === null)) {
       await this.repo.putConnectSession({ ...grant, revokedAt: Date.now() });
       for (const connection of this.connections.values()) {
         if (connection.applicationKey !== key) continue;
         this.pause(connection);
         connection.closedAt = Date.now();
-        try { connection.source.postMessage({ v: 1, type: "revoked", authorizationId: grant.authorizationId }, app.origin); } catch { /* 关闭的窗口以后也不能凭旧授权恢复。 */ }
+        try { connection.source.postMessage({ v: 1, type: "revoked", authorizationId: grant.authorizationId }, grant.origin); } catch { /* 关闭的窗口以后也不能凭旧授权恢复。 */ }
       }
     }
     await this.recordEvent({ id: crypto.randomUUID(), applicationKey: key, at: Date.now(), kind: "disconnected" });

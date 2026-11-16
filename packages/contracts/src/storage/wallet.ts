@@ -118,50 +118,44 @@ export function normalizeAppStorageName(value: string): string {
 }
 
 /**
- * 为「同名但身份不同」的 App 分配带稳定身份后缀的独立 name。
+ * 为「同名但来源不同」的 App 分配带稳定身份后缀的独立 name。
  *
- * 两个不同验证身份绝不共用目录:冲突方得到 `<base>-<digest8>`,digest 来自
- * publisher 公钥与 appId,因此跨设备、跨重启结果一致。
+ * 两个不同来源绝不共用目录:冲突方得到 `<base>-<digest8>`,digest 来自
+ * canonical origin,因此跨设备、跨重启结果一致。
  */
 export function resolveAppStorageNameConflict(input: {
   requestedName: string;
-  publisherPublicKeyHex: string;
-  appId: string;
+  origin: string;
 }): string {
   const base = normalizeAppStorageName(input.requestedName);
-  if (!/^(02|03)[0-9a-f]{64}$/u.test(input.publisherPublicKeyHex)) throw new Error("publisherPublicKeyHex is invalid");
-  if (!STORAGE_ID_PATTERN.test(input.appId)) throw new Error("appId is invalid");
-  const digest = appIdentityDigestHex(input.publisherPublicKeyHex, input.appId);
+  const c = canonicalOrigin(input.origin);
+  const digest = originDigestHex(c);
   return (base.slice(0, 54) + "-" + digest.slice(0, 8));
 }
 
 /**
- * 没有显式登记 name 时，由验证身份派生出稳定的 App 目录名。
+ * 没有显式登记 name 时，由可信来源派生出稳定的 App 目录名。
  *
- * 这保证「同名不同身份绝不共用目录」在没有登记记录时也成立：目录名完全来自
- * 身份摘要，跨设备、跨重启结果一致，显示名称或本地化不影响它。平台一旦有
+ * 这保证「同名不同来源绝不共用目录」在没有登记记录时也成立：目录名完全来自
+ * 来源摘要，跨设备、跨重启结果一致，显示名称或本地化不影响它。平台一旦有
  * 正式登记记录，就应使用登记值并在本函数之外做冲突分配。
  */
-export function deriveAppStorageName(input: {
-  publisherPublicKeyHex: string;
-  appId: string;
-}): string {
-  if (!/^(02|03)[0-9a-f]{64}$/u.test(input.publisherPublicKeyHex)) throw new Error("publisherPublicKeyHex is invalid");
-  if (!STORAGE_ID_PATTERN.test(input.appId)) throw new Error("appId is invalid");
-  const digest = appIdentityDigestHex(input.publisherPublicKeyHex.toLowerCase(), input.appId);
-  return ("app-" + digest.slice(0, 24));
+export function deriveAppStorageName(input: { appPublicKeyHex: string }): string {
+  const app = assertAppPublicKeyHex(input.appPublicKeyHex);
+  return "app-" + originDigestHex(app).slice(0,24);
 }
 
-/** 与 appIdentity 同族的稳定摘要;只需短后缀,用于目录名去冲突。 */
-function appIdentityDigestHex(publisherPublicKeyHex: string, appId: string): string {
+/** 与来源同族的稳定摘要;只需短后缀,用于目录名去冲突。 */
+function originDigestHex(canonical: string): string {
   const bytes = new TextEncoder().encode(
-    "keymaster.app-storage-name.v1\u0000" + publisherPublicKeyHex.toLowerCase() + "\u0000" + appId
+    "keymaster.app-storage-name.v1\u0000" + canonical
   );
   return Array.from(sha256(bytes), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 // 保持与其它 contracts 源文件一致的依赖位置:类型与常量在前,实现依赖在后。
 import { sha256 } from "@noble/hashes/sha2.js";
+import { canonicalOrigin, assertAppPublicKeyHex } from "../appIdentity.js";
 
 /**
  * 逻辑根规划的唯一入口。

@@ -1,8 +1,17 @@
-import type { AppIdentitySnapshot, ProtocolMethod, ProtocolStorageRepository } from "@keymaster/contracts";
+import type { ProtocolMethod, ProtocolStorageRepository } from "@keymaster/contracts";
+import { assertAppPublicKeyHex } from "@keymaster/contracts";
 
-/** Stable application identity; a changed publisher/appId or exact origin never inherits another app's grants. */
-export function applicationKey(origin: string, identity?: AppIdentitySnapshot): string {
-  return JSON.stringify([origin, identity?.publisherPublicKeyHex.toLowerCase() ?? null, identity?.appId ?? null]);
+/** Stable application identity; verified connections of the same App share grants. */
+export function applicationKey(appPublicKeyHex: string): string {
+  return assertAppPublicKeyHex(appPublicKeyHex);
+}
+
+/**
+ * 许可主键：已验证发布身份的连接按 App 公钥归属（跨 origin/渠道/版本共享，
+ * 同名或同源不同公钥不串用）。未验证身份直接拒绝，不回退来源键。
+ */
+export function permissionKeyFor(_transportOrigin: string, appPublicKeyHex?: string): string {
+  return assertAppPublicKeyHex(appPublicKeyHex);
 }
 
 /** Only external Connect operations. No wallet-internal policy or funding approval is installed here. */

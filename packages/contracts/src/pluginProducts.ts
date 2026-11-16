@@ -78,7 +78,7 @@ export const BUILTIN_PLUGIN_RUNTIME_UNIT_CATALOG = [
   { productId: "woc", unitId: "woc.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
   { productId: "p2pkh", unitId: "p2pkh.window", runtime: "window-main", scopeKind: "owner-session" },
   { productId: "p2pkh", unitId: "p2pkh.coordinator-worker", runtime: "shared-worker", scopeKind: "owner-session" },
-  { productId: "apps", unitId: "apps.window", runtime: "window-main", scopeKind: "root" },
+  { productId: "apps", unitId: "apps.window", runtime: "window-main", scopeKind: "storage" },
   { productId: "ai", unitId: "ai.window", runtime: "window-main", scopeKind: "owner-session" },
 ] as const satisfies readonly BuiltinPluginRuntimeUnitDeclaration[];
 

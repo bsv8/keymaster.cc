@@ -1118,7 +1118,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
           <ul className="msfile-settings__apps">
             {authorizations.map((view) => (
               <AppAuthorizationRow
-                key={`${view.key.ownerPublicKeyHex}|${view.key.publisherPublicKeyHex}|${view.key.appId}`}
+                key={`${view.key.ownerPublicKeyHex}|${view.key.origin}`}
                 view={view}
                 globalSettings={snapshot?.globalSettings ?? null}
                 onSave={saveOverride}
@@ -1199,9 +1199,9 @@ function AppAuthorizationRow(props: {
       <div className="msfile-settings__app-header">
         <div>
           <strong>{view.appName}</strong>
-          <span>{view.key.appId}</span>
+          <span>{view.key.origin}</span>
         </div>
-        <code title={view.key.publisherPublicKeyHex}>{view.key.publisherPublicKeyHex.slice(0, 12)}…</code>
+        <code title={view.key.origin}>{view.key.origin}</code>
       </div>
       <div className="msfile-settings__app-limits">
         <div>

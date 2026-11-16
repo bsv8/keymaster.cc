@@ -1,4 +1,4 @@
-import { APP_STORAGE_CLIENTS_CAPABILITY, deriveAppStorageName, deriveThirdPartyStorageModuleId, type AppStorageClients, type AppStorageClient, type OwnerAppStorageGrant, type StorageRuntimeController } from "@keymaster/contracts";
+import { APP_STORAGE_CLIENTS_CAPABILITY, deriveAppStorageName, deriveAppStorageModuleId, canonicalOrigin, assertAppPublicKeyHex, type AppStorageClients, type AppStorageClient, type OwnerAppStorageGrant, type StorageRuntimeController } from "@keymaster/contracts";
 import type { LifecycleScope } from "webloom-framework";
 
 /** Storage derives the App namespace; the Worker revalidates the authoritative session at each I/O. */
@@ -8,11 +8,13 @@ export function createAppStorageClients(controller: StorageRuntimeController, pr
       consumer.capability(APP_STORAGE_CLIENTS_CAPABILITY);
       const assert = () => { scope.assertActive(); providerScope?.assertActive(); if (consumer.status !== "active") throw new Error("App storage gateway revoked"); };
       assert();
-      const appIdentity = Object.freeze({ ...binding.appIdentity });
+      const origin = canonicalOrigin(binding.origin);
+      const appPublicKeyHex = assertAppPublicKeyHex(binding.appPublicKeyHex);
+      if(!binding.authorizationId)throw new Error("App authorization is required");
       const grant: OwnerAppStorageGrant = Object.freeze({ bsvNetwork: binding.bsvNetwork, publicKeyHex: binding.publicKeyHex, walletPublicKeyHex: binding.walletPublicKeyHex, transportOrigin: binding.transportOrigin,
-        sessionEpoch: binding.sessionEpoch, walletGeneration: binding.walletGeneration, runGeneration: binding.runGeneration, appIdentity,
-        appStorageName: deriveAppStorageName(appIdentity),
-        moduleId: deriveThirdPartyStorageModuleId(appIdentity.publisherPublicKeyHex, appIdentity.appId), purposeId: "files",
+        sessionEpoch: binding.sessionEpoch, walletGeneration: binding.walletGeneration, runGeneration: binding.runGeneration, origin, authorizationId: binding.authorizationId, appPublicKeyHex,
+        appStorageName: deriveAppStorageName({ appPublicKeyHex }),
+        moduleId: deriveAppStorageModuleId(appPublicKeyHex), purposeId: "files",
       });
       const call = async <T>(operation: () => Promise<T>): Promise<T> => { assert(); const result = await operation(); assert(); return result; };
       const client: AppStorageClient = {

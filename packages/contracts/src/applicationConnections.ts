@@ -1,14 +1,16 @@
+import type {AppDisplay} from "./appDisplay.js";
 import { defineCapability } from "webloom-framework";
 import type { ApplicationOpenMode } from "./page.js";
-import type { AppIdentitySnapshot } from "./appIdentity.js";
 import type { ProtocolCommandRecord, ProtocolMethod, ProtocolService } from "./protocol.js";
 
 /** Application is the management root; live connections are child instances, not permission owners. */
 export interface ConnectedApplication {
+  /** 宿主实际启动并完成身份验证的完整 URL；普通来源自报不能设置。 */
+  verifiedUrl?: string;
+  display?:AppDisplay;
   key: string;
   origin: string;
   name: string;
-  identity?: AppIdentitySnapshot;
   updatedAt: number;
 }
 export interface ApplicationConnection {

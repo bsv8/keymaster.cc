@@ -2,11 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { useWalletState, usePluginI18n } from "@keymaster/runtime";
 import { sameWalletSession, type VaultLifecycleSnapshot, requireUnlockedWalletIdentity, formatShortPublicKey, type KeyIdentity } from "@keymaster/contracts";
 import { Button, Modal } from "@keymaster/ui";
-import type { AppCatalogEntry } from "./catalog.js";
+import type { AppLaunchTarget } from "./catalog.js";
 
 export interface AppLaunchModalProps {
   open: boolean;
-  entry: AppCatalogEntry | null;
+  entry: AppLaunchTarget | null;
   busy?: boolean;
   error?: string | null;
   onClose(): void;
@@ -45,11 +45,16 @@ export function AppLaunchModal({ open, entry, busy = false, error = null, onClos
     if (busy || !currentKey || !entry || !boundSession.current || !sameWalletSession(boundSession.current, walletState.snapshot())) return;
     await onConfirm();
   }
+  const sourceLabel = !entry ? "" : [
+    entry.marketListed ? t("apps.directory.source.market", { defaultValue: "Market" }) : null,
+    entry.local ? t("apps.directory.source.local", { defaultValue: "Local" }) : null,
+    entry.favorite ? t("apps.directory.source.favorite", { defaultValue: "Favorite" }) : null,
+  ].filter((part): part is string => part !== null).join(" · ");
   return <Modal open={open} title={entry ? t("apps.launch.title", { defaultValue: `Open ${entry.name}` }) : t("apps.launch.titleFallback", { defaultValue: "Open App" })} onClose={onClose} data-testid="app-launch-modal" footer={<>
     <Button variant="ghost" onClick={onClose} disabled={busy} data-testid="app-launch-cancel">{t("common.action.cancel", { defaultValue: "Cancel" })}</Button>
     <Button onClick={() => void submit()} loading={busy} disabled={busy || currentKey === null} data-testid="app-launch-confirm">{t("apps.open.cta", { defaultValue: "Open App" })}</Button>
   </>}>
-    {entry ? <div className="apps-launch-modal__meta"><div className="apps-launch-modal__name">{entry.name}</div><div className="apps-launch-modal__origin">{entry.appOrigin}</div>{entry.summary ? <div className="apps-launch-modal__summary">{entry.summary}</div> : null}</div> : null}
+    {entry ? <div className="apps-launch-modal__meta"><div className="apps-launch-modal__name">{entry.name}</div><div className="apps-launch-modal__origin">{new URL(entry.url).origin}</div><div className="apps-launch-modal__origin">{t("apps.launch.url", { defaultValue: "URL" })}: {entry.url}</div>{sourceLabel ? <div className="apps-launch-modal__origin">{t("apps.launch.source", { defaultValue: "Source" })}: {sourceLabel}</div> : null}{entry.description ? <div className="apps-launch-modal__summary">{entry.description}</div> : null}</div> : null}
     <div className="apps-launch-modal__identity" data-testid="app-launch-identity"><span className="apps-launch-modal__identity-label">{t("apps.launch.key", { defaultValue: "Key" })}</span><span className="apps-launch-modal__identity-value">{currentKey ? `${currentKey.label} (${formatShortPublicKey(currentKey.publicKeyHex)})` : "—"}</span><span className="apps-launch-modal__identity-hint">{t("apps.launch.keyHint", { defaultValue: "This app session binds to the only key kept in this browser." })}</span></div>
     {loadError || error ? <div className="apps-launch-modal__error" role="alert">{error ?? loadError}</div> : null}
   </Modal>;

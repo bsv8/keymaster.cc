@@ -1,7 +1,7 @@
 import { defineWorkerRequestRoute } from "@keymaster/contracts";
 import {
   type CoordinatorClientRequest as PublicCoordinatorClientRequest, type CoordinatorResponse, type SessionEpoch,
-  type StorageRuntimeController, SYSTEM_STORAGE_DECLARATIONS, CENTRAL_STORAGE_DECLARATIONS, sameNetworkIdentity, deriveThirdPartyStorageModuleId,
+  type StorageRuntimeController, SYSTEM_STORAGE_DECLARATIONS, CENTRAL_STORAGE_DECLARATIONS, sameNetworkIdentity, deriveAppStorageModuleId, deriveAppStorageName, canonicalOrigin, assertAppPublicKeyHex,
 } from "@keymaster/contracts";
 import type { CoordinatorOwnerStorageData, CoordinatorPlatformStorageData, StorageOwnerGrant, StoragePlatformGrant } from "@keymaster/contracts/storage-internal";
 import { createStorageGrantAuthority, createStorageDataQueue, createStorageDataExecutor, type StoragePrivateRootStore } from "./coordinator/index.js";
@@ -25,8 +25,8 @@ export interface StorageWorkerRequestPorts {
   assertAvailable(): void;
   unavailable(message: string): Error;
   ensureRuntime(peerId?: string): Promise<StorageRuntimeController>;
-  appSession(identity: import("@keymaster/contracts").NetworkIdentity, origin: string): Promise<(NonNullable<Awaited<ReturnType<Parameters<typeof createStorageGrantAuthority>[0]["appSession"]>>> & { sessionId: string }) | null>;
-  appStorageName(identity: { publisherPublicKeyHex: string; appId: string }): string;
+  appSession(identity: import("@keymaster/contracts").NetworkIdentity, origin: string, authorizationId?: string): Promise<(NonNullable<Awaited<ReturnType<Parameters<typeof createStorageGrantAuthority>[0]["appSession"]>>> & { sessionId: string }) | null>;
+  appStorageName(origin: string): string;
   failure(error: unknown): void;
   admission: { open(peerId: string): boolean; revoked(peerId: string): boolean; response(requestId: string): CoordinatorResponse };
   io: { run<T>(operation: "read" | "write", signal: AbortSignal | undefined, execute: (signal: AbortSignal) => Promise<T>, options: { auditOperation: "storage.browse" | "storage.platform.data" | "storage.owner.data" | "storage.connect.data"; durableLease?: boolean; allowLocalLock?: boolean; allowLocalOwnerTransition?: boolean; allowLocalBindingDiscard?: boolean }): Promise<T> };
@@ -254,20 +254,25 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
 
   async function executeStorageRequest(request: Extract<CoordinatorClientRequest, { kind: "storage.grant" | "storage.control" | "storage.data" | "storage.cancel" | "storage.session.abort" | "storage.browse.open" | "storage.browse.data" | "storage.browse.close" | "storage.owner.bind" | "storage.platform.bind" | "storage.owner.data" | "storage.platform.data" | "storage.clear.root" }>, actualClientId: string, requestSignal?: AbortSignal): Promise<CoordinatorResponse> {
     if (request.kind === "storage.grant") {
-      const session = await ports.appSession(request.networkIdentity, request.transportOrigin);
+      const session = await ports.appSession(request.networkIdentity, request.transportOrigin, request.authorizationId);
       if (ports.admission.revoked(actualClientId)) return ports.admission.response(request.requestId);
       if (!session || !session.networkIdentity || !ports.root() || !sameNetworkIdentity(session.networkIdentity, ports.root()!.identity)) return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "error", message: "Storage network identity is invalid or revoked", code: "storage_identity_required" } };
       if (ports.session().vaultStatus !== "unlocked" || !ports.session().activePublicKeyHex || !ports.root()) {
         return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "error", message: "Storage requires an unlocked wallet", code: "storage_identity_required" } };
       }
-      const verifiedAppIdentity = {
-        publisherPublicKeyHex: session.appIdentity.publisherPublicKeyHex,
-        appId: session.appIdentity.appId,
-      };
-      const moduleId = deriveThirdPartyStorageModuleId(session.appIdentity.publisherPublicKeyHex, session.appIdentity.appId);
-      // 目录名由平台登记并绑定验证身份；App 只能看到自己那一个目录，既不能
+      let origin: string;
+      try {
+        origin = canonicalOrigin(session.origin);
+        assertAppPublicKeyHex(session.appPublicKeyHex);
+        if(!session.authorizationId || session.authorizationId !== request.authorizationId)throw new Error("App authorization is required");
+      } catch {
+        return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "error", message: "Storage network identity is invalid or revoked", code: "storage_identity_required" } };
+      }
+      const appPublicKeyHex = session.appPublicKeyHex!;
+      const moduleId = deriveAppStorageModuleId(appPublicKeyHex);
+      // 目录名由平台登记并绑定可信来源；App 只能看到自己那一个目录，既不能
       // 列举 `apps/` 根，也不能指定别的 name 切换目录。
-      const appStorageName = ports.appStorageName(verifiedAppIdentity);
+      const appStorageName = deriveAppStorageName({appPublicKeyHex});
       if (ports.admission.revoked(actualClientId)) return ports.admission.response(request.requestId);
       const grantId = `grant-${crypto.randomUUID()}`;
       storageGrants.set(grantId, {
@@ -275,7 +280,8 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
           ...session.networkIdentity,
           walletPublicKeyHex: session.ownerPublicKeyHex,
           transportOrigin: session.origin,
-          appIdentity: session.appIdentity,
+          appPublicKeyHex, authorizationId:session.authorizationId!,
+          origin,
           appStorageName,
           moduleId,
           purposeId: "files",

@@ -24,6 +24,9 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
     model: "snapshot",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
+  appsDirectory: Object.freeze({
+    moduleId: "apps", purposeId: "directory", authority: "built-in-module", model: "kv", schemaVersion: 2,
+  } satisfies PluginStorageDeclaration),
   protocolDurablePolicy: Object.freeze({
     moduleId: "protocol",
     purposeId: "durable-policy",
@@ -134,6 +137,7 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
 
 /** manifest pluginId 到中央声明的绑定目录。 */
 export const SYSTEM_STORAGE_DECLARATIONS: Readonly<Record<string, readonly PluginStorageDeclaration[]>> = Object.freeze({
+  apps: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.appsDirectory]),
   ai: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.aiState]),
   storage: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.connectS3Settings]),
   vault: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.vaultPayments]),

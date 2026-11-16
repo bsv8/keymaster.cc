@@ -1,4 +1,4 @@
-import { sameNetworkIdentity } from "@keymaster/contracts";
+import { canonicalOrigin, sameNetworkIdentity } from "@keymaster/contracts";
 import { defineWorkerRequestRoute } from "@keymaster/contracts";
 import type {
   CoordinatorClientRequest, CoordinatorResponse, CoordinatorMsFileData, CoordinatorMsFileControl,
@@ -9,7 +9,7 @@ export interface MsFileWorkerRequestPorts {
   session(): { vaultStatus: string; sessionEpoch: string; activePublicKeyHex?: string };
   runtime: { current(): MsFileServiceImpl | undefined; ensure(): Promise<MsFileServiceImpl> };
   settings(): MsFileReadConcurrencySettings;
-  appSession(identity: import("@keymaster/contracts").NetworkIdentity, origin: string): Promise<{ networkIdentity: import("@keymaster/contracts").NetworkIdentity; sessionId: string; origin: string; ownerPublicKeyHex: string; appIdentity: MsFileConnectAppContext["appIdentity"] } | null>;
+  appSession(identity: import("@keymaster/contracts").NetworkIdentity, origin: string): Promise<{ networkIdentity: import("@keymaster/contracts").NetworkIdentity; sessionId: string; origin: string; ownerPublicKeyHex: string } | null>;
   changed(): void;
   available(): boolean;
   blocked(requestId: string): CoordinatorResponse;
@@ -54,7 +54,7 @@ export function createMsFileWorkerRequests(ports: MsFileWorkerRequestPorts) {
     if (expectedSessionEpoch !== ports.session().sessionEpoch || ports.session().vaultStatus !== "unlocked") {
       throw msfileError("msfile_identity_required", "MSFile session changed during lookup");
     }
-    if (!authoritative || !sameNetworkIdentity(authoritative.networkIdentity, fresh.context) || authoritative.origin !== fresh.context.transportOrigin || JSON.stringify(authoritative.appIdentity) !== JSON.stringify(fresh.context.appIdentity)) {
+    if (!authoritative || !sameNetworkIdentity(authoritative.networkIdentity, fresh.context) || authoritative.origin !== fresh.context.transportOrigin || canonicalOrigin(authoritative.origin) !== fresh.context.origin) {
       throw msfileError("msfile_identity_required", "MSFile session is invalid or revoked");
     }
     if (authoritative.ownerPublicKeyHex !== fresh.context.ownerPublicKeyHex) {
@@ -217,7 +217,7 @@ export function createMsFileWorkerRequests(ports: MsFileWorkerRequestPorts) {
       if (request.expectedSessionEpoch !== ports.session().sessionEpoch || ports.session().vaultStatus !== "unlocked") {
         return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "stale-epoch" } };
       }
-      if (!session || !sameNetworkIdentity(session.networkIdentity, request.context) || session.origin !== request.context.transportOrigin || JSON.stringify(session.appIdentity) !== JSON.stringify(request.context.appIdentity)) {
+      if (!session || !sameNetworkIdentity(session.networkIdentity, request.context) || session.origin !== request.context.transportOrigin || canonicalOrigin(session.origin) !== request.context.origin) {
         return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "error", message: "MSFile session is invalid or revoked", code: "msfile_identity_required" } };
       }
       // grant 绑定前验证 session owner 与实际付款/签名 runtime 的 owner 一致：
@@ -226,7 +226,7 @@ export function createMsFileWorkerRequests(ports: MsFileWorkerRequestPorts) {
         return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "error", message: "MSFile session owner does not match the active runtime owner", code: "msfile_identity_required" } };
       }
       const grantId = `msfile-grant-${crypto.randomUUID()}`;
-      msfileGrants.set(grantId, { context: { ...session.networkIdentity, walletPublicKeyHex: session.ownerPublicKeyHex, transportOrigin: session.origin, ownerPublicKeyHex: session.ownerPublicKeyHex, appIdentity: session.appIdentity }, clientId: actualClientId, sessionEpoch: ports.session().sessionEpoch });
+      msfileGrants.set(grantId, { context: { ...session.networkIdentity, walletPublicKeyHex: session.ownerPublicKeyHex, transportOrigin: session.origin, ownerPublicKeyHex: session.ownerPublicKeyHex, origin: canonicalOrigin(session.origin) }, clientId: actualClientId, sessionEpoch: ports.session().sessionEpoch });
       return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "ok" }, operationResult: grantId };
     }
     if (request.kind === "msfile.cancel") {

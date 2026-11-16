@@ -1,4 +1,4 @@
-import { sameNetworkIdentity, networkIdentityStorageRoot, type NetworkIdentity } from "@keymaster/contracts";
+import { sameNetworkIdentity, networkIdentityStorageRoot, canonicalOrigin, type NetworkIdentity } from "@keymaster/contracts";
 import type { StorageBrowseWallet } from "../../runtime/storageBrowsePrivate.js";
 // 平台存储根：所有受限句柄的唯一装配点。
 //
@@ -120,24 +120,23 @@ function platformRootMatchesGeneration(live: { walletGeneration: string; session
   }
 
   /**
-   * 第三方 App 绑定：目录由平台登记 name 决定，访问权由验证身份决定。
+   * 第三方 App 绑定：目录由平台登记 name 决定，访问权由可信来源决定。
    *
-   * 两者缺一不可：只有相同显示名称、或只有 name 相同而身份不同，都不能获得
-   * 同一个目录的读写。
+   * 两者缺一不可：只有相同来源才能获得同一个目录的读写。
    */
   function bindApp(
     declaration: PluginStorageDeclaration,
     appStorageName: string | undefined,
-    verifiedAppIdentity: { publisherPublicKeyHex: string; appId: string } | undefined,
+    origin: string | undefined,
   ): StorageNamespaceBinding {
     if (declaration.authority !== "third-party-app") {
-      throw new StorageRuntimeError("storage_forbidden", "App identity is only valid for third-party-app authority");
+      throw new StorageRuntimeError("storage_forbidden", "App origin is only valid for third-party-app authority");
     }
     if (appStorageName === undefined) {
       throw new StorageRuntimeError("storage_forbidden", "Third-party app storage requires a registered appStorageName");
     }
-    if (!verifiedAppIdentity) {
-      throw new StorageRuntimeError("storage_forbidden", "Third-party app storage requires a verified app identity");
+    if (origin === undefined) {
+      throw new StorageRuntimeError("storage_forbidden", "Third-party app storage requires a verified origin");
     }
     const live = options.generations();
     const binding: StorageNamespaceBinding = Object.freeze({
@@ -147,10 +146,7 @@ function platformRootMatchesGeneration(live: { walletGeneration: string; session
       sessionEpoch: live.sessionEpoch,
       runGeneration: live.runGeneration,
       appStorageName: normalizeAppStorageName(appStorageName),
-      verifiedAppIdentity: {
-        publisherPublicKeyHex: verifiedAppIdentity.publisherPublicKeyHex.toLowerCase(),
-        appId: verifiedAppIdentity.appId,
-      },
+      origin: canonicalOrigin(origin),
     });
     return binding;
   }
@@ -217,7 +213,7 @@ function platformRootMatchesGeneration(live: { walletGeneration: string; session
     async openModuleFileStore(input): Promise<ModuleFileStore> {
       const declaration = input.declaration;
       if (declaration.authority === "third-party-app") {
-        const binding = bindApp(declaration, input.appStorageName, input.verifiedAppIdentity);
+        const binding = bindApp(declaration, input.appStorageName, input.origin);
         return createModuleFileStore({ store: options.store, binding, isCurrent: gateFor(binding) });
       }
       const binding = bind(declaration);

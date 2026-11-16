@@ -1,4 +1,4 @@
-import { deriveP2pkhAddress } from "@keymaster/contracts";
+import { deriveP2pkhAddress, deriveAppCipherSiteKeyHKDF } from "@keymaster/contracts";
 // Session Crypto capability client。
 //
 // 主页面使用 Coordinator RPC；appView 使用当前 Session Window 的专用 Worker。
@@ -25,6 +25,7 @@ export interface SessionCryptoEngine {
   getIdentity(): ActiveKeyCryptoIdentity;
   signDigest(input: { publicKeyHex: string; digest: ArrayBuffer; format: EcdsaSignatureFormat }): Promise<ActiveKeyCryptoSignDigestResult>;
   deriveP2pkhAddress(input: { publicKeyHex: string; network: "main" | "test" }): Promise<{ publicKeyHex: string; address: string }>;
+  deriveCipherSiteKey(input: { publicKeyHex: string; origin: string; bsvNetwork: "main" | "test"; appPublicKeyHex?: string }): Promise<{ publicKeyHex: string; siteKey: ArrayBuffer }>;
   dispose(reason?: string): void;
 }
 
@@ -180,6 +181,10 @@ async function createWorkerBackedEngine(
       guard();
       return request<{ publicKeyHex: string; address: string }>("deriveP2pkhAddress", deriveInput);
     },
+    async deriveCipherSiteKey(deriveInput) {
+      guard();
+      return request<{ publicKeyHex: string; siteKey: ArrayBuffer }>("deriveCipherSiteKey", deriveInput);
+    },
     dispose(reason = "dispose") {
       if (revoked) return;
       // 先撤销公开能力，再允许一次内部 dispose 请求完成 Worker 侧擦除。
@@ -227,6 +232,12 @@ async function createCoordinatorBackedEngine(
       if (result.type !== "deriveP2pkhAddress") throw new Error("deriveP2pkhAddress response mismatch");
       return { publicKeyHex: input.publicKeyHex, address: result.address };
     },
+    async deriveCipherSiteKey(deriveInput) {
+      const result = await call({ type: "deriveCipherSiteKey", origin: deriveInput.origin, network: deriveInput.bsvNetwork, ...(deriveInput.appPublicKeyHex ? { appPublicKeyHex: deriveInput.appPublicKeyHex } : {}) });
+      if (result.type !== "deriveCipherSiteKey") throw new Error("deriveCipherSiteKey response mismatch");
+      const siteKey = hexToBytes(result.siteKeyHex);
+      return { publicKeyHex: input.publicKeyHex, siteKey: siteKey.slice().buffer as ArrayBuffer };
+    },
     dispose() { disposed = true; }
   };
 }
@@ -255,6 +266,13 @@ async function createLocalEngine(input: SessionCryptoBootstrapInput): Promise<Se
       guard();
       if (deriveInput.publicKeyHex !== input.publicKeyHex) throw new Error("session_key_mismatch");
       return { publicKeyHex: input.publicKeyHex, address: deriveP2pkhAddress(input.publicKeyHex, deriveInput.network) };
+    },
+    async deriveCipherSiteKey(deriveInput) {
+      guard();
+      if (deriveInput.publicKeyHex !== input.publicKeyHex) throw new Error("session_key_mismatch");
+      if (!deriveInput.appPublicKeyHex) throw new Error("Verified App public key is required");
+      const siteKey = deriveAppCipherSiteKeyHKDF(input.privateKeyBytes, input.publicKeyHex, deriveInput.bsvNetwork, deriveInput.appPublicKeyHex);
+      return { publicKeyHex: input.publicKeyHex, siteKey: siteKey.slice().buffer as ArrayBuffer };
     },
     dispose() {
       if (disposed) return;

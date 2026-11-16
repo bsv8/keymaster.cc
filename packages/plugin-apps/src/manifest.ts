@@ -4,12 +4,16 @@ import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 // packages/plugin-apps/src/manifest.ts
 // plugin-apps 插件：Keymaster 内部 app launcher。
 //
-// 设计缘由（施工单 2026-06-29 002 硬切换 + 2026-06-29 003 硬切换）：
+// 设计缘由：
 //   - 注册 `/apps` 页面，并接入新业务导航的首页域与首页 widget；
-//   - 点击 `Open App` 时调用 `protocol.service.launchAppView(...)`；
-//   - 插件不自行操作协议存储、App 运行材料或窗口，由主钱包连接宿主统一管理。
+//   - 点击 `Open App` 时调用 `protocol.service.launchAppView(...)`，只传
+//     origin 推导的启动入口，不传 appIdentity、不做签名/能力前置要求；
+//   - 插件不自行操作协议存储、App 运行材料或开窗，由主钱包连接宿主统一管理。
 //   - 依赖 `page.ui.registry` / `business.registry` / `protocol.service`。
 //   - plugin-apps 拥有 launcher 入口，寿命由依赖与作用域决定。
+//   - 应用目录走共享的 `app.directory` 能力：同一份已上架目录 + 本地缓存
+//     （TTL 600000ms、lastSuccessfulFetchAt）+ 收藏 + 自添加合并；
+//     首页 widget 与 `/apps` 页面共用该能力，共享缓存与请求合并。
 //   - 启动失败的 user-facing 文案（与 LaunchAppViewError.code 一一对应）；
 //     当前激活错误码 `export_owner_runtime_failed` 表示 launcher 端
 //     生成 appView owner runtime capability 失败。
@@ -22,17 +26,17 @@ import type {
   RouteRegistry
 } from "@keymaster/contracts";
 import {
-  APP_CATALOG_CAPABILITY,
   PROTOCOL_SERVICE_CAPABILITY,
+  STORAGE_KV_CLIENTS_CAPABILITY, CENTRAL_STORAGE_DECLARATIONS, APPLICATION_CONNECTIONS_CAPABILITY,
   VAULT_WALLET_STATE_CAPABILITY,
   PAGE_UI_REGISTRY_CAPABILITY,
   BUSINESS_REGISTRY_CAPABILITY,
   capabilityDescriptor,
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
+import { APP_DIRECTORY_CAPABILITY, createAppDirectoryService } from "./catalog.js";
 import { AppsHomeWidget } from "./AppsHomeWidget.js";
 import { AppsPage } from "./AppsPage.js";
-import { createCatalogResolver } from "./catalog.js";
 
 const appsResources: I18nPluginResources = {
   namespace: "apps",
@@ -48,9 +52,6 @@ const appsResources: I18nPluginResources = {
       "apps.page.empty.description": "Apps registered in the catalog will appear here.",
       "apps.open.cta": "Open App",
       "apps.open.launching": "Opening…",
-      "apps.invalid.unnamed": "(invalid app)",
-      "apps.invalid.duplicate": "Duplicate id, ignored.",
-      "apps.invalid.configError": "Configuration error: ",
       // 启动失败的 user-facing 文案（与 LaunchAppViewError.code 一一对应）。
       "apps.open.error.vaultLocked":
         "Please unlock Keymaster first, then try again.",
@@ -79,10 +80,34 @@ const appsResources: I18nPluginResources = {
       "apps.launch.password": "Vault password",
       "apps.launch.hardware": "Use the connected RocKey, unlocked on the device. Enter the PIN only on the device.",
       "apps.launch.error.noKeys": "No Vault key is available.",
+      "apps.launch.url": "URL",
+      "apps.launch.source": "Source",
       "apps.widget.title": "Apps",
       "apps.widget.empty": "No apps registered yet.",
       "apps.widget.unavailable": "The app service is temporarily unavailable for this session.",
-      "apps.widget.viewAll": "View all apps"
+      "apps.widget.viewAll": "View all apps",
+      "apps.directory.loading": "Loading apps…",
+      "apps.directory.loadFailed":
+        "Failed to update the market listing. Local apps are still available.",
+      "apps.directory.retry": "Retry",
+      "apps.directory.persist.failed": "Failed to save the app directory. Your change was not saved.",
+      "apps.directory.ephemeral":
+        "Temporary in-memory mode: browser storage is unavailable. Changes will be lost on reload.",
+      "apps.directory.source.market": "Market",
+      "apps.directory.source.local": "Local",
+      "apps.directory.source.favorite": "Favorite",
+      "apps.directory.favorite.add": "Favorite",
+      "apps.directory.favorite.remove": "Unfavorite",
+      "apps.directory.local.remove": "Remove",
+      "apps.directory.local.edit": "Edit",
+      "apps.directory.local.save": "Save",
+      "apps.directory.local.cancel": "Cancel",
+      "apps.directory.add.open": "Add app",
+      "apps.directory.add.url": "App URL",
+      "apps.directory.add.name": "Name (optional)",
+      "apps.directory.add.description": "Description (optional)",
+      "apps.directory.add.submit": "Add",
+      "apps.directory.add.invalidUrl": "Enter a valid http(s) URL."
     },
     "zh-CN": {
       "apps.route.label": "应用",
@@ -95,9 +120,6 @@ const appsResources: I18nPluginResources = {
       "apps.page.empty.description": "在清单中注册的应用会显示在这里。",
       "apps.open.cta": "打开 App",
       "apps.open.launching": "正在打开…",
-      "apps.invalid.unnamed": "（非法应用）",
-      "apps.invalid.duplicate": "id 重复，已忽略。",
-      "apps.invalid.configError": "配置错误：",
       "apps.open.error.vaultLocked": "请先解锁 Keymaster，然后再试一次。",
       "apps.open.error.noActiveKey": "没有可用的 owner key。请先创建或导入一把。",
       "apps.open.error.invalidAppConfig": "该应用配置非法，请联系应用提供方。",
@@ -115,10 +137,32 @@ const appsResources: I18nPluginResources = {
       "apps.launch.password": "Vault 密码",
       "apps.launch.hardware": "使用已连接并在设备上解锁的 RocKey。PIN 只在设备上输入。",
       "apps.launch.error.noKeys": "没有可用的 Vault key。",
+      "apps.launch.url": "链接",
+      "apps.launch.source": "来源",
       "apps.widget.title": "应用",
       "apps.widget.empty": "尚未注册应用。",
       "apps.widget.unavailable": "当前会话暂时无法提供应用服务。",
-      "apps.widget.viewAll": "查看所有应用"
+      "apps.widget.viewAll": "查看所有应用",
+      "apps.directory.loading": "正在加载应用…",
+      "apps.directory.loadFailed": "更新市场目录失败，本地应用仍可使用。",
+      "apps.directory.retry": "重试",
+      "apps.directory.persist.failed": "保存应用目录失败，本次更改未生效。",
+      "apps.directory.ephemeral": "临时内存模式：浏览器存储不可用，刷新后更改会丢失。",
+      "apps.directory.source.market": "市场",
+      "apps.directory.source.local": "本地",
+      "apps.directory.source.favorite": "收藏",
+      "apps.directory.favorite.add": "收藏",
+      "apps.directory.favorite.remove": "取消收藏",
+      "apps.directory.local.remove": "删除",
+      "apps.directory.local.edit": "编辑",
+      "apps.directory.local.save": "保存",
+      "apps.directory.local.cancel": "取消",
+      "apps.directory.add.open": "自添加应用",
+      "apps.directory.add.url": "应用 URL",
+      "apps.directory.add.name": "名称（可选）",
+      "apps.directory.add.description": "介绍（可选）",
+      "apps.directory.add.submit": "添加",
+      "apps.directory.add.invalidUrl": "请输入合法的 http(s) URL。"
     }
   }
 };
@@ -126,14 +170,17 @@ const appsResources: I18nPluginResources = {
 const appsPluginDefinition = {
   id: "apps",
   name: "Apps",
-  description: "Keymaster 内部 app launcher：从本地 JSON 清单展示 app，并在当前 Keymaster 窗口作为 launcher 启动 appView。",
+  description: "Keymaster 内部 app launcher：展示应用目录并在当前 Keymaster 窗口作为 launcher 启动 appView。",
 
   units: [{
     id: "apps.window",
     runtime: "window-main",
-    scopeKind: "root",
-    provides: [capabilityDescriptor(APP_CATALOG_CAPABILITY)],
+    scopeKind: "storage",
+    storages: [CENTRAL_STORAGE_DECLARATIONS.appsDirectory],
+    provides: [capabilityDescriptor(APP_DIRECTORY_CAPABILITY)],
     dependencies: defineRuntimeUnitDependencies([
+      { capability: STORAGE_KV_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "目录完整状态的原子持久化" },
+      { capability: APPLICATION_CONNECTIONS_CAPABILITY, sourceRuntime: "window-main", reason: "真实连接验证成功后解析 pending URL 身份" },
       { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
       { capability: VAULT_WALLET_STATE_CAPABILITY, reason: "应用授权弹窗读取唯一钱包 Key 元数据" },
       { capability: PROTOCOL_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "调用 launchAppView 启动 appView" },
@@ -143,8 +190,22 @@ const appsPluginDefinition = {
   }],
   i18n: appsResources,
   setup(ctx) {
-    // 暴露只读本地 resolver；协议层通过依赖注入消费，绝不反向 import 本插件。
-    ctx.provide(APP_CATALOG_CAPABILITY, createCatalogResolver());
+    // 提供共享应用目录能力：市场快照 + 本地缓存 + 收藏 + 自添加合并。
+    // 只读探测已取消的私有格式：明确拒绝，不迁移、不覆盖、不清空。
+    let incompatibleLegacyState=false;
+    try {incompatibleLegacyState=["keymaster.apps.directory.store.v1","keymaster.apps.directory.market.v1","keymaster.apps.directory.locals.v1","keymaster.apps.directory.favorites.v1"].some(key=>window.localStorage?.getItem(key)!==null&&window.localStorage?.getItem(key)!==undefined)} catch { /* 统一 K-V 仓储不依赖 localStorage 是否可用。 */ }
+    const directory = createAppDirectoryService({ incompatibleLegacyState, repository: ctx.capability(STORAGE_KV_CLIENTS_CAPABILITY).bind(ctx.consumer,ctx.scope,CENTRAL_STORAGE_DECLARATIONS.appsDirectory.purposeId) });
+    ctx.provide(APP_DIRECTORY_CAPABILITY, directory);
+    const connections = ctx.capability(APPLICATION_CONNECTIONS_CAPABILITY);
+    const off = connections.subscribe(() => {
+      for (const app of connections.snapshot().applications) {
+        if (!app.verifiedUrl||!app.display) continue;
+        for (const pending of directory.getSnapshot().pending) {
+          if (pending.url === app.verifiedUrl) void directory.resolvePending(pending.pendingId,app.key,app.verifiedUrl,app.display).catch(() => undefined);
+        }
+      }
+    });
+
     const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope);
     pages.view.register({
       id: "apps.launcher",
@@ -167,6 +228,7 @@ const appsPluginDefinition = {
       icon: "LayoutGrid",
       entry: { path: "/apps", routeId: "apps.launcher" },
     });
+    return off;
   }
 } satisfies PluginManifest & { setup: PluginSetup };
 

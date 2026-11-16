@@ -1,25 +1,7 @@
-// packages/plugin-protocol/src/protocolCrypto.ts
-// 协议相关密码学 helper。
-//
-// 设计缘由（施工单 001）：
-//   - 协议层需要的密码学原语都收敛在文件里：
-//       sha256
-//       signCompactSecp256k1 （compact 64-byte r||s）
-//       deriveSiteKey         （HMAC-SHA256(ownerPublicKeyHex, "keymaster:cipher:v2|"+bsvNetwork+"|"+exactOrigin)）
-//       aesGcmEncrypt / aesGcmDecrypt
-//   - cipher 的站点绑定不依赖 `aud` 参数，**只**从 event.origin 原样参与派生。
-//   - `AES-GCM` 固定 12 字节随机 nonce。
-//   - 解密失败统一抛英文错误（"Decrypt failed"），不区分 origin / nonce / 密文。
-//   - 这里不依赖 vault 的"密码加密私钥"逻辑；cipher 的职责和 vault 不同。
-//
-// 施工单 001 硬切换：
-//   - signCompactSecp256k1 只接受长度恰好 64 的结果
-//   - 删除 DER -> compact fallback；格式应在 signer capability 请求时确定
-
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { gcm } from "@noble/ciphers/aes.js";
-import { hmac } from "@noble/hashes/hmac.js";
 import { sha256 } from "@noble/hashes/sha2.js";
+import { CIPHER_CONTEXT_V2 as SHARED_CIPHER_CONTEXT_V2 } from "@keymaster/contracts";
 
 /** SHA-256(bytes) -> 32 字节。 */
 export function sha256Bytes(bytes: Uint8Array): Uint8Array {
@@ -74,23 +56,8 @@ export function verifyCompactSecp256k1(
   });
 }
 
-/** cipher 站点绑定的协议常量。 */
-export const CIPHER_CONTEXT_V2 = "keymaster:cipher:v2";
-
-/**
- * 从 session 绑定的 owner 公钥 + `exactOrigin` 推导 32 字节 siteKey。
- *
- * 严格按 `HMAC-SHA256(ownerPublicKeyHex, "keymaster:cipher:v2|"+bsvNetwork+"|"+exactOrigin)`。
- * `exactOrigin` 必须原样来自 `event.origin`；本函数不做任何归一化。
- */
-export function deriveSiteKey(ownerPublicKeyHex: string, exactOrigin: string, bsvNetwork: "main" | "test"): Uint8Array {
-  const owner = hexToBytes(ownerPublicKeyHex);
-  if (owner.length !== 33) {
-    throw new Error("Public key must be 33 bytes");
-  }
-  const message = new TextEncoder().encode(`${CIPHER_CONTEXT_V2}|${bsvNetwork}|${exactOrigin}`);
-  return hmac(sha256, owner, message);
-}
+/** cipher 站点绑定的协议常量（唯一真源见 contracts，与 Go 一致）。 */
+export const CIPHER_CONTEXT_V2 = SHARED_CIPHER_CONTEXT_V2;
 
 /**
  * AES-256-GCM 加密。返回 `nonce + cipherbytes`。

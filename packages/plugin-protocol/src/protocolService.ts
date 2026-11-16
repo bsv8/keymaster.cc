@@ -1,4 +1,5 @@
-import { applicationKey, requiresApplicationApproval, readApplicationPermissions, setApplicationPermission } from "./applicationPermissions.js";
+import { applicationKey, permissionKeyFor, requiresApplicationApproval, readApplicationPermissions, setApplicationPermission } from "./applicationPermissions.js";
+import { verifyLoginPublicationProof, PublicationProofValidationError } from "./publicationProof.js";
 import { projectNetworkIdentity, sameNetworkIdentity, type NetworkIdentity } from "@keymaster/contracts";
 import { requireUnlockedWalletIdentity } from "@keymaster/contracts";
 import { createProviderDispatch } from "./providerDispatch.js";
@@ -69,7 +70,7 @@ import type { AppStorageBinding, AppStorageClient } from "@keymaster/contracts";
 // 不依赖 React；可单测。
 
 import { secp256k1 } from "@noble/curves/secp256k1.js";
-import { deriveAppStorageName, deriveThirdPartyStorageModuleId } from "@keymaster/contracts";
+import { deriveAppStorageName, canonicalOrigin } from "@keymaster/contracts";
 import {
   PROTOCOL_VERSION,
   LaunchAppViewError,
@@ -83,10 +84,6 @@ import {
   type ChannelPublishResult,
   type AppViewContext,
   type BinaryField,
-  type AppIdentitySnapshot,
-  type AppIdentityProofV1,
-  type AppCatalogResolution,
-  type AppCatalogResolver,
   type CipherDecryptParams,
   type CipherDecryptResult,
   type CipherEncryptParams,
@@ -158,12 +155,10 @@ import {
   type StorageDeleteResult,
   type VaultService
 } from "@keymaster/contracts";
-import { AppIdentityValidationError, identityDigestBytes, verifyAppIdentityProof } from "./appIdentity.js";
 import { ProtocolValidationError, internalExecutionParams, validateExactChannel } from "./protocolValidation.js";
 import {
   aesGcmDecrypt,
   aesGcmEncrypt,
-  deriveSiteKey,
   getCompressedPubHexFromPrivHex,
   sha256Bytes,
   signCompactSecp256k1
@@ -274,9 +269,7 @@ export interface ProtocolServiceDeps {
   msfileService?: MsFileService;
   getMsfileService?: () => MsFileService | undefined;
   /** Keymaster 本地 catalog resolver；不得反向依赖 plugin-apps。 */
-  appCatalogResolver?: AppCatalogResolver;
   /** 延迟读取 resolver，避免 protocol -> apps capability 初始化循环。 */
-  getAppCatalogResolver?: () => AppCatalogResolver | undefined;
   /** 自定义 source window（默认取 `window.opener`）。 */
   resolveOpener?: () => Window | null;
   /** 自定义 ready 发送目标（默认 `target.postMessage(msg, "*")`）。 */
@@ -314,7 +307,7 @@ export interface ProtocolServiceDeps {
   hostedApplication?: boolean;
   applicationLoggedOut?: () => void;
   /** 接收端确认应用身份后通知主钱包宿主；身份信息不从未验证消息直接展示。 */
-  applicationIdentified?: (origin: string, identity?: AppIdentitySnapshot) => Promise<void>;
+  applicationIdentified?: (origin: string, appPublicKeyHex: string, verifiedUrl?: string,display?:{name:string;description:string;icon:string}) => Promise<void>;
 }
 
 /**
@@ -328,6 +321,9 @@ interface RequestRecord {
   readonly runGeneration: string;
   readonly bindingId?: string;
   applicationKey?: string;
+  /** 建连时验证的 App 公钥快照；缺省表示未经验证的传输，不得继承已有许可。 */
+  verifiedAppPublicKeyHex?: string;
+  verifiedDisplay?:{name:string;description:string;icon:string};
   manualApprovedAt?: number;
   paymentPreview?: import("@keymaster/contracts").P2pkhConnectPaymentPreview;
   paymentStatus?: import("@keymaster/contracts").ConnectPaymentStatus;
@@ -413,6 +409,8 @@ interface RequestRecord {
     ownerPublicKeyHex: string;
     ownerLabel: string;
     claimsSnapshot: Record<string, import("@keymaster/contracts").ResolvedClaimValue>;
+    /** 沿用原有效授权中已验证的 App 公钥快照；换来源时不得恢复。 */
+    appPublicKeyHex?: string;
   };
   /**
    * 标记 record 在 unlock 后**不**走 confirming 视图，直接 queued → executing。
@@ -556,6 +554,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 设计缘由：
    *   - 用于 UI / 启动决策 / `connect.launch` 的 caller origin 校验。
    */
+  private currentAuthorizationId: string | undefined;
   private currentAppViewContext: AppViewContext | null = null;
 
   /**
@@ -587,8 +586,10 @@ export class ProtocolServiceImpl implements ProtocolService {
   private readonly launchTokensByToken: Map<
     string,
     {
-      appId: string;
       appOrigin: string;
+      stagedSession: ConnectSessionRecord;
+      expectedAppPublicKeyHex?: string;
+      directoryUrl?: string;
       appUrl: string;
       networkIdentity: NetworkIdentity;
       walletPublicKeyHex: string;
@@ -838,6 +839,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 7. 清空 appView 启动上下文 + launchToken 缓存 + bootstrap 监听：
     //    Session Window 重新启动会话时不允许复用旧 launcher handoff。
     this.currentAppViewContext = null;
+    this.currentAuthorizationId=undefined;
     this.currentAppClientSource = null;
     // 施工单 2026-06-30 003：appView UI 两段式。重启会话时 child `ready`
     // 必须重置回 false，否则新会话会在第一次启动时就直接进入 popup 阶段。
@@ -918,6 +920,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // session 订阅者拿到 phase="waiting" + lockState 不变（vault 状态
     // 与 popup 生命周期解耦，由 syncWalletState 单独管理）。
     this.currentAppViewContext = null;
+    this.currentAuthorizationId=undefined;
     this.currentAppClientSource = null;
     // 施工单 2026-06-30 003：endSession 同样要把 child `ready` 等待态
     // 重置；否则下次 startSession 启动新会话时等待态可能跨会话污染。
@@ -1133,10 +1136,10 @@ export class ProtocolServiceImpl implements ProtocolService {
       await this.finalizeRequestByTimeout(rec.recordId); return;
     }
     if (rememberApplicationPermission && rec.applicationKey && requiresApplicationApproval(rec.method)) {
-      await readApplicationPermissions(this.deps.storageRepository, rec.applicationKey);
+      await readApplicationPermissions(this.deps.storageRepository, this.permKey(rec));
       this.assertWalletGeneration(rec);
       if (rec.phase !== "confirming" || rec.cancelRequested) return;
-      await setApplicationPermission(this.deps.storageRepository, rec.applicationKey, rec.method, true);
+      await setApplicationPermission(this.deps.storageRepository, this.permKey(rec), rec.method, true);
       await this.deps.applicationPermissionChanged?.();
       this.assertWalletGeneration(rec);
       if (rec.phase !== "confirming") return;
@@ -1534,105 +1537,18 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /* ============== plugin-apps launcher 启动入口（施工单 2026-06-29 002 硬切换） ============== */
 
-  /** 目录启动只信任本地已验证 proof；运行上下文由主钱包接管，直接导航外部 App。 */
+  /** 目录启动使用真实 origin；不拉取 HTML proof、签名信任根与能力预检。 */
   private resolveAppCatalog(
     origin: string,
-    supplied?: AppIdentityProofV1,
-    appId?: string
-  ): { proof?: AppIdentityProofV1; snapshot?: AppIdentitySnapshot } {
-    const resolver = this.deps.getAppCatalogResolver?.() ?? this.deps.appCatalogResolver;
-    const resolution: AppCatalogResolution = resolver?.resolve(origin) ?? {
-      kind: "known-invalid",
-      reason: "local catalog resolver unavailable"
-    };
-    if (resolution.kind === "known-invalid") {
-      throw new LaunchAppViewError(
-        "invalid_app_config",
-        `launchAppView: catalog app identity invalid (${resolution.reason})`
-      );
-    }
-    if (resolution.kind === "unknown") {
-      throw new LaunchAppViewError(
-        "invalid_app_config",
-        "launchAppView: origin is not registered in local catalog"
-      );
-    }
-    if (resolution.appId !== undefined && resolution.appId !== appId) {
-      throw new LaunchAppViewError(
-        "invalid_app_config",
-        "launchAppView: app id does not match local catalog"
-      );
-    }
-    let proof: AppIdentityProofV1 | undefined;
-    if (resolution.proof) {
-      try { verifyAppIdentityProof(resolution.proof); proof = resolution.proof; }
-      catch { throw new LaunchAppViewError("invalid_app_config", "launchAppView: invalid local app identity proof"); }
-    }
-    if (supplied && !proof) {
-      throw new LaunchAppViewError(
-        "invalid_app_config",
-        "launchAppView: caller app identity cannot upgrade an app without local proof"
-      );
-    }
-    if (proof && supplied) {
-      try { verifyAppIdentityProof(supplied); } catch { throw new LaunchAppViewError("invalid_app_config", "launchAppView: invalid caller app identity proof"); }
-      const expectedDigest = identityDigestBytes(proof);
-      const suppliedDigest = identityDigestBytes(supplied);
-      if (expectedDigest.some((byte, index) => byte !== suppliedDigest[index])) {
-      throw new LaunchAppViewError(
-        "invalid_app_config",
-        "launchAppView: caller app identity does not match local catalog"
-      );
-      }
-    }
-    if (!proof) return {};
-    const snapshot = verifyAppIdentityProof(proof);
-    return { proof, snapshot };
-  }
-
-  /** requirements 是启动前置条件，不是 capability permission。 */
-  private assertAppRequirements(proof: AppIdentityProofV1 | undefined, keyReady: boolean): void {
-    if (!proof) return;
-    if (proof.requirements.includes("private-key") && !keyReady) {
-      throw new LaunchAppViewError(
-        "no_active_key",
-        "launchAppView: private key requirement is not ready"
-      );
-    }
-    if (proof.requirements.includes("storage")) {
-      const storage = this.deps.getStorageController?.() ?? this.deps.storageController;
-      if (!storage || storage.status() !== "ready") {
-        throw new LaunchAppViewError(
-          "requirement_unavailable",
-          "launchAppView: storage requirement is not ready"
-        );
-      }
-    }
-  }
-
-  private assertLoginRequirements(proof: AppIdentityProofV1, keyReady: boolean): void {
-    if (proof.requirements.includes("private-key") && !keyReady) {
-      throw localFailure(
-        "internal_error",
-        "connect.login: private key requirement is not ready"
-      );
-    }
-    if (proof.requirements.includes("storage")) {
-      const storage = this.deps.getStorageController?.() ?? this.deps.storageController;
-      if (!storage || storage.status() !== "ready") {
-        throw protocolError(
-          "storage_unavailable",
-          "connect.login: storage requirement is not ready"
-        );
-      }
-    }
+  ): { origin: string } {
+    const canonical = canonicalOrigin(origin);
+    return { origin: canonical };
   }
 
   async launchAppView(input: LaunchAppViewInput): Promise<LaunchAppViewResult> {
     // 1) 校验入参基本完整性。
     if (
       !input ||
-      !input.appId ||
       !input.appOrigin ||
       !input.appUrl
     ) {
@@ -1664,9 +1580,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         "launchAppView: appOrigin does not match appUrl.origin"
       );
     }
-    const catalog = this.resolveAppCatalog(input.appOrigin, input.appIdentity, input.appId);
-    // Catalog/storage/identity checks are synchronous and precede the gesture popup.
-    this.assertAppRequirements(catalog.proof, true);
+    const catalog = this.resolveAppCatalog(input.appOrigin);
     if (typeof window === "undefined") {
       throw new LaunchAppViewError(
         "window_unavailable",
@@ -1684,7 +1598,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     let view: import("@keymaster/contracts").ApplicationView;
     try {
       view = this.deps.reserveApplicationView({
-        id: `${input.appOrigin}\0${input.appId}`, title: catalog.snapshot?.appName ?? input.appId, origin: input.appOrigin, mode: openMode,
+        id: `${input.appOrigin}`, title: new URL(input.appOrigin).host, origin: input.appOrigin, mode: openMode,
         onClose: () => this.deps.closeApplicationView?.(view.source),
       });
     } catch { throw new LaunchAppViewError("open_session_window_failed", "Could not open application view"); }
@@ -1714,7 +1628,6 @@ export class ProtocolServiceImpl implements ProtocolService {
       ownerPublicKeyHex: key.publicKeyHex,
       ownerLabel: key.label,
       claimsSnapshot: resolvedClaims,
-      ...(catalog.snapshot ? { appIdentity: catalog.snapshot } : {}),
       createdAt: now,
       lastUsedAt: now,
       revokedAt: null
@@ -1742,11 +1655,6 @@ export class ProtocolServiceImpl implements ProtocolService {
         "launchAppView: failed to export owner runtime bootstrap"
       );
     }
-    try {
-      await this.deps.storageRepository.putConnectSessionAndRevokeOriginPeers(sessionRecord);
-    } catch (err) {
-      throw new LaunchAppViewError("session_storage_unavailable", "launchAppView: session storage unavailable");
-    }
     // 存储等待期间断线/锁定，旧 capability 也不能用来导航或建立可执行会话。
     sessionRuntimeBootstrap.crypto.getIdentity();
     wallet.assertActive();
@@ -1767,7 +1675,9 @@ export class ProtocolServiceImpl implements ProtocolService {
     })();
     // 11) 组装 AppBootstrapPayload（含 `sessionRuntimeBootstrap`，不含 `runtimeBinding`）。
     const bootstrap = buildAppBootstrapPayload({
-      appId: input.appId,
+      stagedSession: sessionRecord,
+      expectedAppPublicKeyHex: input.expectedAppPublicKeyHex,
+      directoryUrl: input.appUrl,
       appOrigin: input.appOrigin,
       appUrl: appUrlWithLaunchToken,
       walletPublicKeyHex: key.publicKeyHex,
@@ -1775,7 +1685,6 @@ export class ProtocolServiceImpl implements ProtocolService {
       ownerPublicKeyHex: key.publicKeyHex,
       resolvedClaims: resolvedClaims as Record<string, unknown>,
       resolvedAt: now,
-      ...(catalog.snapshot ? { appIdentity: catalog.snapshot } : {}),
       launchToken,
       expiresAt: now + 24 * 60 * 60 * 1000,
       sessionRuntimeBootstrap
@@ -1823,17 +1732,17 @@ export class ProtocolServiceImpl implements ProtocolService {
     //    bootstrap runtime）——**不**再依"是否 locked"。
     const claimsSnapshot = payload.resolvedClaims as AppViewContext["resolvedClaims"];
     this.currentAppViewContext = {
-      appId: payload.app.appId,
       appOrigin: payload.app.appOrigin,
       appUrl: payload.app.appUrl,
       walletPublicKeyHex: payload.walletPublicKeyHex,
       ownerPublicKeyHex: payload.ownerPublicKeyHex,
       resolvedClaims: claimsSnapshot,
       resolvedAt: payload.resolvedAt,
-      ...(payload.appIdentity ? { appIdentity: payload.appIdentity } : {})
     };
     this.launchTokensByToken.set(payload.launchToken, {
-      appId: payload.app.appId,
+      stagedSession: payload.stagedSession,
+      expectedAppPublicKeyHex: payload.app.expectedAppPublicKeyHex,
+      directoryUrl: payload.app.directoryUrl,
       appOrigin: payload.app.appOrigin,
       appUrl: payload.app.appUrl,
       networkIdentity: payload.networkIdentity,
@@ -1959,6 +1868,11 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /* ============== 内部 ============== */
+
+  /** 许可主键：已验证的 App 公钥快照优先，未验证沿用来源键（过渡行为见 permissionKeyFor）。 */
+  private permKey(rec: { origin: string; verifiedAppPublicKeyHex?: string }): string {
+    return permissionKeyFor(rec.origin, rec.verifiedAppPublicKeyHex);
+  }
 
   private snapshotInternal(): ProtocolSessionSnapshot {
     const rec = this.firstAliveRequest();
@@ -2097,7 +2011,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const method = parsed.method;
 
     const rec: RequestRecord = {
-      ...(this.currentAppViewContext ? { applicationKey: applicationKey(origin, this.currentAppViewContext.appIdentity) } : {}),
+
       protocol: parsed.protocol,
       recordId,
       transportRequestId: parsed.id,
@@ -2131,22 +2045,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     };
     this.requestsByRecordId.set(recordId, rec);
 
-    if (this.deps.applicationIdentified && (method === "connect.login" || method === "connect.resume")) {
-      try {
-        const proof = (parsed.params as ConnectLoginParams | ConnectResumeParams).appIdentity;
-        const identity = proof ? verifyAppIdentityProof(proof) : method === "connect.resume"
-          ? (await this.deps.storageRepository?.getConnectSession(rec.networkIdentity, origin))?.appIdentity
-          : undefined;
-        rec.applicationKey = applicationKey(origin, identity);
-        await this.deps.applicationIdentified(origin, identity);
-        this.assertWalletGeneration(rec);
-        this.receiver.assertCurrent(rec.protocol);
-      } catch {
-        await this.scheduleFailFastRequest(recordId, "invalid_request", "internal_error");
-        return;
-      }
-    }
-
     // 决定初始 phase。`setRecordPhase` 只更新内存 feed 卡（施工单
     // 2026-06-27 002 硬切换：feed 投影走 `buildFeedDisplay`，活卡按
     // createdAt asc 稳定排序，不再做"先占位后改 phase"的两次写）。
@@ -2173,6 +2071,24 @@ export class ProtocolServiceImpl implements ProtocolService {
       return;
     }
     if (method === "connect.login") {
+      // 建连时验证发布身份：应用可提交当前入口的来源证明，钱包核对签名与
+      // 可信来源；证明 origin 与实际来源不一致、签名无效一律 fail-fast，
+      // 不得用受害者证明在另一来源建连。无证明时保持未验证，不继承许可。
+      const loginParams = parsed.params as ConnectLoginParams & { publicationProof?: unknown };
+      if (loginParams.publicationProof === undefined) {await this.scheduleFailFastRequest(recordId,"invalid_request","internal_error");return;}
+      if (loginParams.publicationProof !== undefined) {
+        try {
+          const verified = verifyLoginPublicationProof(loginParams.publicationProof, origin);
+          if (!verified) throw new PublicationProofValidationError("invalid_request", "publicationProof is invalid");
+          rec.verifiedAppPublicKeyHex = verified.appPublicKeyHex;
+ rec.verifiedDisplay=verified.display;
+        } catch (err) {
+          const code = err instanceof PublicationProofValidationError ? err.code : "invalid_request";
+          await this.scheduleFailFastRequest(recordId, code, "internal_error");
+          return;
+        }
+      }
+      rec.applicationKey = permissionKeyFor(origin,rec.verifiedAppPublicKeyHex);
       await this.bootstrapConnectLoginRecord(rec, parsed.params as ConnectLoginParams);
       // login：用户必须选 key → 走 confirming 视图（与现有 manual 路径一致）。
     } else if (method === "connect.resume") {
@@ -2203,6 +2119,22 @@ export class ProtocolServiceImpl implements ProtocolService {
       // `probeExecutionCondition` 决定立即执行还是 fail-fast。
       // executeConnectLaunch 内部再用 launchToken + 统一
       // `resolveOwnerRuntime` 做 fail-closed 校验。
+      // 应用可附带当前入口的来源证明；钱包核对签名与可信来源及令牌绑定来源，
+      // 不一致直接 fail-fast（复制证明到另一来源无法建连）。
+      const launchParams = parsed.params as ConnectLaunchParams & { publicationProof?: unknown };
+      if (launchParams.publicationProof === undefined) {await this.scheduleFailFastRequest(recordId,"invalid_request","internal_error");return;}
+      if (launchParams.publicationProof !== undefined) {
+        try {
+          const verified = verifyLoginPublicationProof(launchParams.publicationProof, origin);
+          if (!verified) throw new PublicationProofValidationError("invalid_request", "publicationProof is invalid");
+          rec.verifiedAppPublicKeyHex = verified.appPublicKeyHex;
+ rec.verifiedDisplay=verified.display;
+        } catch (err) {
+          const code = err instanceof PublicationProofValidationError ? err.code : "invalid_request";
+          await this.scheduleFailFastRequest(recordId, code, "internal_error");
+          return;
+        }
+      }
       this.setRecordPhase(recordId, "queued");
       rec.enteredPhaseAt = Date.now();
       this.executionQueue.push(recordId);
@@ -2271,15 +2203,17 @@ export class ProtocolServiceImpl implements ProtocolService {
       } else {
         rec.walletPublicKeyHex = sessionId;
         rec.ownerPublicKeyHex = session.ownerPublicKeyHex;
-        rec.applicationKey = applicationKey(origin, session.appIdentity);
+        if (!session.appPublicKeyHex) {await this.scheduleFailFastRequest(recordId,"invalid_request","internal_error");return;}
+        rec.applicationKey = applicationKey(session.appPublicKeyHex);
+        if (session.appPublicKeyHex) rec.verifiedAppPublicKeyHex = session.appPublicKeyHex;
         if (!this.deps.hostedApplication && this.deps.storageRepository?.putApplication) {
           try {
-            await this.deps.storageRepository.putApplication({ key: rec.applicationKey, origin, name: session.appIdentity?.appName ?? new URL(origin).host, identity: session.appIdentity, updatedAt: now });
+            await this.deps.storageRepository.putApplication({ key: rec.applicationKey, origin, name: new URL(origin).host, updatedAt: now });
           } catch {
             await this.scheduleFailFastRequest(recordId, "internal_error", "storage_error"); return;
           }
         }
-        if ((method.startsWith("storage.") || method.startsWith("msfile.")) && !session.appIdentity) {
+        if ((method.startsWith("storage.") || method.startsWith("msfile.")) && !session.origin) {
           // MSFile 与 Storage 一致：无 verified App Identity 的 session 不允许
           // 进入执行；对外用稳定 code fail-fast。
           const identityCode: ProtocolErrorCode =
@@ -2429,7 +2363,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    */
   /** SDK 付款账本只接受 96 字符内的 ID；压缩已有网络/公钥/来源坐标，不签发授权 ID。 */
   private async connectBindingKey(identity: NetworkIdentity, origin: string): Promise<string> {
-    const coordinate = JSON.stringify([identity.bsvNetwork, identity.publicKeyHex.toLowerCase(), origin]);
+    const coordinate = JSON.stringify([identity.bsvNetwork, identity.publicKeyHex.toLowerCase(), origin,crypto.randomUUID()]);
     const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(coordinate)));
     return "connect." + Array.from(digest, byte => byte.toString(16).padStart(2, "0")).join("");
   }
@@ -2449,21 +2383,10 @@ export class ProtocolServiceImpl implements ProtocolService {
     const publicKeyHex = identity.publicKeyHex;
     if (!/^(02|03)[0-9a-f]{64}$/iu.test(publicKeyHex)) return null;
     if (!this.deps.storageRepository) return null;
-    const cached = await this.deps.storageRepository.getConnectSession(identity, origin);
+    const cached = await this.deps.storageRepository.getConnectSession(identity, origin,this.currentAuthorizationId);
     if (cached?.revokedAt !== null && cached !== null) return null;
     if (cached) return sameNetworkIdentity(cached.networkIdentity, identity) ? cached : null;
-    const key = await this.publicOwnerKey(identity);
-    if (!key) return null;
-    // A valid owner identity is sufficient to reconnect after local reset.
-    // This creates current defaults, not restored permissions or an App Identity.
-    const now = Date.now();
-    const record: ConnectSessionRecord = {
-      sessionId: await this.connectBindingKey(key, origin),
-      origin, networkIdentity: projectNetworkIdentity(key), ownerPublicKeyHex: key.publicKeyHex,
-      ownerLabel: key.label, claimsSnapshot: {}, createdAt: now, lastUsedAt: now, revokedAt: null,
-    };
-    await this.deps.storageRepository.putConnectSession(record);
-    return record;
+    return null;
   }
 
   /**
@@ -2605,7 +2528,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (rec.protocol.authorizationId) {
       let session: ConnectSessionRecord | null = null;
       try {
-        session = await this.deps.storageRepository.getConnectSession(rec.networkIdentity, origin);
+        session = await this.deps.storageRepository.getConnectSession(rec.networkIdentity, origin,rec.protocol.authorizationId??this.currentAuthorizationId);
       } catch {
         // 临时读取失败不能证明授权已失效，返回内部错误并保留恢复记录。
         return { code: "internal_error", reason: "internal_error" };
@@ -2619,29 +2542,14 @@ export class ProtocolServiceImpl implements ProtocolService {
       } catch {
         return { code: "user_rejected", reason: "internal_error" };
       }
-      const resumeProof = (params as { appIdentity?: AppIdentityProofV1 }).appIdentity;
-      if (resumeProof) {
-        try {
-          const appIdentity = verifyAppIdentityProof(resumeProof);
-          // 恢复不得替换身份或扩大许可：必须与原授权快照的发布者、应用标识和身份摘要完全一致。
-          // requirements 已计入身份摘要，摘要一致即许可范围一致；与 CLI 的 IdentityDigest 核对保持一致。
-          if (!session.appIdentity) throw new Error("Application authorization identity mismatch");
-          if (session.appIdentity.publisherPublicKeyHex.toLowerCase() !== appIdentity.publisherPublicKeyHex.toLowerCase()
-            || session.appIdentity.appId !== appIdentity.appId
-            || session.appIdentity.identityDigestHex.toLowerCase() !== appIdentity.identityDigestHex.toLowerCase()) {
-            throw new Error("Application authorization identity mismatch");
-          }
-          this.assertLoginRequirements(resumeProof, true);
-          // 恢复时不修改授权快照：沿用原授权，不覆盖、不扩大。
-        } catch {
-          return { code: "invalid_request", reason: "internal_error" };
-        }
-      }
+      // resume 要求原恢复凭据和同一来源/钱包/有效运行代际；不得因 proof 删除而改成恢复失败自动登录。
       rec.connectResumeSnapshot = {
         sessionId: session.sessionId,
         ownerPublicKeyHex: session.ownerPublicKeyHex,
         ownerLabel: session.ownerLabel,
-        claimsSnapshot: session.claimsSnapshot
+        claimsSnapshot: session.claimsSnapshot,
+        appPublicKeyHex: permissionKeyFor(session.origin,session.appPublicKeyHex),
+
       };
       return null;
     }
@@ -2664,22 +2572,14 @@ export class ProtocolServiceImpl implements ProtocolService {
     } catch (err) {
       return { code: "user_rejected", reason: "internal_error" };
     }
-    if (params.appIdentity) {
-      try {
-        const appIdentity = verifyAppIdentityProof(params.appIdentity);
-        if (applicationKey(origin, session.appIdentity) !== applicationKey(origin, appIdentity)) throw new Error("Application authorization identity mismatch");
-        this.assertLoginRequirements(params.appIdentity, true);
-        session = { ...session, appIdentity };
-        await this.deps.storageRepository.putConnectSession(session);
-      } catch {
-        return { code: "user_rejected", reason: "internal_error" };
-      }
-    }
+    // 可信来源属于 Receiver 上下文；恢复时沿用原授权及已验证身份快照，不替换身份。
     rec.connectResumeSnapshot = {
       sessionId: session.sessionId,
       ownerPublicKeyHex: session.ownerPublicKeyHex,
       ownerLabel: session.ownerLabel,
-      claimsSnapshot: session.claimsSnapshot
+      claimsSnapshot: session.claimsSnapshot,
+      appPublicKeyHex: permissionKeyFor(session.origin,session.appPublicKeyHex),
+
     };
     return null;
   }
@@ -2695,7 +2595,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   ): Promise<boolean> {
     if (requiresApplicationApproval(parsed.method)) {
       if (!_rec.applicationKey) return false;
-      try { return (await readApplicationPermissions(this.deps.storageRepository, _rec.applicationKey)).includes(parsed.method); }
+      try { return (await readApplicationPermissions(this.deps.storageRepository, this.permKey(_rec))).includes(parsed.method); }
       catch { return false; } // unknown permission never silently authorizes execution
     }
     if (parsed.method === "payment.status" || parsed.method === "feepool.prepare" || parsed.method === "feepool.commit") return true;
@@ -3155,15 +3055,21 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     let session: ConnectSessionRecord | null = null;
     try {
-      session = await this.fetchSessionForBinding({ ...rec.networkIdentity, publicKeyHex: sessionId }, rec.origin);
+      if(rec.method === "connect.launch") {
+        const token = (rec.params as ConnectLaunchParams).launchToken;
+        const launch=this.launchTokensByToken.get(token);
+        if(launch?.appOrigin===rec.origin && rec.verifiedAppPublicKeyHex)session=launch.stagedSession;
+      } else {
+        session = await this.fetchSessionForBinding({ ...rec.networkIdentity, publicKeyHex: sessionId }, rec.origin);
+      }
     } catch {
-      return { kind: "fail", storageError: true };
+      return {kind:"fail",storageError:true};
     }
     if (!session || session.revokedAt !== null) {
       return { kind: "fail" };
     }
     // 1. bootstrap_runtime 来源：刚启动 Session Window 时已有。
-    if (this.ownerRuntimesBySessionId.has(session.sessionId)) {
+    if (this.ownerRuntimesBySessionId.has(session.ownerPublicKeyHex)) {
       return { kind: "execute" };
     }
     // 2. vault_runtime 来源：本窗口 vault 已 unlock 且能拿到 owner key。
@@ -3336,13 +3242,13 @@ export class ProtocolServiceImpl implements ProtocolService {
     const service = this.currentStorageController();
     if (!service || !this.deps.bindAppStorage) throw protocolError("storage_unavailable", "Storage service is unavailable");
     const session = await this.requireConnectSession(rec, walletPublicKeyHex);
-    if (!session.appIdentity) throw protocolError("storage_identity_required", "Storage requires a verified app identity proof snapshot");
+    if (!session.origin) throw protocolError("storage_identity_required", "Storage requires a trusted origin session");
     if (!session.ownerPublicKeyHex) throw protocolError("storage_identity_required", "Storage requires an active owner");
     const summary = await service.summary();
     if (!summary.walletGeneration) throw protocolError("storage_unavailable", "Storage requires an initialized wallet");
     const lifecycle = this.deps.walletState.snapshot();
-    return this.deps.bindAppStorage({ ...session.networkIdentity, walletPublicKeyHex: session.ownerPublicKeyHex, transportOrigin: rec.origin,
-      appIdentity: session.appIdentity, sessionEpoch: lifecycle.sessionEpoch,
+    return this.deps.bindAppStorage({ authorizationId:session.authorizationId!, appPublicKeyHex:permissionKeyFor(rec.origin,session.appPublicKeyHex), ...session.networkIdentity, walletPublicKeyHex: session.ownerPublicKeyHex, transportOrigin: rec.origin,
+      origin: session.origin, sessionEpoch: lifecycle.sessionEpoch,
       walletGeneration: summary.walletGeneration, runGeneration: lifecycle.runGeneration,
     });
   }
@@ -3395,7 +3301,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const service = this.currentMsfileService();
     if (!service) throw protocolError("msfile_unavailable", "MSFile service is unavailable");
     const session = await this.requireConnectSession(rec, walletPublicKeyHex);
-    if (!session.appIdentity) {
+    if (!session.origin) {
       throw protocolError("msfile_identity_required", "MSFile requires a verified app identity proof snapshot");
     }
     return {
@@ -3405,7 +3311,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         walletPublicKeyHex: session.ownerPublicKeyHex,
         transportOrigin: rec.origin,
         ownerPublicKeyHex: session.ownerPublicKeyHex,
-        appIdentity: session.appIdentity
+        origin: session.origin
       }
     };
   }
@@ -3616,7 +3522,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       // 其它统一 `user_rejected`。
       let raw: ConnectSessionRecord | null = null;
       try {
-        raw = await this.deps.storageRepository.getConnectSession(rec.networkIdentity, rec.origin);
+        raw = await this.deps.storageRepository.getConnectSession(rec.networkIdentity, rec.origin,rec.protocol.authorizationId??this.currentAuthorizationId);
       } catch {
         throw localFailure("internal_error", "connect session storage unavailable");
       }
@@ -3775,20 +3681,36 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
-   * 用 session 绑定的 owner public key 派生站点密钥。
+   * 用 session 绑定的 owner 受控能力派生站点密钥（HKDF，私钥不出 Worker）。
    *
    * 设计缘由：cipher.* 必须基于 session 绑定的 key；**不**读取钱包全局
-   * active key。
+   * active key；**不**使用签名派生，不静默回退。
    *
-   * 施工单 2026-06-30 002 硬切换：cipher 路径改走
-   * `resolveOwnerRuntime(session)` 统一入口；无论 runtime 来源
-   * （`bootstrap_runtime` / `vault_runtime`），对外行为完全一致。
+   * 统一 HKDF：`resolveOwnerRuntime(session)` 统一入口；无论 runtime 来源
+   * （`bootstrap_runtime` / `vault_runtime`），Worker 内同一纯函数派生。
    */
   private async deriveSiteKeyWithSession(
     session: ConnectSessionRecord,
     exactOrigin: string
   ): Promise<Uint8Array> {
-    return deriveSiteKey(session.ownerPublicKeyHex, exactOrigin, session.networkIdentity.bsvNetwork);
+    const runtime = await this.resolveOwnerRuntime(session);
+    // 已验证 App 身份的会话按 App 公钥派生（origin 不进入派生）；
+    // 未验证会话沿用来源派生保持旧行为（过渡行为，见 permissionKeyFor）。
+    // appPublicKeyHex 来自钱包已验证的 session 快照，不接受业务请求自带。
+    const result = await runtime.crypto.deriveCipherSiteKey({
+      origin: exactOrigin,
+      bsvNetwork: session.networkIdentity.bsvNetwork,
+      appPublicKeyHex: permissionKeyFor(session.origin,session.appPublicKeyHex),
+
+    });
+    if (result.publicKeyHex.toLowerCase() !== session.ownerPublicKeyHex.toLowerCase()) {
+      throw new Error("Cipher derivation identity mismatch");
+    }
+    const key = new Uint8Array(result.siteKey.slice(0));
+    if (key.length !== 32) {
+      throw new Error("Cipher derivation failed");
+    }
+    return key;
   }
 
   /**
@@ -3902,17 +3824,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const resolvedClaims = resolveClaims(params.claims, (name) =>
       resolveBuiltinClaim(name, { activeKeyLabel: key.label })
     );
-    let appIdentity: AppIdentitySnapshot | undefined;
-    if (params.appIdentity) {
-      try {
-        verifyAppIdentityProof(params.appIdentity);
-        this.assertLoginRequirements(params.appIdentity, Boolean(key.publicKeyHex));
-        appIdentity = verifyAppIdentityProof(params.appIdentity);
-      } catch (error) {
-        if (error instanceof AppIdentityValidationError) throw localFailure("internal_error", error.message);
-        throw error;
-      }
-    }
+    // 可信来源属于 Receiver 上下文；login 只需文本及实际 claims，不做 proof/requirements 门禁。
     const now = Date.now();
     const sessionId = await this.connectBindingKey(key, rec.origin);
     const record: ConnectSessionRecord = {
@@ -3923,7 +3835,8 @@ export class ProtocolServiceImpl implements ProtocolService {
       ownerPublicKeyHex: key.publicKeyHex,
       ownerLabel: key.label,
       claimsSnapshot: resolvedClaims,
-      ...(appIdentity ? { appIdentity } : {}),
+      // 建连时已验证的发布身份快照；后续 resume 沿用，不重复发布验签。
+      ...(rec.verifiedAppPublicKeyHex ? { appPublicKeyHex: rec.verifiedAppPublicKeyHex,appDisplay:rec.verifiedDisplay } : {}),
       // 施工单 2026-06-30 002 硬切换：session 真值收口为三元组
       // （sessionId + origin + ownerPublicKeyHex），**不**写
       // `runtimeBinding`——执行路径走统一 owner runtime resolver，
@@ -3932,15 +3845,16 @@ export class ProtocolServiceImpl implements ProtocolService {
       lastUsedAt: now,
       revokedAt: null
     };
-    await this.deps.storageRepository.putConnectSessionAndRevokeOriginPeers(record);
+    await this.deps.storageRepository.putConnectSession(record);
+    this.currentAuthorizationId=record.authorizationId;
+    await this.deps.applicationIdentified?.(rec.origin,permissionKeyFor(rec.origin,record.appPublicKeyHex),undefined,record.appDisplay);
     return {
       authorizationId: record.authorizationId!,
       walletPublicKeyHex: key.publicKeyHex,
       networkIdentity: projectNetworkIdentity(key),
       ownerPublicKeyHex: key.publicKeyHex,
       resolvedClaims: resolvedClaims,
-      resolvedAt: now,
-      ...(appIdentity ? { appIdentity } : {})
+      resolvedAt: now
     };
   }
 
@@ -3961,7 +3875,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 刷新恢复（携带原授权）：必须沿用原授权建立新 binding，绝不创建新授权或扩大权限。
     if (rec.protocol.authorizationId) {
       if (!this.deps.storageRepository) throw localFailure("internal_error", "connect.resume: session storage unavailable");
-      const existing = await this.deps.storageRepository.getConnectSession(rec.networkIdentity, rec.origin);
+      const existing = await this.deps.storageRepository.getConnectSession(rec.networkIdentity, rec.origin,rec.protocol.authorizationId??this.currentAuthorizationId);
       if (!existing || existing.revokedAt !== null || existing.origin !== rec.origin || existing.authorizationId !== rec.protocol.authorizationId) {
         throw protocolError("authorization_expired", "Application authorization is no longer valid; login again");
       }
@@ -3972,6 +3886,8 @@ export class ProtocolServiceImpl implements ProtocolService {
       const now = Date.now();
       const next: ConnectSessionRecord = { ...existing, lastUsedAt: now };
       await this.deps.storageRepository.putConnectSession(next);
+      this.currentAuthorizationId=existing.authorizationId;
+      await this.deps.applicationIdentified?.(rec.origin,permissionKeyFor(rec.origin,existing.appPublicKeyHex),undefined,existing.appDisplay);
       return {
         authorizationId: existing.authorizationId!,
         walletPublicKeyHex: existing.ownerPublicKeyHex,
@@ -3979,7 +3895,6 @@ export class ProtocolServiceImpl implements ProtocolService {
         ownerPublicKeyHex: existing.ownerPublicKeyHex,
         resolvedClaims: existing.claimsSnapshot,
         resolvedAt: now,
-        ...(existing.appIdentity ? { appIdentity: existing.appIdentity } : {})
       };
     }
     const session = await this.requireConnectSession(rec, (params as { walletPublicKeyHex?: string }).walletPublicKeyHex ?? rec.walletPublicKeyHex);
@@ -3996,6 +3911,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     const now = Date.now();
     const next: ConnectSessionRecord = { ...session, authorizationId: session.authorizationId ?? crypto.randomUUID(), lastUsedAt: now };
     await storageRepository.putConnectSession(next);
+    this.currentAuthorizationId=session.authorizationId;
+    await this.deps.applicationIdentified?.(rec.origin,permissionKeyFor(rec.origin,session.appPublicKeyHex),undefined,session.appDisplay);
     return {
       authorizationId: next.authorizationId!,
       walletPublicKeyHex: session.ownerPublicKeyHex,
@@ -4003,7 +3920,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       ownerPublicKeyHex: session.ownerPublicKeyHex,
       resolvedClaims: session.claimsSnapshot,
       resolvedAt: now,
-      ...(session.appIdentity ? { appIdentity: session.appIdentity } : {})
+      ...(session.origin ? { origin: session.origin } : {})
     };
   }
 
@@ -4035,7 +3952,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!this.deps.storageRepository) {
       throw localFailure("internal_error", "connect.logout: session storage unavailable");
     }
-    const existing = await this.deps.storageRepository.getConnectSession(rec.networkIdentity, rec.origin);
+    const existing = await this.deps.storageRepository.getConnectSession(rec.networkIdentity, rec.origin,rec.protocol.authorizationId??this.currentAuthorizationId);
     const now = Date.now();
     let result: ConnectLogoutResult;
     if (!existing) {
@@ -4116,12 +4033,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!params.launchToken) {
       throw protocolError("invalid_request", "connect.launch: missing launchToken");
     }
-    if (!params.appIdentity) {
-      throw protocolError("invalid_request", "connect.launch: appIdentity is required");
-    }
-    let suppliedIdentity: AppIdentitySnapshot;
-    try { suppliedIdentity = verifyAppIdentityProof(params.appIdentity); }
-    catch (error) { throw protocolError("invalid_request", error instanceof Error ? error.message : "connect.launch: invalid appIdentity"); }
+    // launch 只需一次性 token 及现有传输必要信息；由钱包已确认的目标 URL 推导 origin，
+    // 绑定原钱包、来源、启动窗口和运行生命周期，保留期限、单次消费及防重放。跨 origin 不能消费。
     const record = this.launchTokensByToken.get(params.launchToken);
     if (!record) {
       throw localFailure("internal_error", "connect.launch: unknown launchToken");
@@ -4138,7 +4051,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 校验 Session Window 当前 appViewContext 与 token 记录一致——避免
     // "token 与当前 app 不匹配" 的中间态。
     const ctx = this.currentAppViewContext;
-    if (!ctx || ctx.appId !== record.appId || ctx.appOrigin !== record.appOrigin) {
+    if (!ctx || ctx.appOrigin !== record.appOrigin) {
       throw localFailure(
         "internal_error",
         "connect.launch: appViewContext not aligned with launchToken"
@@ -4152,7 +4065,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     // 校验 session 真值（与 connect.resume 同一路径）：session 不存在 /
     // 已 revoke / origin 不匹配 / owner 不 ready 都拒掉。
-    const session = await this.deps.storageRepository.getConnectSession(record.networkIdentity, record.appOrigin);
+    const session = {...record.stagedSession};
     if (!session) {
       throw localFailure(
         "internal_error",
@@ -4171,9 +4084,13 @@ export class ProtocolServiceImpl implements ProtocolService {
         "connect.launch: session origin mismatch"
       );
     }
-    if (!session.appIdentity || session.appIdentity.identityDigestHex !== suppliedIdentity.identityDigestHex) {
-      throw protocolError("invalid_request", "connect.launch: appIdentity does not match launcher proof");
-    }
+    const verifiedAppHex = rec.verifiedAppPublicKeyHex;
+    if (!verifiedAppHex || (record.expectedAppPublicKeyHex && record.expectedAppPublicKeyHex !== verifiedAppHex)) throw protocolError("invalid_request","App public key differs from directory target");
+    if (session.appPublicKeyHex && session.appPublicKeyHex !== verifiedAppHex) throw protocolError("invalid_request","App identity changed");
+    session.appPublicKeyHex = verifiedAppHex;
+    session.appDisplay=rec.verifiedDisplay;
+    rec.applicationKey = verifiedAppHex;
+    // 跨 origin 不能消费：旧 origin 的启动令牌、授权、数据均不可沿用。
     // 施工单 2026-06-30 002 硬切换：session 真值上不再带 runtime 来源；
     // `connect.launch` 校验的不是 `runtimeBinding`，而是
     // `sessionId + origin + ownerPublicKeyHex` 三元组 + 当前窗口能
@@ -4191,6 +4108,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 消费 token：一次性，幂等。只有 session 真值写入成功后才消费，
     // 这样失败可由调用方观察并重试，而不会留下半成功的内存状态。
     this.launchTokensByToken.set(params.launchToken, { ...record, consumed: true });
+    this.currentAuthorizationId=session.authorizationId;
+    await this.deps.applicationIdentified?.(rec.origin,verifiedAppHex,record.directoryUrl,rec.verifiedDisplay);
     return {
       authorizationId: session.authorizationId!,
       walletPublicKeyHex: session.ownerPublicKeyHex,
@@ -4198,7 +4117,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       ownerPublicKeyHex: session.ownerPublicKeyHex,
       resolvedClaims: session.claimsSnapshot,
       resolvedAt: now,
-      ...(session.appIdentity ? { appIdentity: session.appIdentity } : {})
+      ...(session.origin ? { origin: session.origin } : {})
     };
   }
 
@@ -4248,7 +4167,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       return;
     }
     const epoch = this.channelSessionEpoch;
-    const session = await this.deps.storageRepository?.getConnectSession(rec.networkIdentity, rec.origin);
+    const session = await this.deps.storageRepository?.getConnectSession(rec.networkIdentity, rec.origin,rec.protocol.authorizationId??this.currentAuthorizationId);
     if (!session || epoch !== this.channelSessionEpoch) return;
     const previous = this.channelSessionBySource.get(rec.source);
     if (previous && previous.sessionId !== session.sessionId) {
@@ -4407,7 +4326,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!p2pkhService?.prepareTransfer) throw protocolError("internal_error", "p2pkh service not available");
     const session = await this.requireConnectSession(rec, params.walletPublicKeyHex);
     this.assertSessionOwnerIsActive(session);
-    if (!session.appIdentity) throw protocolError("identity_required", "Connect payment requires a verified app identity");
+    if (!session.appPublicKeyHex) throw protocolError("identity_required", "Connect payment requires a verified app identity");
     const repo = this.deps.storageRepository;
     if (!repo?.claimConnectPayment || !repo.putConnectPayment || !repo.getConnectPayment) {
       throw protocolError("internal_error", "Connect payment idempotency storage is unavailable");
@@ -4418,8 +4337,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       origin: rec.origin,
       ownerPublicKeyHex: session.ownerPublicKeyHex.toLowerCase(),
       network: session.networkIdentity.bsvNetwork,
-      appId: session.appIdentity.appId,
-      publisherPublicKeyHex: session.appIdentity.publisherPublicKeyHex.toLowerCase(),
+      appPublicKeyHex: permissionKeyFor(rec.origin,session.appPublicKeyHex),
     };
     const assertBoundPayment = () => {
       this.assertWalletGeneration(rec);
@@ -4436,8 +4354,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       origin: identity.origin,
       ownerPublicKeyHex: identity.ownerPublicKeyHex,
       networkIdentity: session.networkIdentity,
-      appId: identity.appId,
-      publisherPublicKeyHex: identity.publisherPublicKeyHex,
+      appPublicKeyHex: identity.appPublicKeyHex,
       requestDigest,
       params: normalized,
       status: "pending",
@@ -4468,10 +4385,10 @@ export class ProtocolServiceImpl implements ProtocolService {
           paymentId: current.paymentId,
           clientRequestId: params.clientRequestId,
           outputs: normalized.outputs.map(output => ({ amount: output.amount, script: output.script })),
-          appId: identity.appId,
-          appName: session.appIdentity.appName,
+          appId: identity.appPublicKeyHex,
+          appName: session.origin,
           origin: identity.origin,
-          publisherPublicKeyHex: identity.publisherPublicKeyHex,
+          publisherPublicKeyHex: identity.appPublicKeyHex,
         },
       });
       assertBoundPayment();
@@ -4488,7 +4405,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       current = await storeConnectPaymentRecord(repo, current);
       assertBoundPayment();
       rec.paymentPreview = payment;
-      const permitted = await readApplicationPermissions(repo, rec.applicationKey!);
+      const permitted = await readApplicationPermissions(repo, this.permKey(rec));
       assertBoundPayment();
       rec.autoApproved = permitted.includes("payment.pay");
       if (!rec.autoApproved) {
@@ -4543,7 +4460,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const assertAuthorized = async () => {
       const session = await this.requireConnectSession(rec, record.ownerPublicKeyHex);
       this.assertSessionOwnerIsActive(session);
-      if (session.origin !== record.origin || session.ownerPublicKeyHex.toLowerCase() !== record.ownerPublicKeyHex || session.networkIdentity.bsvNetwork !== record.networkIdentity.bsvNetwork || session.appIdentity?.appId !== record.appId || session.appIdentity?.publisherPublicKeyHex.toLowerCase() !== record.publisherPublicKeyHex) throw localFailure("session_owner_mismatch", "Connect payment lookup identity changed");
+      if (session.appPublicKeyHex !== record.appPublicKeyHex || session.ownerPublicKeyHex.toLowerCase() !== record.ownerPublicKeyHex || session.networkIdentity.bsvNetwork !== record.networkIdentity.bsvNetwork) throw localFailure("session_owner_mismatch", "Connect payment lookup identity changed");
     };
     await assertAuthorized();
     if (["accepted", "already_known", "not_signed", "failed"].includes(record.status)) return record;
@@ -4573,21 +4490,18 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!repo?.getConnectPayment) throw protocolError("internal_error", "Connect payment storage is unavailable");
     const session = await this.requireConnectSession(rec, params.walletPublicKeyHex);
     this.assertSessionOwnerIsActive(session);
-    if (!session.appIdentity) throw protocolError("identity_required", "Connect payment status requires a verified app identity");
+    if (!session.appPublicKeyHex) throw protocolError("identity_required", "Connect payment status requires a verified app identity");
     const identity = {
       origin: rec.origin,
       ownerPublicKeyHex: session.ownerPublicKeyHex.toLowerCase(),
       network: session.networkIdentity.bsvNetwork,
-      appId: session.appIdentity.appId,
-      publisherPublicKeyHex: session.appIdentity.publisherPublicKeyHex.toLowerCase(),
+      appPublicKeyHex: permissionKeyFor(rec.origin,session.appPublicKeyHex),
     };
     let record = await repo.getConnectPayment(paymentRequestKey(identity, params.clientRequestId));
     if (!record
-      || record.origin !== identity.origin
       || record.ownerPublicKeyHex !== identity.ownerPublicKeyHex
       || record.networkIdentity.bsvNetwork !== identity.network
-      || record.appId !== identity.appId
-      || record.publisherPublicKeyHex !== identity.publisherPublicKeyHex) {
+      || record.appPublicKeyHex !== identity.appPublicKeyHex) {
       throw protocolError("payment_not_found", "Connect payment was not found for this identity");
     }
     if (this.currentP2pkhService()?.getPaymentStatus) {
@@ -5957,8 +5871,7 @@ function sameConnectPaymentIdentity(left: ProtocolConnectPaymentRecord, right: P
     && left.ownerPublicKeyHex === right.ownerPublicKeyHex
     && left.networkIdentity.bsvNetwork === right.networkIdentity.bsvNetwork
     && left.networkIdentity.publicKeyHex === right.networkIdentity.publicKeyHex
-    && left.appId === right.appId
-    && left.publisherPublicKeyHex === right.publisherPublicKeyHex
+    && left.appPublicKeyHex === right.appPublicKeyHex
     && left.requestDigest === right.requestDigest
     && JSON.stringify(left.params) === JSON.stringify(right.params);
 }
@@ -5986,8 +5899,7 @@ function mergeConnectPaymentRecord(existing: ProtocolConnectPaymentRecord, next:
     origin: existing.origin,
     ownerPublicKeyHex: existing.ownerPublicKeyHex,
     networkIdentity: existing.networkIdentity,
-    appId: existing.appId,
-    publisherPublicKeyHex: existing.publisherPublicKeyHex,
+    appPublicKeyHex: existing.appPublicKeyHex,
     requestDigest: existing.requestDigest,
     params: existing.params,
     txid: existing.txid ?? next.txid,
@@ -6040,16 +5952,13 @@ function paymentIdentityKey(identity: {
   origin: string;
   ownerPublicKeyHex: string;
   network: "main" | "test";
-  appId: string;
-  publisherPublicKeyHex: string;
+  appPublicKeyHex: string;
 }): string {
   return JSON.stringify([
     "keymaster.connect-payment-id.v1",
     identity.network,
-    identity.origin,
     identity.ownerPublicKeyHex,
-    identity.appId,
-    identity.publisherPublicKeyHex,
+    identity.appPublicKeyHex,
   ]);
 }
 

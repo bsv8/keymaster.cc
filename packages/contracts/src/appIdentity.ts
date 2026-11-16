@@ -1,78 +1,102 @@
-import { defineCapability } from "webloom-framework";
+import { secp256k1 } from "@noble/curves/secp256k1.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 
-export type AppRequirement = "private-key" | "storage";
-
-/** 外部 caller / catalog 使用的完整签名 proof。 */
-export interface AppIdentityProofV1 {
-  version: 1;
-  publisherPublicKey: string;
-  app: { id: string; name: string; description: string };
-  requirements: AppRequirement[];
-  signature: string;
+export class OriginValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OriginValidationError";
+  }
 }
 
-/** 本地 session 中的 proof digest 快照；digest 来源是 proof JCS，不是 metadata-only。 */
-export interface VerifiedAppIdentity {
-  version: 1;
-  publisherPublicKeyHex: string;
-  appId: string;
-  appName: string;
-  identityDigestHex: string;
+function parseHttpUrl(input: unknown): URL {
+  if (typeof input !== "string" || !input) {
+    throw new OriginValidationError("url must be a non-empty string");
+  }
+  let url: URL;
+  try {
+    url = new URL(input);
+  } catch {
+    throw new OriginValidationError("url is not a valid URL");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new OriginValidationError("url must use http or https");
+  }
+  if (url.username || url.password) {
+    throw new OriginValidationError("url must not contain credentials");
+  }
+  if (url.origin === "null" || url.origin === "") {
+    throw new OriginValidationError("url has an opaque origin");
+  }
+  if (!url.host) {
+    throw new OriginValidationError("url is invalid");
+  }
+  return url;
+}
+
+/** 从应用入口 URL 推导 canonical origin。 */
+export function parseEntryUrl(input: unknown): { origin: string; url: string } {
+  const url = parseHttpUrl(input);
+  return { origin: url.origin, url: url.href };
+}
+
+/** 校验并规范化可信 origin 输入（WHATWG origin 序列化）。 */
+export function canonicalOrigin(input: unknown): string {
+  const url = parseHttpUrl(input);
+  if (url.pathname !== "/" && url.pathname !== "") {
+    throw new OriginValidationError("origin must not contain a path");
+  }
+  if (url.search || url.hash) {
+    throw new OriginValidationError("origin must not contain query or fragment");
+  }
+  return url.origin;
+}
+
+/* ============== App 公钥身份（应用发布与公钥身份） ============== */
+
+/**
+ * App 公钥是唯一稳定应用身份：有效 secp256k1 压缩公钥，小写 hex，33 字节。
+ * 此处同时校验压缩格式与曲线有效性，供许可和存储绑定复用。
+ * 属于钱包、交易发行人或其他业务主体的公钥不得填入该字段。
+ */
+export function assertAppPublicKeyHex(value: unknown, field = "appPublicKeyHex"): string {
+  if (typeof value !== "string" || !/^(02|03)[0-9a-f]{64}$/.test(value)) {
+    throw new OriginValidationError(`${field} must be a 33-byte compressed secp256k1 public key in lower-case hex`);
+  }
+  try { secp256k1.Point.fromHex(value); } catch {
+    throw new OriginValidationError(`${field} must be a valid secp256k1 public key`);
+  }
+  return value;
+}
+
+/** 应用稳定归属根：<network>/<walletPublicKeyLower>/<appPublicKeyHex>/files/ */
+export function appStorageRoot(network: string, walletPublicKeyHex: string, appPublicKeyHex: string): string {
+  if (network !== "main" && network !== "test") {
+    throw new OriginValidationError("network must be main or test");
+  }
+  if (!/^(02|03)[0-9a-f]{64}$/iu.test(walletPublicKeyHex)) {
+    throw new OriginValidationError("wallet public key is invalid");
+  }
+  assertAppPublicKeyHex(appPublicKeyHex);
+  return `${network}/${walletPublicKeyHex.toLowerCase()}/${appPublicKeyHex}/files/`;
+}
+
+/** App 级加密 scope：storage.encrypted-file.v1|<sha256hex(root + path)> */
+export function appStorageScope(root: string, path: string): string {
+  if (!root || !path) throw new OriginValidationError("storage root/path is invalid");
+  const digest = sha256(new TextEncoder().encode(root + path));
+  return `storage.encrypted-file.v1|${Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("")}`;
 }
 
 /**
- * 从已验证的 publisher 公钥和 App ID 派生三方 App 的稳定 moduleId。
- *
- * 这不是 caller 可以提交的权限字段：Host 必须从已验证 identity 重新计算，
- * 这样 caller 伪造 owner 或另一个 App UUID 时会在装配层被拒绝。
- * 算法使用 SHA-256 的固定域分隔输入，并按 RFC 4122 UUID v5 的版本/变体
- * 位格式化；同一 publisher + appId 在不同设备和 Provider 上结果一致。
+ * 从已验证 App 公钥派生三方 App 的稳定 moduleId。
+ * 域与 origin 版（v1）分离；同一公钥在不同设备一致，不残留 origin 或 App ID。
  */
-export function deriveThirdPartyStorageModuleId(
-  publisherPublicKeyHex: string,
-  appId: string
-): string {
-  if (!/^(02|03)[0-9a-f]{64}$/u.test(publisherPublicKeyHex)) {
-    throw new Error("publisherPublicKeyHex is invalid");
-  }
-  if (!/^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$/u.test(appId) || [...appId].length > 63) {
-    throw new Error("appId is invalid");
-  }
-
-  // The implementation is synchronous so it can be used during manifest
-  // validation. Keep the small hash implementation local to contracts and
-  // avoid making the public contract depend on a crypto provider at runtime.
-  const bytes = new TextEncoder().encode(
-    `keymaster.storage-module.v1\u0000${publisherPublicKeyHex.toLowerCase()}\u0000${appId}`
-  );
-  // SHA-256 is provided by the platform through a tiny, deterministic
-  // fallback-free implementation imported by the contracts package.
+export function deriveAppStorageModuleId(appPublicKeyHex: string): string {
+  const app = assertAppPublicKeyHex(appPublicKeyHex);
+  const bytes = new TextEncoder().encode(`keymaster.storage-module.v2\u0000${app}`);
   const digest = sha256(bytes);
   digest[6] = (digest[6]! & 0x0f) | 0x50;
   digest[8] = (digest[8]! & 0x3f) | 0x80;
   const hex = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
-
-// Kept as a local import at the end so the identity types remain the first
-// thing visible to consumers in generated documentation.
-import { sha256 } from "@noble/hashes/sha2.js";
-
-export type AppIdentitySnapshot = VerifiedAppIdentity;
-
-/** 本地 catalog 按 origin 的 proof 三态解析。 */
-export type AppCatalogResolution =
-  | { kind: "known-valid"; proof: AppIdentityProofV1; appId?: string }
-  | { kind: "known-invalid"; reason: string }
-  | { kind: "unknown" };
-
-export interface AppCatalogResolver {
-  resolve(origin: string): AppCatalogResolution;
-}
-
-/** 本地已签名 App catalog resolver 的唯一 typed capability 身份。 */
-export const APP_CATALOG_CAPABILITY = defineCapability<AppCatalogResolver>({
-  kind: "local",
-  id: "app.catalog",
-  version: "1",
-});

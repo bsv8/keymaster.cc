@@ -1,5 +1,5 @@
 import { S3Client, ListObjectsV2Command, GetObjectCommand, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
-import { normalizeRelativeStoragePath, networkIdentityStorageRoot, traceDev, type NetworkIdentity, type ModuleFileStore, type ModuleFileObject, type OwnerAppStorageGrant } from "@keymaster/contracts";
+import { normalizeRelativeStoragePath, networkIdentityStorageRoot, appStorageRoot, traceDev, type NetworkIdentity, type ModuleFileStore, type ModuleFileObject, type OwnerAppStorageGrant } from "@keymaster/contracts";
 import { StorageRuntimeError } from "../runtime/storageError.js";
 import type { ConnectS3Config, ConnectS3Failure } from "./protocol.js";
 
@@ -7,9 +7,9 @@ export type ConnectFileStore = Pick<ModuleFileStore, "list" | "put" | "delete" |
   readonly bindingId?: object;
   get(...args: Parameters<ModuleFileStore["get"]>): Promise<(ModuleFileObject & { contentType?: string }) | undefined>;
 };
-/** 每个 App 使用独立公钥；proof 的该公钥当前沿用 publisherPublicKeyHex 字段名。 */
+/** 稳定业务归属为网络 + 钱包公钥 + 已验证 App 公钥。 */
 export function connectS3Root(ctx: OwnerAppStorageGrant): string {
-  return `${networkIdentityStorageRoot(ctx)}${ctx.appIdentity.publisherPublicKeyHex}/files/`;
+  return appStorageRoot(ctx.bsvNetwork, ctx.walletPublicKeyHex, ctx.appPublicKeyHex);
 }
 export function createConnectS3FileStore(config: ConnectS3Config, ctx: OwnerAppStorageGrant, live: () => boolean, lifetime: AbortSignal): ConnectFileStore {
   const root = connectS3Root(ctx);

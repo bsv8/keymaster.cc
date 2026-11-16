@@ -202,7 +202,7 @@ export function openProtocolStorageRepository(stores: ProtocolStorageStores): Pr
         if (options.maxPending !== undefined) {
           const pending = (await listValues<ProtocolConnectPaymentRecord>(durablePolicy, CONNECT_PAYMENT_PREFIX))
             .map((row) => row.value)
-            .filter((row) => row.origin === record.origin && row.status === "pending").length;
+            .filter((row) => row.appPublicKeyHex === record.appPublicKeyHex && sameNetworkIdentity(row.networkIdentity,record.networkIdentity) && row.status === "pending").length;
           if (pending >= options.maxPending) throw new Error("payment-pending-limit");
         }
         try {
@@ -232,38 +232,21 @@ export function openProtocolStorageRepository(stores: ProtocolStorageStores): Pr
 
     /* ----- sessions ----- */
     async putConnectSession(record: ConnectSessionRecord) {
+      if(!record.appPublicKeyHex || !record.authorizationId)throw new Error("Verified App identity required");
       await sessions.put(sessionKey(record.sessionId), record, { partition: PARTITION });
     },
-    async getConnectSession(identity: import("@keymaster/contracts").NetworkIdentity, origin: string) {
+    async getConnectSession(identity: import("@keymaster/contracts").NetworkIdentity, origin: string, authorizationId?:string) {
       const matches = (await listValues<ConnectSessionRecord>(sessions, SESSION_PREFIX))
         .map(row => row.value).filter(record => record.networkIdentity && sameNetworkIdentity(record.networkIdentity, identity)
           && record.ownerPublicKeyHex.toLowerCase() === identity.publicKeyHex.toLowerCase()
-          && record.origin === origin);
+          && record.origin === origin && (authorizationId ? record.authorizationId===authorizationId : true));
       return matches.length === 1 ? matches[0]! : null;
     },
+    async listConnectSessions() {return (await listValues<ConnectSessionRecord>(sessions,SESSION_PREFIX)).map(row=>row.value);},
     async listConnectSessionsByOrigin(origin: string) {
       return (await listValues<ConnectSessionRecord>(sessions, SESSION_PREFIX))
         .map((row) => row.value)
         .filter((row) => row.origin === origin);
     },
-    async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
-      const existing = await listValues<ConnectSessionRecord>(sessions, SESSION_PREFIX);
-      const revision = await currentRevision(sessions);
-      const revokedAt = Date.now();
-      const operations = [
-        { type: "put" as const, key: sessionKey(record.sessionId), value: record },
-        ...existing
-          .filter((row) => row.value.sessionId !== record.sessionId
-            && row.value.origin === record.origin
-            && row.value.networkIdentity.bsvNetwork === record.networkIdentity.bsvNetwork
-            && row.value.revokedAt === null)
-          .map((row) => ({
-            type: "put" as const,
-            key: row.key,
-            value: { ...row.value, revokedAt }
-          }))
-      ];
-      await sessions.commit({ partition: PARTITION, ifRevision: revision, operations });
-    }
   };
 }

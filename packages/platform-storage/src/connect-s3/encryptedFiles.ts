@@ -14,7 +14,7 @@ const encode = new TextEncoder();
 const decode = new TextDecoder("utf-8", { fatal: true });
 function failure(): StorageRuntimeError { return new StorageRuntimeError("storage_provider_error", "Encrypted storage object could not be opened"); }
 
-/** 钱包私钥由 Vault 使用；scope 绑定网络、钱包、App 公钥和完整对象键，不绑定 origin/显示名称。 */
+/** 钱包私钥由 Vault 使用；scope 绑定网络、钱包、canonical origin 和完整对象键。 */
 function secretScope(ctx: OwnerAppStorageGrant, path: string): string {
   if (normalizeRelativeStoragePath(path) !== path) throw new StorageRuntimeError("storage_invalid_path", "Invalid encrypted object path");
   const digest = sha256(encode.encode(connectS3Root(ctx) + path));

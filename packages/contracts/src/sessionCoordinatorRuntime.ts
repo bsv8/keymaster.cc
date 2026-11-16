@@ -347,7 +347,9 @@ const utxos = (value: unknown) => fields(value, "hasResult seq syncedAt", { fund
 const broadcast = (value: unknown) => fields(value, "status reason currentSeq txid canonicalTxid providerReturnedTxidRaw providerReturnedTxidNormalized txidIntegrity providerId providerReference providerCode providerMessage");
 function cryptoResult(value: unknown): CoordinatorCryptoResult {
   const source = value as CoordinatorCryptoResult;
-  return (source.type === "deriveP2pkhAddress" ? fields(source, "type address") : fields(source, "type signatureHex format")) as unknown as CoordinatorCryptoResult;
+  if (source.type === "deriveP2pkhAddress") return fields(source, "type address") as unknown as CoordinatorCryptoResult;
+  if (source.type === "deriveCipherSiteKey") return fields(source, "type siteKeyHex") as unknown as CoordinatorCryptoResult;
+  return fields(source, "type signatureHex format") as unknown as CoordinatorCryptoResult;
 }
 function resultFor(request: CoordinatorRpcRequest, value: unknown): unknown {
   switch (request.kind) {
