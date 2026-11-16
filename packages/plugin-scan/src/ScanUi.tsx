@@ -3,7 +3,7 @@ import { BrowserQRCodeReader } from "@zxing/browser";
 import { Camera, Image } from "lucide-react";
 import { Button, Modal, TextInput } from "@keymaster/ui";
 import { usePluginI18n } from "@keymaster/runtime";
-import type { UriActionResolution, UriActionView } from "@keymaster/contracts";
+import { traceDev, type UriActionResolution, type UriActionView } from "@keymaster/contracts";
 import type { UriRouter } from "./uriRouter.js";
 const Context = createContext<{ router: UriRouter; resolver: UriActionView } | undefined>(undefined);
 export const ScanContextProvider = Context.Provider;
@@ -47,14 +47,48 @@ function ScanInput({ initialInput }: { initialInput?: string }) {
   }, [initialInput]);
   useEffect(() => {
     if (mode !== "camera" || !cameraActive || !video.current) return;
+    const element = video.current;
     let cancelled = false;
+    let stream: MediaStream | undefined;
     let stop: (() => void) | undefined;
+    const release = () => {
+      stop?.();
+      stop = undefined;
+      stream?.getTracks().forEach(track => track.stop());
+      // A cancelled startup must never clear a newer session's source.
+      if (stream && element.srcObject === stream) {
+        element.pause();
+        element.srcObject = null;
+      }
+    };
     if (!navigator.mediaDevices?.getUserMedia) { setError(t("scan.unsupported")); setCameraActive(false); return; }
-    void new BrowserQRCodeReader(undefined, { delayBetweenScanAttempts: 180 }).decodeFromConstraints({ video: { facingMode: { ideal: "environment" } }, audio: false }, video.current, (result, _error, controls) => {
-      if (cancelled || !result) return;
-      controls.stop(); acceptRef.current(result.getText());
-    }).then(controls => { stop = () => controls.stop(); if (cancelled) controls.stop(); }).catch(() => { if (!cancelled) { setError(t("scan.cameraError")); setCameraActive(false); } });
-    return () => { cancelled = true; stop?.(); };
+    void (async () => {
+      try {
+        // Own acquisition so cleanup can stop tracks before ZXing returns controls.
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
+        if (cancelled) { release(); return; }
+        element.srcObject = stream;
+        await element.play();
+        if (cancelled) { release(); return; }
+        const controls = new BrowserQRCodeReader(undefined, { delayBetweenScanAttempts: 180 }).scan(element, (result, _error, controls) => {
+          if (cancelled || !result) return;
+          cancelled = true; stop = undefined;
+          controls.stop(); release(); acceptRef.current(result.getText());
+        });
+        stop = () => controls.stop();
+      } catch (error) {
+        release();
+        if (!cancelled) {
+          traceDev("Scan", "camera.start.failed", () => ({
+            stage: stream ? "play" : "acquire",
+            error,
+            readyState: element.readyState,
+          }));
+          setError(t("scan.cameraError")); setCameraActive(false);
+        }
+      }
+    })();
+    return () => { cancelled = true; release(); };
   }, [mode, cameraActive, t]);
   useEffect(() => () => { generation.current++; }, []);
   useEffect(() => () => {
