@@ -25,11 +25,15 @@ export function TextInput({ label, hint, description, error, id, className = "",
   const reactId = useId();
   const inputId = id ?? `ui-input-${reactId}`;
   const helpText = description ?? hint;
+  const hasError = !!error;
+  const feedbackId = `${inputId}-feedback`;
+  const describedBy = [rest["aria-describedby"], hasError ? `${feedbackId}-error` : helpText && feedbackId].filter(Boolean).join(" ") || undefined;
   return (
-    <label className={`ui-field ${className}`} htmlFor={inputId}>
-      {label ? <span className="ui-field__label">{toText(label)}</span> : null}
-      <input id={inputId} className="ui-input" {...rest} />
-      {error ? <span className="ui-field__error">{toText(error)}</span> : helpText ? <span className="ui-field__hint">{toText(helpText)}</span> : null}
-    </label>
+    <div className={`ui-field ${className}`}>
+      {label ? <label className="ui-field__label" htmlFor={inputId}>{toText(label)}</label> : null}
+      <input id={inputId} className="ui-input" {...rest} aria-invalid={hasError || rest["aria-invalid"]} aria-describedby={describedBy} />
+      {!hasError && helpText ? <span id={feedbackId} className="ui-field__hint">{toText(helpText)}</span> : null}
+      <span id={`${feedbackId}-error`} role="alert" aria-atomic="true" className="ui-field__error">{toText(error)}</span>
+    </div>
   );
 }

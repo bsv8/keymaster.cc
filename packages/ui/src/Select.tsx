@@ -34,17 +34,21 @@ export interface SelectProps extends Omit<SelectHTMLAttributes<HTMLSelectElement
 export function Select({ label, hint, error, options, id, className = "", ...rest }: SelectProps) {
   const reactId = useId();
   const selectId = id ?? `ui-select-${reactId}`;
+  const hasError = !!error;
+  const feedbackId = `${selectId}-feedback`;
+  const describedBy = [rest["aria-describedby"], hasError ? `${feedbackId}-error` : hint && feedbackId].filter(Boolean).join(" ") || undefined;
   return (
-    <label className={`ui-field ${className}`} htmlFor={selectId}>
-      {label ? <span className="ui-field__label">{toText(label)}</span> : null}
-      <select id={selectId} className="ui-input" {...rest}>
+    <div className={`ui-field ${className}`}>
+      {label ? <label className="ui-field__label" htmlFor={selectId}>{toText(label)}</label> : null}
+      <select id={selectId} className="ui-input" {...rest} aria-invalid={hasError || rest["aria-invalid"]} aria-describedby={describedBy}>
         {options.map((opt) => (
           <option key={opt.value} value={opt.value}>
             {toText(opt.label)}
           </option>
         ))}
       </select>
-      {error ? <span className="ui-field__error">{toText(error)}</span> : hint ? <span className="ui-field__hint">{toText(hint)}</span> : null}
-    </label>
+      {!hasError && hint ? <span id={feedbackId} className="ui-field__hint">{toText(hint)}</span> : null}
+      <span id={`${feedbackId}-error`} role="alert" aria-atomic="true" className="ui-field__error">{toText(error)}</span>
+    </div>
   );
 }

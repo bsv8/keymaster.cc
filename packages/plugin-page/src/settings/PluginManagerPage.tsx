@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { Button, Modal, PageHeader, TextInput } from "@keymaster/ui";
 import { usePluginI18n } from "@keymaster/runtime";
 import { useSettingsDiagnostics } from "./SettingsDiagnosticsContext.js";
@@ -12,7 +12,6 @@ export function PluginManagerPage() {
   const layout = useMemo(() => layoutDependencyGraph(graph.nodes, graph.edges), [graph]);
   const marker = useId().replaceAll(":", "");
   const [selected, setSelected] = useState<string>();
-  const returnFocus = useRef<Element | null>(null);
   const [hovered, setHovered] = useState<string>();
   const [query, setQuery] = useState("");
   const [functionQuery, setFunctionQuery] = useState("");
@@ -31,24 +30,7 @@ export function PluginManagerPage() {
   const calls = FUNCTION_DEPENDENCIES.filter(call => (direction === "outgoing" ? call.consumer : call.provider) === selected);
   const filtered = calls.filter(call => `${call.caller} ${call.capability} ${call.method} ${call.consumer} ${call.provider} ${call.file}`.toLowerCase().includes(functionQuery.trim().toLowerCase()));
   const declarations = graph.edges.filter(edge => (direction === "outgoing" ? edge.consumer : edge.provider) === selected);
-  const open = (id: string) => { if (!selected) returnFocus.current = document.activeElement; setSelected(id); setFunctionQuery(""); setDirection("outgoing"); setError(undefined); };
-  useEffect(() => {
-    if (!selected) return;
-    const dialog = document.querySelector<HTMLElement>('[data-testid="plugin-function-dependencies"]');
-    dialog?.querySelector<HTMLElement>("button")?.focus();
-    const trapFocus = (event: KeyboardEvent) => {
-      if (event.key !== "Tab" || !dialog) return;
-      const controls = [...dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), [tabindex="0"]')];
-      const first = controls[0], last = controls.at(-1);
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
-    };
-    dialog?.addEventListener("keydown", trapFocus);
-    return () => {
-      dialog?.removeEventListener("keydown", trapFocus);
-      if (returnFocus.current instanceof HTMLElement || returnFocus.current instanceof SVGElement) returnFocus.current.focus();
-    };
-  }, [selected]);
+  const open = (id: string) => { setSelected(id); setFunctionQuery(""); setDirection("outgoing"); setError(undefined); };
   const retry = async (id: string) => {
     setBusy(id); setError(undefined);
     try { await runtime.retry(id); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(undefined); }

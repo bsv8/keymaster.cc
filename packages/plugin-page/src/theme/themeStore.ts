@@ -34,6 +34,7 @@ function applyTheme(theme: ThemeName): void {
   if (!isBrowser()) return;
   // 写在 <html> 上，让所有 CSS 变量立刻生效。
   document.documentElement.setAttribute(DATA_ATTR, theme);
+  document.documentElement.style.colorScheme = theme;
 }
 
 interface Store {
