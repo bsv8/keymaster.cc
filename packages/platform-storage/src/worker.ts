@@ -1,5 +1,5 @@
 import {
-  defineBuiltinWorkerPlugin, STORAGE_FILE_CLIENTS_CAPABILITY, STORAGE_KV_CLIENTS_CAPABILITY,
+  defineBuiltinWorkerPlugin, STORAGE_FILE_CLIENTS_CAPABILITY,
   COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
 } from "@keymaster/contracts";
 import type { LocalServiceOf, RpcHandler } from "webloom-framework";
@@ -7,16 +7,14 @@ import { STORAGE_PRIVATE_BROWSE_CAPABILITY, projectStorageBrowseResponse, type S
 
 export function createStorageWorkerPlugin(ports: {
   files: LocalServiceOf<typeof STORAGE_FILE_CLIENTS_CAPABILITY>;
-  keyValues: LocalServiceOf<typeof STORAGE_KV_CLIENTS_CAPABILITY>;
   owner: RpcHandler<typeof COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY>;
   authorize(call: import("webloom-framework").HandlerCallContext): string;
   browse(request: StorageBrowsePrivateCommand, peerId: string, signal: AbortSignal): Promise<import("@keymaster/contracts").CoordinatorResponse>;
   revokeBrowse(): void;
 }) {
-  return defineBuiltinWorkerPlugin("storage", [STORAGE_FILE_CLIENTS_CAPABILITY, STORAGE_KV_CLIENTS_CAPABILITY,
+  return defineBuiltinWorkerPlugin("storage", [STORAGE_FILE_CLIENTS_CAPABILITY,
     COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY, STORAGE_PRIVATE_BROWSE_CAPABILITY], context => {
       context.provide(STORAGE_FILE_CLIENTS_CAPABILITY, ports.files);
-      context.provide(STORAGE_KV_CLIENTS_CAPABILITY, ports.keyValues);
       context.handle(COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY, ports.owner);
       context.scope.onRevoke(ports.revokeBrowse);
       context.handlePrivate(STORAGE_PRIVATE_BROWSE_CAPABILITY, async (request, call) => {

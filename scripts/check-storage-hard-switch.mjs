@@ -11,6 +11,7 @@ const root = process.cwd();
 const scanRoots = ["."];
 const sourceExtensions = /\.(?:ts|tsx|js|jsx|json|css)$/u;
 const forbiddenText = [
+  ["已取消的 K-V 渠道", /\b(?:KeyValueStore|BorrowedKeyValueStore|createKeyValueStore|createInMemoryKeyValueStore|openKeyValueStore|openOwnerAppStore|STORAGE_KV_CLIENTS_CAPABILITY)\b|storage\.kv-clients|model\s*:\s*["']kv["']|\.keymaster\/(?:heads|values)\//u],
   ["平台插件存储特权", /platform-only|\bopenPlatform(?:Store|Snapshot|FileStore)\b|storage\.platform\.(?:bind|data)|COORDINATOR_PLATFORM_STORAGE_RPC_CAPABILITY/u],
   ["旧包名", /@keymaster\/plugin-storage/u],
   ["旧运行时符号", /\bStorageService\b/u],
@@ -86,7 +87,7 @@ for (const scanRoot of scanRoots) {
       ];
       for (const [label, pattern] of legacyStorageSemantics) {
         if (indexedDbAllowlist.has(relativeFile)) continue;
-        if (pattern.test(content)) violations.push(`${relativeFile}: 命中${label}`);
+        if (pattern.test(content.replace(/\bicon:\s*["']Database["']/gu, "icon"))) violations.push(`${relativeFile}: 命中${label}`);
       }
       const executable = withoutComments(content);
       const removedDeviceBootstrapBypasses = [

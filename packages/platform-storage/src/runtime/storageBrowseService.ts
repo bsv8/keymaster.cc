@@ -445,8 +445,6 @@ export function createStorageBrowseService(options: StorageBrowseServiceOptions)
             revision,
             lastModified: object.lastModified,
             ...(object.contentType === undefined ? {} : { contentType: object.contentType }),
-            ...(detection.kvPayload === undefined ? {} : { kvPayload: detection.kvPayload }),
-            ...(detection.kvError === undefined ? {} : { kvError: detection.kvError }),
           } satisfies StorageBrowsePreview;
         }), () => assertSessionLive(record, controller.signal));
       } catch (error) {

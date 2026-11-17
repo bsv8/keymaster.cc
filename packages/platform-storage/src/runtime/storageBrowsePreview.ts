@@ -2,15 +2,9 @@
 //
 // 这里没有任何 I/O，也不碰 DOM：Worker 与页面共用同一份判定，因此同一个对象
 // 在任何一处都会得到同样的 format。截断内容一律降级成 truncated，不做结构化解析：
-// 截掉的 JSON、K-V 信封或 Markdown 都无法给出可信结果。
+// 截掉的 JSON或 Markdown 都无法给出可信结果。
 
 import type { StoragePreviewFormat } from "./storageBrowseTypes.js";
-import {
-  kvDecodePayloadShape,
-  kvDecodeValueObject,
-  kvStartsWithBytes,
-  KV_VALUE_OBJECT_HEADER_PREFIX,
-} from "../kv-engine/kvValueCodec.js";
 
 const TEXT_CONTENT_PREFIX = "text/";
 const MARKDOWN_CONTENT_TYPES = new Set(["text/markdown", "text/x-markdown"]);
@@ -23,16 +17,7 @@ export interface BrowsePreviewDetection {
   format: StoragePreviewFormat;
   /** 严格 UTF-8 解码后的文本；仅文本类格式出现。 */
   text?: string;
-  /** K-V 解码结果。 */
-  kvPayload?: {
-    valueId: string;
-    partition: string;
-    payloadFingerprint: string;
-    json: boolean;
-    jsonText?: string;
-  };
-  /** K-V 信封被拒的原因。 */
-  kvError?: "envelope-invalid" | "version-unsupported" | "hash-mismatch" | "payload-unsupported";
+
 }
 
 function extensionOf(path: string): string {
@@ -130,33 +115,11 @@ export interface DetectBrowsePreviewInput {
 }
 
 /**
- * 判定预览格式。顺序即优先级：K-V 信封 → 空 → 截断 → 内容类型/扩展名 → 有限检测。
+ * 判定预览格式。顺序即优先级：空 → 截断 → 内容类型/扩展名 → 有限检测。
  */
 export function detectBrowsePreview(input: DetectBrowsePreviewInput): BrowsePreviewDetection {
   const { bytes, truncated, path } = input;
   const contentType = input.contentType;
-
-  if (kvStartsWithBytes(bytes, KV_VALUE_OBJECT_HEADER_PREFIX)) {
-    // 截断的 K-V 信封无法完成哈希校验，不能声称已解码成功。
-    if (truncated) return { format: "truncated" };
-    const decoded = kvDecodeValueObject(bytes);
-    if (!decoded.ok) return { format: "kv-invalid", kvError: decoded.error };
-    const header = {
-      valueId: decoded.record.valueId,
-      partition: decoded.record.partition,
-      payloadFingerprint: decoded.record.valueHash,
-    };
-    try {
-      const shape = kvDecodePayloadShape(decoded.record.payload);
-      if (shape.kind === "binary") {
-        // 载荷已通过信封与哈希校验，但字节不是文本；属性仍然可用。
-        return { format: "kv-invalid", kvError: "payload-unsupported", kvPayload: { ...header, json: false } };
-      }
-      return { format: "kv-value", kvPayload: { ...header, json: true, jsonText: shape.text } };
-    } catch {
-      return { format: "kv-invalid", kvError: "payload-unsupported", kvPayload: { ...header, json: false } };
-    }
-  }
 
   if (bytes.byteLength === 0) return { format: "empty" };
   // 截断后再判定只会给出错误结论：半个 JSON、半个 Markdown 都不是它自己。

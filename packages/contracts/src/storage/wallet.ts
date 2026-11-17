@@ -5,7 +5,10 @@
 // `path`,不含桶身份或钱包 Owner 前缀。
 
 /** 唯一钱包 Key 的固定逻辑路径;这是结构约束,不是可配置项。 */
-export const WALLET_KEYHOLD_PATH = "vault/key.json";
+export const WALLET_KEYHOLD_PATH = "key.json";
+
+/** 冷启动网络与钱包实例信息；与标准 KeyHold 同事务提交。 */
+export const WALLET_NETWORK_PATH = "network.json";
 
 /** 本地格式与初始化状态的固定路径。 */
 export const WALLET_META_PATH = ".keymaster/meta";
@@ -183,7 +186,7 @@ export function normalizeRelativeStoragePath(value: string): string {
 
 /** 某个相对路径是否落在系统保留区;保留区只允许平台专属权限。 */
 export function isPlatformReservedPath(path: string): boolean {
-  return path === WALLET_KEYHOLD_PATH || path === ".keymaster" || path.startsWith(".keymaster/");
+  return path === WALLET_KEYHOLD_PATH || path === WALLET_NETWORK_PATH || path === ".keymaster" || path.startsWith(".keymaster/");
 }
 
 /** 某个相对路径是否落在第三方 App 根;App 不能列举或跨目录读写。 */

@@ -12,7 +12,6 @@ export {
   WALLET_SCHEMA_VERSION,
 } from "../local/indexedDbWalletStore.js";
 export type { WalletStore } from "../local/indexedDbWalletStore.js";
-export { createKeyValueStore } from "../kv-engine/walletKvEngine.js";
 export { createModuleFileStore } from "../storage-access/wallet/moduleFileStore.js";
 export { createFixedCasSnapshotStore } from "../snapshot/fixedCasSnapshotStore.js";
 export { createPlatformRootStore } from "../storage-access/platform-root/platformRootStore.js";
@@ -34,4 +33,3 @@ export { createStorageDataExecutor } from "./storageDataExecutor.js";
 export { createWorkerStorageClients } from "./workerStorageClients.js";
 export { createStorageRpcHandlers } from "./storageRpcHandlers.js";
 export { createScopedStorageClients } from "./scopedStorageClients.js";
-export { createKeyValueMaintenance } from "./keyValueMaintenance.js";

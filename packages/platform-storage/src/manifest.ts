@@ -1,4 +1,4 @@
-import { STORAGE_FILE_CLIENTS_CAPABILITY, STORAGE_KV_CLIENTS_CAPABILITY } from "@keymaster/contracts";
+import { STORAGE_FILE_CLIENTS_CAPABILITY } from "@keymaster/contracts";
 import { COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY } from "@keymaster/contracts";
 import { STORAGE_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
 import { StorageUnavailableGuard } from "./ui/StorageUnavailableGuard.js";
@@ -86,16 +86,6 @@ export const storageResources: I18nPluginResources = {
       "storage.browse.md.source": "Source",
       "storage.browse.md.image": "[image: {{target}}]",
       "storage.browse.md.capped": "This document was truncated for display.",
-      "storage.browse.kv.raw": "Raw object",
-      "storage.browse.kv.decoded": "Decoded",
-      "storage.browse.kv.valueId": "Value id",
-      "storage.browse.kv.partition": "Partition",
-      "storage.browse.kv.payload": "Payload",
-      "storage.browse.kv.envelopeInvalid": "The key-value envelope is malformed.",
-      "storage.browse.kv.versionUnsupported": "This key-value version is not supported.",
-      "storage.browse.kv.hashMismatch": "The key-value payload hash does not match.",
-      "storage.browse.kv.payloadUnsupported": "The key-value payload is binary and cannot be previewed.",
-      "storage.browse.kv.invalid": "This key-value object could not be decoded.",
       "storage.browse.copyPath": "Copy path",
       "storage.browse.pathCopied": "Path copied to the clipboard.",
       "storage.browse.copyFailed": "The path could not be copied.",
@@ -167,16 +157,6 @@ export const storageResources: I18nPluginResources = {
       "storage.browse.md.source": "源码",
       "storage.browse.md.image": "[图片: {{target}}]",
       "storage.browse.md.capped": "此文档已在展示时截断。",
-      "storage.browse.kv.raw": "原始对象",
-      "storage.browse.kv.decoded": "解码内容",
-      "storage.browse.kv.valueId": "Value id",
-      "storage.browse.kv.partition": "分区",
-      "storage.browse.kv.payload": "载荷",
-      "storage.browse.kv.envelopeInvalid": "K-V 信封格式损坏。",
-      "storage.browse.kv.versionUnsupported": "不支持该 K-V 版本。",
-      "storage.browse.kv.hashMismatch": "K-V 载荷哈希不匹配。",
-      "storage.browse.kv.payloadUnsupported": "K-V 载荷是二进制，无法预览。",
-      "storage.browse.kv.invalid": "此 K-V 对象无法解码。",
       "storage.browse.copyPath": "复制路径",
       "storage.browse.pathCopied": "路径已复制到剪贴板。",
       "storage.browse.copyFailed": "路径复制失败。",
@@ -227,7 +207,7 @@ const storagePlatformPluginDefinition = {
     id: "storage.coordinator-worker",
     runtime: "shared-worker" as const,
     scopeKind: "storage" as const,
-    provides: [COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY, STORAGE_FILE_CLIENTS_CAPABILITY, STORAGE_KV_CLIENTS_CAPABILITY],
+    provides: [COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY, STORAGE_FILE_CLIENTS_CAPABILITY],
     privateProvides: [STORAGE_PRIVATE_BROWSE_CAPABILITY],
   }],
   i18n: storageResources,

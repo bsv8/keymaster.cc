@@ -17,6 +17,7 @@ import {
   isPlatformReservedPath,
   WALLET_CURRENT_SCHEMA_VERSION,
   WALLET_KEYHOLD_PATH,
+  WALLET_NETWORK_PATH,
   WALLET_META_FORMAT,
   WALLET_META_PATH,
   normalizeRelativeStoragePath,
@@ -217,6 +218,12 @@ async function writeObject(
   contentType: string | undefined,
   timestamp: string,
 ): Promise<WalletObjectMeta> {
+  // Startup files are the only root writes; every business object has an identity and plugin.
+  if (path !== WALLET_KEYHOLD_PATH && path !== WALLET_NETWORK_PATH
+    && (!/^(main|test)\/(02|03)[0-9a-f]{64}\/[a-z0-9][a-z0-9._-]{0,62}\/.+$/u.test(path)
+      || path.split("/").includes(".keymaster"))) {
+    throw fail("storage_invalid_path", "Wallet writes require an identity and plugin directory");
+  }
   const meta: WalletObjectMeta = {
     path,
     size: bytes.byteLength,
@@ -339,12 +346,13 @@ export function createIndexedDbWalletStore(options: IndexedDbWalletStoreOptions 
     return record;
   }
 
-  async function readKeyHold(): Promise<Uint8Array | undefined> {
+  async function readBootstrapFiles(): Promise<{ key?: WalletObject; network?: WalletObject }> {
     assertOpen();
     const transaction = await beginTransaction(storeName, "readonly");
-    const stored = await readBytes(transaction.objectStore(storeName), WALLET_KEYHOLD_PATH);
+    const objects = transaction.objectStore(storeName);
+    const [key, network] = await Promise.all([readObject(objects, WALLET_KEYHOLD_PATH), readObject(objects, WALLET_NETWORK_PATH)]);
     await transactionDone(transaction);
-    return stored ? new Uint8Array(stored.bytes) : undefined;
+    return { key, network };
   }
 
   async function get(path: string, input: { ifRevision?: number; signal?: AbortSignal } = {}): Promise<WalletObject | undefined> {
@@ -439,7 +447,7 @@ export function createIndexedDbWalletStore(options: IndexedDbWalletStoreOptions 
   /**
    * 同一事务内提交一批 put/delete。
    *
-   * 这是 K-V、snapshot、文件批量和钱包初始化的共同原子边界:先在同一事务里读判
+   * 这是 snapshot、文件批量和钱包初始化的共同原子边界:先在同一事务里读判
    * 全部前置 revision,再全部写入,任何一条不满足就整体 abort。因此不会出现
    * 「值已写但 head 未更新」的中间态,也不会留下崩溃后的内部孤儿。
    */
@@ -548,7 +556,7 @@ export function createIndexedDbWalletStore(options: IndexedDbWalletStoreOptions 
   return {
     readMeta,
     cleanupLegacyMarkers,
-    readKeyHold,
+    readBootstrapFiles,
     get,
     getRange,
     list,

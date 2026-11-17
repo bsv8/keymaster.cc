@@ -196,10 +196,10 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
     actualClientId: string,
     signal?: AbortSignal,
   ): Promise<unknown> {
-    const operation = data.type === "owner.get" || data.type === "owner.list" ? "read" : "write";
+    const operation = ["owner.file-list", "owner.file-get", "owner.file-range"].includes(data.type) ? "read" : "write";
     return ports.io.run(operation, signal, (leaseSignal) => executeOwnerStorageDataUnsafe(data, actualClientId, leaseSignal), {
       auditOperation: "storage.owner.data",
-      // owner K-V 的读取没有不可逆副作用；写入仍登记当前 Worker 的内存
+      // 模块文件 的读取没有不可逆副作用；写入仍登记当前 Worker 的内存
       // lease，保证本次运行不会越过未知的本地写入。
       durableLease: operation === "write",
     });
@@ -292,8 +292,8 @@ export function createStorageWorkerRequests(ports: StorageWorkerRequestPorts) {
         requestId: request.requestId,
         sessionEpoch: ports.session().sessionEpoch,
         ack: { status: "ok" },
-        // owner.delete is void; owner.get may legitimately return undefined.
-        ...(request.data.type === "owner.delete" ? {} : { operationResult: value }),
+        // owner.file-delete is void; owner.file-get may legitimately return undefined.
+        ...(request.data.type === "owner.file-delete" ? {} : { operationResult: value }),
       };
     }
 

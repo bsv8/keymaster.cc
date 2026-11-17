@@ -54,7 +54,7 @@ export interface WalletStore {
   /** Upgrade only: delete retired wallet-state markers, preserving Key/business objects. */
   cleanupLegacyMarkers?(): Promise<void>;
   /** 读取唯一 KeyHold 的原始字节。 */
-  readKeyHold(): Promise<Uint8Array | undefined>;
+  readBootstrapFiles(): Promise<{ key?: WalletObject; network?: WalletObject }>;
   /** 读取一个对象;不存在返回 undefined。 */
   get(path: string, options?: { ifRevision?: number; signal?: AbortSignal }): Promise<WalletObject | undefined>;
   /** 按 revision 读取一段字节,供 Range/流式读取使用。 */
@@ -85,13 +85,14 @@ export interface WalletStore {
 
 
 /** Vault 冷启动前的私有端口；不授予列举、Range、删除或连接管理能力。 */
+export interface WalletVaultFiles { key: Uint8Array; network: Uint8Array }
 export interface WalletVaultKeyStore {
-  readKey(): Promise<WalletObject | undefined>;
-  writeKey(bytes: Uint8Array, condition: WalletWriteCondition): Promise<WalletPutResult>;
+  readKey(): Promise<{ key?: WalletObject; network?: WalletObject }>;
+  writeKey(files: WalletVaultFiles, condition: WalletWriteCondition): Promise<WalletPutResult>;
 }
 /** 初始化必须保留单事务提交；该端口只由可信 Worker 装配发放。 */
 export interface WalletVaultLifecycleStore {
-  initializeKey(bytes: Uint8Array): Promise<void>;
+  initializeKey(files: WalletVaultFiles): Promise<void>;
   cleanupLegacyMarkers(): Promise<void>;
   resetWallet(): Promise<{ walletGeneration: string; clearedAt: string }>;
 }

@@ -12,9 +12,7 @@ import type { StorageBrowseWallet } from "../../runtime/storageBrowsePrivate.js"
 //   - 所有插件共用按 module/purpose 绑定的存储入口。
 
 import type {
-  KeyValueStore,
   ModuleFileStore,
-  OwnerAppStore,
   PlatformRootStore,
   PluginStorageDeclaration,
   SnapshotStore,
@@ -26,7 +24,6 @@ import {
   buildWalletStorageRoot,
   normalizeAppStorageName,
 } from "@keymaster/contracts";
-import { createKeyValueStore } from "../../kv-engine/walletKvEngine.js";
 import type { WalletStore } from "../../local/indexedDbWalletStore.js";
 import { StorageRuntimeError } from "../../runtime/storageError.js";
 import { createFixedCasSnapshotStore } from "../../snapshot/fixedCasSnapshotStore.js";
@@ -98,7 +95,7 @@ function platformRootMatchesGeneration(live: { walletGeneration: string; session
       moduleId: "coordinator",
       purposeId: "settings",
       authority: "built-in-module",
-      model: "kv",
+      model: "files",
       schemaVersion: 1,
       walletGeneration: live.walletGeneration,
       sessionEpoch: live.sessionEpoch,
@@ -204,10 +201,6 @@ function platformRootMatchesGeneration(live: { walletGeneration: string; session
           return options.store.get(path, getOptions?.signal === undefined ? undefined : { signal: getOptions.signal });
         },
       };
-    },
-    async openKeyValueStore(input): Promise<OwnerAppStore> {
-      const binding = bind(input.declaration);
-      return createKeyValueStore({ store: options.store, binding, isCurrent: gateFor(binding) });
     },
     async openModuleFileStore(input): Promise<ModuleFileStore> {
       const declaration = input.declaration;

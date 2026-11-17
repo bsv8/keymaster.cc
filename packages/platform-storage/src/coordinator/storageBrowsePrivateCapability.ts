@@ -37,12 +37,9 @@ export function projectStorageBrowseResponse(request: StorageBrowsePrivateReques
       ...(contentType === undefined ? {} : { contentType }) })), ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }) } };
   }
   const preview = response.operationResult as StorageBrowsePreview;
-  const { path, format, totalSize, returnedSize, truncated, revision, lastModified, contentType, kvError } = preview;
-  const payload = preview.kvPayload;
+  const { path, format, totalSize, returnedSize, truncated, revision, lastModified, contentType } = preview;
   return { sessionEpoch, ack, operationResult: { path, format, bytes: preview.bytes.slice(), totalSize, returnedSize, truncated, revision, lastModified,
-    ...(contentType === undefined ? {} : { contentType }), ...(kvError === undefined ? {} : { kvError }),
-    ...(payload === undefined ? {} : { kvPayload: { valueId: payload.valueId, partition: payload.partition, payloadFingerprint: payload.payloadFingerprint, json: payload.json,
-      ...(payload.jsonText === undefined ? {} : { jsonText: payload.jsonText }) } }),
+    ...(contentType === undefined ? {} : { contentType }),
   } };
 }
 

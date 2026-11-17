@@ -35,7 +35,6 @@ import type {
 import type { I18nPluginResources } from "./i18n.js";
 import type { PluginBusinessContribution } from "./business.js";
 import type { PluginStorageDeclaration } from "./storage/access.js";
-import type { BorrowedKeyValueStore } from "./storage/kv.js";
 import type { BorrowedModuleFileStore } from "./storage/files.js";
 import type { PluginPermission } from "./keymasterLifecycle.js";
 

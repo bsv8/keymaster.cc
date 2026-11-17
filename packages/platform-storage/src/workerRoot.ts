@@ -15,7 +15,7 @@ export interface StorageWorkerRootPorts {
   wallet: { store(): WalletStore | undefined; identity(): Promise<NetworkIdentity>; label(): Promise<string | undefined>; coldStart(): WalletColdStartSnapshot | undefined; lifecycleReady(): boolean };
   artifacts(root: StoragePrivateRootStore): Promise<{ commit(): void; dispose(): void }>;
   io<T>(execute: () => Promise<T>): Promise<T>;
-  lifecycle: { ready(): void; stop(): void; reconcile(): void; maintenance(): void };
+  lifecycle: { ready(): void; stop(): void; reconcile(): void };
   abortSession(sessionId: string): void;
   revokeRequests(): void;
   invalidateClients(): void;
@@ -87,7 +87,7 @@ export function createStorageWorkerRoot(ports: StorageWorkerRootPorts) {
       controller = undefined;
       traceDev("storage.root", "binding.installed", () => ({ replaced: Boolean(previousRoot) }));
       ready = true;
-      ports.lifecycle.maintenance();
+
     } catch (error) {
       if (token === candidateToken) { root = previousRoot; token = previousToken; }
       artifacts.dispose();
@@ -132,7 +132,7 @@ export function createStorageWorkerRoot(ports: StorageWorkerRootPorts) {
     // Root 可以在异步创建期间被重置，候选控制器不能绑定到下一代。
     if (root !== boundRoot) { (candidate! as StorageRuntimeController & { dispose?(): void }).dispose?.(); throw new StorageRuntimeError("storage_unavailable", "Storage binding became stale"); }
     controller = candidate!; ready = true; failed = false;
-    ports.lifecycle.ready(); ports.lifecycle.reconcile(); ports.lifecycle.maintenance();
+    ports.lifecycle.ready(); ports.lifecycle.reconcile();
     controller.subscribe(emit); emit();
     return controller;
   }

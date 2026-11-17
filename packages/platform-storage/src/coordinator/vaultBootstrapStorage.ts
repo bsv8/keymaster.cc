@@ -1,28 +1,28 @@
-import type { WalletStore, WalletVaultKeyStore, WalletVaultLifecycleStore } from "@keymaster/contracts/storage-internal";
-import { WALLET_KEYHOLD_PATH } from "@keymaster/contracts";
+import type { WalletStore, WalletVaultFiles, WalletVaultKeyStore, WalletVaultLifecycleStore, WalletWriteCondition } from "@keymaster/contracts/storage-internal";
+import { WALLET_KEYHOLD_PATH, WALLET_NETWORK_PATH } from "@keymaster/contracts";
 
-/**
- * 私有 Worker 装配：直接使用可信 Vault 调用，不发布整份 WalletStore。
- * 初始化仍委托底层的一次 batch 事务；不把可信内部调用者当作路径攻击者。
- */
-export function createVaultBootstrapStorage(store: WalletStore): {
-  keys: WalletVaultKeyStore;
-  lifecycle: WalletVaultLifecycleStore;
-} {
+/** Only these two fixed root files are available before identity binding. */
+export function createVaultBootstrapStorage(store: WalletStore): { keys: WalletVaultKeyStore; lifecycle: WalletVaultLifecycleStore } {
+  async function write(files: WalletVaultFiles, condition: WalletWriteCondition) {
+    const before = await store.readBootstrapFiles();
+    const result = await store.batch({
+      operations: [
+        { type: "put", path: WALLET_KEYHOLD_PATH, bytes: files.key, contentType: "application/json" },
+        { type: "put", path: WALLET_NETWORK_PATH, bytes: files.network, contentType: "application/json" },
+      ],
+      conditions: [
+        { path: WALLET_KEYHOLD_PATH, ...condition, ...(condition.ifNoneMatch ? {} : { ifRevision: condition.ifRevision ?? before.key?.revision ?? 0 }) },
+        { path: WALLET_NETWORK_PATH, ...(condition.ifNoneMatch ? { ifNoneMatch: true as const } : { ifRevision: before.network?.revision ?? 0 }) },
+      ],
+    });
+    return { path: WALLET_KEYHOLD_PATH, size: files.key.byteLength, revision: (before.key?.revision ?? 0) + 1, lastModified: result.committedAt, contentType: "application/json" };
+  }
   return Object.freeze({
-    keys: Object.freeze({
-      readKey: () => store.get(WALLET_KEYHOLD_PATH),
-      writeKey: (bytes, condition) => store.put(WALLET_KEYHOLD_PATH, bytes, { ...condition, contentType: "application/json" }),
-    } satisfies WalletVaultKeyStore),
+    keys: Object.freeze({ readKey: () => store.readBootstrapFiles(), writeKey: write }),
     lifecycle: Object.freeze({
       cleanupLegacyMarkers: () => store.cleanupLegacyMarkers?.() ?? Promise.resolve(),
-      async initializeKey(bytes) {
-        await store.batch({
-          operations: [{ type: "put", path: WALLET_KEYHOLD_PATH, bytes, contentType: "application/json" }],
-          conditions: [{ path: WALLET_KEYHOLD_PATH, ifNoneMatch: true }],
-        });
-      },
+      async initializeKey(files: WalletVaultFiles) { await write(files, { ifNoneMatch: true }); },
       resetWallet: () => store.resetWallet(),
-    } satisfies WalletVaultLifecycleStore),
+    }),
   });
 }

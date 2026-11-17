@@ -1,13 +1,10 @@
 import { defineCapability, type PluginConsumer, type LifecycleScope } from "webloom-framework";
-import type { BorrowedKeyValueStore } from "./storage/kv.js";
 import type { BorrowedModuleFileStore } from "./storage/files.js";
 import type { StorageCoordinatorControl, VaultCoordinatorControl, BackgroundCoordinatorControl, P2pkhCoordinatorControl, WocCoordinatorControl, MsFileCoordinatorControl, SatCoordinatorControl, WindowP2pCoordinatorControl, ProtocolCoordinatorControl } from "./sessionCoordinator.js";
 /** Transport binding is assembly plumbing, not authority to impersonate another plugin. */
 export interface CoordinatorClientBinding<T> { bind(consumer: PluginConsumer, scope: LifecycleScope): T }
 export interface PluginFileClients { bind(consumer: PluginConsumer, scope: LifecycleScope, purposeId: string): BorrowedModuleFileStore }
-export interface PluginKeyValueClients { bind(consumer: PluginConsumer, scope: LifecycleScope, purposeId: string): BorrowedKeyValueStore }
 export const STORAGE_FILE_CLIENTS_CAPABILITY = defineCapability<PluginFileClients>({ kind: "local", id: "storage.file-clients", version: "1" });
-export const STORAGE_KV_CLIENTS_CAPABILITY = defineCapability<PluginKeyValueClients>({ kind: "local", id: "storage.kv-clients", version: "1" });
 export const STORAGE_COORDINATOR_CLIENT_BINDING_CAPABILITY = defineCapability<CoordinatorClientBinding<StorageCoordinatorControl>>({ kind: "local", id: "storage.coordinator-client-binding", version: "1" });
 export const VAULT_COORDINATOR_CLIENT_BINDING_CAPABILITY = defineCapability<CoordinatorClientBinding<VaultCoordinatorControl>>({ kind: "local", id: "vault.coordinator-client-binding", version: "1" });
 export const BACKGROUND_COORDINATOR_CLIENT_BINDING_CAPABILITY = defineCapability<CoordinatorClientBinding<BackgroundCoordinatorControl>>({ kind: "local", id: "background.coordinator-client-binding", version: "1" });

@@ -1,4 +1,4 @@
-import type { KeyValueStore, ModuleFileStore, StorageRuntimeController, SessionEpoch } from "@keymaster/contracts";
+import type { ModuleFileStore, StorageRuntimeController, SessionEpoch } from "@keymaster/contracts";
 import type { CoordinatorOwnerStorageData, StorageOwnerBinding } from "@keymaster/contracts/storage-internal";
 import type { StoragePrivateRootStore } from "../storage-access/platform-root/platformRootStore.js";
 
@@ -27,7 +27,6 @@ async function executeOwnerStorageDataUnsafe(data: CoordinatorOwnerStorageData, 
   const root = deps.root();
   if (!root) throw deps.storageUnavailableError("Platform storage has not been bootstrapped");
   const release = deps.beginStorageBindingRequest();
-  let store: KeyValueStore | undefined;
   let files: ModuleFileStore | undefined;
   try {
     if (grant.model === "files") {
@@ -42,10 +41,11 @@ async function executeOwnerStorageDataUnsafe(data: CoordinatorOwnerStorageData, 
       });
       let fileValue: unknown;
       switch (data.type) {
-        case "owner.file-list": fileValue = await files.list(data.input); break;
-        case "owner.file-get": fileValue = await files.get(data.path); break;
-        case "owner.file-range": fileValue = await files.getRange(data.path, data.range); break;
+        case "owner.file-list": fileValue = await files.list({ ...data.input, signal }); break;
+        case "owner.file-get": fileValue = await files.get(data.path, { ifRevision: data.ifRevision, signal }); break;
+        case "owner.file-range": fileValue = await files.getRange(data.path, data.range, { ifRevision: data.ifRevision, signal }); break;
         case "owner.file-put": fileValue = await files.put(data.path, data.bytes, {
+          contentType: data.contentType,
           ...(data.ifNoneMatch === undefined ? {} : { ifNoneMatch: true as const }),
           ...(data.ifRevision === undefined ? {} : { ifRevision: data.ifRevision }),
         }); break;
@@ -68,29 +68,8 @@ async function executeOwnerStorageDataUnsafe(data: CoordinatorOwnerStorageData, 
       deps.assertStorageBindingLive(expectedBinding);
       return fileValue;
     }
-    store = await root.openKeyValueStore({
-      declaration: {
-        moduleId: grant.moduleId,
-        purposeId: grant.purposeId,
-        authority: grant.authority,
-        model: grant.model,
-        schemaVersion: grant.schemaVersion,
-      },
-    });
-    if (signal?.aborted) throw deps.storageUnavailableError("Owner storage request was cancelled");
-    let value: unknown;
-    switch (data.type) {
-      case "owner.get": value = await store.get(data.key, { partition: data.partition }); break;
-      case "owner.list": value = await store.list(data.input); break;
-      case "owner.put": value = await store.put(data.key, data.value, data.condition); break;
-      case "owner.delete": await store.delete(data.key, data.condition); value = undefined; break;
-      case "owner.commit": value = await store.commit({ partition: data.partition, ifRevision: data.ifRevision, operations: data.operations }); break;
-    }
-    if (signal?.aborted) throw deps.storageUnavailableError("Owner storage request was cancelled");
-    deps.assertStorageBindingLive(expectedBinding);
-    return value;
+    throw new Error("Only file storage requests are supported");
   } finally {
-    store?.close();
     files?.close();
     release();
   }

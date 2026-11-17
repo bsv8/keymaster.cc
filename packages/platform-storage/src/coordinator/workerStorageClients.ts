@@ -1,4 +1,4 @@
-import type { BorrowedModuleFileStore, KeyValueStore, ModuleFileStore, PluginStorageDeclaration } from "@keymaster/contracts";
+import type { BorrowedModuleFileStore, ModuleFileStore, PluginStorageDeclaration } from "@keymaster/contracts";
 import type { StoragePrivateRootStore } from "../storage-access/platform-root/platformRootStore.js";
 
 export interface WorkerStorageBinding {
@@ -6,9 +6,6 @@ export interface WorkerStorageBinding {
   sessionEpoch: string;
   runGeneration: string;
 }
-export type WorkerMaintenanceStore = KeyValueStore & {
-  collectGarbage(input?: { minAgeMs?: number; maxDeletes?: number }): Promise<{ scanned: number; candidates: number; deleted: number; failed: number }>;
-};
 export interface WorkerStorageClientDependencies<Binding extends WorkerStorageBinding> {
   root(): StoragePrivateRootStore | undefined;
   binding(): Binding | undefined;
@@ -16,13 +13,11 @@ export interface WorkerStorageClientDependencies<Binding extends WorkerStorageBi
   assertAvailable(): void;
   assertLive(binding: Binding): void;
   beginRequest(): () => void;
-  declaration(moduleId: string, purposeId: string, model: "files" | "kv"): PluginStorageDeclaration;
+  declaration(moduleId: string, purposeId: string, model: "files"): PluginStorageDeclaration;
   unavailable(message: string): Error;
-  withIoLease<T>(operation: "read" | "write", model: "files" | "kv", execute: () => Promise<T>): Promise<T>;
+  withIoLease<T>(operation: "read" | "write", model: "files", execute: () => Promise<T>): Promise<T>;
   onFailure(error: unknown): void;
   onInvalidate(moduleId: string): void;
-  registerMaintenance(store: WorkerMaintenanceStore): void;
-  unregisterMaintenance(store: WorkerMaintenanceStore): void;
 }
 
 /** Storage owns borrowed handles and open generations. Only trusted assembly
@@ -32,7 +27,7 @@ export function createWorkerStorageClients<Binding extends WorkerStorageBinding>
   const files = new Map<string, BorrowedModuleFileStore>();
   const bindings = new Set<{ invalidate(): void }>();
 
-  function borrow<Store extends { close(): void }>(moduleId: string, purposeId: string, model: "files" | "kv", open: (root: StoragePrivateRootStore, declaration: PluginStorageDeclaration) => Promise<Store>) {
+  function borrow<Store extends { close(): void }>(moduleId: string, purposeId: string, model: "files", open: (root: StoragePrivateRootStore, declaration: PluginStorageDeclaration) => Promise<Store>) {
     const declaration = deps.declaration(moduleId, purposeId, model);
     let closed = false;
     let generation = 0;
@@ -121,35 +116,8 @@ export function createWorkerStorageClients<Binding extends WorkerStorageBinding>
     return handle;
   }
 
-  function keyValue(moduleId: string, purposeId: string): KeyValueStore {
-    const declaration = deps.declaration(moduleId, purposeId, "kv");
-    if (declaration.authority === "third-party-app") throw new Error("Worker module K-V requires a built-in or platform declaration");
-    const borrowed = borrow<KeyValueStore>(moduleId, purposeId, "kv", (root, declaration) => root.openKeyValueStore({ declaration }));
-    const handle: WorkerMaintenanceStore = {
-      get walletGeneration() { return borrowed.binding()?.walletGeneration ?? ""; },
-      get runGeneration() { return borrowed.binding()?.runGeneration ?? ""; },
-      moduleId: declaration.moduleId,
-      purposeId: declaration.purposeId,
-      authority: declaration.authority,
-      model: "kv",
-      schemaVersion: declaration.schemaVersion,
-      get: (key, options) => borrowed.run("read", store => store.get(key, options)),
-      list: input => borrowed.run("read", store => store.list(input)),
-      put: (key, value, condition) => borrowed.run("write", store => store.put(key, value, condition)),
-      delete: (key, condition) => borrowed.run("write", store => store.delete(key, condition)),
-      commit: input => borrowed.run("write", store => store.commit(input)),
-      collectGarbage: input => borrowed.run("write", store => {
-        const maintenance = store as Partial<WorkerMaintenanceStore>;
-        if (!maintenance.collectGarbage) throw new Error("K-V garbage collection is unavailable");
-        return maintenance.collectGarbage(input);
-      }),
-      close() { borrowed.close(); deps.unregisterMaintenance(handle); },
-    };
-    deps.registerMaintenance(handle);
-    return handle;
-  }
   return {
     moduleFiles: (moduleId: string, purposeId: string, appStorageName?: string) => openFiles(moduleId, purposeId, appStorageName),
-    keyValue, invalidateAll() { for (const binding of bindings) binding.invalidate(); },
+    invalidateAll() { for (const binding of bindings) binding.invalidate(); },
   };
 }

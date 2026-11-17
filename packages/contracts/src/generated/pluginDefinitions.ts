@@ -224,11 +224,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             "kind": "local",
             "id": "storage.file-clients",
             "version": "1"
-          },
-          {
-            "kind": "local",
-            "id": "storage.kv-clients",
-            "version": "1"
           }
         ],
         "privateProvides": [
@@ -924,7 +919,7 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "capability": {
               "kind": "local",
-              "id": "storage.kv-clients",
+              "id": "storage.file-clients",
               "version": "1"
             },
             "sourceRuntime": "window-main",
@@ -1044,23 +1039,9 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
         "storages": [
           {
             "moduleId": "protocol",
-            "purposeId": "durable-policy",
+            "purposeId": "",
             "authority": "built-in-module",
-            "model": "kv",
-            "schemaVersion": 1
-          },
-          {
-            "moduleId": "protocol",
-            "purposeId": "sessions",
-            "authority": "built-in-module",
-            "model": "kv",
-            "schemaVersion": 1
-          },
-          {
-            "moduleId": "protocol",
-            "purposeId": "command-history",
-            "authority": "built-in-module",
-            "model": "kv",
+            "model": "files",
             "schemaVersion": 1
           }
         ]

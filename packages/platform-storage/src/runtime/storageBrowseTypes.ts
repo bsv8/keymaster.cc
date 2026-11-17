@@ -33,10 +33,6 @@ export type StoragePreviewFormat =
   | "text"
   /** 零字节。 */
   | "empty"
-  /** K-V value 对象，且信封、版本与载荷哈希均已通过校验。 */
-  | "kv-value"
-  /** K-V value 对象，但信封损坏、哈希不符或版本不支持。 */
-  | "kv-invalid"
   /** 二进制或无法判断的格式；只提供原文，不做结构化呈现。 */
   | "binary"
   /** 因超出预览上限而只返回了截取内容。 */
@@ -103,19 +99,6 @@ export interface StorageBrowsePreviewRequest {
   ifRevision?: string;
 }
 
-/** K-V value 对象的解码结果；原始信封字节仍可切换查看。 */
-export interface StorageBrowseKvPayload {
-  /** valueId；来自已校验的信封头。 */
-  valueId: string;
-  /** partition；来自已校验的信封头。 */
-  partition: string;
-  /** 载荷语义身份；JSON 载荷与二进制载荷分别用前缀区分。 */
-  payloadFingerprint: string;
-  /** true 表示载荷是 JSON，可按 JSON 预览。 */
-  json: boolean;
-  /** JSON 载荷的文本；非 JSON 载荷省略。 */
-  jsonText?: string;
-}
 
 /** 文件预览结果；字节最多为 {@link STORAGE_BROWSE_PREVIEW_MAX_BYTES}。 */
 export interface StorageBrowsePreview {
@@ -137,8 +120,5 @@ export interface StorageBrowsePreview {
   lastModified: string;
   /** 写入时声明的内容类型。 */
   contentType?: string;
-  /** K-V 解码结果；仅 format 为 kv-value 时出现。 */
-  kvPayload?: StorageBrowseKvPayload;
-  /** K-V 信封被拒的原因代码；仅 format 为 kv-invalid 时出现。 */
-  kvError?: "envelope-invalid" | "version-unsupported" | "hash-mismatch" | "payload-unsupported";
+
 }

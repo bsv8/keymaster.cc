@@ -1,10 +1,10 @@
 /** 中央系统固定 CAS snapshot 契约。 */
 
 import type { PluginStorageDeclaration } from "./access.js";
-import type { KeyValueJson } from "./kv.js";
+import type { StorageJson } from "./json.js";
 
 /** Snapshot 经 JSON envelope 持久化；二进制值仍只属于 K-V 契约。 */
-export type StorageSnapshotJsonValue = KeyValueJson;
+export type StorageSnapshotJsonValue = StorageJson;
 
 type ContainsNonJsonValue<T, Depth extends readonly unknown[] = []> =
   Depth["length"] extends 8 ? false

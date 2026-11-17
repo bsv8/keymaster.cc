@@ -5,7 +5,6 @@
 // Keymaster 的唯一生产 Host 装配入口：通用生命周期由 WebLoom 创建，
 // 这里仅组合 Keymaster Registry、Storage、i18n 和 Coordinator。
 export type { PluginHost, CreatePluginHostOptions } from "./pluginHostContract.js";
-export * from "./keyValueSettingsStore.js";
 export * from "./navigate.js";
 export * from "./react/useI18n.js";
 export * from "./react/useOptionalResource.js";
@@ -14,7 +13,6 @@ export * from "./react/AppLink.js";
 export * from "./i18n/i18nStore.js";
 export * from "./i18n/languageMap.js";
 export * from "./i18n/createI18nService.js";
-export * from "./storage/inMemoryKeyValueStore.js";
 export * from "./lifecycle/scopedChannelRuntime.js";
 
 // 施工单 2026-06-30 001：全局 fatal store。主应用 与 plugin-vault 等

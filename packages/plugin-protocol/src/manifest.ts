@@ -3,7 +3,7 @@ import { ApplicationConnectionHost } from "./applicationConnectionHost.js";
 import { ApplicationCenterPage, ApplicationConnectionControls } from "./ApplicationCenter.js";
 import { APPLICATION_AI_TOOLS_CAPABILITY, APPLICATION_CONNECTIONS_CAPABILITY, BUSINESS_REGISTRY_CAPABILITY, type ApplicationConnectionsSnapshot } from "@keymaster/contracts";
 import { createPublicProtocolService } from "./publicProtocolService.js";
-import { STORAGE_KV_CLIENTS_CAPABILITY } from "@keymaster/contracts";
+import { STORAGE_FILE_CLIENTS_CAPABILITY } from "@keymaster/contracts";
 import { PROTOCOL_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
 import { createElement } from "react";
 import { bindProtocolUi } from "./ProtocolResourceContext.js";
@@ -451,12 +451,10 @@ const protocolPluginDefinition = {
     scopeKind: "storage",
     provides: [PROTOCOL_SERVICE_CAPABILITY, PROTOCOL_STORAGE_REPOSITORY_CAPABILITY, PROTOCOL_COORDINATOR_CONTROL_CAPABILITY, APPLICATION_CONNECTIONS_CAPABILITY, APPLICATION_AI_TOOLS_CAPABILITY],
     storages: [
-      PROTOCOL_STORAGE_DECLARATIONS.durablePolicy,
-      PROTOCOL_STORAGE_DECLARATIONS.sessions,
-      PROTOCOL_STORAGE_DECLARATIONS.commandHistory
+      PROTOCOL_STORAGE_DECLARATIONS.files
     ],
     dependencies: defineRuntimeUnitDependencies([
-      { capability: STORAGE_KV_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "声明存储客户端及用途授权" },
+      { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "声明存储客户端及用途授权" },
       { capability: PROTOCOL_COORDINATOR_CLIENT_BINDING_CAPABILITY, sourceRuntime: "window-main", reason: "声明本插件的受限 Coordinator 连接" },
       { capability: PAGE_UI_REGISTRY_CAPABILITY, reason: "注册 Connect 与应用连接中心" },
       { capability: PAGE_UI_RENDERER_CAPABILITY, reason: "钱包内的跨源应用工作区" },
@@ -528,9 +526,9 @@ const protocolPluginDefinition = {
       const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
 
       const storageRepository = openProtocolStorageRepository({
-        durablePolicy: ctx.capability(STORAGE_KV_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, PROTOCOL_STORAGE_PURPOSES.durablePolicy),
-        sessions: ctx.capability(STORAGE_KV_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, PROTOCOL_STORAGE_PURPOSES.sessions),
-        commandHistory: ctx.capability(STORAGE_KV_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, PROTOCOL_STORAGE_PURPOSES.commandHistory)
+        durablePolicy: ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, PROTOCOL_STORAGE_PURPOSES.files),
+        sessions: ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, PROTOCOL_STORAGE_PURPOSES.files),
+        commandHistory: ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, PROTOCOL_STORAGE_PURPOSES.files)
       });
       ctx.provide(PROTOCOL_STORAGE_REPOSITORY_CAPABILITY, storageRepository);
       await service.attachProtocolStorageRepository(storageRepository);

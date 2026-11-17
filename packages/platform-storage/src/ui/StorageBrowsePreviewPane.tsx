@@ -1,7 +1,7 @@
 // 浏览页的「预览」面板：按 Worker 判定的 format 呈现内容。
 //
 // 这个组件只做展示。它不解析钱包数据，也没有任何写操作：格式判定、UTF-8 校验、
-// K-V 解码和 1 MiB 截断都已经在 Worker 完成，这里拿到的 format 是可信结论。
+// 格式判定和 1 MiB 截断都已经在 Worker 完成，这里拿到的 format 是可信结论。
 // 唯一在这里发生的解析是「怎么把已知是 JSON / Markdown 的文本画出来」。
 import { useMemo, useState } from "react";
 import { ChevronRight } from "lucide-react";
@@ -32,8 +32,6 @@ export interface PreviewPaneProps {
   onToggleRawJson: () => void;
   markdownSource: boolean;
   onToggleMarkdownSource: () => void;
-  kvRaw: boolean;
-  onToggleKvRaw: () => void;
   /** 失败状态下的重试入口；缺省时只显示说明。 */
   onRetry?: () => void;
 }
@@ -52,11 +50,9 @@ interface PreviewContext {
   wrapText: boolean;
   rawJson: boolean;
   markdownSource: boolean;
-  kvRaw: boolean;
   onToggleWrap: () => void;
   onToggleRawJson: () => void;
   onToggleMarkdownSource: () => void;
-  onToggleKvRaw: () => void;
   translate: BrowseTranslate;
 }
 
@@ -101,11 +97,9 @@ export function PreviewPane(props: PreviewPaneProps) {
         wrapText={props.wrapText}
         rawJson={props.rawJson}
         markdownSource={props.markdownSource}
-        kvRaw={props.kvRaw}
         onToggleWrap={props.onToggleWrap}
         onToggleRawJson={props.onToggleRawJson}
         onToggleMarkdownSource={props.onToggleMarkdownSource}
-        onToggleKvRaw={props.onToggleKvRaw}
         translate={props.translate}
       />
     </div>
@@ -150,10 +144,6 @@ function PreviewBody(props: PreviewContext) {
           <RawText bytes={preview.bytes} wrap={props.wrapText} />
         </>
       );
-    case "kv-value":
-      return <KvBody {...props} />;
-    case "kv-invalid":
-      return <KvInvalidBody {...props} />;
     default:
       return <p className="storage-browse__hint">{t("storage.browse.unsupportedFormat", { defaultValue: "This format cannot be previewed." })}</p>;
   }
@@ -465,65 +455,6 @@ function MarkdownExternalLink(props: { href: string; label: string }) {
       {props.label}
     </button>
   );
-}
-
-/** K-V value：解码内容与原始信封可切换。 */
-function KvBody(props: PreviewContext) {
-  const { preview, translate: t } = props;
-  const payload = preview.kvPayload;
-  return (
-    <div className="storage-browse__kv">
-      <div className="storage-browse__kv-actions">
-        <Button size="sm" variant="ghost" onClick={props.onToggleKvRaw} aria-pressed={props.kvRaw}>
-          {props.kvRaw
-            ? t("storage.browse.kv.decoded", { defaultValue: "Decoded" })
-            : t("storage.browse.kv.raw", { defaultValue: "Raw object" })}
-        </Button>
-      </div>
-      {props.kvRaw ? (
-        <RawText bytes={preview.bytes} wrap={props.wrapText} />
-      ) : payload?.json === true ? (
-        <>
-          <dl className="storage-browse__props">
-            <dt>{t("storage.browse.kv.valueId", { defaultValue: "Value id" })}</dt>
-            <dd>{payload.valueId}</dd>
-            <dt>{t("storage.browse.kv.partition", { defaultValue: "Partition" })}</dt>
-            <dd>{payload.partition}</dd>
-            <dt>{t("storage.browse.kv.payload", { defaultValue: "Payload" })}</dt>
-            <dd>{payload.payloadFingerprint}</dd>
-          </dl>
-          <JsonSource text={payload.jsonText ?? ""} wrap={props.wrapText} />
-        </>
-      ) : <RawText bytes={preview.bytes} wrap={props.wrapText} />}
-    </div>
-  );
-}
-
-/** K-V 信封被拒：说明原因并保留原始对象，不退化成一份看似正常的业务 JSON。 */
-function KvInvalidBody(props: PreviewContext) {
-  const { preview, translate: t } = props;
-  const reason = kvErrorText(preview.kvError, t);
-  return (
-    <div className="storage-browse__kv">
-      <p className="storage-browse__notice" role="status">{reason}</p>
-      <RawText bytes={preview.bytes} wrap={props.wrapText} />
-    </div>
-  );
-}
-
-function kvErrorText(code: StorageBrowsePreview["kvError"], t: BrowseTranslate): string {
-  switch (code) {
-    case "envelope-invalid":
-      return t("storage.browse.kv.envelopeInvalid", { defaultValue: "The key-value envelope is malformed." });
-    case "version-unsupported":
-      return t("storage.browse.kv.versionUnsupported", { defaultValue: "This key-value version is not supported." });
-    case "hash-mismatch":
-      return t("storage.browse.kv.hashMismatch", { defaultValue: "The key-value payload hash does not match." });
-    case "payload-unsupported":
-      return t("storage.browse.kv.payloadUnsupported", { defaultValue: "The key-value payload is binary and cannot be previewed." });
-    default:
-      return t("storage.browse.kv.invalid", { defaultValue: "This key-value object could not be decoded." });
-  }
 }
 
 /** 纯文本源码视图。 */

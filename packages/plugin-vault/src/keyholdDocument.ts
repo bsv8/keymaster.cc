@@ -1,6 +1,6 @@
 // 官方 KeyHold 只加密私钥；钱包封装另存并认证创建时的网络，不修改 SDK 格式。
 import { exportPrivateKey, parseDocument, recommendedParameters, serializeDocument, unlockDocument } from "keyhold";
-import { validateBsvNetwork, type BsvNetwork, type NetworkKeyHoldDocument } from "@keymaster/contracts";
+import { KEYHOLD_LIMITS, validateBsvNetwork, type BsvNetwork, type NetworkKeyHoldDocument } from "@keymaster/contracts";
 import { hmac } from "@noble/hashes/hmac";
 import { sha256 } from "@noble/hashes/sha256";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils";
@@ -52,4 +52,20 @@ export async function createKeyHoldDocument(input: { label: string; privateKey: 
   const parameters = options?.iterations === undefined ? recommended : { ...recommended, keyDerivation: { ...recommended.keyDerivation, iterations: options.iterations } };
   const keyHold = parseDocument(await exportPrivateKey({ privateKey: input.privateKey, password, label: input.label, parameters }));
   return { ...keyHold, walletGeneration: crypto.randomUUID(), bsvNetwork, networkAuthenticationHex: authentication(input.privateKey, bsvNetwork, keyHold.publicKeyHex) };
+}
+
+export function serializeVaultFiles(document: NetworkKeyHoldDocument): import("@keymaster/contracts/storage-internal").WalletVaultFiles {
+  const envelope = JSON.parse(serializeKeyHoldDocument(document));
+  const { keyHold, ...network } = envelope;
+  return { key: new TextEncoder().encode(JSON.stringify(keyHold)), network: new TextEncoder().encode(JSON.stringify({ ...network, format: "keymaster.network", publicKeyHex: document.publicKeyHex })) };
+}
+export function parseVaultFiles(key: Uint8Array, network: Uint8Array): NetworkKeyHoldDocument {
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  if (key.byteLength > KEYHOLD_LIMITS.maxSerializedBytes || network.byteLength > 16 * 1024) throw new TypeError("Wallet bootstrap file exceeds its limit");
+  const metadata = JSON.parse(decoder.decode(network));
+  if (!metadata || metadata.format !== "keymaster.network" || typeof metadata.walletGeneration !== "string") throw new TypeError("Wallet network file is invalid");
+  const { publicKeyHex, ...envelope } = metadata;
+  const document = parseKeyHoldDocument(JSON.stringify({ ...envelope, format: "keymaster.network-keyhold", keyHold: JSON.parse(decoder.decode(key)) }));
+  if (publicKeyHex !== document.publicKeyHex) throw new TypeError("Wallet bootstrap identity mismatch");
+  return document;
 }

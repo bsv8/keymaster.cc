@@ -1,7 +1,7 @@
 // 唯一钱包 Key 的仓储。
 //
 // 与旧「公钥派生文件名」的列表仓储相比只有两处差别,而且都是结构性的:
-//   - 路径固定为 vault/key.json,不再由公钥派生文件名,因此取消「文件名与公钥一致」
+//   - 路径固定为 key.json,不再由公钥派生文件名,因此取消「文件名与公钥一致」
 //     的要求;
 //   - 没有 list/readAll/delete:一个钱包只有一把 Key,多 Key、切换和逐 Key
 //     删除在产品上已不存在。更换身份只能通过重置钱包后重新创建或导入。
@@ -16,6 +16,8 @@ import { StorageRuntimeError, storageErrorCode } from "@keymaster/contracts/stor
 import type { WalletVaultKeyStore } from "@keymaster/contracts/storage-internal";
 import {
   exportPortableKeyHoldDocument,
+  serializeVaultFiles,
+  parseVaultFiles,
   createKeyHoldDocument,
   decryptKeyHoldDocument,
   parseKeyHoldDocument,
@@ -111,15 +113,19 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
     } catch (caught) {
       return rethrowStorage(caught, "KeyHold file could not be read");
     }
-    if (!record) return undefined;
-    return parseFile(record.bytes, record.revision);
+    if (!record.key && !record.network) return undefined;
+    if (!record.key || !record.network) throw fail("storage_wallet_corrupt", "Wallet bootstrap files are incomplete");
+    try {
+      const document = parseVaultFiles(record.key.bytes, record.network.bytes);
+      return parseFile(new TextEncoder().encode(serializeKeyHoldDocument(document)), record.key.revision);
+    } catch { throw fail("storage_wallet_corrupt", "Wallet bootstrap files are invalid"); }
   }
 
   async function writeFresh(bytes: Uint8Array, document: NetworkKeyHoldDocument): Promise<WalletKeyFile> {
     if (bytes.byteLength > KEYHOLD_LIMITS.maxSerializedBytes) throw fail("storage_limit_exceeded", "KeyHold import exceeds its size limit");
     try {
       // 条件创建与写入在同一事务:并发创建只能有一个成功。
-      const written = await store.writeKey(bytes, {
+      const written = await store.writeKey(serializeVaultFiles(document), {
         ifNoneMatch: true,
       });
       return { backend: "software", document, bytes: cloneBytes(bytes), revision: written.revision };
@@ -202,7 +208,7 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
       }
       const nextBytes = new TextEncoder().encode(serializeKeyHoldDocument(nextDocument));
       try {
-        const written = await store.writeKey(nextBytes, {
+        const written = await store.writeKey(serializeVaultFiles(nextDocument), {
           ifRevision: unlocked.revision,
         });
         return { backend: "software", document: nextDocument, bytes: cloneBytes(nextBytes), revision: written.revision };
@@ -224,7 +230,7 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
     const nextBytes = new TextEncoder().encode(serializeKeyHoldDocument(nextDocument));
     try {
       // 改名不要求密码,但也不能覆盖别人的并发更新。
-      const written = await store.writeKey(nextBytes, {
+      const written = await store.writeKey(serializeVaultFiles(nextDocument), {
         ifRevision: file.revision,
       });
       return parseFile(nextBytes, written.revision);
@@ -253,7 +259,7 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
       document.walletGeneration = source.document.walletGeneration;
       const next = new TextEncoder().encode(serializeKeyHoldDocument(document));
       try {
-        const result = await store.writeKey(next,{ifRevision:source.revision});
+        const result = await store.writeKey(serializeVaultFiles(document),{ifRevision:source.revision});
         return parseFile(next,result.revision);
       } catch (caught) { return rethrowStorage(caught,"Software migration commit failed"); }
     } finally { privateKey.fill(0); }

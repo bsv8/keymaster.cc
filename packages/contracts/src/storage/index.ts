@@ -1,6 +1,6 @@
 // 存储契约按职责分层；实现包只依赖这里，不依赖具体 Provider 文件。
 export * from "./wallet.js";
-export * from "./kv.js";
+export * from "./json.js";
 export * from "./files.js";
 export * from "./access.js";
 export * from "./runtime.js";

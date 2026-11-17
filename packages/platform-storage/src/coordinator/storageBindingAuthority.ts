@@ -5,19 +5,10 @@
 
 import type {
   CoordinatorValueResult,
-  KeyValueCommitInput,
-  KeyValueCommitResult,
-  KeyValueEntry,
-  KeyValueEntryMeta,
-  KeyValueListInput,
-  KeyValueListResult,
-  KeyValueStore,
-  KeyValueValue,
   ModuleFileListPage,
   ModuleFileObject,
   ModuleFileStore,
   ModuleFileWriteResult,
-  OwnerAppStore,
   PluginStorageDeclaration,
   StorageWriteCondition,
 } from "@keymaster/contracts";
@@ -60,7 +51,7 @@ export function createStorageBindingAuthority(
     const runGeneration = options.getRunGeneration?.();
     if (!walletGeneration || !runGeneration) throw new Error("Wallet storage is not ready");
     if (input.declaration.moduleId !== input.pluginId || input.declaration.authority !== "built-in-module") throw new Error("Invalid internal storage declaration");
-    if (input.declaration.model !== "kv" && input.declaration.model !== "files") throw new Error("Unsupported plugin storage model");
+    if (input.declaration.model !== "files") throw new Error("Unsupported plugin storage model");
     return { ...input.declaration, model: input.declaration.model, authority: "built-in-module", walletGeneration, runGeneration };
   }
   function requestBinding(owner: Omit<StorageOwnerBinding, "sessionEpoch">): StorageOwnerBinding {
@@ -68,48 +59,6 @@ export function createStorageBindingAuthority(
     if (!sessionEpoch) throw new Error("Wallet runtime is unavailable");
     return { ...owner, sessionEpoch };
   }
-  async function openOwnerAppStore(input: { pluginId: string; declaration: PluginStorageDeclaration }): Promise<OwnerAppStore> {
-    const owner = binding(input);
-    let closed = false;
-    const assertOpen = (): void => { if (closed) throw new Error("Storage handle is closed"); };
-    const call = async <T>(data: CoordinatorOwnerStorageData): Promise<T> => unwrap<T>(await client.storageOwnerData(data), "module storage");
-    return {
-      get walletGeneration() { return owner.walletGeneration; },
-      get runGeneration() { return owner.runGeneration; },
-      moduleId: owner.moduleId,
-      purposeId: owner.purposeId,
-      authority: "built-in-module",
-      model: "kv",
-      schemaVersion: owner.schemaVersion,
-      async get<T = KeyValueValue>(key: string, listInput: { partition?: string } = {}): Promise<KeyValueEntry<T> | undefined> {
-        assertOpen();
-        return call<KeyValueEntry<T> | undefined>({
-          type: "owner.get",
-          binding: requestBinding(owner),
-          key,
-          ...(listInput.partition === undefined ? {} : { partition: listInput.partition }),
-        });
-      },
-      async list(listInput: KeyValueListInput = {}): Promise<KeyValueListResult> {
-        assertOpen();
-        return call<KeyValueListResult>({ type: "owner.list", binding: requestBinding(owner), input: listInput });
-      },
-      async put<T = KeyValueValue>(key: string, value: T, condition = {}): Promise<KeyValueEntryMeta> {
-        assertOpen();
-        return call<KeyValueEntryMeta>({ type: "owner.put", binding: requestBinding(owner), key, value, condition });
-      },
-      async delete(key: string, condition = {}): Promise<void> {
-        assertOpen();
-        await call<void>({ type: "owner.delete", binding: requestBinding(owner), key, condition });
-      },
-      async commit(commitInput: KeyValueCommitInput): Promise<KeyValueCommitResult> {
-        assertOpen();
-        return call<KeyValueCommitResult>({ type: "owner.commit", binding: requestBinding(owner), ...commitInput });
-      },
-      close() { closed = true; },
-    };
-  }
-
   async function openOwnerFileStore(input: { pluginId: string; declaration: PluginStorageDeclaration }): Promise<ModuleFileStore> {
     const owner = binding(input);
     let closed = false;
@@ -193,7 +142,6 @@ export function createStorageBindingAuthority(
     getActivePublicKeyHex: () => options.getActivePublicKeyHex?.(),
     getWalletGeneration: () => options.getWalletGeneration?.(),
     getRunGeneration: () => options.getRunGeneration?.(),
-    openOwnerAppStore,
     openOwnerFileStore,
     async clearStorageRoot(input: { declaration: PluginStorageDeclaration; appStorageName?: string }) {
       unwrap<void>(await client.storageClearRoot(input), "clear storage root");

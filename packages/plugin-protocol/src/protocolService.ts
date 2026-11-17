@@ -60,7 +60,7 @@ import type { ProtocolResultMessage } from "keymaster-connect/protocol";
 //   - popup 卸载 / 刷新 → 所有 pending feepool operation 立即失效；
 //     endSession 把所有未终态 request 强制收尾为 rejected。
 //
-// 隐私边界：余额不足 / 费用池缺失 / K-V 不可用 / 未知 op / 跨 origin
+// 隐私边界：余额不足 / 费用池缺失 / 业务文档 不可用 / 未知 op / 跨 origin
 // operationId，**全部**对外回 `user_rejected`；本地原因只写
 // `ProtocolCommandRecord.failureReason`。
 //
@@ -202,7 +202,7 @@ function feePoolKeyFor(
  * 确认超时缺省秒数（施工单 003 硬切换：per-origin 确认超时）。
  *
  * 设计缘由：
- *   - 缺省 30 秒是 per-origin 策略的保守默认值；K-V / 缓存 / UI 都按
+ *   - 缺省 30 秒是 per-origin 策略的保守默认值；业务文档 / 缓存 / UI 都按
  *     "空 / 非整数 / <= 0 → 30" 规范化。
  *   - 不引入"关闭 timeout"语义：用户明确要 timeout，0 / 负数 / 空 都
  *     不视为"关闭"，而是回退到缺省 30。
@@ -210,7 +210,7 @@ function feePoolKeyFor(
 const DEFAULT_CONFIRM_TIMEOUT_SECONDS = 30;
 
 /**
- * 把 K-V 读到的 origin 记录补齐新字段默认值。**纯函数**；不改入参，不读 K-V。
+ * 把 业务文档 读到的 origin 记录补齐新字段默认值。**纯函数**；不改入参，不读 业务文档。
  */
 function normalizeOriginSettings(
   rec: ProtocolOriginSettingsRecord | null | undefined,
@@ -236,7 +236,7 @@ export interface ProtocolServiceDeps {
   vault: VaultService;
   walletState: VaultWalletState;
   /**
-   * 协议存储 K-V（command-history / durable-policy / sessions）。生产 manifest
+   * 协议存储 业务文档（command-history / durable-policy / sessions）。生产 manifest
    * 必须注入；测试可传内存 fake。独立构造时缺失绑定只允许读路径安全降级，
    * 必要写入会抛错。
    */
@@ -387,7 +387,7 @@ interface RequestRecord {
   /**
    * `connect.resume` 进入时的 session 快照（ownerPublicKeyHex /
    * ownerLabel / claimsSnapshot）；只在 `method === "connect.resume"`
-   * 时有值。confirming 视图直接拿这个做展示，不需要再查 K-V。
+   * 时有值。confirming 视图直接拿这个做展示，不需要再查 业务文档。
    *
    * 关键（施工单 2026-06-28 002 硬切换）：`ownerKeyId` **不**记录在
    * snapshot 里；owner 唯一真值 = `ownerPublicKeyHex`。
@@ -473,10 +473,10 @@ export class ProtocolServiceImpl implements ProtocolService {
   private currentOriginValue: string | null = null;
   /** 当前 origin 下的命令流（最新在前；按 updatedAt desc）。 */
   private feedCommands: ProtocolCommandRecord[] = [];
-  /** 命令流 K-V 是否可用。false 时 UI 顶部显示"历史不可用"。 */
+  /** 命令流 业务文档 是否可用。false 时 UI 顶部显示"历史不可用"。 */
   private historyAvailableFlag: boolean;
   /**
-   * K-V 加载按 origin 隔离的 in-flight promise map（施工单 2026-06-27 002
+   * 业务文档 加载按 origin 隔离的 in-flight promise map（施工单 2026-06-27 002
    * 反馈修复）。
    *
    * 旧实现用单一全局 `historyLoadInFlight: Promise<void> | null`，复
@@ -571,7 +571,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 设计缘由（施工单 2026-06-29 001 硬切换）：
    *   - launchToken 只在 Session Window 当前内存有效；Session Window 刷新
    *     / 关闭即失效。
-   *   - 不允许通过 platform K-V repository 持久化，避免"刷新后旧 token 仍能消费"。
+   *   - 不允许通过 platform 业务文档 repository 持久化，避免"刷新后旧 token 仍能消费"。
    */
   private readonly launchTokensByToken: Map<
     string,
@@ -726,7 +726,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   /**
    * 在服务已经启动后接入协议存储。
    *
-   * purpose-scoped K-V repository 只承载历史、站点配置和 session 持久化。
+   * 插件文件 repository 只承载历史、站点配置和 session 持久化。
    * 生产 manifest 在 setup 生命周期内完成绑定；本方法保留给 service 的
    * 独立构造 / 测试场景，并会传播回补写失败。
    */
@@ -735,7 +735,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.deps.storageRepository = storageRepository;
     this.historyAvailableFlag = true;
 
-    // K-V 尚未就绪期间完成的终态记录仍在内存中；接入后补写，避免一次短暂
+    // 业务文档 尚未就绪期间完成的终态记录仍在内存中；接入后补写，避免一次短暂
     // 初始化延迟导致本次会话的历史永久丢失。
     await Promise.all(
       Array.from(this.requestsByRecordId.values())
@@ -997,7 +997,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
-   * 读 origin 配置。K-V 不可用或该 origin 尚未配置时返回 null。
+   * 读 origin 配置。业务文档 不可用或该 origin 尚未配置时返回 null。
    */
   async getOriginSettings(origin: string): Promise<ProtocolOriginSettings | null> {
     if (!this.deps.storageRepository) return null;
@@ -1015,13 +1015,13 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
-   * 写 origin 配置。K-V 不可用时 throw。写入时同步刷内存 cache。
+   * 写 origin 配置。业务文档 不可用时 throw。写入时同步刷内存 cache。
    */
   async setOriginSettings(record: ProtocolOriginSettings): Promise<void> {
     const allowed = new Set(["origin", "identityAutoApproveEnabled", "cipherAutoApproveEnabled", "confirmTimeoutSeconds", "updatedAt"]);
     if (Object.keys(record).some(key => !allowed.has(key))) throw new TypeError("Unknown origin setting");
     if (!this.deps.storageRepository) {
-      throw new Error("Protocol storage K-V is not available");
+      throw new Error("Protocol storage 业务文档 is not available");
     }
     const stored = await this.deps.storageRepository.getOrigin(record.origin);
     const next = normalizeOriginSettings({ ...stored, ...record }, record.origin);
@@ -1167,7 +1167,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *
    * 注意：manual record 进入 `confirming` 时**必须**同时调
    * `refreshTimeoutFromOriginConfig()`（与 `acceptRequest` 路径一致）。
-   * 锁屏期间积累的 manual request 解锁时同样需要按 K-V 真值 clamp
+   * 锁屏期间积累的 manual request 解锁时同样需要按 业务文档 真值 clamp
    * deadline——否则会固定吃 30 秒默认值，per-origin timeout 配置
    * 不生效。
    */
@@ -1206,7 +1206,7 @@ export class ProtocolServiceImpl implements ProtocolService {
             snapshot.startedFromFallback
           );
           // 同步等待 refresh 落定：cache miss 时 timer 用 30s 兜底启动，
-          // refresh 会 clamp 到 K-V 真值；如果 clamp 触发了 finalize，由
+          // refresh 会 clamp 到 业务文档 真值；如果 clamp 触发了 finalize，由
           // await 链保证后续 setPhase/emit 不会跟 finalize 收尾冲突。
           await this.refreshTimeoutFromOriginConfig(rec.recordId, rec.origin);
         }
@@ -1404,7 +1404,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *     `confirming` 的 record；
    *   - 返回 owner 快照（ownerPublicKeyHex / ownerLabel）；UI 据此渲染
    *     "恢复会话"视图。
-   *   - snapshot 缺失（K-V 不可用 / session 失效）时返回 null：UI 据此
+   *   - snapshot 缺失（业务文档 不可用 / session 失效）时返回 null：UI 据此
    *     展示"该会话已失效，请重新登录"并禁用"恢复"按钮（仍可"取消"）。
    */
   connectResumeRecord(recordId?: string): {
@@ -1476,7 +1476,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 行为：
    *   - 校验 recordId 存在 + method === "connect.resume" + 当前 phase
    *     处于 `waiting_unlock_manual` 或 `confirming`；
-   *   - snapshot 缺失（K-V 不可用 / session 失效）时不推进，UI 应当展示
+   *   - snapshot 缺失（业务文档 不可用 / session 失效）时不推进，UI 应当展示
    *     "该会话已失效，请重新登录"。
    */
   async confirmConnectResume(recordId: string): Promise<void> {
@@ -1984,7 +1984,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     //   - 新实现：切 origin 时立即把 `feedCommands` 清成"只含新 origin 内
     //     存活记录的投影"；旧 origin 数据仍保留在 `requestsByRecordId` 里
     //     便于切回，但当前视图只显示新 origin。`loadHistoryForOrigin`
-    //     完成后再用 K-V 历史重建当前 origin 视图。
+    //     完成后再用 业务文档 历史重建当前 origin 视图。
     if (this.currentOriginValue !== event.origin) {
       this.currentOriginValue = event.origin;
       this.feedCommands = this.buildFeedDisplay(
@@ -2186,7 +2186,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       }
       if (session === null) {
         // 极端竞态：preCheck 通过 → session 突然被外部 logout / 删除。
-        // 走 fail-fast（与 K-V 异常区分）。
+        // 走 fail-fast（与 业务文档 异常区分）。
         await this.scheduleFailFastRequest(recordId, "user_rejected", "internal_error");
         return;
       } else {
@@ -2291,7 +2291,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    * origin 不匹配 → `invalid_origin`（与 identity.get 同语义，
    * 让 caller 知道自己"用的 sessionId 不是该 origin 的"）。
    *
-   * K-V 不可用或读取失败时，直接 internal_error / storage_error，
+   * 业务文档 不可用或读取失败时，直接 internal_error / storage_error，
    * 不进入确认、签名或执行队列，不把未知授权状态伪装为用户拒绝。
    */
   private async preCheckConnectSession(
@@ -2339,11 +2339,11 @@ export class ProtocolServiceImpl implements ProtocolService {
    *
    * 关键不变量（施工单 2026-06-28 002 硬切换）：
    *   - 不存在 / 已 revoke → 返回 `null`；caller 触发 fail-fast。
-   *   - K-V 异常 / K-V 不可用 → **抛错**。让 caller 区分"session 失效"
-   *     与"K-V 异常"两种 case：K-V 异常**不**走 fail-fast 路径——与
-   *     旧"K-V unavailable 降级"边界一致：p2pkh / cipher / 业务
+   *   - 业务文档 异常 / 业务文档 不可用 → **抛错**。让 caller 区分"session 失效"
+   *     与"业务文档 异常"两种 case：业务文档 异常**不**走 fail-fast 路径——与
+   *     旧"业务文档 unavailable 降级"边界一致：p2pkh / cipher / 业务
    *     方法仍走 manual confirm（execute 阶段再校验）。Fail-fast 只
-   *     用于"session 真值确凿无效"，**不**用于"K-V 查不到"。
+   *     用于"session 真值确凿无效"，**不**用于"业务文档 查不到"。
    *   - 跨 origin 不在本函数判断；caller 拿到 session 后自己
    *     `session.origin !== event.origin` 决定走 `invalid_origin`。
    */
@@ -2468,7 +2468,7 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /**
    * 准备 `connect.login` record：读取当前唯一钱包的公开元数据。
-   * 任何 K-V / walletState 异常都**不**当场拒掉 request——service 仍按 manual
+   * 任何 业务文档 / walletState 异常都**不**当场拒掉 request——service 仍按 manual
    * 路径推进；执行阶段会再次校验，失败时回 `user_rejected` + 本地 reason。
    */
   private async bootstrapConnectLoginRecord(rec: RequestRecord, _params: ConnectLoginParams): Promise<void> {
@@ -2495,7 +2495,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - 校验项与执行阶段 `requireConnectSessionForCipher` 严格对齐：
    *     session 真值存在 + 未 revoke + origin 匹配 + owner key ready。
    *   - 校验**通过**时同步把 session 真值落到 `rec.connectResumeSnapshot`，
-   *     避免 execute 阶段再去 K-V 多走一次（执行路径仍以 K-V 当前值为
+   *     避免 execute 阶段再去 业务文档 多走一次（执行路径仍以 业务文档 当前值为
    *     准，但 snapshot 是热路径上的合理缓存）。
    *
    * 返回：`null` = 校验通过；`{code, reason}` = 校验失败（fail-fast）。
@@ -2682,7 +2682,7 @@ export class ProtocolServiceImpl implements ProtocolService {
             snapshot.startedFromFallback
           );
           // 与 resumeAfterUnlock 对齐：cache miss 时 timer 用 30s 兜底启动，
-          // refresh 异步 clamp 到 K-V 真值；per-origin timeout 配置必须生效。
+          // refresh 异步 clamp 到 业务文档 真值；per-origin timeout 配置必须生效。
           void this.refreshTimeoutFromOriginConfig(rec.recordId, rec.origin);
         }
       }
@@ -2705,7 +2705,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *
    * 设计要点（施工单 2026-06-27 001 硬切换 + 施工单 003）：
    *   - 每条 confirming request 独立 timer；进入 confirming 时启动。
-   *   - cache miss 用缺省 30 兜底；K-V 返回后**clamp down**（不 extend）。
+   *   - cache miss 用缺省 30 兜底；业务文档 返回后**clamp down**（不 extend）。
    *   - 修改站点 timeout **不**热更新当前正在倒计时的 request。
    */
   /**
@@ -2719,7 +2719,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *     被提前填充，timer 误读到 60s 而非走 30s 兜底。
    *   - `startedFromFallback`：true 表示本次走了 30s 兜底，后续
    *     `refreshTimeoutFromOriginConfig` 才允许 clamp down；false
-   *     表示本次已拿到 cache 真值，后续不允许热更新（K-V 真值晚到
+   *     表示本次已拿到 cache 真值，后续不允许热更新（业务文档 真值晚到
    *     也**不** extend）。
    */
   private startConfirmTimeout(
@@ -2760,12 +2760,12 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
-   * 异步刷 origin 配置后，按 K-V 真值重新评估当前 request 的
+   * 异步刷 origin 配置后，按 业务文档 真值重新评估当前 request 的
    * timeout deadline。
    *
    * 设计缘由（施工单 2026-06-28 002 硬切换 timeout 收口）：
    *   - **只**对 `startedFromFallback === true` 的 request 生效——已经
-   *     走同步 cache 命中的 request **不**允许 K-V 真值晚到后再热更新。
+   *     走同步 cache 命中的 request **不**允许 业务文档 真值晚到后再热更新。
    *     收口掉“修改站点 timeout 配置热更新正在倒计时的 request”的边界。
    *   - `newDeadline < currentDeadline` 才更新（只缩短，不延长）。
    *   - `newDeadline <= Date.now()` 时立即 `finalizeRequestByTimeout`，
@@ -2804,10 +2804,10 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 决定本次 request 进入 confirming 时的 timeout 快照。
    *
    * 设计缘由（施工单 2026-06-28 002 硬切换 timeout 收口）：
-   *   - 同步 cache 命中 → 用 cache 真值启动 timer；后续 K-V 真值晚到**不**
+   *   - 同步 cache 命中 → 用 cache 真值启动 timer；后续 业务文档 真值晚到**不**
    *     热更新（`startedFromFallback = false`）。
    *   - 同步 cache miss → 用 `DEFAULT_CONFIRM_TIMEOUT_SECONDS`
-   *     （30s）兜底；后续 K-V 真值晚到**只**允许 clamp down
+   *     （30s）兜底；后续 业务文档 真值晚到**只**允许 clamp down
    *     （`startedFromFallback = true`）。
    *
    * 谁把 request 推进到 `confirming`，谁就在“推进那个瞬间”调用本
@@ -3410,7 +3410,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - session 不存在 / 跨 origin / 已 revoked / owner 不 ready 一律对外
    *     回 `user_rejected`；本地 reason 写 `internal_error`（具体原因
    *     不对外暴露，避免 site 通过 result 反推本地状态）。
-   *   - K-V 不可用时也按 internal_error 拒掉——cipher / connect.* / 业务
+   *   - 业务文档 不可用时也按 internal_error 拒掉——cipher / connect.* / 业务
    *     方法路径不接受"session 不可查"的中间态。
    *   - 跨 origin 单独走 `invalid_origin`（与 identity.get 同语义），
    *     其它失败统一 `user_rejected`。
@@ -3464,7 +3464,7 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /**
    * 硬切换 002 收尾：protocol 层显式校验 session owner == 当前
-   * active key。硬门禁（`walletState.openOwnerAppStore` 要求
+   * active key。硬门禁（`Storage 身份绑定` 要求
    * `active === input.publicKeyHex`）会在底层挡掉，但「Key storage
    * is not ready」是偶发底层错误，**不**适合作为协议失败语义。
    * 提前在协议层以 `user_rejected / session_owner_mismatch` 显式
@@ -3718,7 +3718,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *     （来自当前钱包；用户在 confirmConnectLogin 时确认）；
    *   - owner 唯一真值 = `ownerPublicKeyHex`；`ownerKeyId` **不**落
    *   - owner key 必须在 walletState 内可查，且 identityStatus === "ready"；
-   *   - K-V 不可用时直接拒掉（fail-closed）。
+   *   - 业务文档 不可用时直接拒掉（fail-closed）。
    */
   private async executeConnectLogin(rec: RequestRecord): Promise<ConnectLoginResult> {
     const params = rec.params as ConnectLoginParams;
@@ -3782,12 +3782,12 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 执行 connect.resume。
    *
    * 关键不变量：
-   *   - session 真值必须仍在 K-V 内（rec.connectResumeSnapshot 由
+   *   - session 真值必须仍在 业务文档 内（rec.connectResumeSnapshot 由
    *     `bootstrapConnectResumeRecord` 在 acceptRequest 时预填，执行时
-   *     仍以 K-V 当前值为准；中间态变化以 K-V 为真值）；
+   *     仍以 业务文档 当前值为准；中间态变化以 业务文档 为真值）；
    *   - origin / revokedAt / owner ready 三道闸在执行时**重新**校验一次
    *     （即使 popup 当前文档 unlock runtime 仍在，session 也可能被外部
-   *     logout / key 删除 / 别的 tab 改 K-V）；
+   *     logout / key 删除 / 别的 tab 改 业务文档）；
    *   - 失败语义与 cipher 路径一致。
    */
   private async executeConnectResume(rec: RequestRecord): Promise<ConnectResumeResult> {
@@ -3911,7 +3911,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 错）时仍收到 ok=true，导致"session 已吊销但 unlock runtime 还在"
     // 的状态错位。
     //
-    // 副作用：K-V 里 session.revokedAt 已被本次写入；即使 vault.lock
+    // 副作用：业务文档 里 session.revokedAt 已被本次写入；即使 vault.lock
     // 抛错、对外回 ok=false，session 真值层面 logout 已生效——下次
     // connect.resume / cipher.* 仍会按 fail-fast 路径失败（session
     // revoked）。这是 fail-closed 的安全语义，不是 bug。
@@ -5280,7 +5280,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - 不再需要 method 维度判断。
    */
 
-  /* ============== 命令流（feed）+ K-V ============== */
+  /* ============== 命令流（feed）+ 业务文档 ============== */
 
   /**
    * 当前 record 的 phase 是否已经走到终态（不可再被 `confirmByUser` /
@@ -5289,7 +5289,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 终态集合（与 `ProtocolCommandPhase` 同步）：
    *   approved / rejected / failed / timed_out
    *
-   * 旧 `waiting_unlock` / `waiting_confirm` 是 K-V 历史 schema 上的 alias，
+   * 旧 `waiting_unlock` / `waiting_confirm` 是 业务文档 历史 schema 上的 alias，
    * 现在新写入只会落到 `waiting_unlock_manual` / `waiting_unlock_auto`；
    * 这里把 `waiting_unlock` / `waiting_confirm` 也视为**中间态**——它们
    * 一定来自旧历史记录，按活请求区展示策略走（它们不可能出现在新写
@@ -5313,9 +5313,9 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - 历史区：  终态 record，按 updatedAt desc。
    *   - 拼接顺序：活请求区在前，历史区在后。
    *
-   * 入参 `records` 一般来自 `feedCommands` 或"K-V 历史 + 内存活记录"的
+   * 入参 `records` 一般来自 `feedCommands` 或"业务文档 历史 + 内存活记录"的
    * 合并结果；本函数只负责按 phase / 时间戳排序，**不**做 id 去重——
-   * 调用方负责先按 id 合并（K-V + 内存合并时内存覆盖 K-V）。
+   * 调用方负责先按 id 合并（业务文档 + 内存合并时内存覆盖 业务文档）。
    */
   private buildFeedDisplay(records: ProtocolCommandRecord[]): ProtocolCommandRecord[] {
     const live: ProtocolCommandRecord[] = [];
@@ -5481,14 +5481,14 @@ export class ProtocolServiceImpl implements ProtocolService {
    *
    * 行为：
    *   - 同 origin 内已有的 in-flight load 直接复用返回的 promise（避免
-   *     对同 origin 重复 K-V 读取）；**不同 origin 各自独立**——
+   *     对同 origin 重复 业务文档 读取）；**不同 origin 各自独立**——
    *     `historyLoadInFlightByOrigin: Map<origin, Promise>`，不能用
    *     全局 `currentOriginValue` 判断复用（否则切到 B 时复用 A 的 in-flight）。
-   *   - 加载完成后，按 recordId 合并 K-V 历史 + 内存活记录，**同 id 以
-   *     内存活记录为准**；K-V 旧字段不允许覆盖当前内存里的活卡。
-   *   - K-V 里若残留旧版本误写进去的中间态 record（confirming /
+   *   - 加载完成后，按 recordId 合并 业务文档 历史 + 内存活记录，**同 id 以
+   *     内存活记录为准**；业务文档 旧字段不允许覆盖当前内存里的活卡。
+   *   - 业务文档 里若残留旧版本误写进去的中间态 record（confirming /
    *     waiting_unlock_* / queued / executing），本轮直接忽略：活请求
-   *     只能来自当前 popup 会话内存，不能跨会话从 K-V "复活"。
+   *     只能来自当前 popup 会话内存，不能跨会话从 业务文档 "复活"。
    *   - 合并完成后用 `buildFeedDisplay` 重建展示投影（活请求区
    *     createdAt asc + 历史区 updatedAt desc）。
    *   - 加载完成 / 失败时检查 `currentOriginValue === origin`：如果当前
@@ -5505,7 +5505,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     const storageRepository = this.deps.storageRepository;
     if (!storageRepository) {
-      // K-V 不可用：仅当当前 currentOrigin 仍等于本 origin 时把"不可用"
+      // 业务文档 不可用：仅当当前 currentOrigin 仍等于本 origin 时把"不可用"
       // 状态写回 feed；旧 origin 的 in-flight 不会污染新 origin 视图。
       if (this.currentOriginValue === origin) {
         this.feedCommands = this.buildFeedDisplay(
@@ -5539,7 +5539,7 @@ export class ProtocolServiceImpl implements ProtocolService {
             this.originCache.set(origin, normalizeOriginSettings(originRec, origin));
           }, 0);
         }
-        // 按 recordId 合并：内存活记录优先覆盖 K-V 旧记录。
+        // 按 recordId 合并：内存活记录优先覆盖 业务文档 旧记录。
         const mergedById = new Map<string, ProtocolCommandRecord>();
         for (const c of list) {
           if (!this.isTerminalPhase(c.phase)) continue;
@@ -5582,8 +5582,8 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
-   * 取当前 origin 的内存活命令卡（不读 K-V）。
-   * 用于切 origin / K-V 不可用时快速重建"当前 origin 视图"。
+   * 取当前 origin 的内存活命令卡（不读 业务文档）。
+   * 用于切 origin / 业务文档 不可用时快速重建"当前 origin 视图"。
    */
   private currentOriginLiveCommands(origin: string): ProtocolCommandRecord[] {
     const out: ProtocolCommandRecord[] = [];

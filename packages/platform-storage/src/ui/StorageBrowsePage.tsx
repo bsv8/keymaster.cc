@@ -1,7 +1,7 @@
 // 「设置 → 存储」页面：只读存储浏览器。
 //
 // 这个组件是页面侧唯一与浏览数据打交道的 React 组件。它本身不解析钱包数据：
-// 格式判定、UTF-8 校验、K-V 解码与 1 MiB 上限都在 Worker 完成。它负责三件
+// 格式判定、UTF-8 校验与 1 MiB 上限都在 Worker 完成。它负责三件
 // 只有页面才做得了的事：
 //
 //   1. 目录状态机：每个目录独立游标、已加载子项与完成状态。深目录会占满多页，
@@ -79,7 +79,6 @@ export function StorageBrowsePage() {
   // 默认视图，否则上一个文件切到原文之后，下一份会悄悄继承它。
   const [rawJson, setRawJson] = useState(false);
   const [markdownSource, setMarkdownSource] = useState(false);
-  const [kvRaw, setKvRaw] = useState(false);
   const [notice, setNotice] = useState<string | undefined>(undefined);
   const [refreshToken, setRefreshToken] = useState(0);
 
@@ -201,7 +200,6 @@ export function StorageBrowsePage() {
   useEffect(() => {
     setRawJson(false);
     setMarkdownSource(false);
-    setKvRaw(false);
   }, [previewPath]);
 
   const refresh = useCallback(() => {
@@ -457,8 +455,6 @@ export function StorageBrowsePage() {
                   onToggleRawJson={() => setRawJson((value) => !value)}
                   markdownSource={markdownSource}
                   onToggleMarkdownSource={() => setMarkdownSource((value) => !value)}
-                  kvRaw={kvRaw}
-                  onToggleKvRaw={() => setKvRaw((value) => !value)}
                   onRetry={retryPreview}
                 />
               ) : (

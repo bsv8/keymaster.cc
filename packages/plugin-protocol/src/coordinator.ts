@@ -9,7 +9,7 @@ export function openProtocolStorageRepository(): Promise<ProtocolStorageReposito
   return dbPromise;
 }
 
-/** Worker bootstrap 注入 Protocol V1 的 purpose-scoped K-V 借用句柄。 */
+/** Worker bootstrap 注入 Protocol V1 的 插件文件 借用句柄。 */
 export function configureProtocolStorageRepository(
   stores: ProtocolStorageStores
 ): void {

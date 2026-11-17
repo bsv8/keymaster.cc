@@ -14,7 +14,6 @@ import type { KeyRef, VaultSealedSecret } from "./vault.js";
 import type { CoordinatorOwnerStorageData } from "./storage/internal.js";
 import type { StorageRuntimeControllerStatus, StorageRuntimeSummary } from "./storage/runtime.js";
 import type { WalletColdStartSnapshot, WalletInitializeResult } from "./storage/wallet.js";
-import type { KeyValueEntry, KeyValueEntryMeta, KeyValueListResult, KeyValueCommitResult } from "./storage/kv.js";
 import type {
   MsFileCollectorConfig,
   MsFileCollectorStatus,
@@ -85,14 +84,11 @@ export type CoordinatorChannelOperationResultFor<O extends CoordinatorChannelOpe
   O extends { type: "open-private-envelope" } ? OpenedPrivateEnvelope : O extends { type: "subscription-set" } ? ChannelSubscriptionSetResult : null;
 export type CoordinatorChannelOperationResult = CoordinatorChannelOperationResultFor<CoordinatorChannelOperation>;
 export type CoordinatorOwnerStorageResultFor<D extends CoordinatorOwnerStorageData> =
-  D extends { type: "owner.get" } ? KeyValueEntry<unknown> | undefined :
-  D extends { type: "owner.list" } ? KeyValueListResult : D extends { type: "owner.put" } ? KeyValueEntryMeta :
-  D extends { type: "owner.delete" | "owner.file-delete" } ? undefined :
-  D extends { type: "owner.commit" } ? KeyValueCommitResult :
+  D extends { type: "owner.file-delete" } ? undefined :
   D extends { type: "owner.file-list" } ? import("./storage/files.js").ModuleFileListPage :
   D extends { type: "owner.file-get" | "owner.file-range" } ? import("./storage/files.js").ModuleFileObject | undefined :
   D extends { type: "owner.file-put" } ? { revision: string; lastModified: string } : D extends { type: "owner.file-batch" } ? { paths: string[]; committedAt: string } : never;
-export type CoordinatorOwnerStorageResult = KeyValueEntry<unknown> | KeyValueEntry<unknown>[] | KeyValueListResult | KeyValueEntryMeta | KeyValueCommitResult | undefined | null;
+export type CoordinatorOwnerStorageResult = CoordinatorOwnerStorageResultFor<CoordinatorOwnerStorageData>;
 export type CoordinatorCryptoResultFor<O extends CoordinatorCryptoOperation> = Extract<CoordinatorCryptoResult, { type: O["type"] }>;
 export type CoordinatorP2pkhBroadcastResult = P2pkhBroadcastResult |
   { status: "not-dispatched"; reason: "cancelled" | "stale-provider-generation" | "broadcast-provider-unavailable" | "coordinator-not-dispatched" | "stale-session-epoch" | "snapshot-stale" | "snapshot-consumed" | "snapshot-binding-required" | "snapshot-input-invalid"; currentSeq?: number } |
@@ -121,7 +117,7 @@ export type CoordinatorRpcResultFor<K extends CoordinatorRpcRequestKind> = Coord
 type ResponseBase = Omit<CoordinatorRpcResponse, "operationResult" | "cryptoResult">;
 type NonOkResponse = ResponseBase & { ack: Exclude<CoordinatorCommandAck, { status: "ok" }>; operationResult?: never; cryptoResult?: never };
 type VoidRequest = Extract<CoordinatorRpcRequest, { kind: "session.close" | "session.activity" | "unlock" | "lock" | "background.run-now" | "background.trigger" | "background.cancel" | "background.cancel-by-key" | "background.settings.update" | "autolock.settings.update" | "storage.cancel" | "storage.session.abort" | "msfile.cancel" | "msfile.session.abort" | "window-p2p.executor.release" | "channel.cancel" | "chain.fee-policy.update" | "p2pkh.provider-config.update" }> |
-  (Extract<CoordinatorRpcRequest, { kind: "storage.owner.data" }> & { data: Extract<CoordinatorOwnerStorageData, { type: "owner.delete" }> });
+  (Extract<CoordinatorRpcRequest, { kind: "storage.owner.data" }> & { data: Extract<CoordinatorOwnerStorageData, { type: "owner.file-delete" }> });
 export type CoordinatorRpcResponseForRequest<R extends CoordinatorRpcRequest> =
   R extends { kind: "crypto"; operation: infer O extends CoordinatorCryptoOperation } ? (ResponseBase & { ack: { status: "ok" }; cryptoResult: CoordinatorCryptoResultFor<O>; operationResult?: never }) | NonOkResponse :
   R extends VoidRequest ? (ResponseBase & { ack: { status: "ok" }; operationResult?: never; cryptoResult?: never }) | NonOkResponse :
@@ -178,10 +174,6 @@ const bootstrap = (value: unknown) => fields(value, "authorityInstanceId runGene
 const persistence = (value: unknown) => fields(value, "persisted usageBytes quotaBytes");
 const storageSummary = (value: unknown) => fields(value, "status medium publicKeyHex label walletGeneration", { persistence });
 const binary = (value: unknown) => fields(value, "$type bytes mime");
-const kvEntry = (value: unknown) => fields(value, "key revision updatedAt", { value: copy });
-const kvMeta = (value: unknown) => fields(value, "key revision updatedAt");
-const kvList = (value: unknown) => fields(value, "revision nextCursor", { entries: each(kvEntry) });
-const kvCommit = (value: unknown) => fields(value, "revision commitId committedAt");
 const fileEntry = (value: unknown) => fields(value, "path size revision lastModified");
 const fileObject = (value: unknown) => fields(value, "path revision lastModified", { bytes: copy });
 const batchResult = (value: unknown) => fields(value, "committedAt", { paths: copy });
@@ -201,10 +193,6 @@ function storageControlResult(control: CoordinatorStorageControl, value: unknown
 function ownerResult(data: CoordinatorOwnerStorageData, value: unknown): unknown {
   if (value === undefined || value === null) return value;
   switch (data.type) {
-    case "owner.get": return kvEntry(value);
-    case "owner.list": return kvList(value);
-    case "owner.put": return kvMeta(value);
-    case "owner.commit": return kvCommit(value);
     case "owner.file-list": return fields(value, "nextCursor", { files: each(fileEntry) });
     case "owner.file-get": case "owner.file-range": return fileObject(value);
     case "owner.file-put": return fields(value, "revision lastModified");
@@ -212,14 +200,7 @@ function ownerResult(data: CoordinatorOwnerStorageData, value: unknown): unknown
     default: return undefined;
   }
 }
-function ownerDataResponse(value: unknown): unknown {
-  if (value === null || value === undefined) return value;
-  if (Array.isArray(value)) return value.map(kvEntry);
-  const row = value as Row;
-  if ("entries" in row) return kvList(row);
-  if ("commitId" in row) return kvCommit(row);
-  return "value" in row ? kvEntry(row) : kvMeta(row);
-}
+function ownerDataResponse(value: unknown): unknown { return copy(value); }
 const concurrencyFields = "mediaBlockReadConcurrency globalSeedReadConcurrency globalBlockReadConcurrency globalStatConcurrency";
 const price = (value: unknown) => fields(value, "seedMaxPriceSatoshis blockMaxPriceSatoshis");
 const sellerSettings = (value: unknown) => fields(value, "sellerEnabled seedPriceSatoshis fullBlockPriceSatoshis maxBlocksPerBatch quoteLifetimeSeconds paymentTimeoutSeconds maxConcurrentSales minRefundDelayBlocks", { supportedArbiterPublicKeys: copy });

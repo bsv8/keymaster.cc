@@ -40,7 +40,6 @@ import { createWorkerP2pkhSettings } from "@keymaster/plugin-p2pkh/coordinator";
 import { createBitfsWorkerRuntime } from "@keymaster/plugin-msfile/coordinator";
 import { createWorkerFundingRuntime } from "@keymaster/plugin-msfile/coordinator";
 
-import { createKeyValueMaintenance } from "@keymaster/platform-storage/coordinator";
 
 import { BUILTIN_PLUGIN_DEFINITIONS } from "@keymaster/contracts";
 import { createWalletStateSource } from "@keymaster/plugin-vault/coordinator";
@@ -107,7 +106,7 @@ import { createWocService, registerWocP2pkhProviders } from "@keymaster/plugin-w
 import { p2pkhAddressToScriptHex } from "@keymaster/plugin-p2pkh/coordinator";
 import { disposeP2pkhStateRepository, parseP2pkhTransaction } from "@keymaster/plugin-p2pkh/coordinator";
 
-import type { BorrowedModuleFileStore, KeyValueStore, PlatformRootStore, WocService, BsvNetwork } from "@keymaster/contracts";
+import type { BorrowedModuleFileStore, ModuleFileStore, PlatformRootStore, WocService, BsvNetwork } from "@keymaster/contracts";
 
 import type { StorageRuntimeController, AssetDataChangedEvent, WocUtxoResponse } from "@keymaster/contracts";
 import { createScopedStorageClients, createStorageRpcHandlers, createWorkerStorageClients, createIndexedDbWalletStore, StorageRuntimeError } from "@keymaster/platform-storage/coordinator";
@@ -317,7 +316,6 @@ const storageWorkerRoot = createStorageWorkerRoot({
         commit() {
           if (!platformArtifactsMatch(binding)) throw storageUnavailableError("Platform storage candidate became stale");
           coordinatorSettingsSnapshot?.close(); configureProtocolStorageRepository(ownedProtocol);
-          registerCoordinatorProtocolMaintenanceStores(ownedProtocol);
           coordinatorSettingsSnapshot = ownedSettings; coordinatorProtocolStores = ownedProtocol;
           coordinatorPlatformArtifactsBinding = binding;
         },
@@ -329,7 +327,7 @@ const storageWorkerRoot = createStorageWorkerRoot({
   lifecycle: {
     ready() { const unit = coordinatorWorkerUnitRegistry.activate("storage.coordinator-worker"); coordinatorWorkerUnitRegistry.ready(unit.unitId, unit.instanceId); },
     stop() { const unit = coordinatorWorkerUnitRegistry.get("storage.coordinator-worker"); if (unit) stopCoordinatorWorkerUnit(unit.unitId, unit.instanceId); },
-    reconcile: () => { void reconcileCoordinatorRuntime(); }, maintenance: () => scheduleCoordinatorKeyValueMaintenance(),
+    reconcile: () => { void reconcileCoordinatorRuntime(); },
   },
   abortSession: id => storageWorkerRequests.revokeStorageSessionRequests(id),
   revokeRequests() { abortStorageRequests();  },
@@ -374,9 +372,9 @@ function platformArtifactsMatch(binding = coordinatorPlatformArtifactsBinding): 
 }
 /** Protocol 自身目录下的三个 purpose K-V。 */
 interface CoordinatorProtocolStorageStores {
-  durablePolicy: KeyValueStore;
-  sessions: KeyValueStore;
-  commandHistory: KeyValueStore;
+  durablePolicy: ModuleFileStore;
+  sessions: ModuleFileStore;
+  commandHistory: ModuleFileStore;
 }
 let coordinatorProtocolStores: CoordinatorProtocolStorageStores | undefined;
 
@@ -400,20 +398,6 @@ const vaultWorkerOperations = createVaultWorkerOperations({
   binding: { complete: cause => completeUnlockedBinding(cause) },
   io: { run: (kind, signal, execute, options) => withCoordinatorFinalIoLease(kind, signal, execute, { ...options, auditOperation: options.auditOperation }) },
 });
-
-function registerCoordinatorProtocolMaintenanceStores(stores: CoordinatorProtocolStorageStores | undefined): void {
-  if (!stores) return;
-  registerCoordinatorKeyValueMaintenanceStore(stores.durablePolicy);
-  registerCoordinatorKeyValueMaintenanceStore(stores.sessions);
-  registerCoordinatorKeyValueMaintenanceStore(stores.commandHistory);
-}
-
-function unregisterCoordinatorProtocolMaintenanceStores(stores: CoordinatorProtocolStorageStores | undefined): void {
-  if (!stores) return;
-  unregisterCoordinatorKeyValueMaintenanceStore(stores.durablePolicy);
-  unregisterCoordinatorKeyValueMaintenanceStore(stores.sessions);
-  unregisterCoordinatorKeyValueMaintenanceStore(stores.commandHistory);
-}
 
 function closeCoordinatorProtocolStorageStores(stores: CoordinatorProtocolStorageStores | undefined): void {
   if (!stores) return;
@@ -462,20 +446,15 @@ const storageWorkerRequests = createStorageWorkerRequests({
   control: (...args) => storageWorkerControl.execute(...args),
 });
 
-const storageKeyValueMaintenance = createKeyValueMaintenance({ root: () => storageWorkerRoot.root, rootToken: () => storageWorkerRoot.token, isReady: () => storageWorkerRoot.ready });
-const registerCoordinatorKeyValueMaintenanceStore = storageKeyValueMaintenance.register;
-const unregisterCoordinatorKeyValueMaintenanceStore = storageKeyValueMaintenance.unregister;
-const stopCoordinatorKeyValueMaintenance = storageKeyValueMaintenance.stop;
-const scheduleCoordinatorKeyValueMaintenance = storageKeyValueMaintenance.schedule;
 
 async function openCoordinatorProtocolStorageStores(root: PlatformRootStore): Promise<CoordinatorProtocolStorageStores> {
-  const opened: KeyValueStore[] = [];
+  const opened: ModuleFileStore[] = [];
   try {
-    const durablePolicy = await root.openKeyValueStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.protocolDurablePolicy });
+    const durablePolicy = await root.openModuleFileStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.protocolFiles });
     opened.push(durablePolicy);
-    const sessions = await root.openKeyValueStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.protocolSessions });
+    const sessions = await root.openModuleFileStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.protocolFiles });
     opened.push(sessions);
-    const commandHistory = await root.openKeyValueStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.protocolCommandHistory });
+    const commandHistory = await root.openModuleFileStore({ declaration: CENTRAL_STORAGE_DECLARATIONS.protocolFiles });
     opened.push(commandHistory);
     return { durablePolicy, sessions, commandHistory };
   } catch (error) {
@@ -517,7 +496,6 @@ function replaceCoordinatorMeta(next: CoordinatorRuntimeSettings): void {
 }
 
 function disposeCurrentPlatformStorageBinding(binding: CurrentPlatformStorageBinding): void {
-  unregisterCoordinatorProtocolMaintenanceStores(binding.protocol);
   try { binding.runtime?.dispose?.(); } catch { /* best effort */ }
   binding.settingsSnapshot?.close();
   closeCoordinatorProtocolStorageStores(binding.protocol);
@@ -529,7 +507,6 @@ function disposeCurrentPlatformStorageBinding(binding: CurrentPlatformStorageBin
 
 /** 撤销当前存储根：所有已发放句柄与迟到结果立即失效。 */
 function discardCurrentPlatformStorageBinding(): void {
-  stopCoordinatorKeyValueMaintenance();
   storageWorkerRequests.storageBrowseCoordinator.dropBinding();
   const binding = captureCurrentPlatformStorageBinding();
   workerStorageClients.invalidateAll();
@@ -2071,11 +2048,8 @@ const workerStorageClients = createWorkerStorageClients({
   },
   onFailure: markStorageIoFailure,
   onInvalidate(moduleId) { if (moduleId === "p2pkh") disposeP2pkhStateRepository(); },
-  registerMaintenance: storageKeyValueMaintenance.register,
-  unregisterMaintenance: storageKeyValueMaintenance.unregister,
 });
 const createWorkerModuleFileStore = workerStorageClients.moduleFiles;
-const createWorkerKeyValueStore = workerStorageClients.keyValue;
 
 const workerStorageClientCapabilities = createScopedStorageClients({
   getActivePublicKeyHex: () => coordinatorState.activePublicKeyHex,
@@ -2086,12 +2060,6 @@ const workerStorageClientCapabilities = createScopedStorageClients({
     if (!binding) throw storageUnavailableError("Worker file binding is unavailable");
     const files = createWorkerModuleFileStore(pluginId, declaration.purposeId);
     return { ...files, ...declaration, model: "files" as const, ...binding, close: () => { } };
-  },
-  async openOwnerAppStore({ pluginId, declaration }) {
-    const binding = storageWorkerRequests.currentCoordinatorStorageBinding();
-    if (!binding) throw storageUnavailableError("Worker K-V binding is unavailable");
-    const store = createWorkerKeyValueStore(pluginId, declaration.purposeId);
-    return { ...store, ...binding };
   },
   async clearStorageRoot() { throw storageUnavailableError("Worker public clients do not clear roots"); },
 }, pluginId => BUILTIN_PLUGIN_DEFINITIONS.find(plugin => plugin.id === pluginId));
@@ -3297,7 +3265,6 @@ const coordinatorRuntimePlugins = [
   vaultWorkerRuntime.plugin,
   createStorageWorkerPlugin({
     files: workerStorageClientCapabilities[0].value,
-    keyValues: workerStorageClientCapabilities[1].value,
     owner: handleCoordinatorOwnerStorageRpc,
     authorize: call => requireCoordinatorSessionPeer(call).peer.peerId,
     browse: processRequest,
@@ -3576,7 +3543,6 @@ export function coordinatorTestingPorts(): CoordinatorTestingPorts {
     get reconcileCoordinatorRuntime() { return reconcileCoordinatorRuntime; },
     get getTaskSnapshots() { return getTaskSnapshots; },
     get bindCoordinatorTaskUnitsToOwner() { return bindCoordinatorTaskUnitsToOwner; },
-    get createWorkerKeyValueStore() { return createWorkerKeyValueStore; },
     get initializeCoordinatorP2pkhProviders() { return initializeCoordinatorP2pkhProviders; },
 
     get scheduleRuntime() { return scheduleRuntime; },
@@ -3689,11 +3655,9 @@ export function coordinatorTestingPorts(): CoordinatorTestingPorts {
     get satWorkerLifecycle() { return satWorkerLifecycle; },
     get scheduleCoordinatorAuthorityClaim() { return scheduleCoordinatorAuthorityClaim; },
     get snapshotWriteMetrics() { return snapshotWriteMetrics; },
-    get stopCoordinatorKeyValueMaintenance() { return stopCoordinatorKeyValueMaintenance; },
     get stopCoordinatorWorkerUnit() { return stopCoordinatorWorkerUnit; },
     get storageIoOwner() { return storageIoOwner; },
     set storageIoOwner(value: typeof storageIoOwner) { storageIoOwner = value; },
-    get storageKeyValueMaintenance() { return storageKeyValueMaintenance; },
     get storageWorkerControl() { return storageWorkerControl; },
     get storageWorkerRequests() { return storageWorkerRequests; },
     get storageWorkerRoot() { return storageWorkerRoot; },
@@ -3740,7 +3704,6 @@ export interface CoordinatorTestingPorts {
   domainFixtureInstaller: (() => Promise<void>) | undefined;
   getTaskSnapshots: typeof getTaskSnapshots;
   bindCoordinatorTaskUnitsToOwner: typeof bindCoordinatorTaskUnitsToOwner;
-  createWorkerKeyValueStore: typeof createWorkerKeyValueStore;
   initializeCoordinatorP2pkhProviders: typeof initializeCoordinatorP2pkhProviders;
 
   scheduleRuntime: typeof scheduleRuntime;
@@ -3835,10 +3798,8 @@ export interface CoordinatorTestingPorts {
   satWorkerLifecycle: ReturnType<typeof createSatWorkerLifecycle>;
   scheduleCoordinatorAuthorityClaim: typeof scheduleCoordinatorAuthorityClaim;
   snapshotWriteMetrics: typeof snapshotWriteMetrics;
-  stopCoordinatorKeyValueMaintenance: typeof stopCoordinatorKeyValueMaintenance;
   stopCoordinatorWorkerUnit: typeof stopCoordinatorWorkerUnit;
   storageIoOwner: CoordinatorStorageIoOwner | undefined;
-  storageKeyValueMaintenance: ReturnType<typeof createKeyValueMaintenance>;
   storageWorkerControl: ReturnType<typeof createStorageWorkerControl>;
   storageWorkerRequests: ReturnType<typeof createStorageWorkerRequests>;
   storageWorkerRoot: ReturnType<typeof createStorageWorkerRoot>;

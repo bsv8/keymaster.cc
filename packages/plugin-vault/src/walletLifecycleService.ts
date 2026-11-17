@@ -5,7 +5,7 @@
 // 也不决定写入授权。
 //
 // 三个关键约束在这里落地：
-//   - 初始化是**一次** WalletStore.batch：仅最终 Key 文件同事务提交，事务完成才算成功；取消或失败不留半成品。
+//   - 初始化是**一次** WalletStore.batch：最终 Key 和网络文件同事务提交，事务完成才算成功；取消或失败不留半成品。
 //   - 每个句柄绑定钱包身份世代、会话 epoch 和 Worker 运行世代；重置、锁定和
 //     Worker 重启都会改变其中一项，旧句柄和迟到结果在这里被拒绝。
 //   - 重置先撤销授权，再原子清空新格式数据；失败不报告完成，且旧授权不因
@@ -30,7 +30,7 @@ import {
 import * as secp256k1 from "@noble/secp256k1";
 import type { WalletVaultLifecycleStore } from "@keymaster/contracts/storage-internal";
 import type { WalletKeyRepository } from "./walletKeyRepository.js";
-import { createKeyHoldDocument, serializeKeyHoldDocument } from "./keyholdDocument.js";
+import { createKeyHoldDocument, serializeKeyHoldDocument, serializeVaultFiles, parseKeyHoldDocument } from "./keyholdDocument.js";
 import { StorageRuntimeError, storageErrorCode } from "@keymaster/contracts/storage-internal";
 
 /** 解锁后建立的会话世代前缀。 */
@@ -295,9 +295,9 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
 
 
     try {
-      // 唯一的提交边界：固定 Key 文件在 Storage 的事务内条件创建。
+      // 唯一的提交边界：固定 Key 与网络文件在 Storage 的事务内条件创建。
       // 条件创建保证并发初始化只有一个成功，另一方得到 conflict 而不是覆盖。
-      await deps.store.initializeKey(keyHoldBytes);
+      await deps.store.initializeKey(serializeVaultFiles(parseKeyHoldDocument(keyHoldBytes)));
     } catch (caught) {
       privateKeyBytes.fill(0);
       const code = errorCode(caught);

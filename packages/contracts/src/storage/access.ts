@@ -1,5 +1,4 @@
 import { networkIdentityStorageRoot, type NetworkIdentity as importNetworkIdentity } from "../networkIdentity.js";
-import type { KeyValueStore } from "./kv.js";
 import type { SnapshotStore, StorageSnapshotJsonCompatible } from "./snapshot.js";
 import {
   buildWalletStorageRoot,
@@ -17,7 +16,7 @@ import {
 export type StorageAuthority = "built-in-module" | "third-party-app";
 
 /** 中央存储声明的数据模型。 */
-export type StorageModel = "snapshot" | "kv" | "files";
+export type StorageModel = "snapshot" | "files";
 
 /**
  * Host/Coordinator 使用的中央存储声明。
@@ -33,7 +32,7 @@ export interface PluginStorageDeclaration {
   purposeId: string;
   /** 内置模块或已验证第三方 App。 */
   authority: StorageAuthority;
-  /** 固定单对象快照或 unique-value-id K-V。 */
+  /** 固定单对象快照或插件文件。 */
   model: StorageModel;
   /** 当前数据 schema 版本；V1 不提供迁移回退。 */
   schemaVersion: number;
@@ -87,17 +86,17 @@ export function validatePluginStorageDeclaration(input: PluginStorageDeclaration
   if (input.authority !== "built-in-module" && input.authority !== "third-party-app") {
     throw new Error("storage declaration authority is invalid");
   }
-  if (input.model !== "snapshot" && input.model !== "kv" && input.model !== "files") {
+  if (input.model !== "snapshot" && input.model !== "files") {
     throw new Error("storage declaration model is invalid");
   }
   const moduleId = validateStorageModuleId(input.moduleId);
   // files 模型允许空 purposeId，表示「模块根」（例如 p2pkh/）；
-  // kv/snapshot 仍必须有具体 purpose 段。
+  // snapshot 仍必须有具体 purpose 段。
   const purposeId = input.purposeId === "" && input.model === "files" ? "" : validateStoragePurposeId(input.purposeId);
   if (!Number.isSafeInteger(input.schemaVersion) || input.schemaVersion < 1) {
     throw new Error("storage declaration schemaVersion is invalid");
   }
-  // 第三方 App 只能拿到自己目录里的文件读写；K-V 与 snapshot 属于平台和内置
+  // 第三方 App 只能拿到自己目录里的文件读写；snapshot 属于平台和内置
   // 模块的模型，不对 App 开放。
   if (input.authority === "third-party-app" && input.model !== "files") {
     throw new Error("third-party-app storage must use the files model");
@@ -178,16 +177,14 @@ export function assertStorageKeyInNamespace(root: string, key: string): void {
   }
 }
 
-/** 已绑定模块根与 App 目录的受限 K-V 句柄。 */
-export interface OwnerAppStore extends KeyValueStore {}
+
+
 
 /** 平台根存储权威；物理路径、数据库连接和内部实现不会穿过此接口进入插件。 */
 export interface PlatformRootStore {
   readonly identity: importNetworkIdentity;
   /** 当前钱包身份世代。 */
   readonly walletGeneration: string;
-  /** 打开 Host 已预绑定的模块 K-V。 */
-  openKeyValueStore(input: { declaration: PluginStorageDeclaration }): Promise<OwnerAppStore>;
   /** 打开 Host 已预绑定的文件根(model: "files")。 */
   openModuleFileStore(input: {
     declaration: PluginStorageDeclaration;

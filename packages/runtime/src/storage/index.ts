@@ -7,12 +7,6 @@
 // module graph into the Worker.
 
 export {
-  createInMemoryKeyValueStore,
-  withTestStorageBinding,
-  IN_MEMORY_TEST_BINDING,
-} from "./inMemoryKeyValueStore.js";
-export { createKeyValueSettingsStore, type KeyValueSettingsStore } from "../keyValueSettingsStore.js";
-export {
   createInMemoryModuleFileStore,
   type InMemoryModuleFileStore,
   type InMemoryModuleFileStoreOptions,

@@ -8,6 +8,7 @@ import type { PluginStorageDeclaration } from "./access.js";
  * 复制这些坐标再拼物理路径。
  */
 export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
+  protocolFiles: Object.freeze({ moduleId: "protocol", purposeId: "", authority: "built-in-module", model: "files", schemaVersion: 1 } satisfies PluginStorageDeclaration),
   aiState: Object.freeze({
     moduleId: "ai", purposeId: "", authority: "built-in-module", model: "files", schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
@@ -23,41 +24,6 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
   } satisfies PluginStorageDeclaration),
   appsDirectory: Object.freeze({
     moduleId: "apps", purposeId: "", authority: "built-in-module", model: "files", schemaVersion: 2,
-  } satisfies PluginStorageDeclaration),
-  protocolDurablePolicy: Object.freeze({
-    moduleId: "protocol",
-    purposeId: "durable-policy",
-    authority: "built-in-module",
-    model: "kv",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
-  protocolSessions: Object.freeze({
-    moduleId: "protocol",
-    purposeId: "sessions",
-    authority: "built-in-module",
-    model: "kv",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
-  protocolCommandHistory: Object.freeze({
-    moduleId: "protocol",
-    purposeId: "command-history",
-    authority: "built-in-module",
-    model: "kv",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
-  ordinalsMintHistory: Object.freeze({
-    moduleId: "collectible-1satordinals",
-    purposeId: "mint-history",
-    authority: "built-in-module",
-    model: "kv",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
-  p2pkhState: Object.freeze({
-    moduleId: "p2pkh",
-    purposeId: "state",
-    authority: "built-in-module",
-    model: "kv",
-    schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
   /**
    * P2PKH 文件根（空 purpose = 模块根）。
@@ -79,20 +45,6 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
     purposeId: "",
     authority: "built-in-module",
     model: "files",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
-  tokenBsv21State: Object.freeze({
-    moduleId: "token-bsv21",
-    purposeId: "token-state",
-    authority: "built-in-module",
-    model: "kv",
-    schemaVersion: 1,
-  } satisfies PluginStorageDeclaration),
-  tokenBsv21MintHistory: Object.freeze({
-    moduleId: "token-bsv21",
-    purposeId: "mint-history",
-    authority: "built-in-module",
-    model: "kv",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
   /**
@@ -137,15 +89,11 @@ export const SYSTEM_STORAGE_DECLARATIONS: Readonly<Record<string, readonly Plugi
   apps: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.appsDirectory]),
   ai: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.aiState]),
   vault: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.vaultPayments]),
-  "collectible-1satordinals": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.ordinalsMintHistory]),
-  p2pkh: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.p2pkhFiles, CENTRAL_STORAGE_DECLARATIONS.p2pkhState]),
+  p2pkh: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.p2pkhFiles]),
   protocol: Object.freeze([
-    CENTRAL_STORAGE_DECLARATIONS.protocolDurablePolicy,
-    CENTRAL_STORAGE_DECLARATIONS.protocolSessions,
-    CENTRAL_STORAGE_DECLARATIONS.protocolCommandHistory,
+    CENTRAL_STORAGE_DECLARATIONS.protocolFiles,
   ]),
   "sat-subscription": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.satSubscriptionFiles]),
-  "token-bsv21": Object.freeze([CENTRAL_STORAGE_DECLARATIONS.tokenBsv21State, CENTRAL_STORAGE_DECLARATIONS.tokenBsv21MintHistory]),
   msfile: Object.freeze([
     CENTRAL_STORAGE_DECLARATIONS.msfilesFiles,
     CENTRAL_STORAGE_DECLARATIONS.bitfsJournalFiles,

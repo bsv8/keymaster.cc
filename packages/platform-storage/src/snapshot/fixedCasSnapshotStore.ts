@@ -15,7 +15,7 @@ import type {
   StorageSnapshotWriteCondition,
   StorageSnapshotWriteResult,
 } from "@keymaster/contracts";
-import { buildStorageSnapshotPath, keyValueSemanticFingerprint, validatePluginStorageDeclaration } from "@keymaster/contracts";
+import { buildStorageSnapshotPath, storageSemanticFingerprint, validatePluginStorageDeclaration } from "@keymaster/contracts";
 import type { WalletStore } from "../local/indexedDbWalletStore.js";
 import { StorageRuntimeError, storageErrorCode } from "../runtime/storageError.js";
 
@@ -135,13 +135,13 @@ export function createFixedCasSnapshotStore<T>(options: FixedCasSnapshotStoreOpt
     read: () => withLease(async () => (await readInternal()).snapshot),
     write: (input: T, condition: StorageSnapshotWriteCondition = {}): Promise<StorageSnapshotWriteResult> => withLease(async () => {
       const value = input as StorageSnapshotJsonCompatible<T>;
-      const fingerprint = keyValueSemanticFingerprint(value);
+      const fingerprint = storageSemanticFingerprint(value);
       const current = await readInternal();
       const currentRevision = current.snapshot?.revision ?? 0;
       if (condition.ifRevision !== undefined && condition.ifRevision !== currentRevision) {
         throw new StorageRuntimeError("storage_conflict", "Storage snapshot revision changed");
       }
-      if (current.snapshot && keyValueSemanticFingerprint(current.snapshot.value) === fingerprint) {
+      if (current.snapshot && storageSemanticFingerprint(current.snapshot.value) === fingerprint) {
         return { revision: currentRevision, wrote: false };
       }
       const envelope: StorageSnapshotEnvelope<T> = {

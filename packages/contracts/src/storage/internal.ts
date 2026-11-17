@@ -1,6 +1,4 @@
 import { defineCapability } from "webloom-framework";
-import type { OwnerAppStore } from "./access.js";
-import type { KeyValueStore } from "./kv.js";
 import type { ModuleFileStore } from "./files.js";
 import type { PluginStorageDeclaration } from "./access.js";
 
@@ -21,7 +19,6 @@ export interface StorageBindingAuthority {
    */
   getWalletGeneration?(): string | undefined;
   getRunGeneration?(): string | undefined;
-  openOwnerAppStore(input: { pluginId: string; declaration: PluginStorageDeclaration }): Promise<OwnerAppStore>;
   /** 打开模块文件根（model: "files"）。 */
   openOwnerFileStore(input: { pluginId: string; declaration: PluginStorageDeclaration }): Promise<ModuleFileStore>;
   /** 清空一个已绑定根下的全部对象；只由重置与单 App 清理流程调用。 */
@@ -36,11 +33,6 @@ export const STORAGE_BINDING_AUTHORITY_CAPABILITY = defineCapability<StorageBind
 
 /** 页面到 Coordinator 的内部模块数据面；请求携带装配层绑定的用途与钱包运行身份。 */
 export type CoordinatorOwnerStorageData =
-  | { type: "owner.get"; binding: StorageOwnerBinding; key: string; partition?: string }
-  | { type: "owner.list"; binding: StorageOwnerBinding; input?: { prefix?: string; cursor?: string; limit?: number; partition?: string } }
-  | { type: "owner.put"; binding: StorageOwnerBinding; key: string; value: unknown; condition?: { ifRevision?: number; partition?: string } }
-  | { type: "owner.delete"; binding: StorageOwnerBinding; key: string; condition?: { ifRevision?: number; partition?: string } }
-  | { type: "owner.commit"; binding: StorageOwnerBinding; partition: string; ifRevision?: number; operations: import("./kv.js").KeyValueCommitOperation[] }
   /** 模块文件根（model: "files"）：一文件一对象，路径都是模块根下的相对路径。 */
   | { type: "owner.file-list"; binding: StorageOwnerBinding; input?: { prefix?: string; cursor?: string; limit?: number } }
   | { type: "owner.file-get"; binding: StorageOwnerBinding; path: string; ifRevision?: string }
@@ -68,11 +60,11 @@ export interface StorageOwnerBinding {
   moduleId: string;
   purposeId: string;
   authority: "built-in-module";
-  model: "kv" | "files";
+  model: "files";
   schemaVersion: number;
 }
 
 export type { WalletStore, WalletObject, WalletObjectMeta, WalletWriteCondition, WalletPutResult, WalletBatchOperation, WalletBatchCondition, WalletBatchInput, WalletBatchResult } from "./walletStoreInternal.js";
 export { StorageRuntimeError, storageErrorCode, type StorageDiagnostic } from "./runtimeError.js";
 
-export { WALLET_INITIALIZATION_PATH, type WalletVaultKeyStore, type WalletVaultLifecycleStore } from "./walletStoreInternal.js";
+export { WALLET_INITIALIZATION_PATH, type WalletVaultFiles, type WalletVaultKeyStore, type WalletVaultLifecycleStore } from "./walletStoreInternal.js";
