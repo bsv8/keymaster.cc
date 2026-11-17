@@ -5,7 +5,7 @@ import { defineCapability } from "webloom-framework";
 //
 // 设计缘由：
 //   - 内部受信任插件消费 `msfile.service` 的 stat/readSeed/readBlock；
-//   - 不受信任 Connect App 只能走 `connect` gateway，由 plugin-protocol 用
+//   - 不受信任 Connect App 只能走 `connect` gateway，由 plugin-connect 用
 //     持久 session 快照 + MessageEvent.origin 构造 App context；
 //   - Seed/Block 区分只选择金额策略与内容校验规则，不进入 wire；
 //   - 金额一律使用规范十进制字符串，只在 Frame codec 边界转成 CBOR uint64，
@@ -892,7 +892,7 @@ export interface MsFileConnectAppContext extends NetworkIdentity {
 }
 
 /**
- * Connect 专用入口。trusted 插件不得通过它调用；plugin-protocol 也不得
+ * Connect 专用入口。trusted 插件不得通过它调用；plugin-connect 也不得
  * 绕过它去调 trusted Read。
  */
 export interface MsFileConnectGateway {

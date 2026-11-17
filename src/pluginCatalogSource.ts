@@ -11,13 +11,13 @@ import type {
   RuntimeUnitImplementationRegistry,
 } from "@keymaster/contracts";
 import { pagePlugin, pageSetup } from "@keymaster/plugin-page";
-import { appsPlugin, appsSetup } from "@keymaster/plugin-apps";
+import { marketPlugin, marketSetup } from "@keymaster/plugin-market";
 import { backgroundPlugin, backgroundSetup } from "@keymaster/plugin-background";
 import { msfilePlugin, msfileSetup } from "@keymaster/plugin-msfile";
 import { satSubscriptionPlugin, satSubscriptionSetup } from "@keymaster/plugin-sat-subscription";
 import { windowP2pPlugin, windowP2pSetup } from "@keymaster/plugin-window-p2p";
 import { p2pkhPlugin, p2pkhSetup } from "@keymaster/plugin-p2pkh";
-import { protocolPlugin, protocolSetup } from "@keymaster/plugin-protocol";
+import { connectPlugin, connectSetup } from "@keymaster/plugin-connect";
 import {
   storagePlatformPlugin,
   storagePlatformSetup,
@@ -35,11 +35,11 @@ export const WEB_PLUGIN_IMPLEMENTATIONS: readonly { manifest: PluginManifest; se
   { manifest: windowP2pPlugin, setup: windowP2pSetup },
   { manifest: msfilePlugin, setup: msfileSetup },
   { manifest: satSubscriptionPlugin, setup: satSubscriptionSetup },
-  { manifest: protocolPlugin, setup: protocolSetup },
+  { manifest: connectPlugin, setup: connectSetup },
   { manifest: backgroundPlugin, setup: backgroundSetup },
   { manifest: wocPlugin, setup: wocSetup },
   { manifest: p2pkhPlugin, setup: p2pkhSetup },
-  { manifest: appsPlugin, setup: appsSetup },
+  { manifest: marketPlugin, setup: marketSetup },
   { manifest: aiPlugin, setup: aiSetup },
 ] as const;
 export const WEB_PLUGIN_CATALOG_SOURCE: readonly PluginManifest[] = WEB_PLUGIN_IMPLEMENTATIONS.map(entry => entry.manifest);

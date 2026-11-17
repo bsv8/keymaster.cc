@@ -13,12 +13,12 @@
  *     样式不得反向写回 global.css。
  */
 
-@import "@keymaster/plugin-apps/styles.css";
+@import "@keymaster/plugin-market/styles.css";
 @import "@keymaster/plugin-page/styles.css";
 @import "@keymaster/plugin-background/styles.css";
 @import "@keymaster/plugin-vault/styles.css";
 @import "@keymaster/plugin-sat-subscription/styles.css";
-@import "@keymaster/plugin-protocol/styles.css";
+@import "@keymaster/plugin-connect/styles.css";
 @import "@keymaster/plugin-msfile/styles.css";
 @import "@keymaster/plugin-p2pkh/styles.css";
 @import "@keymaster/platform-storage/styles.css";

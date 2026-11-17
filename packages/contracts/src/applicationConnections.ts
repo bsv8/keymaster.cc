@@ -1,7 +1,7 @@
 import type {AppDisplay} from "./appDisplay.js";
 import { defineCapability } from "webloom-framework";
 import type { ApplicationOpenMode } from "./page.js";
-import type { ProtocolCommandRecord, ProtocolMethod, ProtocolService } from "./protocol.js";
+import type { ProtocolCommandRecord, ProtocolMethod, ConnectService } from "./protocol.js";
 
 /** Application is the management root; live connections are child instances, not permission owners. */
 export interface ConnectedApplication {
@@ -18,10 +18,8 @@ export interface ApplicationConnection {
   applicationKey: string;
   createdAt: number;
   closedAt?: number;
-  /** 瞬时运行权已结束，原连接授权仍保留。 */
-  pausedAt?: number;
   /** Wallet-internal authority already bound to this connection; never sent through Connect. */
-  service: ProtocolService;
+  service: ConnectService;
 }
 export interface ApplicationConnectionEvent {
   id: string;

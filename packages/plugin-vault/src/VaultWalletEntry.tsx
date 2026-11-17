@@ -264,9 +264,9 @@ export function VaultWalletEntry() {
     <OnboardingShell width="narrow">
       <div className="locked-shell locked-shell--form">
         <PageHeader
-          title={t("shell.locked.lockedTitle", { defaultValue: "钱包已锁定" })}
+          title={t("shell.locked.lockedTitle", { defaultValue: "解锁钱包" })}
           description={t("shell.locked.lockedDesc", {
-            defaultValue: "输入 Key 密码解锁本机钱包。更换身份需要先重置钱包。"
+            defaultValue: "输入 Key 密码，让钱包运转起来。"
           })}
         />
         {lockedKeyLabel ? (

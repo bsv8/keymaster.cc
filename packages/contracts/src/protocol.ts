@@ -10,9 +10,9 @@ import type { NetworkIdentity } from "./networkIdentity.js";
 //     同一套 BinaryField + 同一套 ready/request/result 状态机；任何一份契约都
 //     要与"硬切换 001 / 002"中列出的核心不变量保持一致。
 //   - 本文件**只**放类型与错误码字面量；具体 CBOR 编码、签名、加解密、claim
-//     解析都收敛在 `packages/plugin-protocol` 内部，不在 contracts 暴露实现。
-//     p2pkh / feepool 的链上交互通过 capability 注入到 plugin-protocol 的
-//     service 中；plugin-protocol 不直接 import plugin-p2pkh。
+//     解析都收敛在 `packages/plugin-connect` 内部，不在 contracts 暴露实现。
+//     p2pkh / feepool 的链上交互通过 capability 注入到 plugin-connect 的
+//     service 中；plugin-connect 不直接 import plugin-p2pkh。
 //   - 二进制统一用 `BinaryField`，不允许 base64 / stringified ArrayBuffer 偷渡。
 //   - `identityEnvelope` / `signedEnvelope` 是最终真值字节（Deterministic CBOR），
 //     不是"待调用方重编码的对象"；调用方验签时**直接**对这些字节验签。
@@ -42,7 +42,7 @@ import type {
   ChannelSubscriptionSetResult
 } from "./channel.js";
 //   - **命令流展示投影**（施工单 2026-06-27 002 硬切换）：
-//       `ProtocolCommandFeedState.commands` **不**再承诺
+//       `ConnectCommandFeedState.commands` **不**再承诺
 //       "全局按 updatedAt desc"，而是 service 派生的"活请求区 +
 //       历史区"拼接投影：
 //         - 活请求区：未终态 record，按 createdAt asc（recordId 次级稳定）；
@@ -50,41 +50,9 @@ import type {
 //       同类 request 在活请求区不复用卡位；UI 不应再按索引展开。
 //       历史加载必须按 recordId 合并（内存活记录覆盖 K-V 旧记录），
 //       批次隔离（origin + token）避免旧 origin 异步回写新 origin 视图。
-//   - 施工单 2026-06-28 001 硬切换：connect session 作为持续登录 caller
-//     的正式真值。
-//       - 新增 connect.login / connect.resume / connect.logout 三个 method；
-//       - cipher.encrypt / cipher.decrypt 强制要求 `walletPublicKeyHex`
-//         输入字段；不再读取钱包全局 active key。
-//       - connect session 持久化到 `protocol storage namespace` 的
-//         `connectSessions` store（K-V version 升 4）。
-//       - popup unlock runtime 仅存在于 popup 当前文档内存；popup
-//         刷新 / 关闭后立即失效，caller 通过 `connect.resume` 补 unlock
-//         即可，不需要重新登录。
-//   - 施工单 2026-06-28 002 硬切换：所有外部业务方法都属于 walletPublicKeyHex：
-//       - identity.get / intent.sign / cipher.encrypt / cipher.decrypt /
-//         p2pkh.transfer / feepool.prepare / feepool.commit 全部强制要求
-//         `walletPublicKeyHex` 入参；`connect.login` 是唯一不要求 sessionId
-//         的入口方法。
-//       - owner 唯一真值 = `ownerPublicKeyHex`；`ownerKeyId` **不**允许
-//         出现在 contract / session record / request record / result payload /
-//         fee pool key / pending operation key / service 分支判断里。
-//       - `ConnectSessionRecord` / `ConnectLoginResult` / `ConnectResumeResult`
-//         都已移除 `ownerKeyId` 字段。
-//       - `ProtocolFeePoolRecord` 的持久化 key 维度补 `ownerPublicKeyHex`：
-//         `${origin}::${ownerPublicKeyHex}::${counterpartyPublicKeyHex}`，
-//         同 origin 不同 owner 不再串池。
-//       - `ProtocolCommandRecord` 上的 owner snapshot 字段统一改为
-//         `ownerPublicKeyHex` + 新增 `walletPublicKeyHex`（业务方法必填）。
-//       - `connect.login` = 重新认证并新建 session；`connect.resume` =
-//         恢复既有 session，只补 unlock。
-//       - popup 任一时刻只允许一个 auth owner；`connect.resume` 有效时
-//         优先于未提交 `connect.login`。
-//       - 所有业务 request 在 accept 阶段即预校验 session 真值
-//         （fail-fast：session 不存在 / 已 revoke / origin 不匹配 /
-//         owner key 不 ready → 直接 phase=failed，对外回 user_rejected
-//         / invalid_origin；不进 waiting_unlock / confirming UI）。
-//       - 业务执行阶段再次校验 session 仍有效（logout 后同 session 下挂
-//         的旧 request 后续执行必须失败；不允许"老 session 复用新 key"）。
+//   - Connect 登录或启动成功后签发当前运行绑定；业务按宿主绑定的授权执行。
+//     页面刷新和连接断开后必须重新登录或从钱包重新打开，旧请求不重放。
+//     长期应用操作许可与运行连接分开保存。
 //   - 双向 Connect 都由完整钱包的应用连接宿主管理，无独立协议页。
 //     App 主动连接采用真实 opener；目录启动的 appView 采用已登记的 child。
 //     connect.launch 一次性消费启动 token，不回退到登录。
@@ -167,7 +135,7 @@ export type ProtocolMethod = (typeof PROTOCOL_METHODS)[number];
 export type ProtocolErrorCode =
   /** Transport authority was revoked or belongs to another wallet/Worker generation. */
   | "connection_expired"
-  /** Wallet confirms the credential is gone/revoked/invalid; client must clear saved recovery. */
+  /** 授权已不存在或撤销；客户端清空当前连接并要求重新登录。 */
   | "authorization_expired"
   | "invalid_request"
   | "invalid_origin"
@@ -299,7 +267,7 @@ export type ProtocolEventMessage =
 
 /** 顶层 request 报文。 */
 export interface ProtocolRequestMessage<M extends ProtocolMethod = ProtocolMethod> {
-  /** Opaque transport binding returned by login/resume/launch; never a wallet selector. */
+  /** Opaque transport binding returned by login/launch; never a wallet selector. */
   bindingId?: string;
   v: typeof PROTOCOL_VERSION;
   type: "request";
@@ -1034,7 +1002,6 @@ export interface ProtocolFeePoolDeliveryRecord {
 export type ProtocolFailureReason =
   | "user_canceled"
   | "client_canceled"
-  | "superseded_by_resume"
   | "insufficient_balance"
   | "invalid_address"
   | "invalid_amount"
@@ -1086,66 +1053,19 @@ export type ProtocolFailureReason =
  * 之间彼此独立。
  */
 
-/* ============== connect.login / connect.resume / connect.logout（施工单 2026-06-28 001 硬切换） ============== */
 
 /**
- * connect 方法族：把 connect session 提升为持续登录 caller 的正式真值。
- *
- * 设计缘由（施工单 2026-06-28 001）：
- *   - 三层语义必须分开：
- *       popup transport session
- *         = popup 窗口级 postMessage 收发会话
- *       connect auth session
- *         = caller 对当前 origin 已获得授权的持久会话
- *       popup unlock runtime
- *         = 当前 popup 文档内可直接执行私钥操作的短期运行时材料
- *   - 登录时显式选择 key；后续 connect session 绑定该 key 的 publicKeyHex。
- *   - cipher.* 不再读取钱包全局 active key；通过 `walletPublicKeyHex` 找到
- *     绑定 key。
- *   - popup 刷新 / 关闭 → 当前 popup unlock runtime 失效；auth session
- *     持久化记录仍保留，caller 通过 `connect.resume` 补 unlock 即可。
- *   - `connect.logout` 是 auth 失效的唯一正常路径。
- *
- * 不删除 `identity.get` / `intent.sign` / `cipher.encrypt` / `cipher.decrypt`：
- *   - `identity.get` 仍保留，但**不**再作为 note 这类持续登录 caller
- *     的推荐入口；走 `connect.login` 获取钱包公钥。
- *   - `cipher.*` 的稳定调用路径改为 session 绑定版本；继续保留旧 method
- *     名但**强制**要求 `walletPublicKeyHex` 字段。
- */
-
-/**
- * 持久化的 connect session 记录。
- *
- * 设计缘由（施工单 2026-06-28 002 硬切换 + 施工单 2026-06-30 002 硬切换）：
- *   - 这是 auth session 真值；**不**是 unlock runtime。
- *   - 允许持久化（platform K-V repository `connectSessions` store）。
- *   - **不**混入 pending request / 中间密文 / 解锁材料。
- *   - `revokedAt` 是被 `connect.logout` 主动吊销的时间戳；非空记录
- *     不允许 `connect.resume` 复活。
- *   - **owner 唯一真值 = `ownerPublicKeyHex`**。`ownerKeyId` **不允许**
- *     出现在 session record / request record / result payload / fee pool
- *     key / service 分支判断里——它会制造第二套 owner 身份。Vault 内部
- *     借用句柄按需从 walletState 解析，**不**落 session 持久化。
- *   - **不**持久化执行 runtime 来源：`runtimeBinding` 已从 session
- *     真值里删掉。同一 session 在窗口生命周期内可以从
- *     `bootstrap_runtime` 切到 `vault_runtime`——这是允许的；
- *     持久化来源会阻止这条切换路径。runtime 来源是窗口内运行时状态，
- *     不是业务真值。
- *
- * 关键不变量：
- *   - `ownerPublicKeyHex` 在创建后**不**可变（resume 不重新选 key）。
- *   - origin / sessionId / ownerPublicKeyHex 三元组是 session 的稳定真值。
- *   - 执行 owner 解析时按 `sessionId -> ownerPublicKeyHex` 走
- *     `resolveOwnerRuntime(session)`，统一在
- *     `bootstrap_runtime | vault_runtime` 两条来源里挑当前可用的那条。
+ * 钱包持久化的连接授权快照，不包含执行句柄或待处理请求。
+ * 只有当前宿主签发的运行绑定可以使用；记录本身不能恢复断开的连接。
+ * owner、网络和实际 origin 在创建后固定，撤销时间非空时禁止使用。
+ * 长期应用操作许可另按已验证 App 公钥保存。
  */
 export interface ConnectSessionRecord {
-  /** 持久连接授权引用；锁定/刷新不撤销，显式断开后失效。 */
+  /** 连接授权引用；需要当前运行绑定，不能用于恢复旧连接。 */
   authorizationId?: string;
   networkIdentity: import("./networkIdentity.js").NetworkIdentity;
   /** 内部缓存与付款核算键：由网络、公钥、来源确定性压缩，不作为公开授权编号。 */
   sessionId: string;
-  /** exact event.origin；connect.resume / 业务方法必须严格匹配。 */
   origin: string;
   /** 绑定 key 的压缩公钥 hex；session 创建后不变。owner 唯一真值。 */
   ownerPublicKeyHex: string;
@@ -1153,7 +1073,6 @@ export interface ConnectSessionRecord {
   ownerLabel: string;
   /**
    * identity.get 解析时返回的 claims 真值快照（本次 connect.login / 启动
-   * bootstrap 时取一次）。site 后续 `connect.resume` 拿同一份快照，不必
    * 再发一次 `identity.get`。
    */
   claimsSnapshot: Record<string, ResolvedClaimValue>;
@@ -1161,7 +1080,7 @@ export interface ConnectSessionRecord {
    * 创建时间，unix milliseconds。
    */
   createdAt: number;
-  /** 最近一次使用时间（resume / 业务方法命中都会刷新）。 */
+  /** 最近一次使用时间（业务方法命中时刷新）。 */
   lastUsedAt: number;
   /** 吊销时间；null = 未吊销。 */
   revokedAt: number | null;
@@ -1169,7 +1088,7 @@ export interface ConnectSessionRecord {
    * 建连时验证的 App 公钥快照（应用发布与公钥身份 §二）。
    * 来自 URL 来源证明验签或可信本地部署登记，不接受业务请求自带；
    * 缺省表示未经验证的传输（旧入口/本地调试），不得继承已有许可。
-   * 同一授权的后续 resume 沿用该快照，不重复发布验签。
+   * 当前连接后续业务沿用该快照，不重复发布验签。
    */
   appPublicKeyHex?: string;
   appDisplay?:{name:string;description:string;icon:string};
@@ -1224,41 +1143,6 @@ export interface ConnectLoginResult {
 }
 
 /**
- * `connect.resume` 请求参数。
- *
- * resume 显式传入钱包公钥；本地记录为空时按当前 Key 重建缺省连接。
- * 可重新验证外部 App proof，不恢复已被重置的本地设置。
- */
-export interface ConnectResumeParams {
-  /** 本地数据重置后重新验证已有发行人签名 proof。 */
-  /**
-   * 由 `connect.login` 返回的钱包公钥。
-   * caller 持公钥，popup 的运行句柄独立受会话世代约束。
-   */
-  walletPublicKeyHex: string;
-}
-
-/**
- * `connect.resume` 成功结果。
- *
- * 返回钱包公钥与当前 claims 快照；新建缺省连接的 claims 为空。
- *
- * 关键（施工单 2026-06-28 002 硬切换）：**不**再返回 `ownerKeyId`。
- */
-export interface ConnectResumeResult {
-  authorizationId: string;
-  networkIdentity: import("./networkIdentity.js").NetworkIdentity;
-  walletPublicKeyHex: string;
-  ownerPublicKeyHex: string;
-  resolvedClaims: Record<string, ResolvedClaimValue>;
-  /**
-   * 解析时间——本次 resume 时间戳，**不**是 connect.login 时的快照时间。
-   * 给 caller 用来做"是否要重新登录"的客户端超时策略。
-   */
-  resolvedAt: number;
-}
-
-/**
  * `connect.logout` 请求参数。
  *
  * logout 按钱包公钥和实际来源撤销本地连接。
@@ -1282,25 +1166,23 @@ export interface ConnectLogoutResult {
  * connect method 在 popup 当前文档处于 `waiting_unlock_*` 时进入的"选 key"
  * UI 行为约束。
  *
- * 设计缘由：login / resume 现在由统一 auth owner 快照仲裁；login 是
- * 重新认证并新建 session，resume 是恢复既有 session。
+ * 登录由统一待确认快照驱动，成功后新建连接授权。
  */
-export type ConnectRequestKind = "login" | "resume" | "logout" | "launch";
+export type ConnectRequestKind = "login" | "logout" | "launch";
 
 /**
  * connect auth owner 的只读快照。
  *
  * 设计缘由：
  *   - popup 任一时刻只允许一个 auth owner 控制全屏 auth 页；
- *   - login / resume 的仲裁真值由 service 决定，UI 只读这个快照渲染；
- *   - `canSubmit` 反映 service 侧是否已具备提交条件（login: 候选 key
- *     是否存在；resume: 只读会话是否有效）。
+ *   - 待确认登录由 service 决定，UI 只读这个快照渲染；
+ *   - `canSubmit` 反映 service 侧是否已具备提交条件（当前钱包身份是否已就绪）。
  */
-export interface ProtocolConnectAuthSnapshot {
+export interface ConnectAuthSnapshot {
   /** 钱包已提交后端；硬件认证不展示或传输 PIN。 */
   backend?: "software" | "hardware";
   /** 当前 auth owner 类型；`null` 表示没有 auth owner。 */
-  ownerType: "login" | "resume" | null;
+  ownerType: "login" | null;
   /** 当前 auth owner 对应的 recordId；无 owner 时为 null。 */
   recordId: string | null;
   /** service 侧当前是否已具备提交条件。 */
@@ -1311,12 +1193,6 @@ export interface ProtocolConnectAuthSnapshot {
   login: {
     recordId: string;
     wallet?: { publicKeyHex: string; label: string };
-  } | null;
-  /** resume auth owner 的只读会话信息；无 resume owner 时为 null。 */
-  resume: {
-    recordId: string;
-    ownerPublicKeyHex: string;
-    ownerLabel: string;
   } | null;
 }
 
@@ -1334,8 +1210,7 @@ export interface ProtocolConnectAuthSnapshot {
  *   - 失败时按 fail-closed：launchToken 缺失 / 已消费 / 当前 Session Window
  *     不在 `appView` mode / caller origin 与 bootstrap 期记录不一致 → 拒掉；
  *     不允许 fallback 到 `connect.login`。
- *   - 成功结果形状与 `connect.login` 对齐，便于 caller 走同一套"持久化
- *     walletPublicKeyHex、完整网络身份 + 后续 connect.resume / cipher.*"路径。
+ *   - 成功结果与登录一致，业务只使用接收端签发的当前绑定。
  */
 export interface ConnectLaunchParams {
   /** 由 launcher 写入 client app 启动 URL 的 launchToken。一次性消费。 */
@@ -1364,13 +1239,13 @@ export type ChannelSubscriptionSetParamsV1 = ChannelSubscriptionSetParams;
 export type ChannelSubscriptionSetResultV1 = ChannelSubscriptionSetResult;
 
 
-/* ============== plugin-apps launcher 启动入口（施工单 2026-06-29 002 硬切换） ============== */
+/* ============== plugin-market launcher 启动入口（施工单 2026-06-29 002 硬切换） ============== */
 
 /**
  * `protocol.service.launchAppView(...)` 的入参。
  *
  * 设计缘由（施工单 2026-06-29 002 硬切换）：
- *   - 这是 `plugin-apps` **唯一**允许调用的 appView 启动入口；plugin-apps
+ *   - 这是 `plugin-market` **唯一**允许调用的 appView 启动入口；plugin-market
  *     自己不操作协议存储、运行句柄或开窗；主钱包宿主接管外部应用连接。
  *   - `appOrigin` 必须是 exact origin；`new URL(appUrl).origin` 必须
  *     === `appOrigin`，否则视为配置错误、整次启动 fail-closed。
@@ -1395,23 +1270,26 @@ export interface LaunchAppViewInput {
  * `protocol.service.launchAppView(...)` 的成功结果。
  *
  * 设计缘由（施工单 2026-06-29 002 硬切换）：
- *   - 成功意味着 launcher 已完成整套：vault 已解锁校验 + owner key 已 ready
+ *   - 已打开的有效应用直接聚焦，不重建连接；新启动则完成 vault 解锁与 owner 就绪校验。
+ *   - 新启动完成整套：vault 已解锁校验 + owner key 已 ready
  *     校验 + app 配置合法 + 预建 connect session + 创建 App 专属 crypto capability +
  *     生成 launchToken + 注册主钱包连接宿主 + 导航跨源 App iframe。
  *   - 启动失败（任何一道闸）一律 throw，不返回 `appViewOpened=false`
  *     的"半成功"语义——避免业务插件"先显示成功，再去查"等隐式兼容路径。
  *   - 返回的 `appUrl` 是已拼上 `?launchToken=<id>` 的真实打开 URL；
- *     `plugin-apps` 仅作展示用，**不**自己再去 `window.open(appUrl)`。
+ *     `plugin-market` 仅作展示用，**不**自己再去 `window.open(appUrl)`。
  */
 export interface LaunchAppViewResult {
   networkIdentity: NetworkIdentity;
-  /** 外部 App 已在钱包创建的跨源 iframe 中打开。 */
+  /** 外部 App 已打开，或已切回其现有视图。 */
   appViewOpened: true;
   /** launcher 已确认的钱包公钥；与 networkIdentity 一起定位身份。 */
   walletPublicKeyHex: string;
-  /** 本次为该 app 生成的 launchToken；client app 首条 `connect.launch` 消费。 */
-  launchToken: string;
-  /** 已拼上 `?launchToken=<id>` 的 client app URL。 */
+  /** 本次新启动生成的 token；仅聚焦已有应用时不生成、不返回。 */
+  launchToken?: string;
+  /** 已复用当前运行视图，未创建新连接或重新导航。 */
+  reused?: true;
+  /** 新启动时为带 token 的导航 URL；复用时为现有应用的原始入口。 */
   appUrl: string;
 }
 
@@ -1602,7 +1480,6 @@ export interface MethodParamsMap {
   "feepool.prepare": FeepoolPrepareParams;
   "feepool.commit": FeepoolCommitParams;
   "connect.login": ConnectLoginParams;
-  "connect.resume": ConnectResumeParams;
   "connect.logout": ConnectLogoutParams;
   "connect.launch": ConnectLaunchParams;
   "channel.publish": ChannelPublishParams;
@@ -1628,7 +1505,6 @@ export interface MethodResultMap {
   "feepool.prepare": FeepoolPrepareResult;
   "feepool.commit": FeepoolCommitResult;
   "connect.login": ConnectLoginResult;
-  "connect.resume": ConnectResumeResult;
   "connect.logout": ConnectLogoutResult;
   "connect.launch": ConnectLaunchResult;
   "channel.publish": ChannelPublishResult;
@@ -1828,7 +1704,7 @@ export interface ProtocolCommandRecord {
  *     第一条活卡进入终态后从活请求区离开，第二条活卡成为新的
  *     活请求区第一格——这是"前一条事务结束"的正常释放。
  */
-export interface ProtocolCommandFeedState {
+export interface ConnectCommandFeedState {
   /** 当前 popup 服务的 exact origin；未收到第一条 request 时为 null。 */
   currentOrigin: string | null;
   /**
@@ -1851,7 +1727,7 @@ export interface ProtocolCommandFeedState {
  * 锁屏页用的待处理摘要（施工单 2026-06-27 001 硬切换）。
  *
  * 设计缘由：
- *   - 不维护第二份可变状态；它由 service 从 `ProtocolCommandFeedState.commands`
+ *   - 不维护第二份可变状态；它由 service 从 `ConnectCommandFeedState.commands`
  *     在 `feedSnapshot()` / `lockSummarySnapshot()` 调用时刻聚合。
  *   - `byMethod` 用 method 名做 key，value 是该方法在当前未终态记录里
  *     出现的次数；与历史终态记录无关。
@@ -1908,9 +1784,9 @@ export type ProtocolPopupLockState = "locked" | "unlocked";
 
 /**
  * 命令流 K-V capability key。manifest 在 setup 阶段 provide；
- * ProtocolService 通过 ctx 注入，**不**直接 import K-V 模块。
+ * ConnectService 通过 ctx 注入，**不**直接 import K-V 模块。
  */
-export const PROTOCOL_COMMAND_REPOSITORY_CAPABILITY = defineCapability<Record<string, unknown>>({
+export const CONNECT_COMMAND_REPOSITORY_CAPABILITY = defineCapability<Record<string, unknown>>({
   kind: "local",
   id: "protocol.commandRepository",
   version: "1",
@@ -1924,7 +1800,7 @@ export const PROTOCOL_COMMAND_REPOSITORY_CAPABILITY = defineCapability<Record<st
  * capability 同步改名。manifest 在 setup 阶段 provide，service 通过 deps
  * 注入，**不**直接 import K-V 模块。
  */
-export const PROTOCOL_STORAGE_REPOSITORY_CAPABILITY = defineCapability<ProtocolStorageRepository>({
+export const CONNECT_STORAGE_REPOSITORY_CAPABILITY = defineCapability<ConnectStorageRepository>({
   kind: "local",
   id: "protocol.storageRepository",
   version: "1",
@@ -1954,7 +1830,7 @@ export const PROTOCOL_STORAGE_REPOSITORY_CAPABILITY = defineCapability<ProtocolS
  *     走 manual confirm、feepool fail-closed、connect session 不可用
  *     时 caller 被要求重新登录）。
  */
-export interface ProtocolStorageRepository {
+export interface ConnectStorageRepository {
   getApplicationOpenMode(): Promise<import("./page.js").ApplicationOpenMode>;
   setApplicationOpenMode(mode: import("./page.js").ApplicationOpenMode): Promise<void>;
   listApplicationEvents?(): Promise<import("./applicationConnections.js").ApplicationConnectionEvent[]>;
@@ -2104,7 +1980,7 @@ export type ProtocolSessionPhase =
   | "error";
 
 /** popup 会话的可序列化快照（仅供调试 / 未来日志扩展使用）。 */
-export interface ProtocolSessionSnapshot {
+export interface ConnectSessionSnapshot {
   phase: ProtocolSessionPhase;
   /** 当前绑定的 source window（仅做引用，不做结构化克隆）。 */
   boundSource: Window | null;
@@ -2136,8 +2012,8 @@ export interface ProtocolSessionSnapshot {
 
 /* ============== capability ============== */
 
-/** ProtocolService capability key。 */
-export const PROTOCOL_SERVICE_CAPABILITY = defineCapability<ProtocolService>({
+/** ConnectService capability key。 */
+export const CONNECT_SERVICE_CAPABILITY = defineCapability<ConnectService>({
   kind: "local",
   id: "protocol.service",
   version: "1",
@@ -2145,17 +2021,17 @@ export const PROTOCOL_SERVICE_CAPABILITY = defineCapability<ProtocolService>({
 
 /**
  * 协议 service 对外契约。`主应用` / `ProtocolPopupPage` 通过
- * `useCapability<ProtocolService>(PROTOCOL_SERVICE_CAPABILITY)` 拿到实例。
+ * `useCapability<ConnectService>(CONNECT_SERVICE_CAPABILITY)` 拿到实例。
  *
  * 设计缘由：service 负责 transport + 校验 + 解锁 + 确认流调度 + 调用
  * vault / walletState + 构造 envelope + 签名 / 加解密；UI 只负责渲染态。
  * service 完全不依赖 React，单元测试可直接调它。
  */
 /**
- * plugin-protocol 通过 capability 注入 p2pkh 业务能力的"瘦身"接口。
+ * plugin-connect 通过 capability 注入 p2pkh 业务能力的"瘦身"接口。
  *
  * 设计缘由（施工单 2026-06-28 002 硬切换）：
- *   - plugin-protocol 不直接 import plugin-p2pkh（边界检查禁止插件间
+ *   - plugin-connect 不直接 import plugin-p2pkh（边界检查禁止插件间
  *     互相 import）。这里在 contracts 层定义一个最小子集；plugin-p2pkh
  *     的现有 `P2pkhService` 已经覆盖该子集，manifest setup 时做一次
  *     适配即可。
@@ -2218,7 +2094,7 @@ export interface P2pkhProtocolAdapter {
   }>;
 }
 
-export interface ProtocolService {
+export interface ConnectService {
   /**
    * 启动一个 popup 会话。同一 service 实例允许多次启动会话（每次都重置
    * 内部状态）。调用方在 popup 加载时调用一次；之后由 service 自己维护
@@ -2300,9 +2176,9 @@ export interface ProtocolService {
   /**
    * 订阅会话状态变化，UI 用来驱动页面。
    */
-  subscribe(handler: (snapshot: ProtocolSessionSnapshot) => void): () => void;
+  subscribe(handler: (snapshot: ConnectSessionSnapshot) => void): () => void;
   /** 同步取当前会话快照。 */
-  snapshot(): ProtocolSessionSnapshot;
+  snapshot(): ConnectSessionSnapshot;
   /**
    * 当前 popup 服务的 exact origin。未收到第一条 request 时返回 null。
    * UI 顶部"当前站点"展示用。**不**做 host 归一化。
@@ -2322,12 +2198,12 @@ export interface ProtocolService {
    * 设计缘由（施工单 2026-06-27 001 硬切换）：
    *   - 增加 `lockSummary` 字段，锁屏页用其渲染待处理概览。
    */
-  feedSnapshot(): ProtocolCommandFeedState;
+  feedSnapshot(): ConnectCommandFeedState;
   /**
    * 订阅命令流变化。`feed.phase !== 'waiting' && feed.commands` 推
    * 变；UI 用来驱动 feed 面板的更新。
    */
-  subscribeFeed(handler: (state: ProtocolCommandFeedState) => void): () => void;
+  subscribeFeed(handler: (state: ConnectCommandFeedState) => void): () => void;
   /**
    * 读 origin 配置；K-V 不可用或该 origin 尚未配置时返回 null。
    * UI 用此填默认 + 弹 modal 编辑当前 origin。
@@ -2365,10 +2241,10 @@ export interface ProtocolService {
    * 当前 connect auth owner 只读快照。
    *
    * 设计缘由：popup 任一时刻只允许一个 auth owner 控制全屏 auth 页；
-   * login / resume 的仲裁真值由 service 决定，UI 只读这个快照渲染。
+   * 待确认登录由 service 决定，UI 只读这个快照渲染。
    * 当没有 auth owner 时返回 `null`。
    */
-  connectAuthSnapshot(): ProtocolConnectAuthSnapshot | null;
+  connectAuthSnapshot(): ConnectAuthSnapshot | null;
   /**
    * 锁屏页用的待处理摘要（施工单 2026-06-27 001 硬切换）。
    *
@@ -2379,7 +2255,7 @@ export interface ProtocolService {
   /** 从当前 Vault 与有效授权 runtime 同步执行状态；页面不传锁屏值。状态变化时撤销 Channel 会话或推进等待请求。 */
   syncWalletState(): void;
 
-  /* ============== plugin-apps launcher 启动入口（施工单 2026-06-29 002 硬切换） ============== */
+  /* ============== plugin-market launcher 启动入口（施工单 2026-06-29 002 硬切换） ============== */
 
   /** 钱包目录启动外部 App：创建受控上下文，交给主钱包连接宿主并打开 App 窗口。 */
   launchAppView(input: LaunchAppViewInput): Promise<LaunchAppViewResult>;
@@ -2396,28 +2272,13 @@ export interface ProtocolService {
     wallet?: { publicKeyHex: string; label: string };
   } | null;
   /**
-   * 当前 popup 是否存在"等待用户恢复"的 connect resume 流程。
-   * 兼容旧 UI；新 UI 应优先读 `connectAuthSnapshot()`。
-   */
-  connectResumeRecord(recordId?: string): {
-    recordId: string;
-    method: "connect.resume";
-    ownerPublicKeyHex: string;
-    ownerLabel: string;
-  } | null;
-  /**
    * 用户在 connect login 视图选定 key 并提交密码。service 先重新验密；
    * 若 vault 当前已锁定，则会先解锁再建立新 session，成功后原子吊销
    * 同 origin 旧 session。
    */
   confirmConnectLogin(recordId: string): Promise<void>;
   /**
-   * 用户在 connect resume 视图提交密码。service 先验密；若 vault 当前
-   * 已锁定，则会先解锁再恢复既有 session。
-   */
-  confirmConnectResume(recordId: string): Promise<void>;
-  /**
-   * 用户在 connect login / resume / cipher confirm / 任何视图点击"取消"，
+   * 用户在连接或业务审批视图点击"取消"，
    * service 把 request 收尾为 `rejected`，对外回 `user_rejected`。
    */
   rejectConnectRequest(recordId: string): Promise<void>;

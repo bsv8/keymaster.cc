@@ -1,3 +1,4 @@
+import { traceDev, sanitizeDiagnosticText } from "@keymaster/contracts";
 // Coordinator Worker 运行单元运行态注册表。
 //
 // 静态目录只回答“这个 unit 属于哪个产品、声明了哪些服务/任务”；本模块
@@ -160,7 +161,8 @@ export function createCoordinatorWorkerUnitRegistry(
     fail(unitId, instanceId, error) {
       const current = active.get(unitId);
       if (!current || current.instanceId !== instanceId) return undefined;
-      const nextError = errorText(error);
+      traceDev("runtime.plugins", "setup.failed", () => ({ runtime: "shared-worker", pluginId: current.productId, unitId, instanceId, error }));
+      const nextError = sanitizeDiagnosticText(errorText(error));
       if (current.state !== "failed" || current.error !== nextError) {
         current.state = "failed";
         current.error = nextError;

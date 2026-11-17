@@ -53,7 +53,7 @@ for (const file of scanDirs.flatMap((dir) => { try { return walk(dir); } catch {
           // allow an explicitly narrow editor safety subscription only.
           const text = source.getFullText();
           const narrowEditorException = (
-            (relative(root, file) === "packages/plugin-apps/src/AppLaunchModal.tsx" &&
+            (relative(root, file) === "packages/plugin-market/src/AppLaunchModal.tsx" &&
               text.includes("@resource-boundary allow: wallet-session-form-safety"))
           ) && method === "subscribe" && ts.isIdentifier(node.expression.expression)
             && node.expression.expression.text === "walletState";

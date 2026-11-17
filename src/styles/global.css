@@ -844,6 +844,8 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
 .home-single .business-home__space:has(.home-actions) > h2 {
   grid-column: 1 / -1;
 }
+/* 应用贡献自带标题和市场操作，保留分节卡并避免重复标题。 */
+.home-single .business-home__space:has(.apps-home-widget) > h2 { display: none; }
 /* 同一分节的多块贡献（文件）之间用分隔线区隔，不嵌套卡片。 */
 .home-single .business-home__space:has(.msfile-bucket) > .home-layout__cell + .home-layout__cell {
   border-top: 1px solid var(--border);

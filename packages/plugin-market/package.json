@@ -1,0 +1,21 @@
+{
+  "name": "@keymaster/plugin-market",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./styles.css": "./src/styles.css"
+  },
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
+    "@keymaster/contracts": "*",
+    "@keymaster/runtime": "*",
+    "webloom-framework": "0.6.0",
+    "@keymaster/ui": "*",
+    "lucide-react": "^0.468.0"
+  },
+  "scripts": {}
+}

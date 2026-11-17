@@ -29,7 +29,7 @@
       "path": "./packages/plugin-background"
     },
     {
-      "path": "./packages/plugin-protocol"
+      "path": "./packages/plugin-connect"
     },
     {
       "path": "./packages/plugin-window-p2p"
@@ -41,7 +41,7 @@
       "path": "./packages/plugin-sat-subscription"
     },
     {
-      "path": "./packages/plugin-apps"
+      "path": "./packages/plugin-market"
     },
     {
       "path": "./packages/msfile-media"

@@ -1,6 +1,6 @@
 import { defineCapability, type PluginConsumer, type LifecycleScope } from "webloom-framework";
 import type { BorrowedModuleFileStore } from "./storage/files.js";
-import type { StorageCoordinatorControl, VaultCoordinatorControl, BackgroundCoordinatorControl, P2pkhCoordinatorControl, WocCoordinatorControl, MsFileCoordinatorControl, SatCoordinatorControl, WindowP2pCoordinatorControl, ProtocolCoordinatorControl } from "./sessionCoordinator.js";
+import type { StorageCoordinatorControl, VaultCoordinatorControl, BackgroundCoordinatorControl, P2pkhCoordinatorControl, WocCoordinatorControl, MsFileCoordinatorControl, SatCoordinatorControl, WindowP2pCoordinatorControl, ConnectCoordinatorControl } from "./sessionCoordinator.js";
 /** Transport binding is assembly plumbing, not authority to impersonate another plugin. */
 export interface CoordinatorClientBinding<T> { bind(consumer: PluginConsumer, scope: LifecycleScope): T }
 export interface PluginFileClients { bind(consumer: PluginConsumer, scope: LifecycleScope, purposeId: string): BorrowedModuleFileStore }
@@ -13,4 +13,4 @@ export const WOC_COORDINATOR_CLIENT_BINDING_CAPABILITY = defineCapability<Coordi
 export const MSFILE_COORDINATOR_CLIENT_BINDING_CAPABILITY = defineCapability<CoordinatorClientBinding<MsFileCoordinatorControl>>({ kind: "local", id: "msfile.coordinator-client-binding", version: "1" });
 export const SAT_COORDINATOR_CLIENT_BINDING_CAPABILITY = defineCapability<CoordinatorClientBinding<SatCoordinatorControl>>({ kind: "local", id: "sat-subscription.coordinator-client-binding", version: "1" });
 export const WINDOW_P2P_COORDINATOR_CLIENT_BINDING_CAPABILITY = defineCapability<CoordinatorClientBinding<WindowP2pCoordinatorControl>>({ kind: "local", id: "window-p2p.coordinator-client-binding", version: "1" });
-export const PROTOCOL_COORDINATOR_CLIENT_BINDING_CAPABILITY = defineCapability<CoordinatorClientBinding<ProtocolCoordinatorControl>>({ kind: "local", id: "protocol.coordinator-client-binding", version: "1" });
+export const CONNECT_COORDINATOR_CLIENT_BINDING_CAPABILITY = defineCapability<CoordinatorClientBinding<ConnectCoordinatorControl>>({ kind: "local", id: "protocol.coordinator-client-binding", version: "1" });

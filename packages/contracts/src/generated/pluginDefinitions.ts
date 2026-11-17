@@ -881,7 +881,7 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
   },
   {
     "id": "protocol",
-    "name": "Protocol",
+    "name": "Connect",
     "units": [
       {
         "id": "protocol.window",
@@ -968,7 +968,7 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
               "version": "1"
             },
             "sourceRuntime": "window-main",
-            "reason": "Protocol 自有资源"
+            "reason": "Connect 自有资源"
           },
           {
             "capability": {
@@ -995,7 +995,7 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
               "version": "1"
             },
             "sourceRuntime": "window-main",
-            "reason": "协议需要 owner key 状态"
+            "reason": "连接需要 owner key 状态"
           },
           {
             "capability": {
@@ -1004,7 +1004,7 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
               "version": "1"
             },
             "sourceRuntime": "window-main",
-            "reason": "注册 protocol 资源"
+            "reason": "注册 connect 资源"
           },
           {
             "capability": {
@@ -1030,7 +1030,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
         "connect": {
           "providerMethods": [
             "connect.login",
-            "connect.resume",
             "connect.logout",
             "connect.launch"
           ]
@@ -1581,7 +1580,7 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
   },
   {
     "id": "apps",
-    "name": "Apps",
+    "name": "Market",
     "units": [
       {
         "id": "apps.window",
@@ -1639,7 +1638,7 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
               "version": "1"
             },
             "sourceRuntime": "window-main",
-            "reason": "调用 launchAppView 启动 appView"
+            "reason": "调用 launchAppView 启动 appView（能力字符串 protocol.service 保留）"
           },
           {
             "capability": {

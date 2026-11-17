@@ -2,7 +2,7 @@
 // 共享 Deterministic CBOR (RFC 8949 §4.2.1) 编码/解码原语。
 //
 // 设计缘由（施工单 2026-07-04 004 硬切换）：
-//   - 本文件是 platform 共享原语，**不**再属于 plugin-protocol 私有；
+//   - 本文件是 platform 共享原语，**不**再属于 plugin-connect 私有；
 //   - protocol、vault 和其它平台模块共享 deterministic CBOR：identity
 //     envelope / signedEnvelope / cipher 内层结构依赖同一份编码真值；
 //   - **不再**继续演化为项目自维护 CBOR 实现（施工单 §8.4）——底层

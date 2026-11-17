@@ -140,7 +140,7 @@ import { validatePublicKey } from "bitcoin-libp2p/identity";
 // Channel 密码学和固定 inbox 路由只在 SharedWorker 调用；Window executor
 // 只看 SSP wire，不会收到私钥或明文。
 
-import { configureProtocolStorageRepository, getConnectSession as getAuthoritativeConnectSession } from "@keymaster/plugin-protocol/coordinator";
+import { configureConnectStorageRepository, getConnectSession as getAuthoritativeConnectSession } from "@keymaster/plugin-connect/coordinator";
 import { type SatDefaultNetwork, type SatSupplierConnection } from "@keymaster/plugin-sat-subscription/coordinator";
 
 function decodePersisted(value: string): Uint8Array {
@@ -315,7 +315,7 @@ const storageWorkerRoot = createStorageWorkerRoot({
       return {
         commit() {
           if (!platformArtifactsMatch(binding)) throw storageUnavailableError("Platform storage candidate became stale");
-          coordinatorSettingsSnapshot?.close(); configureProtocolStorageRepository(ownedProtocol);
+          coordinatorSettingsSnapshot?.close(); configureConnectStorageRepository(ownedProtocol);
           coordinatorSettingsSnapshot = ownedSettings; coordinatorProtocolStores = ownedProtocol;
           coordinatorPlatformArtifactsBinding = binding;
         },

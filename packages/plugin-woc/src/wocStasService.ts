@@ -1,7 +1,7 @@
 // packages/plugin-woc/src/wocStasService.ts
 // STAS WOC service：业务插件（plugin-token-stas）调用的唯一 STAS 查询入口。
 //
-// 设计缘由同 wocBsv21Service：业务插件禁止直接 fetch WOC。
+// 业务插件禁止直接 fetch WOC，统一通过 actor 调度查询。
 
 import type {
   BsvNetwork,

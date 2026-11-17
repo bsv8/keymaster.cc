@@ -27,12 +27,15 @@ importers:
       '@keymaster/plugin-ai':
         specifier: '*'
         version: link:packages/plugin-ai
-      '@keymaster/plugin-apps':
-        specifier: '*'
-        version: link:packages/plugin-apps
       '@keymaster/plugin-background':
         specifier: '*'
         version: link:packages/plugin-background
+      '@keymaster/plugin-connect':
+        specifier: '*'
+        version: link:packages/plugin-connect
+      '@keymaster/plugin-market':
+        specifier: '*'
+        version: link:packages/plugin-market
       '@keymaster/plugin-msfile':
         specifier: '*'
         version: link:packages/plugin-msfile
@@ -42,9 +45,6 @@ importers:
       '@keymaster/plugin-page':
         specifier: '*'
         version: link:packages/plugin-page
-      '@keymaster/plugin-protocol':
-        specifier: '*'
-        version: link:packages/plugin-protocol
       '@keymaster/plugin-sat-subscription':
         specifier: '*'
         version: link:packages/plugin-sat-subscription
@@ -254,7 +254,61 @@ importers:
         specifier: 0.6.0
         version: 0.6.0(react@18.3.1)
 
-  packages/plugin-apps:
+  packages/plugin-background:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
+      lucide-react:
+        specifier: ^0.468.0
+        version: 0.468.0(react@18.3.1)
+      webloom-framework:
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
+
+  packages/plugin-connect:
+    dependencies:
+      '@bsv/sdk':
+        specifier: ^1.6.12
+        version: 1.10.4
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
+      '@noble/ciphers':
+        specifier: ^2.2.0
+        version: 2.2.0
+      '@noble/curves':
+        specifier: ^2.2.0
+        version: 2.4.0
+      '@noble/hashes':
+        specifier: ^2.2.0
+        version: 2.4.0
+      keymaster-connect:
+        specifier: 0.1.8
+        version: 0.1.8
+      keymaster-multisig-pool:
+        specifier: 1.5.0
+        version: 1.5.0
+      lucide-react:
+        specifier: ^0.468.0
+        version: 0.468.0(react@18.3.1)
+      webloom-framework:
+        specifier: 0.6.0
+        version: 0.6.0(react@18.3.1)
+
+  packages/plugin-market:
     dependencies:
       '@keymaster/contracts':
         specifier: '*'
@@ -267,28 +321,10 @@ importers:
         version: link:../ui
       '@noble/curves':
         specifier: ^2.2.0
-        version: 2.2.0
+        version: 2.4.0
       '@noble/hashes':
         specifier: ^2.2.0
-        version: 2.2.0
-      lucide-react:
-        specifier: ^0.468.0
-        version: 0.468.0(react@18.3.1)
-      webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
-
-  packages/plugin-background:
-    dependencies:
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../contracts
-      '@keymaster/runtime':
-        specifier: '*'
-        version: link:../runtime
-      '@keymaster/ui':
-        specifier: '*'
-        version: link:../ui
+        version: 2.4.0
       lucide-react:
         specifier: ^0.468.0
         version: 0.468.0(react@18.3.1)
@@ -398,42 +434,6 @@ importers:
       bsv8-channel-protocol:
         specifier: 0.6.0
         version: 0.6.0
-
-  packages/plugin-protocol:
-    dependencies:
-      '@bsv/sdk':
-        specifier: ^1.6.12
-        version: 1.10.4
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../contracts
-      '@keymaster/runtime':
-        specifier: '*'
-        version: link:../runtime
-      '@keymaster/ui':
-        specifier: '*'
-        version: link:../ui
-      '@noble/ciphers':
-        specifier: ^2.2.0
-        version: 2.2.0
-      '@noble/curves':
-        specifier: ^2.2.0
-        version: 2.2.0
-      '@noble/hashes':
-        specifier: ^2.2.0
-        version: 2.2.0
-      keymaster-connect:
-        specifier: 0.1.8
-        version: 0.1.8
-      keymaster-multisig-pool:
-        specifier: 1.5.0
-        version: 1.5.0
-      lucide-react:
-        specifier: ^0.468.0
-        version: 0.468.0(react@18.3.1)
-      webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
 
   packages/plugin-sat-subscription:
     dependencies:
@@ -3195,8 +3195,8 @@ snapshots:
   '@libp2p/crypto@5.2.0':
     dependencies:
       '@libp2p/interface': 3.4.0
-      '@noble/curves': 2.2.0
-      '@noble/hashes': 2.2.0
+      '@noble/curves': 2.4.0
+      '@noble/hashes': 2.4.0
       multiformats: 14.0.5
       protons-runtime: 7.0.0
       uint8arraylist: 3.0.2

@@ -7,7 +7,7 @@ export interface RuntimeDiagnosticEntry {
   kind: PluginState["kind"];
   error?: string;
   blockedBy?: string[];
-  units?: { unitId: string; kind: string; error?: string }[];
+  units?: { unitId: string; runtime?: string; kind: string; error?: string }[];
 }
 export interface RuntimeDiagnosticSnapshot {
   graph: PluginGraph;

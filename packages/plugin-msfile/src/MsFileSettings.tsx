@@ -947,9 +947,16 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
             <strong>{t("msfile.settings.collector.status", { defaultValue: "提交状态" })}</strong>
             <p>{collectorStatus
               ? t("msfile.settings.collector.statusLine", {
-                defaultValue: `待提交 ${collectorStatus.pendingCount} 条${collectorStatus.inflight ? "（发送中）" : ""}${collectorStatus.lastSuccessAt ? `，最近成功 ${new Date(collectorStatus.lastSuccessAt).toLocaleString()}` : ""}${collectorStatus.lastError ? `，失败：${collectorStatus.lastError}` : ""}`,
+                pending: t("msfile.settings.collector.statusLine.pending", { pendingCount: collectorStatus.pendingCount }),
+                inflight: collectorStatus.inflight ? t("msfile.settings.collector.statusLine.inflight") : "",
+                lastSuccess: collectorStatus.lastSuccessAt
+                  ? t("msfile.settings.collector.statusLine.lastSuccess", { time: new Date(collectorStatus.lastSuccessAt).toLocaleString() })
+                  : "",
+                lastError: collectorStatus.lastError
+                  ? t("msfile.settings.collector.statusLine.lastError", { error: collectorStatus.lastError })
+                  : "",
               })
-              : t("msfile.settings.collector.statusUnknown", { defaultValue: "暂无状态。" })}</p>
+              : t("msfile.settings.collector.statusUnknown")}</p>
           </div>
         </div>
         <div className="msfile-settings__section-actions">

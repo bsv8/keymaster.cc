@@ -1,7 +1,5 @@
 export { createWocService } from "./wocService.js";
-export { createWocBsv21Service } from "./wocBsv21Service.js";
 export { createWocStasService } from "./wocStasService.js";
-export { createWoc1SatOrdinalsService } from "./woc1SatOrdinalsService.js";
 export { registerWocP2pkhProviders } from "./p2pkhProviders.js";
 export { createChainHeightTask } from "./chainHeightTask.js";
 export { createWorkerWocViews } from "./workerWocViews.js";

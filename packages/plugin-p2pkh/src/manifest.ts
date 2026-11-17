@@ -722,7 +722,7 @@ const p2pkhPluginDefinition = {
     ctx.provide(BALANCE_BROADCAST_CAPABILITY, broadcaster);
     ctx.provide(P2PKH_ADDRESS_CODEC_CAPABILITY, p2pkhAddressCodec);
     // Window retains the plugin interface, never a signer or a local claim
-    // authority. MSFile/Token/1Sat use the same durable Worker manager path.
+    // authority. MSFile uses the same durable Worker manager path.
     const protocolSpend = createWindowProtocolSpend(publicCoordinator, walletBinding);
     ctx.provide(P2PKH_PROTOCOL_SPEND_CAPABILITY, protocolSpend);
 

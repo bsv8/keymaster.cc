@@ -60,7 +60,9 @@ for (const file of program.getSourceFiles()) {
   }
   visit(file);
 }
-const packageCatalog = new Map(catalog.map(plugin => [plugin.id === "storage" ? "platform-storage" : "plugin-" + plugin.id, plugin]));
+const packageCatalog = new Map(catalog.map(plugin => [plugin.id === "storage" ? "platform-storage" : plugin.id === "apps" ? "plugin-market" : plugin.id === "protocol" ? "plugin-connect" : "plugin-" + plugin.id, plugin]));
+// 显示名已统一为 Market/Connect，但 pluginId 仍保留 apps/protocol（A 方案硬切换，不迁移存储）。
+// 目录已随包名改为 plugin-market/plugin-connect，这里显式映射持久身份到新目录。
 // 两个产品目录沿用其领域包名。
 function caller(node, file) {
   for (let parent = node.parent; parent; parent = parent.parent) {

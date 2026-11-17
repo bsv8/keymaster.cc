@@ -121,7 +121,7 @@ export function AppShell() {
     window.addEventListener("resize", end);
   }
   function navigate() { page.selectApplication(null); setMobileSessions(false); setMobileMenuOpen(false); }
-  const applicationMenu = views.length ? <><div className="workspace-menu-caption">{t("apps.widget.title", { defaultValue: "应用" })}</div>{views.map(view => <div className={`workspace-app-menu-row${view.id === activeApp ? " is-active" : ""}`} key={view.id}><button onClick={() => { page.selectApplication(view.id); setMobileMenuOpen(false); }}><LayoutGrid size={14}/><span>{view.title}</span></button><button className="workspace-app-close" aria-label={`关闭 ${view.title}`} title={`关闭 ${view.title}`} onClick={() => view.close()}><X size={12}/></button></div>)}</> : null;
+  const applicationMenu = views.length ? <><div className="workspace-menu-caption">{t("market.widget.title", { defaultValue: "应用" })}</div>{views.map(view => <div className={`workspace-app-menu-row${view.id === activeApp ? " is-active" : ""}`} key={view.id}><button onClick={() => { page.selectApplication(view.id); setMobileMenuOpen(false); }}><LayoutGrid size={14}/><span>{view.title}</span></button><button className="workspace-app-close" aria-label={`关闭 ${view.title}`} title={`关闭 ${view.title}`} onClick={() => view.close()}><X size={12}/></button></div>)}</> : null;
   const menu = <>{applicationMenu}<BusinessNavigation onClose={navigate}/></>;
   const conversations = <section className="workspace-conversations" aria-label="会话">
     <div className="workspace-session-list" hidden={maximized} style={{ height: listHeight }}>{page.renderFrame("ai-session-list")}</div>

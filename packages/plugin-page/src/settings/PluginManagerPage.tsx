@@ -1,5 +1,6 @@
 import { useId, useMemo, useState } from "react";
 import { Button, Modal, PageHeader, TextInput } from "@keymaster/ui";
+import { sanitizeDiagnosticText, sanitizeDiagnosticValue } from "@keymaster/contracts";
 import { usePluginI18n } from "@keymaster/runtime";
 import { useSettingsDiagnostics } from "./SettingsDiagnosticsContext.js";
 import { buildDependencyGraph, FUNCTION_DEPENDENCIES, layoutDependencyGraph } from "./dependencyGraph.js";
@@ -31,12 +32,40 @@ export function PluginManagerPage() {
   const filtered = calls.filter(call => `${call.caller} ${call.capability} ${call.method} ${call.consumer} ${call.provider} ${call.file}`.toLowerCase().includes(functionQuery.trim().toLowerCase()));
   const declarations = graph.edges.filter(edge => (direction === "outgoing" ? edge.consumer : edge.provider) === selected);
   const open = (id: string) => { setSelected(id); setFunctionQuery(""); setDirection("outgoing"); setError(undefined); };
+  const problems = runtime.plugins.filter(plugin => plugin.kind === "failed" || plugin.kind === "blocked" || plugin.units?.some(unit => unit.kind === "failed" || unit.kind === "blocked"));
+  const dependencyPaths = (id: string, path: string[] = []): string[] => {
+    if (path.includes(id)) return [[...path, id].join(" → ") + " (cycle)"];
+    const next = [...path, id];
+    const providers = [...new Set((runtime.graph.dependencies[id] ?? []).filter(capability => !(runtime.graph.optionalDependencies?.[id] ?? []).includes(capability)).flatMap(capability =>
+      Object.entries(runtime.graph.provides).filter(([provider, capabilities]) => capabilities.includes(capability) && provider !== id && problems.some(problem => problem.id === provider)).map(([provider]) => provider)))];
+    return providers.length ? providers.flatMap(provider => dependencyPaths(provider, next)) : [next.join(" → ")];
+  };
+  const [copyStatus, setCopyStatus] = useState("");
+  const copyDiagnostics = async () => {
+    setCopyStatus("");
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(sanitizeDiagnosticValue({ plugins: problems, dependencyPaths: Object.fromEntries(problems.map(plugin => [plugin.id, dependencyPaths(plugin.id)])), graph: runtime.graph }), null, 2));
+      setCopyStatus(t("pluginManager.diagnostics.copied"));
+    } catch { setCopyStatus(t("pluginManager.diagnostics.copyFailed")); }
+  };
   const retry = async (id: string) => {
     setBusy(id); setError(undefined);
-    try { await runtime.retry(id); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(undefined); }
+    try { await runtime.retry(id); } catch (cause) { setError(sanitizeDiagnosticText(cause instanceof Error ? cause.message : String(cause))); } finally { setBusy(undefined); }
   };
   return <div className="plugin-manager">
     <PageHeader title={t("pluginManager.title")} description={t("pluginManager.description")} />
+    {problems.length > 0 && <section aria-label={t("pluginManager.diagnostics.title")}>
+      <div className="dependency-toolbar"><strong>{t("pluginManager.diagnostics.title")} ({problems.length})</strong><Button variant="ghost" onClick={() => void copyDiagnostics()}>{t("pluginManager.diagnostics.copy")}</Button><span role="status">{copyStatus}</span></div>
+      {problems.map(plugin => <div key={plugin.id} className="dependency-diagnostic">
+        <div><button type="button" onClick={() => open(plugin.id)}>{plugin.name} · {plugin.id}</button> · {t(plugin.kind === "blocked" ? "pluginManager.diagnostics.blocked" : plugin.kind === "failed" ? "pluginManager.diagnostics.failed" : "pluginManager.diagnostics.unitFailed")}</div>
+        {plugin.error && <pre>{plugin.error}</pre>}
+        {plugin.blockedBy?.map(reason => <pre key={reason}>{reason}</pre>)}
+        {plugin.units?.filter(unit => unit.kind !== "enabled").map(unit => <pre key={unit.unitId}>{unit.unitId} · {unit.runtime} · {unit.kind}{unit.error ? `: ${unit.error}` : ""}</pre>)}
+        <div>{t("pluginManager.diagnostics.dependencies")}: {dependencyPaths(plugin.id).filter(path => path !== plugin.id).join("; ") || "—"}</div>
+        <Button variant="ghost" disabled={busy !== undefined} onClick={() => void retry(plugin.id)}>{t(busy === plugin.id ? "pluginManager.action.retrying" : "pluginManager.action.retry")}</Button>
+      </div>)}
+      {error && <p role="alert">{error}</p>}
+    </section>}
     <div className="dependency-toolbar">
       <TextInput aria-label={t("pluginManager.graph.search")} placeholder={t("pluginManager.graph.search")} value={query} onChange={event => setQuery(event.currentTarget.value)} />
       <label className="dependency-page-toggle"><input type="checkbox" checked={showPageDependencies} onChange={event => setShowPageDependencies(event.currentTarget.checked)} />{t("pluginManager.graph.showPage")}</label>

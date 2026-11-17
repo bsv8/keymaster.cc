@@ -921,7 +921,7 @@ export type WindowP2pCoordinatorControl = CoordinatorSessionControl & Pick<Sessi
 >;
 
 /** Protocol 插件只需要 Connect Channel 面。 */
-export type ProtocolCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient, "channelOperation">;
+export type ConnectCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient, "channelOperation">;
 
 // ============================================================
 // 6. Capability Keys
@@ -945,4 +945,4 @@ export const WOC_COORDINATOR_CONTROL_CAPABILITY = defineCapability<P2pkhCoordina
 export const MSFILE_COORDINATOR_CONTROL_CAPABILITY = defineCapability<MsFileCoordinatorControl>({ kind: "local", id: "msfile.coordinator-control", version: "1" });
 export const SAT_COORDINATOR_CONTROL_CAPABILITY = defineCapability<SatCoordinatorControl>({ kind: "local", id: "sat.coordinator-control", version: "1" });
 export const WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY = defineCapability<WindowP2pCoordinatorControl>({ kind: "local", id: "window-p2p.coordinator-control", version: "1" });
-export const PROTOCOL_COORDINATOR_CONTROL_CAPABILITY = defineCapability<ProtocolCoordinatorControl>({ kind: "local", id: "protocol.coordinator-control", version: "1" });
+export const CONNECT_COORDINATOR_CONTROL_CAPABILITY = defineCapability<ConnectCoordinatorControl>({ kind: "local", id: "protocol.coordinator-control", version: "1" });

@@ -26,3 +26,4 @@ export function formatSats(value: number, locale: string = DEFAULT_LOCALE): stri
 export function satsToBsv(value: number): string {
   return `${(value / 100_000_000).toFixed(8)} BSV`;
 }
+export { AppIcon } from "./AppIcon.js";

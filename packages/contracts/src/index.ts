@@ -6,7 +6,7 @@
 // 注意：P2PKH 专属类型已从全局 contracts 迁出到 packages/plugin-p2pkh/src/p2pkhContracts.ts。
 // 资产平台协议在 assets.ts，P2PKH 只是众多 AssetProvider 之一。
 
-export { traceDev } from "./devDiagnostics.js";
+export { traceDev, sanitizeDiagnosticText, sanitizeDiagnosticValue } from "./devDiagnostics.js";
 export * from "./plugin.js";
 export { capabilityDescriptor } from "webloom-framework";
 export * from "./vault.js";
@@ -74,3 +74,4 @@ export * from "./uriAction.js";
 export * from "./publicKeyUri.js";
 
 export {validateAppDisplay,type AppDisplay} from "./appDisplay.js";
+export { APPLICATION_OPERATION_LABELS, applicationCommandTerminal, applicationCommandStatus } from "./applicationActivity.js";

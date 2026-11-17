@@ -318,3 +318,6 @@
 
 .dependency-page-toggle { display: inline-flex; align-items: center; gap: 8px; color: var(--text); font-size: 13px; white-space: nowrap; cursor: pointer; }
 .dependency-page-toggle input { accent-color: var(--accent, #6495ed); }
+
+.dependency-diagnostic { padding: 12px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.dependency-diagnostic pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; margin: 6px 0; }

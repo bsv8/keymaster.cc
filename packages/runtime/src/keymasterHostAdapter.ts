@@ -19,6 +19,7 @@ import type {
   RuntimeVaultStatus,
 } from "@keymaster/contracts";
 import {
+  traceDev, sanitizeDiagnosticText,
   CHANNEL_RUNTIME_CAPABILITY,
   I18N_SERVICE_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
@@ -464,7 +465,13 @@ export function createKeymasterPluginHost(
         i18n.registerResources(context.instanceId, manifest.i18n);
         context.onDispose(() => i18n.unregisterResources(context.instanceId));
       }
-      const result = await setup(createLegacyContext(context, manifest));
+      let result: Awaited<ReturnType<PluginSetup>>;
+      try {
+        result = await setup(createLegacyContext(context, manifest));
+      } catch (error) {
+        traceDev("runtime.plugins", "setup.failed", () => ({ pluginId: manifest.id, unitId: context.unitId, instanceId: context.instanceId, runtime: hostRuntime, error }));
+        throw error;
+      }
       return typeof result === "function" ? async () => { await result(); } : async () => undefined;
     };
   }
@@ -549,8 +556,8 @@ export function createKeymasterPluginHost(
             return { graph: legacyGraph(), plugins: [...manifests.values()].map(manifest => {
               const state = legacyState(manifest.id);
               return { id: manifest.id, name: manifest.name, description: manifest.description, kind: state.kind,
-                error: state.error, blockedBy: state.blockedBy,
-                units: state.units?.map(unit => ({ unitId: unit.unitId, kind: unit.kind, error: unit.error })),
+                error: state.error && sanitizeDiagnosticText(state.error), blockedBy: state.blockedBy?.map(sanitizeDiagnosticText),
+                units: state.units?.map(unit => ({ unitId: unit.unitId, runtime: unit.runtime, kind: unit.kind, error: unit.error && sanitizeDiagnosticText(unit.error) })),
               };
             }) };
           },
@@ -670,7 +677,8 @@ export function createKeymasterPluginHost(
           instanceId: unit.instanceId,
           // 契约状态已二值化：未就绪一律表达为 failed，由 reasons 解释。
           state: unit.state === "enabled" ? "ready" as const : "failed" as const,
-          error: unit.state === "failed" ? "远程运行单元失败" : undefined,
+          error: options.runtimeUnitSnapshots?.().find(snapshot => snapshot.unitId === unit.unitId && snapshot.instanceId === unit.instanceId)?.error
+            ?? (unit.state === "failed" ? "远程运行单元失败" : undefined),
         }))
       : (options.runtimeUnitSnapshots?.() ?? []);
     const units = declaredUnits.map((declared) => {
@@ -701,6 +709,20 @@ export function createKeymasterPluginHost(
       units,
     } as ReturnType<LegacyPluginHost["state"]>;
   }
+
+  const diagnosticStates = new Map<string, string>();
+  const diagnosticsMode = (import.meta as ImportMeta & { env?: { MODE?: string } }).env?.MODE;
+  const offDiagnosticLog = diagnosticsMode === "dev" || diagnosticsMode === "development" ? coreHost.subscribe(() => {
+    for (const id of manifests.keys()) {
+      const state = coreHost!.state(id);
+      const signature = JSON.stringify([state.kind, state.instanceId, state.error, state.blockedBy]);
+      if (diagnosticStates.get(id) === signature) continue;
+      diagnosticStates.set(id, signature);
+      if (state.kind === "failed" || state.kind === "blocked") {
+        traceDev("runtime.plugins", "activation.unavailable", () => ({ runtime: hostRuntime, pluginId: id, ...state }));
+      }
+    }
+  }) : () => {};
 
   function legacyGraph(): import("@keymaster/contracts").PluginGraph {
     const graph = coreHost!.graph();
@@ -839,6 +861,7 @@ export function createKeymasterPluginHost(
     },
     dispose: (reason) => {
       if (legacyDisposePromise) return legacyDisposePromise;
+      offDiagnosticLog();
       for (const unsubscribe of remoteRuntimeSubscriptions.values()) unsubscribe();
       remoteRuntimeSubscriptions.clear();
       remoteRuntimes.clear();
