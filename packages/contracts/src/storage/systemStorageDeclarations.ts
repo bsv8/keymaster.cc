@@ -22,9 +22,6 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
     model: "snapshot",
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
-  appsDirectory: Object.freeze({
-    moduleId: "apps", purposeId: "", authority: "built-in-module", model: "files", schemaVersion: 2,
-  } satisfies PluginStorageDeclaration),
   /**
    * P2PKH 文件根（空 purpose = 模块根）。
    * 布局（已绑定网络身份根）：`p2pkh/setting.json`、`p2pkh/history.json`。
@@ -86,7 +83,6 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
 
 /** manifest pluginId 到中央声明的绑定目录。 */
 export const SYSTEM_STORAGE_DECLARATIONS: Readonly<Record<string, readonly PluginStorageDeclaration[]>> = Object.freeze({
-  apps: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.appsDirectory]),
   ai: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.aiState]),
   vault: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.vaultPayments]),
   p2pkh: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.p2pkhFiles]),

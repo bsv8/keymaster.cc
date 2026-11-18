@@ -1,3 +1,4 @@
+import type { AppDirectoryDocument, AppDirectoryRepository } from "../appDirectoryTypes.js";
 import { sameNetworkIdentity } from "@keymaster/contracts";
 import type {
   BorrowedModuleFileStore, ConnectSessionRecord, ProtocolCommandRecord, ProtocolFeePoolDeliveryRecord,
@@ -12,6 +13,7 @@ export interface ConnectStorageStores {
   commandHistory: BorrowedModuleFileStore;
 }
 interface Policy {
+  directory?: { revision: number; document: AppDirectoryDocument };
   mode: ApplicationOpenMode;
   applications: ConnectedApplication[];
   events: ApplicationConnectionEvent[];
@@ -66,7 +68,7 @@ function document<T>(files: BorrowedModuleFileStore, path: string, empty: () => 
   return { read, update };
 }
 const recordArray = (value: unknown): value is Array<Record<string, unknown>> => Array.isArray(value) && value.every(row => row && typeof row === "object" && !Array.isArray(row));
-export function openConnectStorageRepository(stores: ConnectStorageStores): ConnectStorageRepository {
+export function openConnectApplicationRepository(stores: ConnectStorageStores): { repository: ConnectStorageRepository; appDirectory: AppDirectoryRepository } {
   const policy = document<Policy>(stores.durablePolicy, "durable-policy.json", () => ({ mode: "iframe", applications: [], events: [], permissions: [], origins: [], feePools: [], deliveries: [], payments: [] }), (value): value is Policy => {
     if (!value || typeof value !== "object") return false;
     const data = value as Policy;
@@ -75,7 +77,7 @@ export function openConnectStorageRepository(stores: ConnectStorageStores): Conn
   const commands = document<ProtocolCommandRecord[]>(stores.commandHistory, "command-history.json", () => [], (value): value is ProtocolCommandRecord[] => recordArray(value) && value.every(row => typeof row.id === "string" && typeof row.updatedAt === "number"));
   const sessions = document<ConnectSessionRecord[]>(stores.sessions, "sessions.json", () => [], (value): value is ConnectSessionRecord[] => recordArray(value) && value.every(row => typeof row.sessionId === "string" && typeof row.appPublicKeyHex === "string" && typeof row.authorizationId === "string"));
   const sortedCommands = async () => (await commands.read()).value.sort((a,b) => b.updatedAt-a.updatedAt);
-  return {
+  const repository: ConnectStorageRepository = {
     getApplicationOpenMode: async () => (await policy.read()).value.mode,
     async setApplicationOpenMode(mode) { await policy.update(data => { data.mode = mode; }); },
     listApplicationEvents: async () => (await policy.read()).value.events,
@@ -141,4 +143,27 @@ export function openConnectStorageRepository(stores: ConnectStorageStores): Conn
     listConnectSessions: async () => (await sessions.read()).value,
     listConnectSessionsByOrigin: async origin => (await sessions.read()).value.filter(row => row.origin===origin),
   };
+  return { repository, appDirectory: {
+    async read() {
+      const directory = (await policy.read()).value.directory;
+      if (!directory) return null;
+      if (!Number.isSafeInteger(directory.revision) || directory.revision < 1) throw new Error("Invalid directory revision");
+      return structuredClone(directory);
+    },
+    async write(doc, { ifRevision, forgetKey }) {
+      return policy.update(data => {
+        if (data.directory?.revision !== ifRevision) throw conflict();
+        if (forgetKey && (!doc.deletedKeys.includes(forgetKey) || doc.apps[forgetKey])) throw new Error("Invalid application deletion");
+        const revision = (data.directory?.revision ?? 0) + 1;
+        data.directory = { revision, document: structuredClone(doc) };
+        if (forgetKey) {
+          data.applications = data.applications.filter(app => app.key !== forgetKey);
+          data.permissions = data.permissions.filter(permission => permission.key !== forgetKey);
+        }
+        return revision;
+      });
+    },
+  } };
 }
+
+export function openConnectStorageRepository(stores: ConnectStorageStores): ConnectStorageRepository { return openConnectApplicationRepository(stores).repository; }

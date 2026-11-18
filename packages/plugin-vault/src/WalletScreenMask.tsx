@@ -1,3 +1,5 @@
+import { PAGE_UI_RENDERER_CAPABILITY } from "@keymaster/contracts";
+import { usePluginCapability } from "webloom-framework/react";
 import { useLayoutEffect, useRef, useState, useSyncExternalStore, useId, type ReactNode } from "react";
 import { Button, PageHeader, TextInput } from "@keymaster/ui";
 import { usePluginI18n } from "@keymaster/runtime";
@@ -7,6 +9,8 @@ import "./screenMask.css";
 /** 页面隐私遮罩。子树保持挂载，后台业务不随显示状态退出。 */
 export function WalletScreenMask({ children }: { children?: ReactNode }) {
   const vault = useInternalVault();
+  const renderer = usePluginCapability(PAGE_UI_RENDERER_CAPABILITY);
+  useSyncExternalStore(renderer.subscribe, renderer.revision, renderer.revision);
   const wallet = useSyncExternalStore(listener => vault.subscribeWalletState(listener), () => vault.walletSnapshot());
   const masked = wallet.status === "unlocked" && wallet.screenMasked === true;
   const { t } = usePluginI18n();
@@ -58,6 +62,7 @@ export function WalletScreenMask({ children }: { children?: ReactNode }) {
         title={title}
         description={t("shell.mask.desc", { defaultValue: "钱包此时仍在运行，输入密码进入钱包。" })}
       />
+      {renderer.renderFrame("screen-mask-status")}
       <TextInput
         label={t("shell.mask.passwordLabel", { defaultValue: "钱包密码" })}
         type="password"

@@ -1,3 +1,8 @@
+import { createConnectWorkerPlugin } from "@keymaster/plugin-connect/worker";
+import { CONNECT_PRIVATE_COMMAND, CONNECT_PRIVATE_EVENTS } from "@keymaster/plugin-connect/assembly";
+import { createMarketWorkerPlugin } from "@keymaster/plugin-market/worker";
+import { connectPrivateCapabilities } from "./connectPrivateCapabilities.js";
+import { createConnectChannelRuntime } from "@keymaster/plugin-connect/worker";
 import { createRuntimeExit, RuntimeRestartRequiredError } from "../coordinator/runtimeExit.js";
 import { traceDev } from "@keymaster/contracts";
 import { requireWocNetwork } from "@keymaster/contracts";
@@ -2330,13 +2335,14 @@ function disconnectedClientResponse(requestId: string): CoordinatorResponse {
 // Channel runtime / owner inbox
 // ============================================================
 
+const connectChannelListeners = new Set<(event: import("@keymaster/contracts").CoordinatorChannelStateEvent) => void>();
 const channelWorkerRuntime = createChannelWorkerRuntime({
   session: () => ({ vaultStatus: coordinatorState.vaultStatus, sessionEpoch: coordinatorState.sessionEpoch, activePublicKeyHex: coordinatorState.activePublicKeyHex }),
   runtime: { current: () => satWorkerLifecycle.current(), ensure: () => ensureSatRuntime() },
   io: { run: (operation, signal, execute, options) => withCoordinatorFinalIoLease(operation, signal, execute, { ...options, auditOperation: options.auditOperation }) },
   admission: { disconnected: peerId => revokedCoordinatorPeerIds.has(peerId), response: disconnectedClientResponse },
   products: { available: isCoordinatorProductRegistered, blocked: coordinatorProductBlockedResponse },
-  events: event => { publishTopicEvent("channel.events", event as never); },
+  events: event => { publishTopicEvent("channel.events", event as never); for (const listener of connectChannelListeners) listener(event as unknown as import("@keymaster/contracts").CoordinatorChannelStateEvent); },
   connectSession: getAuthoritativeConnectSession,
   crypto: { signer: vaultWorkerKeys.channelSigner, open: vaultWorkerKeys.openChannelPrivate },
   related: {
@@ -2922,6 +2928,7 @@ function coordinatorSessionClosed(peerId: string, binding: CoordinatorSessionBin
 }
 
 const COORDINATOR_SESSION_EXPOSURES = [
+  CONNECT_PRIVATE_COMMAND, CONNECT_PRIVATE_EVENTS,
   STORAGE_PRIVATE_BROWSE_CAPABILITY,
   COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
   COORDINATOR_CRYPTO_RPC_CAPABILITY,
@@ -2976,7 +2983,7 @@ function reconcileCoordinatorSessionExposure(state: CoordinatorPeerState): void 
   try {
     state.serviceExposure = state.peer.exposeGroup(COORDINATOR_SESSION_EXPOSURES.map((capability) => ({
       capability,
-      options: (capability === STORAGE_PRIVATE_BROWSE_CAPABILITY)
+      options: (capability === STORAGE_PRIVATE_BROWSE_CAPABILITY || capability === CONNECT_PRIVATE_COMMAND || capability === CONNECT_PRIVATE_EVENTS)
         ? {} // 私有票据由框架按连接与消费实例签发，不使用公共会话 grant。
         : { grantId: coordinatorSessionGrantId(state, capability.id) },
     })));
@@ -3080,7 +3087,7 @@ async function openCoordinatorSession(
         const serviceExposure = coordinatorSessionServicesReady()
           ? state.peer.exposeGroup(COORDINATOR_SESSION_EXPOSURES.map((capability) => ({
             capability,
-            options: (capability === STORAGE_PRIVATE_BROWSE_CAPABILITY)
+            options: (capability === STORAGE_PRIVATE_BROWSE_CAPABILITY || capability === CONNECT_PRIVATE_COMMAND || capability === CONNECT_PRIVATE_EVENTS)
               ? {} // 私有票据由框架按连接与消费实例签发，不使用公共会话 grant。
               : { grantId: coordinatorSessionGrantId(state, capability.id) },
           })))
@@ -3261,7 +3268,21 @@ defineWorkerRequestRoute<Extract<CoordinatorClientRequest, { kind: "lock" }>>({
   coordinatorRequestRoutes.set(kind, route);
 }
 
+const connectWorkerChannel = createConnectChannelRuntime({
+  async channelOperation(operation: import("@keymaster/contracts").CoordinatorChannelOperation) {
+    const response = await channelWorkerRuntime.executeChannelRequest({kind:"channel.operation",clientId:"protocol.worker",requestId:crypto.randomUUID(),expectedSessionEpoch:coordinatorState.sessionEpoch,operation}, "protocol.worker");
+    return response.ack.status === "ok" ? {status:"ok",value:response.operationResult,sessionEpoch:response.sessionEpoch} : response.ack;
+  },
+  subscribeTopic(_topic: "channel.events", handler: (event: import("@keymaster/contracts").CoordinatorChannelStateEvent) => void) {connectChannelListeners.add(handler);return()=>{connectChannelListeners.delete(handler)};},
+});
 const coordinatorRuntimePlugins = [
+  createMarketWorkerPlugin(),
+  createConnectWorkerPlugin({
+    authorize: call => requireCoordinatorSessionPeer(call).peer.peerId,
+    walletOrigin: () => globalThis.location.origin,
+    channel: connectWorkerChannel,
+    lock: async () => { await closeWalletRuntime("connect-logout"); return {status:"ok",sessionEpoch:coordinatorState.sessionEpoch}; },
+  }),
   vaultWorkerRuntime.plugin,
   createStorageWorkerPlugin({
     files: workerStorageClientCapabilities[0].value,
@@ -3322,12 +3343,13 @@ export function coordinatorHostOptions() {
   return {
     id: "keymaster-coordinator",
     plugins: [coordinatorTransportPlugin, ...coordinatorRuntimePlugins],
-    privateCapabilities: storagePrivateCapabilities(),
+    privateCapabilities: [...storagePrivateCapabilities(), ...connectPrivateCapabilities()],
     expose: [
       COORDINATOR_RPC_CAPABILITY,
       COORDINATOR_TOPIC_STREAM_CAPABILITY,
     ],
     peerExposureAllowlist: [
+      CONNECT_PRIVATE_COMMAND, CONNECT_PRIVATE_EVENTS,
       STORAGE_PRIVATE_BROWSE_CAPABILITY,
       COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
       COORDINATOR_CRYPTO_RPC_CAPABILITY,

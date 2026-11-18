@@ -890,22 +890,7 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
         "provides": [
           {
             "kind": "local",
-            "id": "protocol.service",
-            "version": "1"
-          },
-          {
-            "kind": "local",
-            "id": "protocol.storageRepository",
-            "version": "1"
-          },
-          {
-            "kind": "local",
-            "id": "protocol.coordinator-control",
-            "version": "1"
-          },
-          {
-            "kind": "local",
-            "id": "protocol.application-connections",
+            "id": "connect.app-source",
             "version": "1"
           },
           {
@@ -916,24 +901,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
         ],
         "privateProvides": [],
         "dependencies": [
-          {
-            "capability": {
-              "kind": "local",
-              "id": "storage.file-clients",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "声明存储客户端及用途授权"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "protocol.coordinator-client-binding",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "声明本插件的受限 Coordinator 连接"
-          },
           {
             "capability": {
               "kind": "local",
@@ -982,15 +949,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "capability": {
               "kind": "local",
-              "id": "vault.service",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "connect mode 需要 vault（受控 capability 取 owner runtime）；appView mode 可走 owner runtime bootstrap"
-          },
-          {
-            "capability": {
-              "kind": "local",
               "id": "vault.wallet-state",
               "version": "1"
             },
@@ -1015,16 +973,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             "sourceRuntime": "window-main",
             "reason": "可选 MSFile 方法",
             "optional": true
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "p2pkh.service",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "可选 P2PKH 方法",
-            "optional": true
           }
         ],
         "connect": {
@@ -1034,6 +982,85 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             "connect.launch"
           ]
         },
+        "permissions": [],
+        "storages": []
+      },
+      {
+        "id": "protocol.coordinator-worker",
+        "runtime": "shared-worker",
+        "scopeKind": "storage",
+        "provides": [],
+        "privateProvides": [
+          {
+            "kind": "rpc",
+            "id": "connect.private.command",
+            "version": "1"
+          },
+          {
+            "kind": "stream",
+            "id": "connect.private.events",
+            "version": "1"
+          }
+        ],
+        "dependencies": [
+          {
+            "capability": {
+              "kind": "local",
+              "id": "storage.file-clients",
+              "version": "1"
+            },
+            "sourceRuntime": "shared-worker",
+            "reason": "Connect 唯一业务仓储"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "vault.wallet-state",
+              "version": "1"
+            },
+            "sourceRuntime": "shared-worker",
+            "reason": "Worker 钱包身份与运行世代"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "p2pkh.worker-transfer",
+              "version": "1"
+            },
+            "sourceRuntime": "shared-worker",
+            "reason": "通过已绑定的 Worker 转账能力执行付款",
+            "optional": true
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "vault.worker-crypto",
+              "version": "1"
+            },
+            "sourceRuntime": "shared-worker",
+            "reason": "Vault 独占的受控密码学句柄"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "msfile.service",
+              "version": "1"
+            },
+            "sourceRuntime": "shared-worker",
+            "reason": "已声明的 MSFile 公开方法",
+            "optional": true
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "market.sync",
+              "version": "1"
+            },
+            "sourceRuntime": "shared-worker",
+            "reason": "同步市场来源资料",
+            "optional": true
+          }
+        ],
         "permissions": [],
         "storages": [
           {
@@ -1585,90 +1612,28 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
       {
         "id": "apps.window",
         "runtime": "window-main",
-        "scopeKind": "storage",
+        "scopeKind": "root",
+        "provides": [],
+        "privateProvides": [],
+        "dependencies": [],
+        "permissions": [],
+        "storages": []
+      },
+      {
+        "id": "apps.coordinator-worker",
+        "runtime": "shared-worker",
+        "scopeKind": "root",
         "provides": [
           {
             "kind": "local",
-            "id": "app.directory",
+            "id": "market.sync",
             "version": "1"
           }
         ],
         "privateProvides": [],
-        "dependencies": [
-          {
-            "capability": {
-              "kind": "local",
-              "id": "storage.file-clients",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "目录完整状态的原子持久化"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "protocol.application-connections",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "真实连接验证成功后解析 pending URL 身份"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "i18n.service",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "本单元的 setup 或 UI 使用"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "vault.wallet-state",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "应用授权弹窗读取唯一钱包 Key 元数据"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "protocol.service",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "调用 launchAppView 启动 appView（能力字符串 protocol.service 保留）"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "page.ui.registry",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "注册应用列表页面"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "business.registry",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "接入首页业务导航"
-          }
-        ],
+        "dependencies": [],
         "permissions": [],
-        "storages": [
-          {
-            "moduleId": "apps",
-            "purposeId": "",
-            "authority": "built-in-module",
-            "model": "files",
-            "schemaVersion": 2
-          }
-        ]
+        "storages": []
       }
     ]
   },

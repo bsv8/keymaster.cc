@@ -70,6 +70,8 @@ interface CoordinatorWorkerUnitRuntimeDetails {
  * 服务所有者标识；只有实际装配并激活的服务才会出现在运行快照中。
  */
 const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
+  { unitId: "apps.coordinator-worker", taskIds: [], serviceIds: ["market.sync"], storagePurposes: [], finalIoAuditEntries: [] },
+  { unitId: "protocol.coordinator-worker", taskIds: [], serviceIds: ["connect.authority"], storagePurposes: [""], finalIoAuditEntries: [] },
   {
     unitId: "storage.coordinator-worker",
     taskIds: [],

@@ -1,10 +1,10 @@
 import type {AppDisplay} from "./appDisplay.js";
-import { defineCapability } from "webloom-framework";
 import type { ApplicationOpenMode } from "./page.js";
 import type { ProtocolCommandRecord, ProtocolMethod, ConnectService } from "./protocol.js";
 
 /** Application is the management root; live connections are child instances, not permission owners. */
 export interface ConnectedApplication {
+  publication?: import("./appSources.js").AppSourceEntry;
   /** 宿主实际启动并完成身份验证的完整 URL；普通来源自报不能设置。 */
   verifiedUrl?: string;
   display?:AppDisplay;
@@ -48,4 +48,3 @@ export interface ApplicationConnections {
   disconnect(applicationKey: string): Promise<void>;
   focus(id: string): void;
 }
-export const APPLICATION_CONNECTIONS_CAPABILITY = defineCapability<ApplicationConnections>({ kind: "local", id: "protocol.application-connections", version: "1" });

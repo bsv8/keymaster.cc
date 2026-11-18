@@ -5,7 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./styles.css": "./src/styles.css"
+    "./worker": "./src/worker.ts"
   },
   "types": "./src/index.ts",
   "dependencies": {

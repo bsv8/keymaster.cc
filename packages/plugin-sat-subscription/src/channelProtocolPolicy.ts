@@ -69,8 +69,8 @@ function channelCallerId(caller: ChannelCaller, clientId?: string): string {
     }
     return `${epoch}:system:${caller.systemId}${instanceSuffix}`;
   }
-  if (!caller.walletPublicKeyHex || !caller.origin) throw new Error("Channel Connect caller is incomplete");
-  return `${epoch}:connect:${caller.walletPublicKeyHex}:${caller.origin}${instanceSuffix}`;
+  if (!caller.walletPublicKeyHex || !caller.origin || !caller.authorizationId) throw new Error("Channel Connect caller is incomplete");
+  return `${epoch}:connect:${caller.walletPublicKeyHex}:${caller.origin}:${caller.authorizationId}${instanceSuffix}`;
 }
 
 function isActiveOwnerInboxChannel(channel: string): boolean {

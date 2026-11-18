@@ -1239,13 +1239,13 @@ export type ChannelSubscriptionSetParamsV1 = ChannelSubscriptionSetParams;
 export type ChannelSubscriptionSetResultV1 = ChannelSubscriptionSetResult;
 
 
-/* ============== plugin-market launcher 启动入口（施工单 2026-06-29 002 硬切换） ============== */
+/* ============== Connect 内部应用启动 ============== */
 
 /**
- * `protocol.service.launchAppView(...)` 的入参。
+ * `Connect 内部 launchAppView(...)` 的入参。
  *
  * 设计缘由（施工单 2026-06-29 002 硬切换）：
- *   - 这是 `plugin-market` **唯一**允许调用的 appView 启动入口；plugin-market
+ *   - Connect 内部页面统一使用此 appView 启动入口；页面
  *     自己不操作协议存储、运行句柄或开窗；主钱包宿主接管外部应用连接。
  *   - `appOrigin` 必须是 exact origin；`new URL(appUrl).origin` 必须
  *     === `appOrigin`，否则视为配置错误、整次启动 fail-closed。
@@ -1267,7 +1267,7 @@ export interface LaunchAppViewInput {
 }
 
 /**
- * `protocol.service.launchAppView(...)` 的成功结果。
+ * `Connect 内部 launchAppView(...)` 的成功结果。
  *
  * 设计缘由（施工单 2026-06-29 002 硬切换）：
  *   - 已打开的有效应用直接聚焦，不重建连接；新启动则完成 vault 解锁与 owner 就绪校验。
@@ -1294,14 +1294,14 @@ export interface LaunchAppViewResult {
 }
 
 /**
- * `protocol.service.launchAppView(...)` 失败时抛出的 typed error。
+ * `Connect 内部 launchAppView(...)` 失败时抛出的 typed error。
  *
  * 设计缘由（施工单 2026-06-29 002 硬切换 + 用户反馈）：
  *   - 内部异常文案（`"launchAppView: vault not unlocked"` 等）属于实现
  *     细节，**不**应该直接展示给用户。
  *   - UI 按 `code` 字段映射到对应 i18n 文案，并给出"先解锁 / 允许弹窗 /
  *     配置错误"等明确指引。
- *   - 收口在 `protocol.service` 内部，**不**让业务插件自己解析 error
+ *   - 收口在 Connect 内部，**不**让业务插件自己解析 error
  *     message 字符串。
  *   - 失败一律 fail-closed：service **不**补偿、不回退、不半启动；UI 仅
  *     按 code 渲染错误态。
@@ -1783,30 +1783,6 @@ export interface ProtocolLockSummary {
 export type ProtocolPopupLockState = "locked" | "unlocked";
 
 /**
- * 命令流 K-V capability key。manifest 在 setup 阶段 provide；
- * ConnectService 通过 ctx 注入，**不**直接 import K-V 模块。
- */
-export const CONNECT_COMMAND_REPOSITORY_CAPABILITY = defineCapability<Record<string, unknown>>({
-  kind: "local",
-  id: "protocol.commandRepository",
-  version: "1",
-});
-
-/**
- * 协议存储 K-V capability key。
- *
- * 设计缘由（施工单 002 硬切换）：原 command repository capability 只承载
- * commands store；本次把 K-V 升级到 3 store（commands / origins / feePools），
- * capability 同步改名。manifest 在 setup 阶段 provide，service 通过 deps
- * 注入，**不**直接 import K-V 模块。
- */
-export const CONNECT_STORAGE_REPOSITORY_CAPABILITY = defineCapability<ConnectStorageRepository>({
-  kind: "local",
-  id: "protocol.storageRepository",
-  version: "1",
-});
-
-/**
  * 协议存储 K-V 抽象。实现走 platform K-V repository；测试用 `fake-indexeddb`。
  *
  * 关键不变量：
@@ -2010,18 +1986,8 @@ export interface ConnectSessionSnapshot {
   lockState: ProtocolPopupLockState;
 }
 
-/* ============== capability ============== */
-
-/** ConnectService capability key。 */
-export const CONNECT_SERVICE_CAPABILITY = defineCapability<ConnectService>({
-  kind: "local",
-  id: "protocol.service",
-  version: "1",
-});
-
 /**
- * 协议 service 对外契约。`主应用` / `ProtocolPopupPage` 通过
- * `useCapability<ConnectService>(CONNECT_SERVICE_CAPABILITY)` 拿到实例。
+ * Connect 内部执行与页面契约，通过私有上下文取得实例，不发布跨插件服务。
  *
  * 设计缘由：service 负责 transport + 校验 + 解锁 + 确认流调度 + 调用
  * vault / walletState + 构造 envelope + 签名 / 加解密；UI 只负责渲染态。
@@ -2138,7 +2104,7 @@ export interface ConnectService {
    *
    * 兼容旧 UI：未传 recordId 时取"当前最新一张可取消的卡片"。
    */
-  rejectByUser(recordId?: string): Promise<void>;
+  rejectByUser(recordId?: string, expectedPhase?: ProtocolCommandPhase): Promise<void>;
   /**
    * 通知 service 钱包已解锁，service 把所有 `waiting_unlock_*` request
    * 批量推进到 `confirming` 或 `queued`，并尝试启动全局串行执行。
@@ -2255,7 +2221,7 @@ export interface ConnectService {
   /** 从当前 Vault 与有效授权 runtime 同步执行状态；页面不传锁屏值。状态变化时撤销 Channel 会话或推进等待请求。 */
   syncWalletState(): void;
 
-  /* ============== plugin-market launcher 启动入口（施工单 2026-06-29 002 硬切换） ============== */
+  /* ============== Connect 内部应用启动 ============== */
 
   /** 钱包目录启动外部 App：创建受控上下文，交给主钱包连接宿主并打开 App 窗口。 */
   launchAppView(input: LaunchAppViewInput): Promise<LaunchAppViewResult>;

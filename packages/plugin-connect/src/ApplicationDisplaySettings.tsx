@@ -1,14 +1,16 @@
+import { useAppsModel } from "./useAppsModel.js";
+import { useConnectApps } from "./AppContext.js";
 import { useEffect, useState } from "react";
-import { usePluginCapability } from "webloom-framework/react";
 import { usePluginI18n } from "@keymaster/runtime";
-import { APPLICATION_CONNECTIONS_CAPABILITY, type ApplicationOpenMode } from "@keymaster/contracts";
+import { type ApplicationOpenMode } from "@keymaster/contracts";
 import { useApplicationReminders } from "./applicationReminders.js";
 import { PageHeader, Select } from "@keymaster/ui";
 
 /** 钱包统一的打开方式；落盘成功后才更新界面，不迁移已打开应用。 */
 export function ApplicationDisplaySettings() {
   const { controller: reminders, sound, notification } = useApplicationReminders();
-  const host = usePluginCapability(APPLICATION_CONNECTIONS_CAPABILITY);
+  const { host } = useConnectApps();
+  const { directory, entries } = useAppsModel();
   const { t } = usePluginI18n();
   const [mode, setMode] = useState<ApplicationOpenMode>();
   const [busy, setBusy] = useState(false);
@@ -40,6 +42,17 @@ export function ApplicationDisplaySettings() {
     <button type="button" onClick={() => void reminders.enableNotifications()}>开启系统通知</button>
     <p role="status">系统通知：{notification}</p>
     <p>浏览器可能限制后台发声和系统通知；静音、勿扰与挂起无法绕过。</p>
+    <h2>应用管理</h2>
+    <p>删除应用会取消收藏和永久许可，并断开当前连接。已执行操作及资金责任记录保留。</p>
+    {entries.map(app => <div className="app-details__row" key={app.appPublicKeyHex}>
+      <span>{app.name || "未命名应用"}</span>
+      <button type="button" disabled={busy} onClick={async () => {
+        setBusy(true); setError("");
+        try { await directory.deleteApp(app.appPublicKeyHex); }
+        catch { setError("删除应用失败，请重试。"); }
+        finally { setBusy(false); }
+      }}>删除应用</button>
+    </div>)}
     {error && <p role="alert">{error}</p>}
   </section>;
 }

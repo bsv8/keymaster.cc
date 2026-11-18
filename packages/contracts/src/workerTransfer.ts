@@ -23,6 +23,7 @@ export interface P2pkhWorkerTransfer {
   transfer(input: P2pkhTransferRequest): Promise<P2pkhDirectTransferResult>;
   readonly identity: Readonly<import("./networkIdentity.js").NetworkIdentity>;
   prepareTransfer(input: P2pkhTransferRequest): Promise<unknown>;
+  getPaymentStatus: NonNullable<import("./protocol.js").P2pkhProtocolAdapter["getPaymentStatus"]>;
   submitTransfer(preview: unknown): Promise<{ status: "local-confirmed" | "isolated" | "not-dispatched"; txid?: string; error?: string; rawTxHex: string; submissionId: string; localInputClaimIds: string[]; attempts: number; reason?: string }>;
 }
 export interface P2pkhWorkerTransferBinding {

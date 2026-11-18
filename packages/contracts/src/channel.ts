@@ -147,12 +147,15 @@ export type ChannelCaller =
 /** Coordinator RPC 使用的 caller；Connect caller 由 Session Window 预先验真。 */
 export type ChannelOperationCaller = ChannelCaller | {
   kind: "connect";
+  authorizationId: string;
   walletPublicKeyHex: string;
   origin: string;
 } & NetworkIdentity;
 
 /** Session Window 向 Coordinator 传递的已验证 Connect session 上下文。 */
 export interface ConnectChannelCaller extends NetworkIdentity {
+  /** 当前连接的已验证授权标识；同公钥多连接不能共用订阅身份。 */
+  authorizationId: string;
   /** 已验证钱包公钥；与此上下文的网络一起定位，不进入 App content。 */
   walletPublicKeyHex: string;
   /** Session Window 已验证的 exact origin。 */

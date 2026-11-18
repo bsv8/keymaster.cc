@@ -1,8 +1,8 @@
+import { useConnectApps } from "./AppContext.js";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
-import { usePluginCapability } from "webloom-framework/react";
 import { usePluginI18n, useResourceView } from "@keymaster/runtime";
-import { APPLICATION_OPERATION_LABELS, applicationCommandStatus, applicationCommandTerminal, APPLICATION_CONNECTIONS_CAPABILITY, type ApplicationConnection, type ApplicationConnectionsSnapshot, type ProtocolCommandRecord, type MsFilePendingApprovalView } from "@keymaster/contracts";
+import { APPLICATION_OPERATION_LABELS, applicationCommandStatus, applicationCommandTerminal, type ApplicationConnection, type ApplicationConnectionsSnapshot, type ProtocolCommandRecord, type MsFilePendingApprovalView } from "@keymaster/contracts";
 import { useConnectResources, useConnectWalletState } from "./ConnectResourceContext.js";
 import { AppIcon } from "@keymaster/ui";
 import { Inbox } from "lucide-react";
@@ -16,7 +16,7 @@ const EMPTY: ApplicationConnectionsSnapshot = { applications: [], connections: [
 const terminal = applicationCommandTerminal;
 const needsAttention = (command: ProtocolCommandRecord) => command.phase === "confirming" || command.phase === "waiting_unlock_manual";
 function useApplications() {
-  const host = usePluginCapability(APPLICATION_CONNECTIONS_CAPABILITY);
+  const { host } = useConnectApps();
   const state = useResourceView<ApplicationConnectionsSnapshot>(useConnectResources(), "connect.applications", []);
   return { host, snapshot: state.data ?? EMPTY };
 }
@@ -151,4 +151,12 @@ function ApplicationActivityGroups({ snapshot, approvals, selected, onSelect }: 
       {[...group.commands].sort((a, b) => Number(needsAttention(b)) - Number(needsAttention(a)) || b.updatedAt - a.updatedAt).map(command => <li key={command.id}><button type="button" data-activity-id={command.id} aria-pressed={selected === command.id} onClick={() => onSelect(command.id)}><span>{METHOD_LABELS[command.method] ?? "应用操作"}</span><span>{!terminal(command) && !connectionFor(snapshot, command) ? "连接已结束" : applicationCommandStatus(command)}</span><time>{new Date(command.updatedAt).toLocaleString()}</time></button></li>)}</ul>
     </section>)}
   </div>;
+}
+
+/** Read-only contribution inside the privacy mask; no application details or actions. */
+export function ApplicationMaskStatus() {
+  const { snapshot } = useApplications();
+  const msfile = useResourceView<{ approvals: MsFilePendingApprovalView[] }>(useConnectResources(), "connect.msfile-approvals", []);
+  const count = snapshot.commands.filter(needsAttention).filter(command => connectionFor(snapshot, command)).length + (msfile.data?.approvals.length ?? 0);
+  return <p className="wallet-screen-mask__pending" role="status" data-testid="mask-pending-count">待审批 <strong>{count}</strong> 项</p>;
 }

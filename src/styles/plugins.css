@@ -13,7 +13,7 @@
  *     样式不得反向写回 global.css。
  */
 
-@import "@keymaster/plugin-market/styles.css";
+
 @import "@keymaster/plugin-page/styles.css";
 @import "@keymaster/plugin-background/styles.css";
 @import "@keymaster/plugin-vault/styles.css";

@@ -227,11 +227,17 @@ function normalizeOriginSettings(
   };
 }
 
+export interface ConnectExecutionLease {
+  /** Pending user decisions release the global execution slot, then rejoin its FIFO before continuing. */
+  waitForUser<T>(wait: () => Promise<T>): Promise<T>;
+}
 /** ConnectService 构造依赖。 */
 export interface ConnectServiceDeps {
   /** 提供实例撤销时立即失效，早于异步 dispose。 */
   runtimeSignal?: AbortSignal;
-  vault: VaultService;
+  walletOrigin?: string;
+  runConnectRequest?: (execute: (lease: ConnectExecutionLease) => Promise<void>) => Promise<void>;
+  vault: Pick<VaultService, "status" | "getCurrentKey" | "createActiveKeyCrypto" | "createAppViewSession" | "disposeAppViewSession" | "lock">;
   walletState: VaultWalletState;
   /**
    * 协议存储 业务文档（command-history / durable-policy / sessions）。生产 manifest
@@ -290,11 +296,14 @@ export interface ConnectServiceDeps {
   acceptApplicationLaunch?: (payload: AppBootstrapPayload, source: Window, view: import("@keymaster/contracts").ApplicationView) => Promise<void>;
   closeApplicationView?: (source: Window) => void;
   applicationPermissionChanged?: () => Promise<void>;
+  applicationConnected?: (key: string, publication?:import("@keymaster/contracts").AppSourceEntry) => Promise<void>;
   /** Shared main-wallet connection: App logout must not lock the whole wallet. */
   hostedApplication?: boolean;
   applicationLoggedOut?: () => void;
   /** 接收端确认应用身份后通知主钱包宿主；身份信息不从未验证消息直接展示。 */
-  applicationIdentified?: (origin: string, appPublicKeyHex: string, verifiedUrl?: string,display?:{name:string;description:string;icon:string}) => Promise<void>;
+  applicationIdentified?: (origin: string, appPublicKeyHex: string, verifiedUrl?: string,display?:{name:string;description:string;icon:string}, publication?:import("@keymaster/contracts").AppSourceEntry) => Promise<void>;
+  applicationSessionEstablished?: (origin: string, appPublicKeyHex: string, verifiedUrl?: string, display?: { name: string; description: string; icon: string }, publication?: import("@keymaster/contracts").AppSourceEntry) => void;
+
 }
 
 /**
@@ -302,6 +311,7 @@ export interface ConnectServiceDeps {
  * 历史都对应一个 RequestRecord；recordId 与 transport requestId 解耦。
  */
 interface RequestRecord {
+  executionLease?: ConnectExecutionLease;
   /** 协议权威由独立 Receiver 签发，UI/业务记录不能自行重建。 */
   readonly protocol: ReceiverRequest;
   readonly walletGeneration: string;
@@ -310,6 +320,7 @@ interface RequestRecord {
   applicationKey?: string;
   /** 建连时验证的 App 公钥快照；缺省表示未经验证的传输，不得继承已有许可。 */
   verifiedAppPublicKeyHex?: string;
+  verifiedPublication?: import("@keymaster/contracts").AppSourceEntry;
   verifiedDisplay?:{name:string;description:string;icon:string};
   manualApprovedAt?: number;
   paymentPreview?: import("@keymaster/contracts").P2pkhConnectPaymentPreview;
@@ -603,7 +614,7 @@ export class ConnectServiceImpl implements ConnectService {
    */
   private readonly channelSessionBySource: Map<
     Window,
-    { origin: string; sessionId: string; networkIdentity: NetworkIdentity; ownerPublicKeyHex: string; epoch: number }
+    { origin: string; sessionId: string; authorizationId: string; networkIdentity: NetworkIdentity; ownerPublicKeyHex: string; epoch: number }
   > = new Map();
   /** 每个 Connect session 的虚拟精确频道集合。物理订阅由 Coordinator 统一复用。 */
   private readonly channelSubscriptionsBySessionId: Map<string, string[]> = new Map();
@@ -1035,10 +1046,16 @@ export class ConnectServiceImpl implements ConnectService {
     }
     // 宿主只选择处理分支，控制帧与请求合法性都由 Receiver 判断。
     if ((event.data as { type?: unknown } | null)?.type === "cancel") {
+      // Receiver acceptance aborts its request signal. Filter the business stage
+      // first so a late client cancel cannot abort an already approved request.
+      const id = (event.data as { id?: unknown }).id;
+      if (typeof id !== "string") return;
+      const candidate = this.findRequestByTransportId(event.source as Window | null, event.origin, id);
+      if (!candidate || !this.isRequestCancellable(candidate)) return;
       const parsed = this.receiver.acceptCancel(event);
       if (!parsed) return;
       // 命中：source + origin + transportRequestId 都匹配 + 当前 phase
-      // **不**是 executing。
+      // 仍处于等待人工审批阶段。
       const rec = this.findRequestByTransportId(event.source as Window | null, event.origin, parsed.id);
       if (!rec) return;
       if (!this.isRequestCancellable(rec)) return;
@@ -1111,7 +1128,7 @@ export class ConnectServiceImpl implements ConnectService {
       const resolve = rec.paymentApproval;
       rec.paymentApproval = undefined;
       this.clearConfirmTimeout(rec.recordId);
-      this.setRecordPhase(rec.recordId, "executing");
+      this.setRecordPhase(rec.recordId, rec.executionLease ? "queued" : "executing");
       resolve(true);
       this.emit(); this.emitFeed();
       return;
@@ -1132,9 +1149,10 @@ export class ConnectServiceImpl implements ConnectService {
    *
    * recordId 缺省时取"当前任意一张可取消 request"（兼容旧 UI）。
    */
-  async rejectByUser(recordId?: string): Promise<void> {
+  async rejectByUser(recordId?: string, expectedPhase?: ProtocolCommandPhase): Promise<void> {
     const rec = this.resolveRecordForCancel(recordId);
     if (!rec) return;
+    if (expectedPhase !== undefined && rec.phase !== expectedPhase) return;
     if (!this.isRequestCancellable(rec)) return;
     await this.finalizeRequestByCancel(rec.recordId, "user_canceled");
   }
@@ -1440,7 +1458,7 @@ export class ConnectServiceImpl implements ConnectService {
    *
    * 行为：
    *   - 校验 recordId 存在 + 当前 phase 处于可取消状态
-   *     （waiting_unlock_* / confirming / queued）；
+   *     （waiting_unlock_manual / confirming）；
    *   - 走与 `rejectByUser` 同语义路径：写 failureReason="user_canceled"，
    *     对外回 `user_rejected`。
    */
@@ -1477,7 +1495,7 @@ export class ConnectServiceImpl implements ConnectService {
     catch { throw new LaunchAppViewError("no_active_key", "Wallet identity unavailable"); }
     let url: URL;
     try { url = new URL(input.appUrl); } catch { throw new LaunchAppViewError("invalid_app_config", "Invalid App URL"); }
-    if (!["https:", "http:"].includes(url.protocol) || url.origin !== input.appOrigin || url.origin === window.location.origin) throw new LaunchAppViewError("invalid_app_config", "Invalid App origin");
+    if (!["https:", "http:"].includes(url.protocol) || url.origin !== input.appOrigin || url.origin === (this.deps.walletOrigin ?? window.location.origin)) throw new LaunchAppViewError("invalid_app_config", "Invalid App origin");
     const lifecycle = this.deps.walletState.snapshot();
     const launchKey = JSON.stringify([lifecycle.walletGeneration, lifecycle.runGeneration, lifecycle.sessionEpoch,
       input.expectedAppPublicKeyHex ? `app:${input.expectedAppPublicKeyHex.toLowerCase()}` : `url:${url.href}`]);
@@ -1533,17 +1551,17 @@ export class ConnectServiceImpl implements ConnectService {
         "launchAppView: invalid appUrl"
       );
     }
-    if (!['https:', 'http:'].includes(parsedAppUrl.protocol) || parsedAppUrl.origin === window.location.origin || parsedAppUrl.origin !== input.appOrigin) {
+    if (!['https:', 'http:'].includes(parsedAppUrl.protocol) || parsedAppUrl.origin === (this.deps.walletOrigin ?? window.location.origin) || parsedAppUrl.origin !== input.appOrigin) {
       throw new LaunchAppViewError(
         "invalid_app_config",
         "launchAppView: appOrigin does not match appUrl.origin"
       );
     }
     const catalog = this.resolveAppCatalog(input.appOrigin);
-    if (typeof window === "undefined") {
+    if (!this.deps.reserveApplicationView) {
       throw new LaunchAppViewError(
         "window_unavailable",
-        "launchAppView: window undefined"
+        "Application view relay unavailable"
       );
     }
     if (!this.deps.storageRepository) {
@@ -1654,7 +1672,7 @@ export class ConnectServiceImpl implements ConnectService {
     await this.deps.acceptApplicationLaunch(bootstrap, popup, view);
     wallet.assertActive();
     const clientUrl = new URL(appUrlWithLaunchToken);
-    clientUrl.searchParams.set("sessionWindowOrigin", window.location.origin);
+    clientUrl.searchParams.set("sessionWindowOrigin", (this.deps.walletOrigin ?? window.location.origin));
     if (view.closed) throw new Error("Application closed during launch");
     view.navigate(clientUrl.toString());
     sessionWindowNavigated = true;
@@ -2015,6 +2033,7 @@ export class ConnectServiceImpl implements ConnectService {
           const verified = verifyLoginPublicationProof(loginParams.publicationProof, origin);
           if (!verified) throw new PublicationProofValidationError("invalid_request", "publicationProof is invalid");
           rec.verifiedAppPublicKeyHex = verified.appPublicKeyHex;
+          rec.verifiedPublication = verified.publication;
  rec.verifiedDisplay=verified.display;
         } catch (err) {
           const code = err instanceof PublicationProofValidationError ? err.code : "invalid_request";
@@ -2041,6 +2060,7 @@ export class ConnectServiceImpl implements ConnectService {
           const verified = verifyLoginPublicationProof(launchParams.publicationProof, origin);
           if (!verified) throw new PublicationProofValidationError("invalid_request", "publicationProof is invalid");
           rec.verifiedAppPublicKeyHex = verified.appPublicKeyHex;
+          rec.verifiedPublication = verified.publication;
  rec.verifiedDisplay=verified.display;
         } catch (err) {
           const code = err instanceof PublicationProofValidationError ? err.code : "invalid_request";
@@ -2063,7 +2083,7 @@ export class ConnectServiceImpl implements ConnectService {
         await this.scheduleFailFastRequest(recordId, "user_rejected", "internal_error");
         return;
       }
-      rec.walletPublicKeyHex = channelSession.sessionId;
+      rec.walletPublicKeyHex = channelSession.ownerPublicKeyHex;
       rec.ownerPublicKeyHex = channelSession.ownerPublicKeyHex;
       if (this.lockStateValue === "locked") {
         // 锁定会话立即使 Channel 调用失效；不把 App 请求挂在解锁队列中。
@@ -2332,9 +2352,11 @@ export class ConnectServiceImpl implements ConnectService {
     rec.errorMessage =
       code === "invalid_origin"
         ? "invalid origin"
-        : code === "asset_not_enabled"
-          ? "Requested asset is not enabled in Keymaster settings"
-          : "User rejected";
+        : code === "invalid_request"
+          ? "Invalid request"
+          : code === "asset_not_enabled"
+            ? "Requested asset is not enabled in Keymaster settings"
+            : "User rejected";
     rec.failureReason = reason;
     rec.finishedAt = Date.now();
     rec.updatedAt = rec.finishedAt;
@@ -2699,17 +2721,7 @@ export class ConnectServiceImpl implements ConnectService {
   ): Promise<void> {
     const rec = this.requestsByRecordId.get(recordId);
     if (!rec) return;
-    if (rec.phase === "executing") {
-      rec.cancelRequested = true;
-      rec.abortController?.abort();
-      // 取消只作用于本条请求：中止它的 AbortSignal 即可，媒体之外的持久写
-      // 都由 IndexedDB 事务原子提交，不存在需要额外回收的远端上传会话。
-      return;
-    }
-    // queued：从执行队列里移除。
-    if (rec.phase === "queued") {
-      this.executionQueue = this.executionQueue.filter((id) => id !== recordId);
-    }
+    if (!this.isRequestCancellable(rec)) return;
     this.clearConfirmTimeout(recordId);
     rec.paymentApproval?.(false);
     rec.paymentApproval = undefined;
@@ -2809,15 +2821,15 @@ export class ConnectServiceImpl implements ConnectService {
         }
         // decision.kind === "execute"：取出队首并执行。
         this.executionQueue.shift();
-        this.executingRecordId = recordId;
-        this.setRecordPhase(recordId, "executing");
-        rec.enteredPhaseAt = Date.now();
-        try {
-          await this.runRequest(rec);
-        } catch {
-        } finally {
-          this.executingRecordId = null;
-        }
+        const execute = async (lease?: ConnectExecutionLease) => {
+          if (this.isTerminalPhase(rec.phase) || rec.cancelRequested) return;
+          rec.executionLease = lease;
+          this.executingRecordId = recordId;
+          this.setRecordPhase(recordId, "executing");
+          rec.enteredPhaseAt = Date.now();
+          try { await this.runRequest(rec); } finally { rec.executionLease = undefined; this.executingRecordId = null; }
+        };
+        try { if (this.deps.runConnectRequest) await this.deps.runConnectRequest(execute); else await execute(); } catch { /* Request failures are finalized by runRequest or runtime revocation. */ }
       }
     } finally {
       this.drainingExecutionQueue = false;
@@ -2967,8 +2979,15 @@ export class ConnectServiceImpl implements ConnectService {
         rec.phase = "approved";
         rec.finishedAt = Date.now();
         rec.updatedAt = rec.finishedAt;
-        await this.persistFeedCommandFor(rec);
-        await this.replyResultToRec(rec, result);
+        if (rec.method === "connect.login" || rec.method === "connect.launch") {
+          await this.replyResultToRec(rec, result);
+          await this.persistFeedCommandFor(rec).catch(error =>
+            traceDev("connect.session", "commandHistory.failed", () => ({ error }))
+          );
+        } else {
+          await this.persistFeedCommandFor(rec);
+          await this.replyResultToRec(rec, result);
+        }
         if (rec.method === "connect.logout") this.deps.applicationLoggedOut?.();
       }
       this.emitFeed();
@@ -3603,9 +3622,14 @@ export class ConnectServiceImpl implements ConnectService {
       lastUsedAt: now,
       revokedAt: null
     };
+    // 目录身份与版本检查先于授权提交：applicationIdentified 只做发布验证与目录
+    // 归并，抛错时不创建会话、不设置当前授权，也不登记连接。
+    await this.deps.applicationIdentified?.(rec.origin,permissionKeyFor(rec.origin,record.appPublicKeyHex),undefined,record.appDisplay,rec.verifiedPublication);
+    this.assertWalletGeneration(rec);
+    this.receiver.assertCurrent(rec.protocol);
     await this.deps.storageRepository.putConnectSession(record);
-    this.currentAuthorizationId=record.authorizationId;
-    await this.deps.applicationIdentified?.(rec.origin,permissionKeyFor(rec.origin,record.appPublicKeyHex),undefined,record.appDisplay);
+    this.currentAuthorizationId = record.authorizationId;
+    this.deps.applicationSessionEstablished?.(rec.origin, record.appPublicKeyHex!, undefined, record.appDisplay, rec.verifiedPublication);
     return {
       authorizationId: record.authorizationId!,
       walletPublicKeyHex: key.publicKeyHex,
@@ -3792,14 +3816,18 @@ export class ConnectServiceImpl implements ConnectService {
     //     通过 probe 验证过；如果到这里仍然解析不到，再单独做一次
     //     兜底校验，明确告诉用户"runtime 丢失请重新打开 app"。
     await this.resolveOwnerRuntime(session);
+    // 目录身份与版本检查先于会话提交：applicationIdentified 只做发布验证与目录
+    // 归并，抛错时不写入会话、不消费一次性启动令牌、不设置当前授权，
+    // 也不登记连接。
+    await this.deps.applicationIdentified?.(rec.origin,verifiedAppHex,record.directoryUrl,rec.verifiedDisplay,rec.verifiedPublication);
     const now = Date.now();
+    this.assertWalletGeneration(rec);
+    this.receiver.assertCurrent(rec.protocol);
     const next: ConnectSessionRecord = { ...session, lastUsedAt: now };
     await this.deps.storageRepository.putConnectSession(next);
-    // 消费 token：一次性，幂等。只有 session 真值写入成功后才消费，
-    // 这样失败可由调用方观察并重试，而不会留下半成功的内存状态。
     this.launchTokensByToken.set(params.launchToken, { ...record, consumed: true });
-    this.currentAuthorizationId=session.authorizationId;
-    await this.deps.applicationIdentified?.(rec.origin,verifiedAppHex,record.directoryUrl,rec.verifiedDisplay);
+    this.currentAuthorizationId = session.authorizationId;
+    this.deps.applicationSessionEstablished?.(rec.origin, verifiedAppHex, record.directoryUrl, rec.verifiedDisplay, rec.verifiedPublication);
     return {
       authorizationId: session.authorizationId!,
       walletPublicKeyHex: session.ownerPublicKeyHex,
@@ -3822,11 +3850,13 @@ export class ConnectServiceImpl implements ConnectService {
     networkIdentity: NetworkIdentity;
     origin: string;
     sessionId: string;
+    authorizationId: string;
     ownerPublicKeyHex: string;
   }): import("@keymaster/contracts").ConnectChannelCaller {
     return {
       ...context.networkIdentity,
       walletPublicKeyHex: context.ownerPublicKeyHex,
+      authorizationId: context.authorizationId,
       origin: context.origin,
       ownerPublicKeyHex: context.ownerPublicKeyHex
     };
@@ -3857,7 +3887,7 @@ export class ConnectServiceImpl implements ConnectService {
     }
     const epoch = this.channelSessionEpoch;
     const session = await this.deps.storageRepository?.getConnectSession(rec.networkIdentity, rec.origin,this.currentAuthorizationId);
-    if (!session || epoch !== this.channelSessionEpoch) return;
+    if (!session?.authorizationId || epoch !== this.channelSessionEpoch) return;
     const previous = this.channelSessionBySource.get(rec.source);
     if (previous && previous.sessionId !== session.sessionId) {
       this.deps.connectChannelRuntime?.release(this.channelCallerFor(previous));
@@ -3868,6 +3898,7 @@ export class ConnectServiceImpl implements ConnectService {
       networkIdentity: rec.networkIdentity,
       origin: rec.origin,
       sessionId: session.sessionId,
+      authorizationId: session.authorizationId,
       ownerPublicKeyHex: value.ownerPublicKeyHex,
       epoch: this.channelSessionEpoch
     });
@@ -3885,6 +3916,7 @@ export class ConnectServiceImpl implements ConnectService {
   }
 
   private async requireChannelContext(rec: RequestRecord): Promise<{
+    authorizationId: string;
     networkIdentity: NetworkIdentity;
     sessionId: string;
     origin: string;
@@ -4098,14 +4130,16 @@ export class ConnectServiceImpl implements ConnectService {
       assertBoundPayment();
       rec.autoApproved = permitted.includes("payment.pay");
       if (!rec.autoApproved) {
-        const approved = await new Promise<boolean>(resolve => {
+        const ask = () => new Promise<boolean>(resolve => {
           rec.paymentApproval = resolve;
           this.setRecordPhase(rec.recordId, "confirming");
           const timeout = this.resolveConfirmTimeoutSnapshot(rec.origin);
           this.startConfirmTimeout(rec.recordId, timeout.initialSeconds, timeout.startedFromFallback);
           this.emit(); this.emitFeed();
         });
+        const approved = await (rec.executionLease ? rec.executionLease.waitForUser(ask) : ask());
         if (!approved) throw protocolError("user_rejected", "External payment was not approved");
+        this.setRecordPhase(rec.recordId, "executing");
       }
       assertBoundPayment();
       submissionStarted = true;
@@ -5450,13 +5484,7 @@ export class ConnectServiceImpl implements ConnectService {
   }
 
   private isRequestCancellable(rec: RequestRecord): boolean {
-    return (
-      rec.phase === "waiting_unlock_manual" ||
-      rec.phase === "waiting_unlock_auto" ||
-      rec.phase === "confirming" ||
-      rec.phase === "queued" ||
-      (rec.phase === "executing" && rec.method.startsWith("msfile."))
-    );
+    return rec.phase === "confirming" || rec.phase === "waiting_unlock_manual";
   }
 
   /**

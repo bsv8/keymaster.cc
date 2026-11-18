@@ -23,3 +23,6 @@
 @media (max-width: 640px) {
   .wallet-screen-mask { padding: 20px 16px 18px; border-radius: 12px; }
 }
+
+.wallet-screen-mask__pending { margin: 0; padding: 16px; border: 2px solid var(--border); border-radius: 12px; text-align: center; font-size: 1.25rem; font-weight: 600; }
+.wallet-screen-mask__pending strong { font-size: 2rem; color: var(--text); }

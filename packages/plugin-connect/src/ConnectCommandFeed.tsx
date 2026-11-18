@@ -478,7 +478,7 @@ function ConfirmCardBody({
         <Button
           variant="ghost"
           disabled={busy}
-          onClick={async () => { try { await service.rejectByUser(command.id); } catch { setError("拒绝结果未能写入历史，请重试。"); } }}
+          onClick={async () => { try { await service.rejectByUser(command.id, command.phase); } catch { setError("拒绝结果未能写入历史，请重试。"); } }}
         >
           {t("connect.confirm.cancel", { defaultValue: "取消" })}
         </Button>
@@ -580,11 +580,7 @@ function QueuedCardBody({
         description={t(`connect.confirm.method.${command.method}`, { defaultValue: command.method })}
       />
       <RequestSummary t={t} command={command} />
-      <div className="protocol-popup__actions">
-        <Button variant="ghost" onClick={() => service.rejectByUser(command.id)}>
-          {t("connect.feed.queued.cancel", { defaultValue: "取消排队" })}
-        </Button>
-      </div>
+
     </>
   );
 }

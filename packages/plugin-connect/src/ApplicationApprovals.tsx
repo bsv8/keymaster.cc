@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { usePluginCapability, useHasPluginCapability } from "webloom-framework/react";
 import { useResourceViewSelector } from "@keymaster/runtime";
-import { MSFILE_SERVICE_CAPABILITY, VAULT_SERVICE_CAPABILITY, formatShortPublicKey, type ConnectAuthSnapshot, type ConnectService, type MsFileApprovalDecision, type MsFilePendingApprovalView } from "@keymaster/contracts";
+import { MSFILE_SERVICE_CAPABILITY, formatShortPublicKey, type ConnectAuthSnapshot, type ConnectService, type MsFileApprovalDecision, type MsFilePendingApprovalView } from "@keymaster/contracts";
 import { useConnectResources } from "./ConnectResourceContext.js";
 
 type Translate = (key: string, values?: { defaultValue?: string }) => string;
@@ -38,13 +38,11 @@ export function MsFileApprovalSection({ t, approvalId }: { t: Translate; approva
 }
 function MsFileApproval({ t, approvalId }: { t: Translate; approvalId?: string }) {
   const service = usePluginCapability(MSFILE_SERVICE_CAPABILITY);
-  const vault = usePluginCapability(VAULT_SERVICE_CAPABILITY);
   const status = useResourceViewSelector<{ approvals: MsFilePendingApprovalView[] }, { approvals: MsFilePendingApprovalView[] }>(useConnectResources(), "connect.msfile-approvals", [], snapshot => snapshot.data ?? { approvals: service.listPendingApprovals() }, (a, b) => JSON.stringify(a.approvals) === JSON.stringify(b.approvals));
   const [amounts, setAmounts] = useState<Record<string, string>>({});
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const approvals = status.approvals.filter(value => !approvalId || value.approvalId === approvalId);
-  const unlocked = vault.status() === "unlocked";
   async function decide(id: string, decision: MsFileApprovalDecision) {
     if (busy) return;
     setBusy(true); setError(undefined);
@@ -57,7 +55,7 @@ function MsFileApproval({ t, approvalId }: { t: Translate; approvalId?: string }
     <dl><dt>App</dt><dd>{value.appName} ({value.appId})</dd><dt>Kind</dt><dd>{value.kind}</dd><dt>Current cap</dt><dd>{value.effectiveMaxPriceSatoshis}</dd><dt>Hash</dt><dd><code>{value.contentHashHint}…</code></dd></dl>
     {error ? <p role="alert">{error}</p> : null}
     <input type="text" inputMode="numeric" aria-label="New maximum price" placeholder={t("msfile.approvals.newLimit", { defaultValue: "New maximum price (satoshis)" })} value={amounts[value.approvalId] ?? ""} onChange={event => setAmounts(previous => ({ ...previous, [value.approvalId]: event.target.value.replace(/[^0-9]/g, "") }))} />
-    <div className="protocol-msfile-approval-actions"><button type="button" disabled={!unlocked || busy} onClick={() => void decide(value.approvalId, { action: "reject" })}>{t("connect.confirm.reject", { defaultValue: "拒绝" })}</button>
-      {(["once", "always"] as const).map(scope => <button type="button" key={scope} disabled={!unlocked || busy || !amounts[value.approvalId]} onClick={() => void decide(value.approvalId, { action: "allow", scope, newMaxPriceSatoshis: amounts[value.approvalId]! })}>{t(scope === "once" ? "msfile.approvals.allowOnce" : "msfile.approvals.allowAlways", { defaultValue: scope === "once" ? "Allow once" : "Always allow up to this amount" })}</button>)}</div>
+    <div className="protocol-msfile-approval-actions"><button type="button" disabled={busy} onClick={() => void decide(value.approvalId, { action: "reject" })}>{t("connect.confirm.reject", { defaultValue: "拒绝" })}</button>
+      {(["once", "always"] as const).map(scope => <button type="button" key={scope} disabled={busy || !amounts[value.approvalId]} onClick={() => void decide(value.approvalId, { action: "allow", scope, newMaxPriceSatoshis: amounts[value.approvalId]! })}>{t(scope === "once" ? "msfile.approvals.allowOnce" : "msfile.approvals.allowAlways", { defaultValue: scope === "once" ? "Allow once" : "Always allow up to this amount" })}</button>)}</div>
   </section>)}</div>;
 }

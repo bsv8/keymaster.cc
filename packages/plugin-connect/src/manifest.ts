@@ -1,67 +1,21 @@
-import { ApplicationDisplaySettings } from "./ApplicationDisplaySettings.js";
-import { ApplicationConnectionHost } from "./applicationConnectionHost.js";
-import { ApplicationConnectionControls } from "./ApplicationCenter.js";
-import { APPLICATION_AI_TOOLS_CAPABILITY, APPLICATION_CONNECTIONS_CAPABILITY, BUSINESS_REGISTRY_CAPABILITY, type ApplicationConnectionsSnapshot } from "@keymaster/contracts";
-import { createPublicConnectService } from "./publicConnectService.js";
-import { STORAGE_FILE_CLIENTS_CAPABILITY } from "@keymaster/contracts";
-import { CONNECT_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
 import { createElement } from "react";
+import { APP_MARKET_SYNC_CAPABILITY, APP_SOURCE_INVALIDATION_CAPABILITY, APPLICATION_AI_TOOLS_CAPABILITY, BUSINESS_REGISTRY_CAPABILITY, STORAGE_FILE_CLIENTS_CAPABILITY, VAULT_WORKER_CRYPTO_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, P2PKH_WORKER_TRANSFER_CAPABILITY, MSFILE_SERVICE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, PAGE_UI_REGISTRY_CAPABILITY, PAGE_UI_RENDERER_CAPABILITY, OWNED_RESOURCE_ACCESS_CAPABILITY, I18N_SERVICE_CAPABILITY, defineRuntimeUnitDependencies, type ApplicationConnectionsSnapshot, type I18nPluginResources, type PluginContext, type PluginManifest, type PluginSetup } from "@keymaster/contracts";
+import { createWindowConnect } from "./windowConnect.js";
+import { CONNECT_PRIVATE_COMMAND, CONNECT_PRIVATE_EVENTS } from "./connectWorkerContract.js";
+import { MarketPage } from "./MarketPage.js";
+import { AppDetailPage } from "./AppDetailPage.js";
+import { AppsHomeWidget } from "./AppsHomeWidget.js";
+import { ApplicationDisplaySettings } from "./ApplicationDisplaySettings.js";
+import { ApplicationMaskStatus, ApplicationConnectionControls } from "./ApplicationCenter.js";
 import { bindConnectUi } from "./ConnectResourceContext.js";
-import { PAGE_UI_REGISTRY_CAPABILITY, PAGE_UI_RENDERER_CAPABILITY, OWNED_RESOURCE_ACCESS_CAPABILITY } from "@keymaster/contracts";
-import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
-// packages/plugin-connect/src/manifest.ts
-// 对外连接插件（显示名 Connect，持久身份仍为 protocol）：完整钱包应用连接中心、逐操作外部许可与受限业务网关。
-// 两个连接方向统一由主钱包宿主登记窗口；不注册专用连接页或跨窗口 bootstrap。
-// 应用设置与审计走 durable-policy，连接事实与命令历史各用独立 purpose。
-// 钱包身份、私钥和资金责任仍留在各自业务权威；SDK Receiver 只拥有连接绑定。
-
-import type {
-  I18nPluginResources,
-  VaultWalletState,
-  PluginContext,
-  PluginManifest,
-  PluginSetup,
-  VaultService,
-  ResourceRegistry,
-  VaultStatus,
-  ConnectSessionSnapshot,
-  ConnectCommandFeedState,
-  ConnectService,
-  SessionCoordinatorClient,
-  P2pkhProtocolAdapter
-} from "@keymaster/contracts";
-import { defineCapability } from "webloom-framework";
-import {
-  MSFILE_SERVICE_CAPABILITY,
-  CONNECT_SERVICE_CAPABILITY,
-  CONNECT_STORAGE_REPOSITORY_CAPABILITY,
-  RESOURCE_REGISTRY_CAPABILITY,
-  CONNECT_COORDINATOR_CONTROL_CAPABILITY,
-  VAULT_SERVICE_CAPABILITY,
-  VAULT_WALLET_STATE_CAPABILITY,
-  type ConnectCoordinatorControl,
-} from "@keymaster/contracts";
-import { defineRuntimeUnitDependencies } from "@keymaster/contracts";
-import {
-  createConnectService
-} from "./connectService.js";
-import { openConnectStorageRepository } from "./storage/protocolStorageRepository.js";
-import { createConnectChannelRuntime } from "./channelRuntime.js";
-import { CONNECT_STORAGE_DECLARATIONS, CONNECT_STORAGE_PURPOSES } from "./storage/protocolStorageDeclarations.js";
-
+import { CONNECT_STORAGE_DECLARATIONS } from "./storage/protocolStorageDeclarations.js";
 export const CONNECT_PLUGIN_ID = "protocol";
-// 兼容说明：显示名已统一为 Connect，但 pluginId/moduleId/unitId 仍保留 protocol/protocol.window，
-// 存储布局与数据不变（本次 A 方案硬切换，不做迁移）。Coordinator 绑定中的 "protocol" 保留，对应持久身份。
-/** Connect only needs the stable adapter subset exposed by P2PKH. */
-const P2PKH_SERVICE_CAPABILITY = defineCapability<P2pkhProtocolAdapter>({
-  kind: "local",
-  id: "p2pkh.service",
-  version: "1",
-});
 const connectResources: I18nPluginResources = {
   namespace: "connect",
   resources: {
     en: {
+      "connect.market.label": "App market",
+      "connect.market.domain": "Applications",
       "connect.applicationDisplay.title": "Application settings",
       "connect.applicationDisplay.description": "Manage application opening, reminder sounds and system notifications.",
       "connect.applicationDisplay.opening": "Application opening",
@@ -186,7 +140,6 @@ const connectResources: I18nPluginResources = {
       "connect.feed.waitingUnlock.autoDesc":
         "This request will execute automatically after the wallet is unlocked.",
       "connect.feed.queued.title": "Confirmed, waiting to execute",
-      "connect.feed.queued.cancel": "Cancel queue",
       "connect.feed.method": "Method",
       "connect.sessionError.banner":
         "Cannot reach the external site. Please check the site console for details.",
@@ -244,6 +197,8 @@ const connectResources: I18nPluginResources = {
       "connect.sessionWindow.appView.ready": "Session ready"
     },
     "zh-CN": {
+      "connect.market.label": "应用市场",
+      "connect.market.domain": "应用",
       "connect.applicationDisplay.title": "应用设置",
       "connect.applicationDisplay.description": "管理应用打开方式、提示音和系统通知。应用打开方式在整个钱包统一使用，并持久保存。",
       "connect.applicationDisplay.opening": "应用打开方式",
@@ -362,7 +317,6 @@ const connectResources: I18nPluginResources = {
       "connect.feed.waitingUnlock.autoDesc":
         "此请求会在解锁后自动执行。",
       "connect.feed.queued.title": "已确认，等待执行",
-      "connect.feed.queued.cancel": "取消排队",
       "connect.feed.method": "方法",
       "connect.sessionError.banner":
         "无法连接到外部站点。请回到来源站点查看控制台日志。",
@@ -437,109 +391,41 @@ const connectPluginDefinition = {
     runtime: "window-main",
     connect: { providerMethods: ["connect.login", "connect.logout", "connect.launch"] },
     scopeKind: "storage",
-    provides: [CONNECT_SERVICE_CAPABILITY, CONNECT_STORAGE_REPOSITORY_CAPABILITY, CONNECT_COORDINATOR_CONTROL_CAPABILITY, APPLICATION_CONNECTIONS_CAPABILITY, APPLICATION_AI_TOOLS_CAPABILITY],
-    storages: [
-      CONNECT_STORAGE_DECLARATIONS.files
-    ],
+    provides: [APP_SOURCE_INVALIDATION_CAPABILITY, APPLICATION_AI_TOOLS_CAPABILITY],
     dependencies: defineRuntimeUnitDependencies([
-      { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "声明存储客户端及用途授权" },
-      { capability: CONNECT_COORDINATOR_CLIENT_BINDING_CAPABILITY, sourceRuntime: "window-main", reason: "声明本插件的受限 Coordinator 连接" },
       { capability: PAGE_UI_REGISTRY_CAPABILITY, reason: "注册 Connect 与应用连接中心" },
       { capability: PAGE_UI_RENDERER_CAPABILITY, reason: "钱包内的跨源应用工作区" },
       { capability: BUSINESS_REGISTRY_CAPABILITY, reason: "应用连接管理入口" },
       { capability: OWNED_RESOURCE_ACCESS_CAPABILITY, reason: "Connect 自有资源" },
       { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
-      {
-        capability: VAULT_SERVICE_CAPABILITY,
-        reason: "connect mode 需要 vault（受控 capability 取 owner runtime）；appView mode 可走 owner runtime bootstrap"
-      },
       { capability: VAULT_WALLET_STATE_CAPABILITY, reason: "连接需要 owner key 状态" },
       { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "注册 connect 资源" },
       { capability: MSFILE_SERVICE_CAPABILITY, optional: true, reason: "可选 MSFile 方法" },
-      { capability: P2PKH_SERVICE_CAPABILITY, optional: true, reason: "可选 P2PKH 方法" },
+    ]),
+  }, {
+    id: "protocol.coordinator-worker", runtime: "shared-worker", scopeKind: "storage",
+    provides: [], privateProvides: [CONNECT_PRIVATE_COMMAND, CONNECT_PRIVATE_EVENTS],
+    storages: [CONNECT_STORAGE_DECLARATIONS.files],
+    dependencies: defineRuntimeUnitDependencies([
+      { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "shared-worker", reason: "Connect 唯一业务仓储" },
+      { capability: VAULT_WALLET_STATE_CAPABILITY, sourceRuntime: "shared-worker", reason: "Worker 钱包身份与运行世代" },
+      { capability: P2PKH_WORKER_TRANSFER_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "通过已绑定的 Worker 转账能力执行付款" },
+      { capability: VAULT_WORKER_CRYPTO_CAPABILITY, sourceRuntime: "shared-worker", reason: "Vault 独占的受控密码学句柄" },
+      { capability: MSFILE_SERVICE_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "已声明的 MSFile 公开方法" },
+      { capability: APP_MARKET_SYNC_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "同步市场来源资料" },
     ]),
   }],
   i18n: connectResources,
   async setup(ctx: PluginContext) {
-    // 取依赖（plugin-vault 必须先装载）。
-    const vaultService = ctx.capability(VAULT_SERVICE_CAPABILITY);
-    const walletStateService = ctx.capability(VAULT_WALLET_STATE_CAPABILITY).bind(ctx.consumer, ctx.scope);
-    const coordinatorClient = ctx.capability(CONNECT_COORDINATOR_CLIENT_BINDING_CAPABILITY).bind(ctx.consumer, ctx.scope) as ConnectCoordinatorControl | undefined;
-    if (!coordinatorClient) throw new Error("Connect Coordinator control is unavailable");
-    ctx.provide(CONNECT_COORDINATOR_CONTROL_CAPABILITY, coordinatorClient);
-    const connectChannelRuntime = createConnectChannelRuntime(coordinatorClient);
-    // MSFile 是可选平台能力：缺失时只让
-    // `msfile.*` 三个方法 fail closed（msfile_unavailable），不阻塞连接页。
-    let msfileService: import("@keymaster/contracts").MsFileService | undefined;
-    try {
-      msfileService = ctx.optionalCapability(MSFILE_SERVICE_CAPABILITY);
-    } catch {
-      msfileService = undefined;
-    }
-
-    // Bind the three declared Storage purposes explicitly during setup.
-    // Keep optional services as resolvers so replacement instances are observed.
-    const getP2pkhService = (): P2pkhProtocolAdapter | undefined => {
-      try {
-        return ctx.optionalCapability(P2PKH_SERVICE_CAPABILITY);
-      } catch {
-        return undefined;
-      }
-    };
-
-    let applicationHost: ApplicationConnectionHost;
-    const serviceDeps: import("./connectService.js").ConnectServiceDeps = {
-        vault: vaultService,
-        walletState: walletStateService,
-        runtimeSignal: ctx.scope.signal,
-        msfileService,
-        getMsfileService: () => {
-          try {
-            return ctx.optionalCapability(MSFILE_SERVICE_CAPABILITY);
-          } catch {
-            return undefined;
-          }
-        },
-        getP2pkhService,
-        connectChannelRuntime,
-        // 根服务只作为钱包内启动器；连接实例的方向由主钱包宿主装配。
-        bootMode: "connect",
-        focusExistingApplication: input => applicationHost.focusExistingApplication(input),
-        getApplicationOpenMode: () => applicationHost.applicationOpenMode(),
-        reserveApplicationView: input => ctx.capability(PAGE_UI_RENDERER_CAPABILITY).openApplication(input),
-        acceptApplicationLaunch: (payload, source, view) => applicationHost.acceptLaunch(payload, source, view),
-        closeApplicationView: source => applicationHost.closeView(source),
-      };
-    const service = createConnectService(serviceDeps);
-      ctx.provide(CONNECT_SERVICE_CAPABILITY, createPublicConnectService(service, () => ctx.scope.assertActive()));
-      const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
-
-      const storageRepository = openConnectStorageRepository({
-        durablePolicy: ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, CONNECT_STORAGE_PURPOSES.files),
-        sessions: ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, CONNECT_STORAGE_PURPOSES.files),
-        commandHistory: ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, CONNECT_STORAGE_PURPOSES.files)
-      });
-      ctx.provide(CONNECT_STORAGE_REPOSITORY_CAPABILITY, storageRepository);
-      await service.attachConnectStorageRepository(storageRepository);
-      applicationHost = new ApplicationConnectionHost(serviceDeps, storageRepository);
-      ctx.provide(APPLICATION_CONNECTIONS_CAPABILITY, applicationHost);
-      ctx.provide(APPLICATION_AI_TOOLS_CAPABILITY, applicationHost.aiTools);
-      await applicationHost.initialize();
-      const onApplicationMessage = (event: MessageEvent) => {
-        void applicationHost.handleMessage(event).catch(() => console.error("[connect] Application request handling failed"));
-      };
-      const onApplicationUnload = () => applicationHost.dispose();
-      // A BFCache restoration must rebuild a stopped host, not silently revive old connection authority.
-      const onApplicationRestore = (event: PageTransitionEvent) => { if (event.persisted) window.location.reload(); };
-      window.addEventListener("message", onApplicationMessage);
-      window.addEventListener("pagehide", onApplicationUnload);
-      window.addEventListener("pageshow", onApplicationRestore);
-      resources.register<ApplicationConnectionsSnapshot, readonly string[]>({
-        id: "connect.applications", scope: "global", key: () => ["connect.applications"],
-        load: async () => applicationHost.snapshot(),
-        subscribe: (_args, _context, invalidate) => applicationHost.subscribe(invalidate), invalidation: "immediate"
-      });
-
+    const apps = await createWindowConnect(ctx);
+    const { host: applicationHost, directory } = apps;
+    ctx.provide(APP_SOURCE_INVALIDATION_CAPABILITY, { invalidateSource: keys => directory.invalidateSource(keys) });
+    ctx.provide(APPLICATION_AI_TOOLS_CAPABILITY, apps.aiTools);
+    const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
+    resources.register<ApplicationConnectionsSnapshot, readonly string[]>({
+      id: "connect.applications", scope: "global", key: () => ["connect.applications"],
+      load: async () => applicationHost.snapshot(), subscribe: (_args, _context, invalidate) => applicationHost.subscribe(invalidate), invalidation: "immediate",
+    });
       resources.register({ id: "connect.msfile-approvals", scope: "active-key", key: (_args, context) => ["connect.msfile-approvals", context.activePublicKeyHex ?? "none"],
         load: async () => ({ approvals: ctx.optionalCapability(MSFILE_SERVICE_CAPABILITY)?.listPendingApprovals() ?? [] }),
         subscribe: (_args, _context, invalidate) => {
@@ -554,26 +440,24 @@ const connectPluginDefinition = {
           return () => { offConsumer(); off(); };
         }, invalidation: "immediate" });
       const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope).view;
-      const DisplaySettings = bindConnectUi(ctx, ApplicationDisplaySettings);
+      const Launcher = bindConnectUi(ctx, MarketPage, apps);
+      const Detail = bindConnectUi(ctx, AppDetailPage, apps);
+      const Home = bindConnectUi(ctx, AppsHomeWidget, apps);
+      pages.register({ id: "connect.launcher", path: "/apps", kind: "page", label: { key: "connect.market.label", fallback: "Market" }, render: () => createElement(Launcher) });
+      pages.register({ id: "connect.detail", path: "/app/:appId", kind: "page", label: "应用详情", render: location => createElement(Detail, { key: location.params.appId, appId: location.params.appId ?? "" }) });
+      pages.register({ kind: "home", slot: "main", id: "connect.home", label: "应用", space: { id: "connect.applications", label: { key: "connect.market.domain", fallback: "Applications" }, order: 400 }, order: 60, render: () => createElement(Home) });
+      ctx.capability(BUSINESS_REGISTRY_CAPABILITY).registerFeature("protocol", "home", { id: "home.connect-apps", label: { key: "connect.market.label", fallback: "Market" }, order: 50, icon: "LayoutGrid", entry: { path: "/apps", routeId: "connect.launcher" } });
+      const DisplaySettings = bindConnectUi(ctx, ApplicationDisplaySettings, apps);
       pages.register({ kind: "page", path: "/settings/application-display", id: "connect.application-display", label: { key: "connect.applicationDisplay.title", fallback: "Application settings" }, render: () => createElement(DisplaySettings) });
       ctx.capability(BUSINESS_REGISTRY_CAPABILITY).registerFeature("protocol", "settings", {
         id: "settings.application-display", label: { key: "connect.applicationDisplay.title", fallback: "Application settings" }, order: 30, icon: "PanelsTopLeft", entry: { path: "/settings/application-display", routeId: "connect.application-display" },
       });
-      const Controls = bindConnectUi(ctx, ApplicationConnectionControls);
+      const MaskStatus = bindConnectUi(ctx, ApplicationMaskStatus, apps);
+      pages.register({ kind: "frame", slot: "screen-mask-status", id: "connect.mask-status", label: "待审批数量", render: () => createElement(MaskStatus) });
+      const Controls = bindConnectUi(ctx, ApplicationConnectionControls, apps);
       pages.register({ kind: "header", slot: "topbar", id: "connect.application-controls", order: 900, label: "应用处理记录", render: () => createElement(Controls) });
 
-      return () => {
-        window.removeEventListener("message", onApplicationMessage);
-        window.removeEventListener("pagehide", onApplicationUnload);
-        window.removeEventListener("pageshow", onApplicationRestore);
-        applicationHost.dispose();
-        // 幂等 teardown：service 内部状态在 endSession 后清空。
-        try {
-          service.dispose();
-        } catch {
-          // ignore
-        }
-      };
+      return () => apps.dispose();
   }
 } satisfies PluginManifest & { setup: PluginSetup };
 

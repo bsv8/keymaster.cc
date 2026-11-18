@@ -1,5 +1,5 @@
 // Worker-safe connect storage access (持久身份仍为 protocol)。No UI/runtime barrels are imported.
-import { openConnectStorageRepository as openRawConnectStorageRepository, type ConnectStorageStores } from "./storage/protocolStorageRepository.js";
+import { openConnectApplicationRepository, type ConnectStorageStores } from "./storage/protocolStorageRepository.js";
 import type { ConnectSessionRecord, ConnectStorageRepository } from "@keymaster/contracts";
 
 let dbPromise: Promise<ConnectStorageRepository> | undefined;
@@ -12,8 +12,10 @@ export function openConnectStorageRepository(): Promise<ConnectStorageRepository
 /** Worker bootstrap 注入 Connect（持久身份 protocol）V1 的 插件文件 借用句柄。 */
 export function configureConnectStorageRepository(
   stores: ConnectStorageStores
-): void {
-  dbPromise = Promise.resolve(openRawConnectStorageRepository(stores));
+) {
+  const owned = openConnectApplicationRepository(stores);
+  dbPromise = Promise.resolve(owned.repository);
+  return owned;
 }
 
 export async function getConnectSession(identity: import("@keymaster/contracts").NetworkIdentity, origin: string,authorizationId?:string): Promise<ConnectSessionRecord | null> {

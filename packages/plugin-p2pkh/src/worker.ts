@@ -103,6 +103,7 @@ export function createP2pkhWorkerRuntime(ports: P2pkhWorkerPorts) {
         return Object.freeze({
           identity,
           async transfer(input: Parameters<typeof service.transfer>[0]) { context.scope.assertActive(); const result = await service.transfer(input); context.scope.assertActive(); return result; },
+          async getPaymentStatus(input: Parameters<typeof service.getPaymentStatus>[0]) { context.scope.assertActive(); const result = await service.getPaymentStatus(input); context.scope.assertActive(); return result; },
           async prepareTransfer(input: Parameters<typeof service.prepareTransfer>[0]) { context.scope.assertActive(); const result = await service.prepareTransfer(input); context.scope.assertActive(); return result; },
           async submitTransfer(preview: unknown) { context.scope.assertActive(); const result = await service.submitTransfer(preview as Parameters<typeof service.submitTransfer>[0]); context.scope.assertActive(); return result; },
         });

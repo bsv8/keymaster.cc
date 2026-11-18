@@ -26,7 +26,7 @@ export interface PageUiRegistry {
   /** 使用贡献方真实 consumer 与 Scope 创建框架注册视图，归属不接受自报字符串。 */
   bind(consumer: PluginConsumer, scope: LifecycleScope): ScopedRegistryView<PageUiRegistration>;
 }
-export type PageFrameSlot = "unlocked-shell" | "screen-guard" | "wallet-entry" | "wallet-recovery" | "wallet-guard" | "storage-guard" | "onboarding" | "uri-action" | "ai-conversations" | "ai-session-list" | "ai-session-actions" | "ai-onboarding";
+export type PageFrameSlot = "screen-mask-status" | "unlocked-shell" | "screen-guard" | "wallet-entry" | "wallet-recovery" | "wallet-guard" | "storage-guard" | "onboarding" | "uri-action" | "ai-conversations" | "ai-session-list" | "ai-session-actions" | "ai-onboarding";
 export type ApplicationOpenMode = "iframe" | "popup";
 export interface ApplicationView {
   readonly mode: ApplicationOpenMode;

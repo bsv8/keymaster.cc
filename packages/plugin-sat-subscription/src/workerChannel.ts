@@ -376,7 +376,7 @@ export function createChannelWorkerRuntime(ports: ChannelWorkerPorts) {
       return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "stale-epoch" } };
     }
     if (operation.caller.kind === "connect") {
-      const session = await ports.connectSession(operation.caller, operation.caller.origin);
+      const session = await ports.connectSession(operation.caller, operation.caller.origin, operation.caller.authorizationId);
       if (!session || session.revokedAt !== null || session.origin !== operation.caller.origin || session.ownerPublicKeyHex !== operation.ownerPublicKeyHex) {
         return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "error", message: "Channel Connect session is invalid", code: "storage_identity_required" } };
       }

@@ -14,11 +14,12 @@ type HostedConnection = ApplicationConnection & { launchUrl?: string; expectedAp
 
 /** 长期应用许可与运行连接分离；断开后必须重新登录或从钱包重新打开。 */
 export class ApplicationConnectionHost implements ApplicationConnections {
+  private deleting = new Set<string>();
   private applications = new Map<string, ConnectedApplication>();
   private connections = new Map<string, HostedConnection>();
   private views = new Map<Window, ApplicationView>();
-  private incomingSource: Window | null = null;
-  private incomingRegistered = false;
+  private incomingSources = new Set<Window>();
+  private registeredSources = new Set<Window>();
   private openMode: ApplicationOpenMode | null = null;
   private listeners = new Set<() => void>();
   private history = new Map<string, ProtocolCommandRecord>();
@@ -99,6 +100,9 @@ export class ApplicationConnectionHost implements ApplicationConnections {
     try { await promise; }
     finally { if (this.loading?.promise === promise) this.loading = undefined; }
   }
+  applicationOpenModeSnapshot(): ApplicationOpenMode | null {
+    return this.disposed ? null : this.openMode;
+  }
   applicationOpenMode(): ApplicationOpenMode {
     if (this.openMode === null || this.disposed) throw new Error("Application settings unavailable");
     return this.openMode;
@@ -112,22 +116,28 @@ export class ApplicationConnectionHost implements ApplicationConnections {
     this.emit();
   }
   acceptOpener(source: Window | null): void {
-    if (this.disposed || this.incomingSource || this.incomingRegistered || !source || source.closed) return;
-    // 仅接受钱包文档的真实 opener，不从任意 postMessage 认领来源。
-    if (source !== window.opener) throw new Error("Wallet opener does not match the browser");
-    this.incomingSource = source;
+    if (this.disposed || !source || source.closed) return;
+    this.incomingSources.add(source);
     this.tryAttachIncoming();
   }
   private tryAttachIncoming(): void {
-    if (this.disposed || this.incomingRegistered || !this.incomingSource || this.incomingSource.closed || this.deps.walletState.snapshot().status !== "unlocked") return;
-    this.incomingRegistered = true;
-    this.createConnection(this.incomingSource);
-    this.emit();
+    if (this.disposed || this.deps.walletState.snapshot().status !== "unlocked") return;
+    for (const source of this.incomingSources) {
+      if (source.closed || this.registeredSources.has(source)) continue;
+      this.registeredSources.add(source);
+      this.createConnection(source);
+      this.emit();
+    }
   }
   private createConnection(source: Window, bootMode: "connect" | "appView" = "connect"): HostedConnection {
     const id = crypto.randomUUID();
     const service = createConnectService({ ...this.deps, bootMode, hostedApplication: true, resolveOpener: () => source, storageRepository: this.repo,
-      applicationIdentified: (origin, key, url,display) => this.identifyIncoming(id, origin, key, url,display),
+      applicationIdentified: (origin, key, url,display,publication) => this.verifyIncomingPublication(id, origin, key, publication),
+      applicationSessionEstablished: (origin, key, url, display, publication) => {
+        void this.registerIncomingSession(id, origin, key, url, display, publication).catch(error =>
+          console.error("Connect application registration failed", error)
+        );
+      },
       applicationLoggedOut: () => { const connection = this.connections.get(id); if (connection) { this.endConnection(connection); connection.closedAt = Date.now(); this.emit(); } },
       applicationPermissionChanged: () => this.refreshEvents() });
     const tools = new KeymasterAiToolReceiver({
@@ -197,6 +207,8 @@ export class ApplicationConnectionHost implements ApplicationConnections {
   }
   closeView(source: Window): void {
     this.views.delete(source);
+    this.incomingSources.delete(source);
+    this.registeredSources.delete(source);
     for (const connection of this.connections.values()) {
       if (connection.source !== source) continue;
       this.endConnection(connection);
@@ -205,24 +217,33 @@ export class ApplicationConnectionHost implements ApplicationConnections {
     }
     this.emit();
   }
-  private async identifyIncoming(id: string, origin: string, appPublicKeyHex: string, verifiedUrl?: string,display?:{name:string;description:string;icon:string}): Promise<void> {
+  /** 建连前只做发布验证与目录归并：低版本或目录写入失败在此拦下，不登记连接。
+   * 已登记同公钥的连接也逐次复核发布版本，重试不能跳过版本检查。 */
+  private async verifyIncomingPublication(id: string, origin: string, appPublicKeyHex: string, publication?: import("@keymaster/contracts").AppSourceEntry): Promise<void> {
     const connection = this.connections.get(id);
     if (!connection || connection.closedAt || this.disposed) throw new Error("Connection expired");
     const key = applicationKey(appPublicKeyHex);
+    if (this.deleting.has(key)) throw new Error("Application is being deleted");
     if ((connection.applicationKey && connection.applicationKey !== key) || (connection.identifyingKey && connection.identifyingKey !== key)) throw new Error("Application identity changed");
-    if (connection.applicationKey === key) return;
+    connection.origin = origin;
     connection.identifyingKey = key;
-    connection.origin=origin;
-    try {
-      const app: ConnectedApplication = { key, origin, ...(verifiedUrl ? {verifiedUrl} : {}),...(display?{display}:{}), name: display?.name??new URL(origin).host, updatedAt: Date.now() };
-      await this.repo.putApplication!(app);
-      if (connection.closedAt || this.disposed) throw new Error("Connection expired");
-      await this.recordEvent({ id: crypto.randomUUID(), applicationKey: key, at: connection.createdAt, kind: "connected", connectionId: id });
-      if (connection.closedAt || this.disposed) throw new Error("Connection expired");
-      this.applications.set(key, app);
-      connection.applicationKey = key;
-      this.emit();
-    } finally { connection.identifyingKey = undefined; }
+    try { await this.deps.applicationConnected?.(key, publication); }
+    finally { connection.identifyingKey = undefined; }
+  }
+  private async registerIncomingSession(id: string, origin: string, key: string, verifiedUrl?: string, display?: { name: string; description: string; icon: string }, publication?: import("@keymaster/contracts").AppSourceEntry): Promise<void> {
+    const connection = this.connections.get(id);
+    if (!connection || connection.closedAt || this.disposed || this.deleting.has(key) || connection.applicationKey === key) return;
+    const application: ConnectedApplication = { key, origin, ...(publication ? { publication } : {}), ...(verifiedUrl ? { verifiedUrl } : {}), ...(display ? { display } : {}), name: display?.name ?? new URL(origin).host, updatedAt: Date.now() };
+    const event: ApplicationConnectionEvent = { id: crypto.randomUUID(), applicationKey: key, at: connection.createdAt, kind: "connected", connectionId: id };
+    this.applications.set(key, application);
+    connection.applicationKey = key;
+    connection.origin = origin;
+    void this.repo.putApplication!(application).catch(error =>
+      console.error("Connect application registration write failed", error)
+    );
+    void this.recordEvent(event).catch(error =>
+      console.error("Connect connection history write failed", error)
+    );
   }
   async handleMessage(event: MessageEvent): Promise<void> {
     if (this.disposed) return;
@@ -243,7 +264,7 @@ export class ApplicationConnectionHost implements ApplicationConnections {
     // 三条通道只接受已登记的 frame、钱包打开的 App 窗口或真实 opener。
     const sourceWindow = event.source as Window;
     const view = this.views.get(sourceWindow);
-    const incoming = sourceWindow === this.incomingSource && this.incomingRegistered && !sourceWindow.closed;
+    const incoming = this.registeredSources.has(sourceWindow) && !sourceWindow.closed;
     if (view ? view.closed || event.origin !== view.origin : !incoming) return;
     // 只允许新登录或新 launch 创建运行连接，旧业务帧不能复活已断开的实例。
     // A fresh client document announces ready again. Its old runtime binding cannot
@@ -261,7 +282,7 @@ export class ApplicationConnectionHost implements ApplicationConnections {
     for (const connection of this.connections.values()) {
       if (connection.closedAt || connection.source !== event.source) continue;
       const application = this.applications.get(connection.applicationKey);
-      if (application && application.origin !== event.origin) return;
+      if (connection.origin && connection.origin !== event.origin) return;
       if (connection.tools.handle(event.data)) return;
       await connection.service.handleMessage(event);
       return;
@@ -317,6 +338,24 @@ export class ApplicationConnectionHost implements ApplicationConnections {
    */
   async permissions(key: string): Promise<ProtocolMethod[]> {return readApplicationPermissions(this.repo,assertAppPublicKeyHex(key));}
   async revokePermission(key: string, method: ProtocolMethod): Promise<void> {await setApplicationPermission(this.repo,assertAppPublicKeyHex(key),method,false);await this.refreshEvents();this.emit();}
+  /** Connect settings only: revoke live authority before removing application management material. */
+  async forgetApplication(key: string, commit: () => Promise<void>): Promise<void> {
+    assertAppPublicKeyHex(key);
+    if (this.disposed || this.deleting.has(key)) throw new Error("Application unavailable");
+    const generation = this.walletGeneration();
+    this.deleting.add(key);
+    try {
+      for (const connection of this.connections.values()) {
+        if (connection.applicationKey === key || connection.identifyingKey === key) this.endConnection(connection);
+      }
+      if (this.applications.has(key)) await this.disconnect(key);
+      if (generation !== this.walletGeneration()) throw new Error("Wallet changed");
+      await commit();
+      if (generation !== this.walletGeneration()) throw new Error("Wallet changed");
+      this.applications.delete(key);
+      this.emit();
+    } finally { this.deleting.delete(key); }
+  }
   /** 唯一的显式断开入口：先持久撤销，再撤回所有关联窗口的瞬时权限。 */
   async disconnect(key: string): Promise<void> {
     const app = this.applications.get(key);
@@ -368,7 +407,7 @@ export class ApplicationConnectionHost implements ApplicationConnections {
     this.events = events;
     this.emit();
   }
-  private async recordEvent(event: ApplicationConnectionEvent): Promise<void> { this.events = [...this.events, event]; await this.repo.putApplicationEvent!(event); this.emit(); }
+  private async recordEvent(event: ApplicationConnectionEvent): Promise<void> { await this.repo.putApplicationEvent!(event); this.events = [...this.events, event]; this.emit(); }
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;

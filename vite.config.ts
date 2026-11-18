@@ -7,6 +7,7 @@ import { createRequire } from "node:module";
 
 const appVersion = appPackage.version;
 const storagePrivateGrant = randomBytes(32).toString("hex");
+const connectPrivateGrant = randomBytes(32).toString("hex");
 /** Vite preview 不读取 Pages 的 `_headers` 文件；仅给真实媒体 SW 补部署响应头。 */
 function msFilePreviewHeaders(): Plugin {
   return {
@@ -43,6 +44,7 @@ export default defineConfig({
   define: {
     __KEYMASTER_PRODUCT_SERVICES__: "true",
     __KEYMASTER_STORAGE_PRIVATE_GRANT__: JSON.stringify(storagePrivateGrant),
+    __KEYMASTER_CONNECT_PRIVATE_GRANT__: JSON.stringify(connectPrivateGrant),
 
   },
   // 应用使用 history 路由。资源必须从站点根路径加载；相对 URL 会在

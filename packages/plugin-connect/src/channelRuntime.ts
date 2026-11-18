@@ -33,13 +33,13 @@ function ownerOperation(
   return {
     ...operation,
     ownerPublicKeyHex: caller.ownerPublicKeyHex,
-    caller: { kind: "connect", bsvNetwork: caller.bsvNetwork, publicKeyHex: caller.publicKeyHex, walletPublicKeyHex: caller.walletPublicKeyHex, origin: caller.origin }
+    caller: { kind: "connect", bsvNetwork: caller.bsvNetwork, publicKeyHex: caller.publicKeyHex, walletPublicKeyHex: caller.walletPublicKeyHex, origin: caller.origin, authorizationId: caller.authorizationId }
   };
 }
 
 /** 为 protocol Service 创建只允许 Connect caller 的 Channel facade。 */
 export function createConnectChannelRuntime(
-  coordinator: ConnectCoordinatorControl
+  coordinator: Pick<ConnectCoordinatorControl, "channelOperation" | "subscribeTopic">
 ): ConnectChannelRuntime {
   return {
     publish: async (caller: ConnectChannelCaller, input: ChannelPublishParams): Promise<ChannelPublishResult> => {
@@ -54,7 +54,7 @@ export function createConnectChannelRuntime(
       const operation: CoordinatorChannelOperation = {
         type: "subscription-set",
         ownerPublicKeyHex: caller.ownerPublicKeyHex,
-        caller: { kind: "connect", bsvNetwork: caller.bsvNetwork, publicKeyHex: caller.publicKeyHex, walletPublicKeyHex: caller.walletPublicKeyHex, origin: caller.origin },
+        caller: { kind: "connect", bsvNetwork: caller.bsvNetwork, publicKeyHex: caller.publicKeyHex, walletPublicKeyHex: caller.walletPublicKeyHex, origin: caller.origin, authorizationId: caller.authorizationId },
         channels: [...channels],
       };
       return unwrap(await coordinator.channelOperation(operation), "Channel subscription set") as ChannelSubscriptionSetResult;
@@ -63,7 +63,7 @@ export function createConnectChannelRuntime(
       const operation: CoordinatorChannelOperation = {
         type: "release",
         ownerPublicKeyHex: caller.ownerPublicKeyHex,
-        caller: { kind: "connect", bsvNetwork: caller.bsvNetwork, publicKeyHex: caller.publicKeyHex, walletPublicKeyHex: caller.walletPublicKeyHex, origin: caller.origin },
+        caller: { kind: "connect", bsvNetwork: caller.bsvNetwork, publicKeyHex: caller.publicKeyHex, walletPublicKeyHex: caller.walletPublicKeyHex, origin: caller.origin, authorizationId: caller.authorizationId },
       };
       void coordinator.channelOperation(operation).catch(() => undefined);
     },

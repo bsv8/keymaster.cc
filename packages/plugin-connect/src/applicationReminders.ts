@@ -1,6 +1,5 @@
+import { useConnectApps } from "./AppContext.js";
 import { useSyncExternalStore } from "react";
-import { APPLICATION_CONNECTIONS_CAPABILITY } from "@keymaster/contracts";
-import { usePluginCapability } from "webloom-framework/react";
 
 type ReminderState = { sound: "off" | "ready" | "failed"; notification: string };
 function createReminders() {
@@ -59,7 +58,7 @@ function createReminders() {
 // 以应用连接能力实例隔离，设置页卸载不终止顶栏运行中的提醒。
 const reminders = new WeakMap<object, ReturnType<typeof createReminders>>();
 export function useApplicationReminders() {
-  const reader = usePluginCapability(APPLICATION_CONNECTIONS_CAPABILITY);
+  const { host: reader } = useConnectApps();
   let controller = reminders.get(reader);
   if (!controller) { controller = createReminders(); reminders.set(reader, controller); }
   const state = useSyncExternalStore(controller.subscribe, controller.snapshot);

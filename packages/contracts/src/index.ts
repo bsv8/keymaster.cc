@@ -75,3 +75,5 @@ export * from "./publicKeyUri.js";
 
 export {validateAppDisplay,type AppDisplay} from "./appDisplay.js";
 export { APPLICATION_OPERATION_LABELS, applicationCommandTerminal, applicationCommandStatus } from "./applicationActivity.js";
+
+export * from "./appSources.js";
