@@ -179,8 +179,8 @@ importers:
         specifier: ^5.1.6
         version: 5.1.6
       keymaster-connect:
-        specifier: 0.1.8
-        version: 0.1.8
+        specifier: 0.2.0
+        version: 0.2.0
       webloom-framework:
         specifier: 0.6.0
         version: 0.6.0(react@18.3.1)
@@ -296,8 +296,8 @@ importers:
         specifier: ^2.2.0
         version: 2.4.0
       keymaster-connect:
-        specifier: 0.1.8
-        version: 0.1.8
+        specifier: 0.2.0
+        version: 0.2.0
       keymaster-multisig-pool:
         specifier: 1.5.0
         version: 1.5.0
@@ -1970,8 +1970,8 @@ packages:
   keyhold@2.1.0:
     resolution: {integrity: sha512-MsphUUVSp9VcpNuO5m7Ug4kd1yhUSr8HUBgZ22EzM0PwwzA1SU8fbf0omgy2apBW7yiVY5yX/7ITd2ow5BDvSQ==}
 
-  keymaster-connect@0.1.8:
-    resolution: {integrity: sha512-X+vln/KDBfq3WyrxdseHoDuM7Cv1BaymVs9POPA7nycXlYp4W7s5/VG5XoiLPCab/FiQTDIScRpeNwBhJDIjKg==}
+  keymaster-connect@0.2.0:
+    resolution: {integrity: sha512-2pjImZZRu908rPx3sZyXxFiKnSqgMw4Oiu0MWyEo0KkSoQBdpKirsNNuP/V+HQqN3Dt2uN8lkj0JJQUO68DSvQ==}
     engines: {node: '>=20.19'}
 
   keymaster-multisig-pool@1.5.0:
@@ -4608,7 +4608,7 @@ snapshots:
     dependencies:
       '@noble/curves': 2.2.0
 
-  keymaster-connect@0.1.8:
+  keymaster-connect@0.2.0:
     dependencies:
       '@noble/curves': 2.4.0
       '@noble/hashes': 2.4.0
