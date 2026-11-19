@@ -20,7 +20,7 @@
     "@noble/hashes": "^2.0.1",
     "@noble/secp256k1": "^2.2.0",
     "lucide-react": "^0.468.0",
-    "webloom-framework": "0.6.0"
+    "webloom-framework": "0.6.3"
   },
   "scripts": {}
 }

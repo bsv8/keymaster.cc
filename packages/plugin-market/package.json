@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./worker": "./src/worker.ts"
+    "./worker": "./src/worker.ts",
+    "./assembly": "./src/marketWorkerContract.ts"
   },
   "types": "./src/index.ts",
   "dependencies": {
@@ -13,9 +14,10 @@
     "@noble/hashes": "^2.2.0",
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
-    "webloom-framework": "0.6.0",
+    "webloom-framework": "0.6.3",
     "@keymaster/ui": "*",
-    "lucide-react": "^0.468.0"
+    "lucide-react": "^0.468.0",
+    "keymaster-market-protocol": "0.1.1"
   },
   "scripts": {}
 }

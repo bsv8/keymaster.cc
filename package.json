@@ -5,7 +5,7 @@
   "type": "module",
   "packageManager": "pnpm@11.5.1",
   "config": {
-    "webloomFrameworkReleaseVersion": "0.6.0"
+    "webloomFrameworkReleaseVersion": "0.6.3"
   },
   "workspaces": [
     "packages/*",
@@ -79,11 +79,11 @@
     "buffer": "^6.0.3",
     "keyhold": "2.1.0",
     "sat-subscription-protocol": "0.3.0",
-    "webloom-framework": "0.6.0",
+    "webloom-framework": "0.6.3",
     "@keymaster/plugin-page": "*",
     "@keymaster/plugin-scan": "workspace:*"
   },
-  "description": "\u672c\u5730\u4f18\u5148\u7684 BSV \u6d4f\u89c8\u5668\u94b1\u5305\u3002\u57fa\u4e8e\u63d2\u4ef6\u67b6\u6784\uff0c\u6309\"\u57fa\u7840\u8bbe\u65bd / \u5e73\u53f0 / \u4e1a\u52a1\"\u4e09\u5c42\u5206\u79bb\u3002",
+  "description": "本地优先的 BSV 浏览器钱包。基于插件架构，按\"基础设施 / 平台 / 业务\"三层分离。",
   "main": "index.js",
   "directories": {
     "doc": "docs"

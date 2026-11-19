@@ -33,10 +33,9 @@ export function AppsHomeWidget() {
       <Button variant="secondary" onClick={() => navigateTo("/apps")}>应用市场</Button>
     </header>
     {snapshot.persistError && <p role="alert">{snapshot.persistError}</p>}
-    {snapshot.error && <p role="alert">市场暂时不可用，本地项仍保留。</p>}
     {error && <p role="alert" className="apps-home-widget__error">{error}</p>}
     {snapshot.loading && <p className="apps-home-widget__empty" role="status">正在读取目录…</p>}
-    {!snapshot.loading && !snapshot.entries.length && !snapshot.pending.length && <p className="apps-home-widget__empty">尚未添加应用，可前往应用市场选择。</p>}
+    {!snapshot.loading && !snapshot.entries.length && <p className="apps-home-widget__empty">尚未添加应用，可前往应用市场选择。</p>}
     <div className="apps-home-widget__grid" aria-busy={busy !== undefined}>
       {snapshot.entries.map(entry => {
         const target = launchTarget(entry);
@@ -48,20 +47,6 @@ export function AppsHomeWidget() {
           {busy === id && <span className="apps-home-widget__item-status">正在打开…</span>}
           {!target && <span className="apps-home-widget__item-status">{entry.urls.length ? "当前入口不可用" : "需使用 CLI"}</span>}
         </button>;
-      })}
-      {snapshot.pending.map(pending => {
-        const name = pending.name || "新应用";
-        const id = pending.pendingId;
-        return <div key={id}>
-          <button type="button" className="apps-home-widget__item" disabled={!pending.url || busy !== undefined} data-entry-url={pending.url} data-testid={`apps-home-open-${(pending.url ?? id).replace(/[^a-z0-9]+/gi, "-")}`} onClick={() => {
-            if (pending.url) void open(id, { url: pending.url, name: pending.name, pendingId: id, marketListed: false, local: true, favorite: false });
-          }}>
-            <AppIcon size={76} icon={pending.icon} url={pending.url} name={name} />
-            <span className="apps-home-widget__item-name">{name}</span>
-            <span className="apps-home-widget__item-status">{busy === id ? "正在打开…" : pending.url ? "待验证" : "待验证 · 需使用 CLI"}</span>
-          </button>
-          {pending.error && <p className="apps-home-widget__error" role="alert">{pending.error}</p>}
-        </div>;
       })}
     </div>
   </section>;

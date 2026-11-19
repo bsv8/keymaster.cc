@@ -1,6 +1,6 @@
 import { defineCapability } from "webloom-framework";
 import type { ApplicationConnectionsSnapshot, ConnectAuthSnapshot, ConnectCommandFeedState, ApplicationOpenMode, LaunchAppViewInput, ProtocolMethod, ConnectedAiTool } from "@keymaster/contracts";
-import type { AppDirectorySnapshot, AppLocalInput } from "./catalog.js";
+import type { AppDirectorySnapshot } from "./catalog.js";
 export type ConnectWorkerCommand =
  | { type: "snapshot" }
  | { type: "register-opener"; sourceId: string }
@@ -16,10 +16,6 @@ export type ConnectWorkerCommand =
  | { type: "opening"; mode: ApplicationOpenMode }
  | { type: "list" }
  | { type: "favorite"; key: string }
- | { type: "add-local"; input: AppLocalInput }
- | { type: "invalidate-source"; keys: readonly string[] }
- | { type: "invalidate-local"; key: string }
- | { type: "remove-pending"; pendingId: string }
  | { type: "select"; key: string; selection: { url?: string; indexseedhashhex?: string } }
  | { type: "delete-app"; key: string }
  | { type: "ai-invoke"; id: string; args: unknown };

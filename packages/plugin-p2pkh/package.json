@@ -15,7 +15,7 @@
     "@noble/secp256k1": "^2.1.0",
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
-    "webloom-framework": "0.6.0",
+    "webloom-framework": "0.6.3",
     "@keymaster/ui": "*",
     "@bsv/sdk": "^2.1.7",
     "qrcode.react": "^4.2.0",

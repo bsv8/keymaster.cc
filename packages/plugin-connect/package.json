@@ -16,7 +16,7 @@
     "@bsv/sdk": "^1.6.12",
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
-    "webloom-framework": "0.6.0",
+    "webloom-framework": "0.6.3",
     "@keymaster/ui": "*",
     "lucide-react": "^0.468.0",
     "@noble/curves": "^2.2.0",

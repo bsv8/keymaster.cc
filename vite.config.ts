@@ -45,6 +45,7 @@ export default defineConfig({
     __KEYMASTER_PRODUCT_SERVICES__: "true",
     __KEYMASTER_STORAGE_PRIVATE_GRANT__: JSON.stringify(storagePrivateGrant),
     __KEYMASTER_CONNECT_PRIVATE_GRANT__: JSON.stringify(connectPrivateGrant),
+    __KEYMASTER_MARKET_PRIVATE_GRANT__: JSON.stringify(randomBytes(32).toString("hex")),
 
   },
   // 应用使用 history 路由。资源必须从站点根路径加载；相对 URL 会在

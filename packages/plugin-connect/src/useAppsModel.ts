@@ -22,7 +22,7 @@ export function useAppsModel() {
   const entries: AppDirectoryEntry[] = [...snapshot.entries];
   for (const app of applications.applications) {
     if (snapshot.deletedKeys.includes(app.key) || entries.some(entry => entry.appPublicKeyHex === app.key)) continue;
-    entries.push({ appVersion:app.publication?.appVersion??"", appPublicKeyHex: app.key, name: app.display?.name ?? app.name, description: app.display?.description, icon: app.display?.icon, urls: app.verifiedUrl && app.display ? [{ url: app.verifiedUrl, origin: new URL(app.verifiedUrl).origin, display: app.display }] : [], files: [], marketListed: false, favorite: snapshot.favoriteKeys.includes(app.key), local: false });
+    entries.push({ appVersion:app.publication?.appVersion??"", appPublicKeyHex: app.key, name: app.display?.name ?? app.name, description: app.display?.description, icon: app.display?.icon, urls: app.verifiedUrl && app.display ? [{ url: app.verifiedUrl, origin: new URL(app.verifiedUrl).origin, display: app.display }] : [], files: [], favorite: snapshot.favoriteKeys.includes(app.key) });
   }
   async function open(target: AppLaunchTarget) {
     if (launching.current) return;

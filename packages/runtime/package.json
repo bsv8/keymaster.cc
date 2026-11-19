@@ -11,7 +11,7 @@
   "types": "./src/index.ts",
   "dependencies": {
     "@keymaster/contracts": "*",
-    "webloom-framework": "0.6.0"
+    "webloom-framework": "0.6.3"
   },
   "devDependencies": {
     "@keymaster/platform-storage": "workspace:*"

@@ -16,7 +16,7 @@
     "@keymaster/contracts": "*",
     "@keymaster/msfile-media": "*",
     "@keymaster/runtime": "*",
-    "webloom-framework": "0.6.0",
+    "webloom-framework": "0.6.3",
     "@keymaster/ui": "*",
     "masterseed": "1.1.0",
     "@libp2p/webrtc": "7.0.2",

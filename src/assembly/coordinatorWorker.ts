@@ -1,7 +1,9 @@
 import { createConnectWorkerPlugin } from "@keymaster/plugin-connect/worker";
 import { CONNECT_PRIVATE_COMMAND, CONNECT_PRIVATE_EVENTS } from "@keymaster/plugin-connect/assembly";
+import { MARKET_PRIVATE_COMMAND, MARKET_PRIVATE_EVENTS } from "@keymaster/plugin-market/assembly";
 import { createMarketWorkerPlugin } from "@keymaster/plugin-market/worker";
 import { connectPrivateCapabilities } from "./connectPrivateCapabilities.js";
+import { marketPrivateCapabilities } from "./marketPrivateCapabilities.js";
 import { createConnectChannelRuntime } from "@keymaster/plugin-connect/worker";
 import { createRuntimeExit, RuntimeRestartRequiredError } from "../coordinator/runtimeExit.js";
 import { traceDev } from "@keymaster/contracts";
@@ -1306,6 +1308,8 @@ interface CoordinatorPeerState {
   serviceExposure?: { revoke(): void };
   /** 当前 owner/session 世代对应的 WebLoom service exposure；旋转后旧 proxy 必须失效。 */
   serviceExposureIdentity?: string;
+  /** 按服务分组的可选私有暴露；缺失组在后续 reconcile 中补齐，不阻塞核心会话。 */
+  optionalExposures?: Map<string, { revoke(): void }>;
   sessionBinding?: CoordinatorSessionBinding;
   openCommitOrder?: number;
   bridgeRequests: Set<CoordinatorBridgeRequest>;
@@ -1739,6 +1743,46 @@ function publishCoordinatorWorkerUnitSnapshot(): void {
     workerUnitRevision: coordinatorRuntimeUnitRevision(),
     units: coordinatorRuntimeUnitSnapshots(),
   } satisfies Omit<CoordinatorWorkerUnitStateEvent, "topic" | "sessionEpoch">);
+}
+
+/**
+ * 业务运行批次：钱包业务运行实例的唯一标识。
+ *
+ * 密钥可用且存储绑定成功后，以 SharedWorker 本轮应加载的业务单元为准开启一批。
+ * 重复 reconcile、打开或刷新 Tab、解除遮罩都不创建新批次；真正销毁并重建钱包
+ * 业务运行实例后才开启新批次。旧批次的迟到结果不得写入新钱包。
+ */
+let currentBusinessRunId: string | undefined;
+let currentLoadBatchId: string | undefined;
+function businessRunId(): string | undefined {
+  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) return undefined;
+  return `${coordinatorState.sessionEpoch}:${coordinatorState.runGeneration}:${coordinatorState.walletGeneration ?? ""}:${coordinatorState.activePublicKeyHex}`;
+}
+function businessLoadParticipants(): string[] {
+  return [...new Set(COORDINATOR_WORKER_UNIT_CATALOG.map(unit => unit.productId))];
+}
+/** 解锁绑定确认后先记录本轮运行实例；批次在 reconcile 之后开启。 */
+function noteBusinessRunStarted(): void {
+  const runId = businessRunId();
+  if (!runId) return;
+  if (runId !== currentBusinessRunId) {
+    currentBusinessRunId = runId;
+    currentLoadBatchId = undefined;
+  }
+}
+function startBusinessLoadBatch(): void {
+  if (!currentBusinessRunId || currentLoadBatchId) return;
+  const app = coordinatorRuntimeApp as unknown as { startLoadBatch?: (pluginIds: readonly string[]) => string } | undefined;
+  if (!app || typeof app.startLoadBatch !== "function") {
+    console.warn("[coordinator] WebLoom load batch API unavailable; Market first sync requires the updated webloom-framework");
+    return;
+  }
+  try {
+    currentLoadBatchId = app.startLoadBatch(businessLoadParticipants());
+  } catch (error) {
+    console.warn("[coordinator] business load batch start failed", error instanceof Error ? error.message : String(error));
+    currentLoadBatchId = undefined;
+  }
 }
 
 function currentOwnerWorkerUnitIdentity(): { ownerPublicKeyHex: string; sessionEpoch: SessionEpoch } {
@@ -2493,6 +2537,7 @@ async function completeUnlockedBinding(cause: SessionStateEvent["cause"] = "unlo
       await loadCoordinatorMeta();
       if (coordinatorState.sessionEpoch !== bindingEpoch) throw storageUnavailableError("Wallet unlock was revoked during platform storage binding");
     }
+    noteBusinessRunStarted();
     bindCoordinatorTaskUnitsToOwner();
     try {
       await ensureMsfileBitfsBuyerRecovery(publicKeyHex);
@@ -2501,6 +2546,9 @@ async function completeUnlockedBinding(cause: SessionStateEvent["cause"] = "unlo
     }
     await reconcileCoordinatorRuntime();
     if (coordinatorState.sessionEpoch !== bindingEpoch || coordinatorState.vaultStatus !== "unlocked") throw storageUnavailableError("Wallet unlock was revoked during runtime binding");
+    // 批次在 reconcile 之后开启：观察本轮加载的最新收敛结果，避免把
+    // reconcile 之前的阻塞/就绪旧态当成本轮结束而提前结算。
+    startBusinessLoadBatch();
   } catch (error) {
     await closeWalletRuntime("worker-unit-bind-failed");
     throw error;
@@ -2928,10 +2976,15 @@ function coordinatorSessionClosed(peerId: string, binding: CoordinatorSessionBin
 }
 
 const COORDINATOR_SESSION_EXPOSURES = [
-  CONNECT_PRIVATE_COMMAND, CONNECT_PRIVATE_EVENTS,
   STORAGE_PRIVATE_BROWSE_CAPABILITY,
   COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
   COORDINATOR_CRYPTO_RPC_CAPABILITY,
+] as const;
+const CONNECT_PRIVATE_EXPOSURES = [
+  CONNECT_PRIVATE_COMMAND, CONNECT_PRIVATE_EVENTS,
+] as const;
+const MARKET_PRIVATE_EXPOSURES = [
+  MARKET_PRIVATE_COMMAND, MARKET_PRIVATE_EVENTS,
 ] as const;
 
 /** 当前 owner/session 世代中可向 Window 暴露的 Coordinator 服务。 */
@@ -2960,6 +3013,71 @@ function coordinatorSessionGrantId(state: CoordinatorPeerState, capabilityId: st
 }
 
 /**
+ * 将当前 owner/session 世代投影到真实 WebLoom exposure，核心与私有面分组独立。
+ *
+ * 暴露 reference 的 serviceInstanceId/grantId 由 WebLoom 生成并绑定到
+ * 当前 group；owner 锁定、换 Key、Storage Root 重绑时先撤销旧 group，
+ * 下一次 ready 才建立新 group。这样旧 proxy 即使仍在页面中也不能跨越
+ * session epoch 或 walletState generation。
+ *
+ * 三组独立暴露：核心会话面失败时整体失败；Connect/Market 私有面按各自
+ * 就绪情况分别暴露，一组缺失（如 Connect 加载失败）不阻止另一组，
+ * Market 设置页仍可读取「Connect 不可用」。
+ */
+/** 可选私有暴露组：label → 能力组。缺失组由 reconcile 补齐。 */
+const SESSION_OPTIONAL_EXPOSURE_GROUPS = [
+  ["connect", CONNECT_PRIVATE_EXPOSURES],
+  ["market", MARKET_PRIVATE_EXPOSURES],
+] as const;
+
+function exposeSessionGroups(state: CoordinatorPeerState): { revoke(): void } {
+  const grants = (capability: { id: string }) => ({ grantId: coordinatorSessionGrantId(state, capability.id) });
+  const core = state.peer.exposeGroup(COORDINATOR_SESSION_EXPOSURES.map((capability) => ({
+    capability,
+    options: capability === STORAGE_PRIVATE_BROWSE_CAPABILITY
+      ? {}
+      : grants(capability),
+  })));
+  const groups = new Map<string, { revoke(): void }>([["core", core]]);
+  state.optionalExposures = groups;
+  backfillSessionOptionalExposures(state);
+  let revoked = false;
+  return {
+    revoke() {
+      if (revoked) return;
+      revoked = true;
+      if (state.optionalExposures === groups) state.optionalExposures = undefined;
+      for (const group of [...groups.values()].reverse()) {
+        try { group.revoke(); } catch { /* best effort */ }
+      }
+    },
+  };
+}
+
+/**
+ * 补齐缺失的可选私有组。
+ *
+ * 会话暴露可能早于提供方单元 setup 完成：首轮 exposeGroup 会因能力尚未
+ * 注册而失败。这里在每次会话 exposure reconcile 时重试缺失组，提供方完成
+ * setup 后自动补上；已存在的组跳过，不重复暴露。
+ */
+function backfillSessionOptionalExposures(state: CoordinatorPeerState): void {
+  const groups = state.optionalExposures;
+  if (!groups) return;
+  for (const [label, capabilities] of SESSION_OPTIONAL_EXPOSURE_GROUPS) {
+    if (groups.has(label)) continue;
+    try {
+      // 私有票据由框架按连接与消费实例签发，不使用公共会话 grant。
+      groups.set(label, state.peer.exposeGroup(capabilities.map((capability) => ({ capability, options: {} }))));
+    } catch (error) {
+      // 可选私有面缺失（如提供方单元尚未完成 setup）只记录；下一轮 reconcile 再试。
+      traceDev("coordinator.session", "optional-exposure-unavailable", () => ({ label, error: error instanceof Error ? error.message : String(error) }));
+      console.warn("[coordinator] session optional exposure unavailable", label, error instanceof Error ? error.message : String(error));
+    }
+  }
+}
+
+/**
  * 将当前 owner/session 世代投影到真实 WebLoom exposure。
  *
  * 暴露 reference 的 serviceInstanceId/grantId 由 WebLoom 生成并绑定到
@@ -2973,7 +3091,11 @@ function reconcileCoordinatorSessionExposure(state: CoordinatorPeerState): void 
     && state.peer.scope.state === "active"
     && coordinatorSessionServicesReady();
   const identity = ready ? coordinatorSessionExposureIdentity() : undefined;
-  if (state.serviceExposure && state.serviceExposureIdentity === identity) return;
+  if (state.serviceExposure && state.serviceExposureIdentity === identity) {
+    // 身份未变时仍补齐缺失的可选私有组：首轮暴露可能早于提供方 setup 完成。
+    if (identity) backfillSessionOptionalExposures(state);
+    return;
+  }
 
   state.serviceExposure?.revoke();
   state.serviceExposure = undefined;
@@ -2981,12 +3103,7 @@ function reconcileCoordinatorSessionExposure(state: CoordinatorPeerState): void 
   if (!identity) return;
 
   try {
-    state.serviceExposure = state.peer.exposeGroup(COORDINATOR_SESSION_EXPOSURES.map((capability) => ({
-      capability,
-      options: (capability === STORAGE_PRIVATE_BROWSE_CAPABILITY || capability === CONNECT_PRIVATE_COMMAND || capability === CONNECT_PRIVATE_EVENTS)
-        ? {} // 私有票据由框架按连接与消费实例签发，不使用公共会话 grant。
-        : { grantId: coordinatorSessionGrantId(state, capability.id) },
-    })));
+    state.serviceExposure = exposeSessionGroups(state);
     state.serviceExposureIdentity = identity;
   } catch (error) {
     // 只有已确认的 endpoint/scope close race 可以收口；active peer 上的
@@ -3085,12 +3202,7 @@ async function openCoordinatorSession(
         // publish is itself transactional; sessionOpen and physical I/O owner
         // become visible only after it has committed successfully.
         const serviceExposure = coordinatorSessionServicesReady()
-          ? state.peer.exposeGroup(COORDINATOR_SESSION_EXPOSURES.map((capability) => ({
-            capability,
-            options: (capability === STORAGE_PRIVATE_BROWSE_CAPABILITY || capability === CONNECT_PRIVATE_COMMAND || capability === CONNECT_PRIVATE_EVENTS)
-              ? {} // 私有票据由框架按连接与消费实例签发，不使用公共会话 grant。
-              : { grantId: coordinatorSessionGrantId(state, capability.id) },
-          })))
+          ? exposeSessionGroups(state)
           : undefined;
         state.serviceExposure = serviceExposure;
         state.serviceExposureIdentity = serviceExposure ? coordinatorSessionExposureIdentity() : undefined;
@@ -3343,13 +3455,13 @@ export function coordinatorHostOptions() {
   return {
     id: "keymaster-coordinator",
     plugins: [coordinatorTransportPlugin, ...coordinatorRuntimePlugins],
-    privateCapabilities: [...storagePrivateCapabilities(), ...connectPrivateCapabilities()],
+    privateCapabilities: [...storagePrivateCapabilities(), ...connectPrivateCapabilities(), ...marketPrivateCapabilities()],
     expose: [
       COORDINATOR_RPC_CAPABILITY,
       COORDINATOR_TOPIC_STREAM_CAPABILITY,
     ],
     peerExposureAllowlist: [
-      CONNECT_PRIVATE_COMMAND, CONNECT_PRIVATE_EVENTS,
+      CONNECT_PRIVATE_COMMAND, CONNECT_PRIVATE_EVENTS, MARKET_PRIVATE_COMMAND, MARKET_PRIVATE_EVENTS,
       STORAGE_PRIVATE_BROWSE_CAPABILITY,
       COORDINATOR_OWNER_STORAGE_RPC_CAPABILITY,
       COORDINATOR_CRYPTO_RPC_CAPABILITY,

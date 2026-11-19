@@ -24,7 +24,7 @@ export function createWindowConnect(ctx: PluginContext) {
  const listeners=new Set<()=>void>(),directoryListeners=new Set<()=>void>();
  const sources=new Map<string,{source:Window;view?:ApplicationView}>();
  const sourceIds=new Map<Window,string>(), services=new Map<string,ConnectService>();
- let state:ConnectWorkerSnapshot = {revision:-1,applications:{applications:[],connections:[],commands:[],events:[],historyAvailable:false},directory:{entries:[],pending:[],favoriteKeys:[],deletedKeys:[],loading:true,error:null,persistError:null,lastSuccessfulFetchAt:null},opening:null,tools:[]};
+ let state:ConnectWorkerSnapshot = {revision:-1,applications:{applications:[],connections:[],commands:[],events:[],historyAvailable:false},directory:{entries:[],favoriteKeys:[],deletedKeys:[],loading:false,error:null,persistError:null},opening:null,tools:[]};
  let current:ApplicationConnectionsSnapshot={applications:[],connections:[],commands:[],events:[],historyAvailable:false};
  let stopped=false;
  function apply(next:ConnectWorkerSnapshot) {
@@ -82,9 +82,7 @@ export function createWindowConnect(ctx: PluginContext) {
  const directory:WindowAppDirectory={
   subscribe(listener){directoryListeners.add(listener);return()=>{directoryListeners.delete(listener)}},getSnapshot:()=>state!.directory,
   list:async()=>{await call({type:"list"});return state!.directory},
-  toggleFavorite:(key)=>call({type:"favorite",key}).then(()=>{}),addLocal:input=>call({type:"add-local",input}) as Promise<import("./catalog.js").AppPendingEntry>,
-  invalidateSource:keys=>call({type:"invalidate-source",keys}).then(()=>{}),invalidateLocal:key=>call({type:"invalidate-local",key}).then(()=>{}),
-  removePending:pendingId=>call({type:"remove-pending",pendingId}).then(()=>{}),select:(key,selection)=>call({type:"select",key,selection}).then(()=>{}),
+  toggleFavorite:(key)=>call({type:"favorite",key}).then(()=>{}),select:(key,selection)=>call({type:"select",key,selection}).then(()=>{}),
   deleteApp:key=>call({type:"delete-app",key}).then(()=>{}),
  };
  let launching=false;

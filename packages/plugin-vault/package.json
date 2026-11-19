@@ -20,7 +20,7 @@
     "@noble/secp256k1": "^2.2.0",
     "keyhold": "2.1.0",
     "lucide-react": "^0.468.0",
-    "webloom-framework": "0.6.0",
+    "webloom-framework": "0.6.3",
     "bsv8-channel-protocol": "0.6.0",
     "bitfs-protocol": "0.5.1"
   },

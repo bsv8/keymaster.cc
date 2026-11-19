@@ -1,5 +1,5 @@
 import { createElement } from "react";
-import { APP_MARKET_SYNC_CAPABILITY, APP_SOURCE_INVALIDATION_CAPABILITY, APPLICATION_AI_TOOLS_CAPABILITY, BUSINESS_REGISTRY_CAPABILITY, STORAGE_FILE_CLIENTS_CAPABILITY, VAULT_WORKER_CRYPTO_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, P2PKH_WORKER_TRANSFER_CAPABILITY, MSFILE_SERVICE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, PAGE_UI_REGISTRY_CAPABILITY, PAGE_UI_RENDERER_CAPABILITY, OWNED_RESOURCE_ACCESS_CAPABILITY, I18N_SERVICE_CAPABILITY, defineRuntimeUnitDependencies, type ApplicationConnectionsSnapshot, type I18nPluginResources, type PluginContext, type PluginManifest, type PluginSetup } from "@keymaster/contracts";
+import { CONNECT_APP_SOURCE_BATCH_CAPABILITY, APPLICATION_AI_TOOLS_CAPABILITY, BUSINESS_REGISTRY_CAPABILITY, STORAGE_FILE_CLIENTS_CAPABILITY, VAULT_WORKER_CRYPTO_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, P2PKH_WORKER_TRANSFER_CAPABILITY, MSFILE_SERVICE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, PAGE_UI_REGISTRY_CAPABILITY, PAGE_UI_RENDERER_CAPABILITY, OWNED_RESOURCE_ACCESS_CAPABILITY, I18N_SERVICE_CAPABILITY, defineRuntimeUnitDependencies, type ApplicationConnectionsSnapshot, type I18nPluginResources, type PluginContext, type PluginManifest, type PluginSetup } from "@keymaster/contracts";
 import { createWindowConnect } from "./windowConnect.js";
 import { CONNECT_PRIVATE_COMMAND, CONNECT_PRIVATE_EVENTS } from "./connectWorkerContract.js";
 import { MarketPage } from "./MarketPage.js";
@@ -391,7 +391,7 @@ const connectPluginDefinition = {
     runtime: "window-main",
     connect: { providerMethods: ["connect.login", "connect.logout", "connect.launch"] },
     scopeKind: "storage",
-    provides: [APP_SOURCE_INVALIDATION_CAPABILITY, APPLICATION_AI_TOOLS_CAPABILITY],
+    provides: [APPLICATION_AI_TOOLS_CAPABILITY],
     dependencies: defineRuntimeUnitDependencies([
       { capability: PAGE_UI_REGISTRY_CAPABILITY, reason: "注册 Connect 与应用连接中心" },
       { capability: PAGE_UI_RENDERER_CAPABILITY, reason: "钱包内的跨源应用工作区" },
@@ -404,7 +404,7 @@ const connectPluginDefinition = {
     ]),
   }, {
     id: "protocol.coordinator-worker", runtime: "shared-worker", scopeKind: "storage",
-    provides: [], privateProvides: [CONNECT_PRIVATE_COMMAND, CONNECT_PRIVATE_EVENTS],
+    provides: [CONNECT_APP_SOURCE_BATCH_CAPABILITY], privateProvides: [CONNECT_PRIVATE_COMMAND, CONNECT_PRIVATE_EVENTS],
     storages: [CONNECT_STORAGE_DECLARATIONS.files],
     dependencies: defineRuntimeUnitDependencies([
       { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "shared-worker", reason: "Connect 唯一业务仓储" },
@@ -412,14 +412,12 @@ const connectPluginDefinition = {
       { capability: P2PKH_WORKER_TRANSFER_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "通过已绑定的 Worker 转账能力执行付款" },
       { capability: VAULT_WORKER_CRYPTO_CAPABILITY, sourceRuntime: "shared-worker", reason: "Vault 独占的受控密码学句柄" },
       { capability: MSFILE_SERVICE_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "已声明的 MSFile 公开方法" },
-      { capability: APP_MARKET_SYNC_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "同步市场来源资料" },
     ]),
   }],
   i18n: connectResources,
   async setup(ctx: PluginContext) {
     const apps = await createWindowConnect(ctx);
-    const { host: applicationHost, directory } = apps;
-    ctx.provide(APP_SOURCE_INVALIDATION_CAPABILITY, { invalidateSource: keys => directory.invalidateSource(keys) });
+    const { host: applicationHost } = apps;
     ctx.provide(APPLICATION_AI_TOOLS_CAPABILITY, apps.aiTools);
     const resources = ctx.capability(RESOURCE_REGISTRY_CAPABILITY);
     resources.register<ApplicationConnectionsSnapshot, readonly string[]>({

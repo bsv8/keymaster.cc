@@ -121,8 +121,8 @@ importers:
         specifier: 0.3.0
         version: 0.3.0
       webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
+        specifier: 0.6.3
+        version: 0.6.3(react@18.3.1)
     devDependencies:
       '@noble/secp256k1':
         specifier: ^2.2.0
@@ -182,8 +182,8 @@ importers:
         specifier: 0.2.0
         version: 0.2.0
       webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
+        specifier: 0.6.3
+        version: 0.6.3(react@18.3.1)
 
   packages/msfile-media:
     dependencies:
@@ -218,8 +218,8 @@ importers:
         specifier: ^0.468.0
         version: 0.468.0(react@18.3.1)
       webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
+        specifier: 0.6.3
+        version: 0.6.3(react@18.3.1)
 
   packages/plugin-ai:
     dependencies:
@@ -251,8 +251,8 @@ importers:
         specifier: 4.0.1
         version: 4.0.1
       webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
+        specifier: 0.6.3
+        version: 0.6.3(react@18.3.1)
 
   packages/plugin-background:
     dependencies:
@@ -269,8 +269,8 @@ importers:
         specifier: ^0.468.0
         version: 0.468.0(react@18.3.1)
       webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
+        specifier: 0.6.3
+        version: 0.6.3(react@18.3.1)
 
   packages/plugin-connect:
     dependencies:
@@ -305,8 +305,8 @@ importers:
         specifier: ^0.468.0
         version: 0.468.0(react@18.3.1)
       webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
+        specifier: 0.6.3
+        version: 0.6.3(react@18.3.1)
 
   packages/plugin-market:
     dependencies:
@@ -325,12 +325,15 @@ importers:
       '@noble/hashes':
         specifier: ^2.2.0
         version: 2.4.0
+      keymaster-market-protocol:
+        specifier: 0.1.1
+        version: 0.1.1
       lucide-react:
         specifier: ^0.468.0
         version: 0.468.0(react@18.3.1)
       webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
+        specifier: 0.6.3
+        version: 0.6.3(react@18.3.1)
 
   packages/plugin-msfile:
     dependencies:
@@ -374,8 +377,8 @@ importers:
         specifier: 1.1.0
         version: 1.1.0
       webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
+        specifier: 0.6.3
+        version: 0.6.3(react@18.3.1)
 
   packages/plugin-p2pkh:
     dependencies:
@@ -407,8 +410,8 @@ importers:
         specifier: ^4.2.0
         version: 4.2.0(react@18.3.1)
       webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
+        specifier: 0.6.3
+        version: 0.6.3(react@18.3.1)
 
   packages/plugin-page:
     dependencies:
@@ -428,8 +431,8 @@ importers:
         specifier: ^18.3.1
         version: 18.3.1
       webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
+        specifier: 0.6.3
+        version: 0.6.3(react@18.3.1)
     devDependencies:
       bsv8-channel-protocol:
         specifier: 0.6.0
@@ -468,8 +471,8 @@ importers:
         specifier: 0.1.0
         version: 0.1.0(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)))
       webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
+        specifier: 0.6.3
+        version: 0.6.3(react@18.3.1)
 
   packages/plugin-scan:
     dependencies:
@@ -492,8 +495,8 @@ importers:
         specifier: ^18.3.1
         version: 18.3.1
       webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
+        specifier: 0.6.3
+        version: 0.6.3(react@18.3.1)
 
   packages/plugin-vault:
     dependencies:
@@ -528,8 +531,8 @@ importers:
         specifier: ^0.468.0
         version: 0.468.0(react@18.3.1)
       webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
+        specifier: 0.6.3
+        version: 0.6.3(react@18.3.1)
 
   packages/plugin-window-p2p:
     dependencies:
@@ -555,8 +558,8 @@ importers:
         specifier: 0.3.0
         version: 0.3.0
       webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
+        specifier: 0.6.3
+        version: 0.6.3(react@18.3.1)
 
   packages/plugin-woc:
     dependencies:
@@ -573,8 +576,8 @@ importers:
         specifier: ^1.4.0
         version: 1.8.0
       webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
+        specifier: 0.6.3
+        version: 0.6.3(react@18.3.1)
 
   packages/runtime:
     dependencies:
@@ -582,8 +585,8 @@ importers:
         specifier: '*'
         version: link:../contracts
       webloom-framework:
-        specifier: 0.6.0
-        version: 0.6.0(react@18.3.1)
+        specifier: 0.6.3
+        version: 0.6.3(react@18.3.1)
     devDependencies:
       '@keymaster/platform-storage':
         specifier: workspace:*
@@ -1974,6 +1977,9 @@ packages:
     resolution: {integrity: sha512-2pjImZZRu908rPx3sZyXxFiKnSqgMw4Oiu0MWyEo0KkSoQBdpKirsNNuP/V+HQqN3Dt2uN8lkj0JJQUO68DSvQ==}
     engines: {node: '>=20.19'}
 
+  keymaster-market-protocol@0.1.1:
+    resolution: {integrity: sha512-+5EaRJw4xV7xWeTj9iw3cIvH9EkBuepoEapcD4oHxNsd5diwSYVxya2IiB3w3MMqrG0boh2vwLV3ZNCK+FE8Hw==}
+
   keymaster-multisig-pool@1.5.0:
     resolution: {integrity: sha512-858FmzP0wK7KuOPosuH3dso//PNI+7VIqgx62swqyA+Hnco4nlnDEdqEPCwpIpwB/3qHyBNRt3RkGRd+ys6soQ==}
     engines: {node: '>=18.0.0'}
@@ -2797,8 +2803,8 @@ packages:
   webcrypto-core@1.9.2:
     resolution: {integrity: sha512-gsXecm82UQNlTBURJGuqOWy1Ww08S3kZUcr3aOJS02Pk0xLtkfeUAVC0u0xhgdonFme80edSJUIJyuvL/7250Q==}
 
-  webloom-framework@0.6.0:
-    resolution: {integrity: sha512-45wDFhWL6p69wXh3KZJBkl5J06J0TeWoU/4PLy5G1Rd6M4fGvmeTzPYqVkwrv7orKAocVj9JwqpQpkrdd0I5yw==}
+  webloom-framework@0.6.3:
+    resolution: {integrity: sha512-WaS1MCvr2VxkmnZfb6I2kfmtlrpCUQ5PcnH87tyPLUO64ihYysWA6XTPg4Ju1ckxqf7sp6rG8Q2xT96X2hlHzQ==}
     engines: {node: '>=18'}
     peerDependencies:
       react: '>=18'
@@ -4613,6 +4619,8 @@ snapshots:
       '@noble/curves': 2.4.0
       '@noble/hashes': 2.4.0
 
+  keymaster-market-protocol@0.1.1: {}
+
   keymaster-multisig-pool@1.5.0:
     dependencies:
       '@bsv/sdk': 1.10.4
@@ -5934,7 +5942,7 @@ snapshots:
       asn1js: 3.0.10
       tslib: 2.8.1
 
-  webloom-framework@0.6.0(react@18.3.1):
+  webloom-framework@0.6.3(react@18.3.1):
     optionalDependencies:
       react: 18.3.1
 

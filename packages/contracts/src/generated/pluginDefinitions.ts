@@ -890,11 +890,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
         "provides": [
           {
             "kind": "local",
-            "id": "connect.app-source",
-            "version": "1"
-          },
-          {
-            "kind": "local",
             "id": "protocol.ai-tools",
             "version": "1"
           }
@@ -989,7 +984,13 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
         "id": "protocol.coordinator-worker",
         "runtime": "shared-worker",
         "scopeKind": "storage",
-        "provides": [],
+        "provides": [
+          {
+            "kind": "local",
+            "id": "connect.app-source-batch",
+            "version": "1"
+          }
+        ],
         "privateProvides": [
           {
             "kind": "rpc",
@@ -1048,16 +1049,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             },
             "sourceRuntime": "shared-worker",
             "reason": "已声明的 MSFile 公开方法",
-            "optional": true
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "market.sync",
-              "version": "1"
-            },
-            "sourceRuntime": "shared-worker",
-            "reason": "同步市场来源资料",
             "optional": true
           }
         ],
@@ -1615,25 +1606,77 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
         "scopeKind": "root",
         "provides": [],
         "privateProvides": [],
-        "dependencies": [],
+        "dependencies": [
+          {
+            "capability": {
+              "kind": "local",
+              "id": "page.ui.registry",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "注册 Market 设置页"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "business.registry",
+              "version": "1"
+            },
+            "sourceRuntime": "window-main",
+            "reason": "设置区入口"
+          }
+        ],
         "permissions": [],
         "storages": []
       },
       {
         "id": "apps.coordinator-worker",
         "runtime": "shared-worker",
-        "scopeKind": "root",
-        "provides": [
+        "scopeKind": "storage",
+        "provides": [],
+        "privateProvides": [
           {
-            "kind": "local",
-            "id": "market.sync",
+            "kind": "rpc",
+            "id": "market.private.command",
+            "version": "1"
+          },
+          {
+            "kind": "stream",
+            "id": "market.private.events",
             "version": "1"
           }
         ],
-        "privateProvides": [],
-        "dependencies": [],
+        "dependencies": [
+          {
+            "capability": {
+              "kind": "local",
+              "id": "storage.file-clients",
+              "version": "1"
+            },
+            "sourceRuntime": "shared-worker",
+            "reason": "Market 自有存储"
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "connect.app-source-batch",
+              "version": "1"
+            },
+            "sourceRuntime": "shared-worker",
+            "reason": "提交已验证发布与来源失效；缺席时只记录同步失败，不阻止 Market 加载",
+            "optional": true
+          }
+        ],
         "permissions": [],
-        "storages": []
+        "storages": [
+          {
+            "moduleId": "apps",
+            "purposeId": "",
+            "authority": "built-in-module",
+            "model": "files",
+            "schemaVersion": 1
+          }
+        ]
       }
     ]
   },

@@ -1,4 +1,4 @@
-import { defineBuiltinWorkerPlugin, STORAGE_FILE_CLIENTS_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, VAULT_WORKER_CRYPTO_CAPABILITY, P2PKH_WORKER_TRANSFER_CAPABILITY, MSFILE_SERVICE_CAPABILITY, APP_MARKET_SYNC_CAPABILITY, traceDev, requireUnlockedWalletIdentity, type ConnectChannelRuntime, type P2pkhProtocolAdapter, type PluginContext, type ApplicationView, type LaunchAppViewInput, type VaultWalletState } from "@keymaster/contracts";
+import { defineBuiltinWorkerPlugin, STORAGE_FILE_CLIENTS_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, VAULT_WORKER_CRYPTO_CAPABILITY, P2PKH_WORKER_TRANSFER_CAPABILITY, MSFILE_SERVICE_CAPABILITY, CONNECT_APP_SOURCE_BATCH_CAPABILITY, traceDev, requireUnlockedWalletIdentity, type ConnectChannelRuntime, type P2pkhProtocolAdapter, type PluginContext, type ApplicationView, type LaunchAppViewInput, type VaultWalletState } from "@keymaster/contracts";
 import type { HandlerCallContext } from "webloom-framework";
 import { CONNECT_PRIVATE_COMMAND, CONNECT_PRIVATE_EVENTS, type ConnectWorkerSnapshot, type ConnectWorkerEvent, type ConnectWorkerCommand } from "./connectWorkerContract.js";
 import { ApplicationConnectionHost } from "./applicationConnectionHost.js";
@@ -18,7 +18,7 @@ export interface ConnectWorkerPorts {
 }
 /** One authority per wallet Worker instance; no business state is owned by a Window relay. */
 export function createConnectWorkerPlugin(ports: ConnectWorkerPorts) {
- return defineBuiltinWorkerPlugin("protocol", [CONNECT_PRIVATE_COMMAND, CONNECT_PRIVATE_EVENTS], async ctx => {
+ return defineBuiltinWorkerPlugin("protocol", [CONNECT_PRIVATE_COMMAND, CONNECT_PRIVATE_EVENTS, CONNECT_APP_SOURCE_BATCH_CAPABILITY], async ctx => {
   const wallet = ctx.capability(VAULT_WALLET_STATE_CAPABILITY).bind(ctx.consumer, ctx.scope);
   const cryptoProvider = ctx.capability(VAULT_WORKER_CRYPTO_CAPABILITY);
   const files = ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, "");
@@ -64,8 +64,11 @@ export function createConnectWorkerPlugin(ports: ConnectWorkerPorts) {
   const deps: ConnectServiceDeps = { vault, walletState: wallet, storageRepository: repository, walletOrigin: ports.walletOrigin(), runConnectRequest, runtimeSignal: ctx.scope.signal, hostedApplication: true, getP2pkhService: () => adapter, getMsfileService: () => ctx.optionalCapability(MSFILE_SERVICE_CAPABILITY), connectChannelRuntime: ports.channel };
   const host = new ApplicationConnectionHost(deps, repository);
   await host.initialize();
-  const directory = createAppDirectoryService({ repository: appDirectory, getMarket: () => ctx.optionalCapability(APP_MARKET_SYNC_CAPABILITY), assertActive: () => ctx.scope.assertActive(), hasUsage(key) { const s = host.snapshot(); return !s.historyAvailable || !!s.error || s.applications.some(a => a.key === key) || s.events.some(e => e.applicationKey === key) || s.commands.some(c => c.applicationKey === key); }, forgetApp: (key, commit) => host.forgetApplication(key, commit) });
-  deps.applicationConnected = async (key,publication) => { if(publication)await directory.observePublication(publication); if (directory.getSnapshot().deletedKeys.includes(key)) await directory.restoreApp(key); };
+  const directory = createAppDirectoryService({ repository: appDirectory, assertActive: () => ctx.scope.assertActive(), hasUsage(key) { const s = host.snapshot(); return !s.historyAvailable || !!s.error || s.applications.some(a => a.key === key) || s.events.some(e => e.applicationKey === key) || s.commands.some(c => c.applicationKey === key); }, forgetApp: (key, commit) => host.forgetApplication(key, commit) });
+  // 建连结果只用于连接与使用记录，不写入发布资料。新的已验证连接可恢复管理资格。
+  deps.applicationConnected = async (key) => { if (directory.getSnapshot().deletedKeys.includes(key)) await directory.restoreApp(key); };
+  // 受限批次写入：仅允许声明依赖并获得授权的来源插件（Market）调用。
+  ctx.provide(CONNECT_APP_SOURCE_BATCH_CAPABILITY, { applyChanges: (changes) => directory.applyBatch(changes) });
   let revision = 0, disposed = false;
   function snapshot(): ConnectWorkerSnapshot {
    const state = host.snapshot();
@@ -85,19 +88,6 @@ export function createConnectWorkerPlugin(ports: ConnectWorkerPorts) {
   }
   function closeSource(source:Source) { if(source.closed)return; source.closed=true; host.closeView(source.window); sources.delete(sourceKey(source.owner,source.id)); }
   function closePeer(owner:string) { peers.get(owner)?.stop(); peers.delete(owner); for(const source of [...sources.values()])if(source.owner===owner)closeSource(source); }
-  // Deletion and pending reconciliation are separate. Historical observations cannot restore an App.
-  const resolving = new Set<string>();
-  const offResolve = host.subscribe(() => {
-   void directory.reconcile().catch(error=>traceDev("connect.worker","reconcile.failed",()=>({error})));
-   for(const app of host.snapshot().applications) {
-    if (!app.verifiedUrl || !app.display || directory.getSnapshot().deletedKeys.includes(app.key)) continue;
-    for(const pending of directory.getSnapshot().pending) {
-     if(pending.url!==app.verifiedUrl || resolving.has(pending.pendingId))continue;
-     resolving.add(pending.pendingId);
-     void directory.resolvePending(pending.pendingId,app.key,app.verifiedUrl,app.display).catch(error=>traceDev("connect.worker","pending.failed",()=>({error}))).finally(()=>resolving.delete(pending.pendingId));
-    }
-   }
-  });
   void directory.list().catch(error=>traceDev("connect.worker","directory.failed",()=>({error})));
   let controlTail:Promise<void>=Promise.resolve();
   const serial=<T>(run:()=>Promise<T>|T):Promise<T>=>{const work=controlTail.then(()=>{ctx.scope.assertActive();return run()});controlTail=work.then(()=>{},()=>{});return work;};
@@ -149,12 +139,8 @@ export function createConnectWorkerPlugin(ports: ConnectWorkerPorts) {
     case "disconnect": return host.disconnect(command.key);
     case "focus": return host.focus(command.connectionId);
     case "opening": return host.setApplicationOpenMode(command.mode);
-    case "list": void directory.list();return;
-    case "favorite": {const existing=directory.getSnapshot().entries.find(e=>e.appPublicKeyHex===command.key);const app=host.snapshot().applications.find(a=>a.key===command.key);const material=existing??app?.publication??(app?{appVersion:app.publication?.appVersion??"",appPublicKeyHex:app.key,name:app.display?.name??app.name,description:app.display?.description,icon:app.display?.icon,urls:app.verifiedUrl&&app.display?[{url:app.verifiedUrl,origin:app.origin,display:app.display}]:[],files:[]}:undefined);return directory.toggleFavorite(command.key,material);}
-    case "add-local": return directory.addLocal(command.input);
-    case "invalidate-source": return directory.invalidateSource(command.keys);
-    case "invalidate-local": return directory.invalidateLocal(command.key);
-    case "remove-pending": return directory.removePending(command.pendingId);
+    case "list": await directory.list();return;
+    case "favorite": return directory.toggleFavorite(command.key);
     case "select": return directory.select(command.key,command.selection);
     case "delete-app": return directory.deleteApp(command.key);
     case "ai-invoke": return host.aiTools.invoke(command.id,command.args as Record<string, import("@keymaster/contracts").JSONValue>,signal);
@@ -184,7 +170,7 @@ export function createConnectWorkerPlugin(ports: ConnectWorkerPorts) {
    return(async function*(){try{while(!closed){if(queue.length){yield queue.shift()!;continue}await new Promise<void>(resolve=>{wake=resolve});wake=undefined}if(overflow)throw new Error("Connect relay overflow")}finally{call.signal.removeEventListener("abort",stop);if(peers.get(owner)===sink)closePeer(owner)}})();
   });
   traceDev("connect.worker","authority.started",()=>({instanceId:ctx.consumer.instanceId}));
-  return()=>{disposed=true;offResolve();offDirectory();offHost();for(const owner of [...peers.keys()])closePeer(owner);host.dispose();for(const handle of appCrypto.values())handle.dispose("worker-released");appCrypto.clear();};
+  return()=>{disposed=true;offDirectory();offHost();for(const owner of [...peers.keys()])closePeer(owner);host.dispose();for(const handle of appCrypto.values())handle.dispose("worker-released");appCrypto.clear();};
  });
 }
 

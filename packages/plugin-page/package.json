@@ -12,7 +12,7 @@
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
     "react": "^18.3.1",
-    "webloom-framework": "0.6.0",
+    "webloom-framework": "0.6.3",
     "@keymaster/ui": "*",
     "lucide-react": "^0.468.0"
   },

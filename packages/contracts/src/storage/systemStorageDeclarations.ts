@@ -66,6 +66,18 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
     schemaVersion: 1,
   } satisfies PluginStorageDeclaration),
   /**
+   * Market 自有存储（空 purpose = `apps/` 根）。
+   * 市场已应用清单、手工来源与待验证项、同步状态均保存在当前钱包身份下，
+   * 不读取 Connect 目录重建清单或判断失效。
+   */
+  marketFiles: Object.freeze({
+    moduleId: "apps",
+    purposeId: "",
+    authority: "built-in-module",
+    model: "files",
+    schemaVersion: 1,
+  } satisfies PluginStorageDeclaration),
+  /**
    * 三方 App 的 Keymaster 管理设置：`msfile/app-settings/`。
    *
    * 这是平台管理记录，不在 `apps/<app-name>/` 内：App 不能通过自己的文件权限
@@ -84,6 +96,7 @@ export const CENTRAL_STORAGE_DECLARATIONS = Object.freeze({
 /** manifest pluginId 到中央声明的绑定目录。 */
 export const SYSTEM_STORAGE_DECLARATIONS: Readonly<Record<string, readonly PluginStorageDeclaration[]>> = Object.freeze({
   ai: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.aiState]),
+  apps: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.marketFiles]),
   vault: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.vaultPayments]),
   p2pkh: Object.freeze([CENTRAL_STORAGE_DECLARATIONS.p2pkhFiles]),
   protocol: Object.freeze([

@@ -16,7 +16,7 @@
   "dependencies": {
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
-    "webloom-framework": "0.6.0",
+    "webloom-framework": "0.6.3",
     "@keymaster/ui": "*",
     "@libp2p/interface": "3.4.0",
     "@multiformats/multiaddr": "13.0.3",
