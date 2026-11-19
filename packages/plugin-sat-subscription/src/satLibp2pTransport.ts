@@ -1,8 +1,4 @@
-// SatSubscription 的内部 libp2p 传输适配器。
-//
-// SSP 核心只负责 deterministic Wire；本模块负责 /ssp/1.0.0 的 Noise 已认证
-// Connection、长驻双向 Stream、单 writer 和 SDK uvarint framing。它只接收
-// plugin-window-p2p 已创建的唯一 Host，不创建第二个 Host，也不对外发布 SDK。
+// SatSubscription 在自己的 libp2p Host 上建立 SSP 和 SPI stream。
 
 import type { Connection, Libp2p, Stream } from "@libp2p/interface";
 import { multiaddr, type Multiaddr } from "@multiformats/multiaddr";

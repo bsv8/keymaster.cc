@@ -24,11 +24,15 @@ export async function readSchedulerPoolSessionId(sessions: BitfsSessionJournal, 
  * 允许报价连接重建，但绝不按“最近一个池”猜归属。 */
 export async function findBuyerPoolResponseSession(input: {
   sessions: BitfsSessionJournal; raw: Uint8Array; owner: string; counterparty: string; seed: string;
+  sessionIds?: Iterable<string>;
 }): Promise<string> {
   const ref = inspectPoolArtifactReference(input.raw);
   const candidates: string[] = [];
-  for (const record of await input.sessions.list()) {
-    if (record.role !== "buyer" || record.ownerPublicKeyHex !== input.owner
+  const records = input.sessionIds
+    ? await Promise.all([...input.sessionIds].map(id => input.sessions.get(id)))
+    : await input.sessions.list();
+  for (const record of records) {
+    if (!record || record.role !== "buyer" || record.ownerPublicKeyHex !== input.owner
       || record.counterpartyPublicKeyHex !== input.counterparty || record.seedHashHex !== input.seed) continue;
     if (ref.paymentAuthorizationID) {
       if (await input.sessions.getEvidence(record.sessionId, `kind5-content-request-${hex(ref.paymentAuthorizationID)}`)) candidates.push(record.sessionId);

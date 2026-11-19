@@ -545,8 +545,6 @@ export async function commitPurchasedMsFileContent(input: {
   seedHashHex: string;
   /** exact Seed 原文。 */
   seedBytes: Uint8Array;
-  /** 按 Seed 摘要顺序的全部 Block。 */
-  blocks: readonly Uint8Array[];
   /** 用户可见文件名。 */
   fileName: string;
   /** 用户可见 MIME 类型。 */
@@ -555,25 +553,30 @@ export async function commitPurchasedMsFileContent(input: {
   signal?: AbortSignal;
   /** 显式时钟，仅用于 meta.storedAt。 */
   now?(): number;
-}): Promise<MsFileSeedUploadResult> {
+} & (
+  { blocks: readonly Uint8Array[]; readBlock?: never }
+  | { blocks?: never; readBlock(index: number, hash: string, signal: AbortSignal | undefined): Promise<Uint8Array> }
+)): Promise<MsFileSeedUploadResult> {
   const { store, signal } = input;
   const seedHashHex = input.seedHashHex;
   const now = input.now ?? Date.now;
   try {
     const info = await verifySeed([input.seedBytes], Digest.fromHex(seedHashHex), signal);
     const totalBlocks = Number(info.blockCount);
-    if (input.blocks.length !== totalBlocks) throw new MsFileSeedStoreError("integrity", "purchased block count does not match seed");
+    if (input.blocks && input.blocks.length !== totalBlocks) throw new MsFileSeedStoreError("integrity", "purchased block count does not match seed");
     const randomAccess = createSeedRandomAccess(input.seedBytes);
     let actualSize = 0n;
-    await runPool(totalBlocks, MSFILE_SEED_BLOCK_WRITE_CONCURRENCY, signal, async (index, blockSignal) => {
-      const bytes = input.blocks[index];
+    const concurrency = input.readBlock ? 2 : MSFILE_SEED_BLOCK_WRITE_CONCURRENCY;
+    await runPool(totalBlocks, concurrency, signal, async (index, blockSignal) => {
+      const digest = await readBlockHash(randomAccess, info.seedSize, BigInt(index), blockSignal);
+      const bytes = input.readBlock
+        ? await input.readBlock(index, digest.toHex(), blockSignal)
+        : input.blocks[index];
       if (!(bytes instanceof Uint8Array)) throw new MsFileSeedStoreError("integrity", "purchased block is not bytes");
-      const blockIndex = BigInt(index);
-      const digest = await readBlockHash(randomAccess, info.seedSize, blockIndex, blockSignal);
       verifyBlock(bytes, digest, blockSignal);
       await putFile(store, blockPath(seedHashHex, digest.toHex()), bytes, blockSignal);
+      actualSize += BigInt(bytes.byteLength);
     });
-    for (const bytes of input.blocks) actualSize += BigInt(bytes.byteLength);
     // meta 尚未存在，因此中断留下的块/Seed 不会被列表或 Stat 当成 available。
     await putFile(store, seedPath(seedHashHex), input.seedBytes, signal);
     const meta: MsFileSeedMeta = {

@@ -1,6 +1,6 @@
 import { defineCapability, type PluginConsumer, type LifecycleScope } from "webloom-framework";
 import type { BorrowedModuleFileStore } from "./storage/files.js";
-import type { StorageCoordinatorControl, VaultCoordinatorControl, BackgroundCoordinatorControl, P2pkhCoordinatorControl, WocCoordinatorControl, MsFileCoordinatorControl, SatCoordinatorControl, WindowP2pCoordinatorControl } from "./sessionCoordinator.js";
+import type { StorageCoordinatorControl, VaultCoordinatorControl, BackgroundCoordinatorControl, P2pkhCoordinatorControl, WocCoordinatorControl, MsFileCoordinatorControl, SatCoordinatorControl } from "./sessionCoordinator.js";
 /** Transport binding is assembly plumbing, not authority to impersonate another plugin. */
 export interface CoordinatorClientBinding<T> { bind(consumer: PluginConsumer, scope: LifecycleScope): T }
 export interface PluginFileClients { bind(consumer: PluginConsumer, scope: LifecycleScope, purposeId: string): BorrowedModuleFileStore }
@@ -12,4 +12,3 @@ export const P2PKH_COORDINATOR_CLIENT_BINDING_CAPABILITY = defineCapability<Coor
 export const WOC_COORDINATOR_CLIENT_BINDING_CAPABILITY = defineCapability<CoordinatorClientBinding<WocCoordinatorControl>>({ kind: "local", id: "woc.coordinator-client-binding", version: "1" });
 export const MSFILE_COORDINATOR_CLIENT_BINDING_CAPABILITY = defineCapability<CoordinatorClientBinding<MsFileCoordinatorControl>>({ kind: "local", id: "msfile.coordinator-client-binding", version: "1" });
 export const SAT_COORDINATOR_CLIENT_BINDING_CAPABILITY = defineCapability<CoordinatorClientBinding<SatCoordinatorControl>>({ kind: "local", id: "sat-subscription.coordinator-client-binding", version: "1" });
-export const WINDOW_P2P_COORDINATOR_CLIENT_BINDING_CAPABILITY = defineCapability<CoordinatorClientBinding<WindowP2pCoordinatorControl>>({ kind: "local", id: "window-p2p.coordinator-client-binding", version: "1" });

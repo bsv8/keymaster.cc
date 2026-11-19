@@ -23,7 +23,7 @@ export interface TaskRuntime {
   /**
    * 同步策略（2026-09-20 智能调度）：
    *   - "managed"：间隔由同步管理设置决定（30 秒 / 1 分钟 / 5 分钟 / 关闭）。
-   *   - "smart"：由 WoC 空闲 2 秒的智能调度驱动，没有固定周期。
+   *   - "smart"：由 WoC 空闲 30 秒的智能调度驱动，没有固定周期。
    *   - "fixed"/缺省：平台固定周期或测试任务，不读取同步管理设置。
    */
   syncPolicy?: "managed" | "smart" | "fixed";
@@ -117,7 +117,7 @@ export function createWorkerBackgroundRuntime(deps: WorkerBackgroundPorts) {
       }
     };
   }
-  const WOC_IDLE_SYNC_DEBOUNCE_MS = 2_000;
+  const WOC_IDLE_SYNC_DEBOUNCE_MS = 30_000;
   let smartSyncIdleTimer: ReturnType<typeof setTimeout> | undefined;
   let smartSyncDebounceMs = WOC_IDLE_SYNC_DEBOUNCE_MS;
   function managedIntervalFor(taskId: string): number {
@@ -198,7 +198,7 @@ export function createWorkerBackgroundRuntime(deps: WorkerBackgroundPorts) {
       }
       return;
     }
-    // smart 任务没有固定周期：由 WoC 空闲 2 秒的智能调度驱动。
+    // smart 任务没有固定周期：由 WoC 空闲 30 秒的智能调度驱动。
     if (runtime.syncPolicy === "smart") {
       if (runtime.timer) clearTimeout(runtime.timer);
       runtime.timer = undefined;
@@ -528,7 +528,7 @@ export function createWorkerBackgroundRuntime(deps: WorkerBackgroundPorts) {
         }
 
         // 智能调度：smart 任务完成后，若 WoC 队列已空闲，从「任务完成」
-        // 这一刻重新计时 2 秒；任务运行期间的队列事件已把计时取消。
+        // 这一刻重新计时 30 秒；任务运行期间的队列事件已把计时取消。
         // 门禁：锁定 / 无 active key / 任务所属 session 已失效时不得重新计时，
         // 否则锁定时被 abort 的任务会在 finally 里把计时器重新挂起来。
         if (runtime.syncPolicy === "smart"

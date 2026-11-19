@@ -397,69 +397,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
     ]
   },
   {
-    "id": "window-p2p",
-    "name": "Window P2P",
-    "units": [
-      {
-        "id": "window-p2p.window",
-        "runtime": "window-main",
-        "scopeKind": "root",
-        "provides": [
-          {
-            "kind": "local",
-            "id": "window-p2p.executor",
-            "version": "1"
-          },
-          {
-            "kind": "local",
-            "id": "window-p2p.coordinator-control",
-            "version": "1"
-          }
-        ],
-        "privateProvides": [],
-        "dependencies": [
-          {
-            "capability": {
-              "kind": "local",
-              "id": "window-p2p.coordinator-client-binding",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "Window P2P Coordinator 连接"
-          }
-        ],
-        "permissions": [],
-        "storages": []
-      },
-      {
-        "id": "window-p2p.coordinator-worker",
-        "runtime": "shared-worker",
-        "scopeKind": "owner-session",
-        "provides": [
-          {
-            "kind": "local",
-            "id": "window-p2p.worker-bridge",
-            "version": "1"
-          }
-        ],
-        "privateProvides": [],
-        "dependencies": [
-          {
-            "capability": {
-              "kind": "local",
-              "id": "vault.wallet-state",
-              "version": "1"
-            },
-            "sourceRuntime": "shared-worker",
-            "reason": "executor 租约所属钱包身份"
-          }
-        ],
-        "permissions": [],
-        "storages": []
-      }
-    ]
-  },
-  {
     "id": "msfile",
     "name": "MSFile",
     "units": [
@@ -512,15 +449,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             },
             "sourceRuntime": "window-main",
             "reason": "本单元的 setup 或 UI 使用"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "window-p2p.executor",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "MSFile 数据面挂载到唯一 Window P2P Host 的 msfile lane"
           },
           {
             "capability": {
@@ -612,6 +540,13 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             "authority": "built-in-module",
             "model": "files",
             "schemaVersion": 1
+          },
+          {
+            "moduleId": "msfile",
+            "purposeId": "bitfs-journal",
+            "authority": "built-in-module",
+            "model": "files",
+            "schemaVersion": 1
           }
         ]
       },
@@ -640,16 +575,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "capability": {
               "kind": "local",
-              "id": "window-p2p.worker-bridge",
-              "version": "1"
-            },
-            "sourceRuntime": "shared-worker",
-            "reason": "由公共 Window executor 提供受限网络 lane",
-            "optional": true
-          },
-          {
-            "capability": {
-              "kind": "local",
               "id": "vault.wallet-state",
               "version": "1"
             },
@@ -663,7 +588,8 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
               "version": "1"
             },
             "sourceRuntime": "shared-worker",
-            "reason": "卖方与 Channel 服务依赖同一供应商运行态"
+            "reason": "BitFS 发现与信令使用 Channel；直接读文件不等待广播供应商",
+            "optional": true
           },
           {
             "capability": {
@@ -766,15 +692,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "capability": {
               "kind": "local",
-              "id": "window-p2p.executor",
-              "version": "1"
-            },
-            "sourceRuntime": "window-main",
-            "reason": "Sat 只能复用 Window P2P owner 的唯一 Host"
-          },
-          {
-            "capability": {
-              "kind": "local",
               "id": "resource.owned-access",
               "version": "1"
             },
@@ -835,16 +752,6 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             },
             "sourceRuntime": "shared-worker",
             "reason": "供应商状态的受限文件客户端"
-          },
-          {
-            "capability": {
-              "kind": "local",
-              "id": "window-p2p.worker-bridge",
-              "version": "1"
-            },
-            "sourceRuntime": "shared-worker",
-            "reason": "由公共 Window executor 提供受限网络 lane",
-            "optional": true
           },
           {
             "capability": {

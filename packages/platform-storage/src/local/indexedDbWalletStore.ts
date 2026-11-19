@@ -48,6 +48,8 @@ export interface IndexedDbWalletStoreOptions {
   indexStoreName?: string;
   /** 测试可注入时钟。 */
   now?: () => number;
+  /** 页面业务句柄在同一事务内核对钱包代次，避免 reset 后迟到写入。 */
+  walletGeneration?: string;
 }
 
 /** 字节仓库的物理形状:内嵌元数据,单仓库即可完成读取。 */
@@ -298,7 +300,21 @@ export function createIndexedDbWalletStore(options: IndexedDbWalletStoreOptions 
     const opened = await database();
     assertOpen();
     try {
-      return opened.transaction(stores, mode);
+      if (!options.walletGeneration) return opened.transaction(stores, mode);
+      const names = Array.isArray(stores) ? stores : [stores];
+      const transaction = opened.transaction([...new Set([storeName, ...names])], mode);
+      try {
+        const network = await readObject(transaction.objectStore(storeName), WALLET_NETWORK_PATH);
+        const identity = network && JSON.parse(new TextDecoder().decode(network.bytes)) as { format?: string; walletGeneration?: string } | undefined;
+        if (identity?.format !== "keymaster.network" || identity.walletGeneration !== options.walletGeneration) {
+          throw fail("storage_unavailable", "IndexedDB wallet generation changed");
+        }
+        assertOpen();
+        return transaction;
+      } catch (error) {
+        transaction.abort();
+        throw error;
+      }
     } catch (caught) {
       throw mapIndexedDbError(caught);
     }

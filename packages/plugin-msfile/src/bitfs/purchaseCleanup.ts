@@ -38,26 +38,12 @@ export async function deleteBitfsPurchaseData(input: {
     await markBitfsDeletedHistory(journal, seed, selected.map(s => s.sessionId), [...removedIds]);
     input.assertActive();
     if (input.deleteContent) {
-      const shared = await listBitfsPaths(content, `bitfs-staging/by-seed/${seed}/`);
-      for (const record of retained) {
-        for (const path of [...shared, ...await listBitfsPaths(content, `bitfs-staging/${record.sessionId}/`)]) {
-          const value = await content.get(path);
-          if (value) await content.put(`bitfs-recovery-content/${record.sessionId}/${path}`, value.bytes);
-        }
-      }
       await content.delete(`meta/${seed}.json`);
       await content.delete(`seeds/${seed}.ms`);
       await deleteBitfsPrefix(content, `storage/${seed}/`);
       await deleteBitfsPrefix(content, `bitfs-staging/by-seed/${seed}/`);
       for (const record of selected) await deleteBitfsPrefix(content, `bitfs-staging/${record.sessionId}/`);
     } else {
-      // 删除历史保留正式文件；若还有待结池，其已验收内容仍只归原池恢复使用。
-      for (const record of retained) {
-        for (const path of [...await listBitfsPaths(content, `bitfs-staging/by-seed/${seed}/`), ...await listBitfsPaths(content, `bitfs-staging/${record.sessionId}/`)]) {
-          const value = await content.get(path);
-          if (value) await content.put(`bitfs-recovery-content/${record.sessionId}/${path}`, value.bytes);
-        }
-      }
       for (const record of removed) await deleteBitfsPrefix(content, `bitfs-staging/${record.sessionId}/`);
       const alreadyHidden = await readBitfsHiddenHistory(journal, seed);
       const selectedIds = new Set(selected.map(s => s.sessionId));

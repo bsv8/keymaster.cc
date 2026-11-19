@@ -24,6 +24,7 @@ export type BitfsWebRtcStreamEvent =
     webrtcSessionId: string;
     ownerSessionEpoch: string;
     frame: Uint8Array;
+    direction: "inbound" | "outbound";
     /** 帧完整到达时刻（本地时钟毫秒，解析与校验之前）。 */
     receivedAt: number;
   }
@@ -631,6 +632,7 @@ export class BitfsWebRtcStreamRuntime {
           webrtcSessionId: entry.webrtcSessionId,
           ownerSessionEpoch: entry.ownerSessionEpoch,
           frame: exact,
+          direction: entry.direction,
           receivedAt: Date.now()
         }, [exact.buffer]);
       }

@@ -16,6 +16,7 @@
   "dependencies": {
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
+    "@keymaster/window-network": "workspace:*",
     "webloom-framework": "0.6.3",
     "@keymaster/ui": "*",
     "@libp2p/interface": "3.4.0",

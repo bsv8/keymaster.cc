@@ -6,7 +6,7 @@ import { coordinatorClientBindings } from "./assembly/coordinatorClientBindings.
 
 import { storagePrivateCapabilities, storagePrivateSlotBindings } from "./assembly/storagePrivateCapabilities.js";
 import { marketPrivateCapabilities, marketPrivateSlotBindings } from "./assembly/marketPrivateCapabilities.js";
-import { APPLICATION_BOOTSTRAP_READY_CAPABILITY, COORDINATOR_ACTIVITY_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, STORAGE_RUNTIME_CONTROLLER_CAPABILITY, VAULT_SERVICE_CAPABILITY, type PluginManifest, type SessionCoordinatorClient, type StorageCoordinatorControl, type VaultCoordinatorControl, type BackgroundCoordinatorControl, type P2pkhCoordinatorControl, type WocCoordinatorControl, type MsFileCoordinatorControl, type SatCoordinatorControl, type WindowP2pCoordinatorControl, type PluginPermission, type RuntimeIdentityTransition, CENTRAL_STORAGE_DECLARATIONS, type PluginStorageDeclaration } from "@keymaster/contracts";
+import { APPLICATION_BOOTSTRAP_READY_CAPABILITY, COORDINATOR_ACTIVITY_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, STORAGE_RUNTIME_CONTROLLER_CAPABILITY, VAULT_SERVICE_CAPABILITY, type PluginManifest, type SessionCoordinatorClient, type StorageCoordinatorControl, type VaultCoordinatorControl, type BackgroundCoordinatorControl, type P2pkhCoordinatorControl, type WocCoordinatorControl, type MsFileCoordinatorControl, type SatCoordinatorControl, type PluginPermission, type RuntimeIdentityTransition, CENTRAL_STORAGE_DECLARATIONS, type PluginStorageDeclaration } from "@keymaster/contracts";
 import {
   type WindowApp,
 } from "webloom-framework";
@@ -181,7 +181,7 @@ export function createPublicCoordinatorClient(client: SessionCoordinatorClient):
     "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainFeeSnapshots", "getChainHeightSnapshot", "subscribeTopic", "sendActivity",
     "storageCancel", "storageSessionAbort",
     "msfileControl", "msfileGrant", "msfileData", "msfileCancel", "msfileSessionAbort",
-    "windowP2pExecutorAcquire", "windowP2pExecutorRelease", "windowP2pExecutorSpikeTransfer", "windowP2pExecutorSignNoiseStaticKey", "windowP2pExecutorSignPeerRecord",
+    "windowP2pExecutorAcquire", "windowP2pExecutorRelease", "windowP2pExecutorSignNoiseStaticKey", "windowP2pExecutorSignPeerRecord",
     "satOperation", "channelOperation",
     "p2pkhProviderConfigGet", "p2pkhProviderConfigUpdate", "p2pkhUtxosGet", "p2pkhUtxosRefresh"
   ]);
@@ -210,6 +210,11 @@ export function createVaultCoordinatorClient(client: SessionCoordinatorClient): 
  * 不再通过字符串 capability 取得其它插件的 RPC。
  */
 export function createPluginCoordinatorFacade(client: SessionCoordinatorClient, pluginId: string): unknown {
+  const networkMethods = [
+    "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainFeeSnapshots", "getChainHeightSnapshot", "subscribeTopic", "sendActivity",
+    "windowP2pExecutorAcquire", "windowP2pExecutorRelease",
+    "windowP2pExecutorSignNoiseStaticKey", "windowP2pExecutorSignPeerRecord"
+  ] as const;
   switch (pluginId) {
     case "storage": return createStorageCoordinatorClient(client);
     case "vault": return createVaultCoordinatorClient(client);
@@ -228,17 +233,12 @@ export function createPluginCoordinatorFacade(client: SessionCoordinatorClient, 
       "chainFeePolicyUpdate", "p2pkhProviderConfigGet", "p2pkhProviderConfigUpdate", "p2pkhUtxosGet", "p2pkhUtxosRefresh"
     ]);
     case "msfile": return bindCoordinatorMethods<MsFileCoordinatorControl>(client, [
-      "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainFeeSnapshots", "getChainHeightSnapshot", "subscribeTopic", "sendActivity",
+      ...networkMethods,
       "msfileControl", "msfileGrant", "msfileData", "msfileCancel", "msfileSessionAbort"
     ]);
     case "sat-subscription": return bindCoordinatorMethods<SatCoordinatorControl>(client, [
-      "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainFeeSnapshots", "getChainHeightSnapshot", "subscribeTopic", "sendActivity",
+      ...networkMethods,
       "satOperation", "channelOperation"
-    ]);
-    case "window-p2p": return bindCoordinatorMethods<WindowP2pCoordinatorControl>(client, [
-      "connect", "getIsConnected", "getConnectionState", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "getChainFeeSnapshots", "getChainHeightSnapshot", "subscribeTopic", "sendActivity",
-      "windowP2pExecutorAcquire", "windowP2pExecutorRelease", "windowP2pExecutorSpikeTransfer",
-      "windowP2pExecutorSignNoiseStaticKey", "windowP2pExecutorSignPeerRecord"
     ]);
     default: return undefined;
   }
@@ -463,6 +463,7 @@ export async function bootstrapPlugins(onRuntimeReset?: (failed: boolean) => voi
     runtimeSlotBindings: { ...storagePrivateSlotBindings("default"), ...connectPrivateSlotBindings("default"), ...marketPrivateSlotBindings("default") },
     capabilities: [...coordinatorClientBindings(pluginId => createPluginCoordinatorFacade(coordinatorClient, pluginId)),
       ...createScopedStorageClients(createStorageBindingAuthority(coordinatorClient as SessionCoordinatorClient & StorageBindingCoordinatorClient, {
+        getPageWallet: () => coordinatorClient.getBootstrapSnapshot(),
         getWalletGeneration: () => coordinatorClient.getBootstrapSnapshot().walletGeneration,
         getSessionEpoch: () => coordinatorClient.getBootstrapSnapshot().sessionEpoch,
         getRunGeneration: () => coordinatorClient.getBootstrapSnapshot().runGeneration,

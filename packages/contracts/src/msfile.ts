@@ -613,8 +613,8 @@ export interface MsFileBitfsTaskSnapshot extends MsFileBitfsPurchaseSnapshot {
   availableQuotes?: MsFileBitfsQuoteView[];
   /** 当前页面是否可以安全取消；已产生付款签名或卖家离线时为 false。 */
   canCancel?: boolean;
-  /** 买卖通道断开且存在已开费用池时，可重新发布需求并续接原会话。 */
-  canReconnect?: boolean;
+  /** 当前标签页只查看由其他标签页执行的任务。 */
+  downloadReadOnly?: boolean;
 }
 
 /** 当前 Seed 的 ChannelProtocol 需求与已验证报价视图。 */
@@ -631,6 +631,15 @@ export interface MsFileBitfsDemandSnapshot {
   purchase?: MsFileBitfsPurchaseSnapshot | null;
   /** 同文件已有未结束购买时仅提供详情入口，不混入历史金额。 */
   existingPurchaseSessionId?: string | null;
+  /** 最近一次购买已结束，且文件已通过当前钱包本地存储检查。 */
+  completedPurchase?: {
+    taskId: string;
+    localFile: Extract<MsFileSourceStat, { sourceKind: "local-bitfs"; status: "available" }>;
+  };
+  /** 当前标签页只能查看进度。 */
+  downloadReadOnly?: boolean;
+  /** 下载已停止，保留半成品供查看或删除。 */
+  interrupted?: boolean;
   /** 用户为当前 Seed 保存的强制下载上限；不代替全局自动购买价上限。 */
   currentMaxFullBlockPriceSatoshis?: MsFileSatoshiAmount | null;
 }
@@ -951,6 +960,8 @@ export interface MsFileService {
    * 缺少该可选能力的旧 service 只可执行现有 remote MSFile 读取。
    */
   publishBitfsDemand?(seedHashHex: string): Promise<MsFileBitfsDemandSnapshot>;
+  /** 用原下载工作区重新发现卖方并续下。 */
+  resumeBitfsDownload?(seedHashHex: string): Promise<MsFileBitfsDemandSnapshot>;
   /** 读取需求编号及其当前已验证报价；不包含原始 wire 或交易证据。 */
   getBitfsDemand?(seedHashHex: string): Promise<MsFileBitfsDemandSnapshot>;
   /** 选择已验签报价并通过其关联 DataChannel 执行买方购买流程。 */

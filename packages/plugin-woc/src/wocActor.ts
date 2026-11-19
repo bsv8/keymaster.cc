@@ -656,12 +656,37 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
     });
   }
 
+  const transactionObservations = new Map<string, Promise<WocTransactionObservation>>();
+
   function getTransactionObservation(
     network: BsvNetwork,
     canonicalTxid: string,
-    opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }
+    opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number },
   ): Promise<WocTransactionObservation> {
+    if (opts.signal.aborted) return Promise.reject(opts.signal.reason);
     const txid = normalizeTxidHex(canonicalTxid);
+    const key = `${config.baseUrl}:${network}:${txid}`;
+    let observation = transactionObservations.get(key);
+    if (!observation) {
+      const signal = new AbortController().signal;
+      observation = queryTransactionObservation(network, txid, { ...opts, signal }).finally(() => {
+        transactionObservations.delete(key);
+      });
+      transactionObservations.set(key, observation);
+    }
+    const result = observation;
+    return new Promise((resolve, reject) => {
+      const abort = () => reject(opts.signal.reason);
+      opts.signal.addEventListener("abort", abort, { once: true });
+      void result.then(resolve, reject).finally(() => opts.signal.removeEventListener("abort", abort));
+    });
+  }
+
+  function queryTransactionObservation(
+    network: BsvNetwork,
+    txid: string,
+    opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number },
+  ): Promise<WocTransactionObservation> {
     return enqueue({
       priority: priorityOf(opts.priority ?? "background"),
       signal: opts.signal,

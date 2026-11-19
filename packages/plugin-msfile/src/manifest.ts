@@ -1,5 +1,7 @@
+import { createBitfsBuyerWindowRuntime } from "./bitfs/buyerWindowRuntime.js";
+import { createWindowWebRtcInterconnect } from "./bitfs/webrtcInterconnect.js";
+import { installWindowP2pExecutor } from "@keymaster/window-network/window";
 import { MsFileDemandsPage } from "./MsFileDemandsPage.js";
-import { WINDOW_P2P_WORKER_BRIDGE_CAPABILITY } from "@keymaster/contracts/window-p2p";
 import { createPublicMsFileService } from "./publicMsFileService.js";
 import { setupMsFileUriActions } from "./setupUriActions.js";
 import { URI_ACTION_REGISTRY_CAPABILITY } from "@keymaster/contracts";
@@ -30,7 +32,6 @@ import {
   P2PKH_PROTOCOL_SPEND_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
   type MsFileCoordinatorControl,
-  WINDOW_P2P_EXECUTOR_CAPABILITY,
   defineRuntimeUnitDependencies,
   type SessionCoordinatorClient,
 } from "@keymaster/contracts";
@@ -1020,13 +1021,12 @@ const msfilePluginDefinition = {
     scopeKind: "owner-session",
     provides: [MSFILE_SERVICE_CAPABILITY, MSFILE_COORDINATOR_CONTROL_CAPABILITY, MSFILE_BUCKET_SERVICE_CAPABILITY],
     // 桶存储页面直接读写 `<owner>/msfiles/` 文件根（seeds/storage/meta）；
-    // 句柄由 Host 绑定、真实 I/O 仍由 Coordinator Worker 执行。
-    storages: [CENTRAL_STORAGE_DECLARATIONS.msfilesFiles],
+    // 句柄由 Host 绑定，页面通过 Storage 直接读写当前钱包的 IndexedDB。
+    storages: [CENTRAL_STORAGE_DECLARATIONS.msfilesFiles, CENTRAL_STORAGE_DECLARATIONS.bitfsJournalFiles],
     dependencies: defineRuntimeUnitDependencies([
       { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "window-main", reason: "声明存储客户端及用途授权" },
       { capability: MSFILE_COORDINATOR_CLIENT_BINDING_CAPABILITY, sourceRuntime: "window-main", reason: "声明本插件的受限 Coordinator 连接" },
       { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
-      { capability: WINDOW_P2P_EXECUTOR_CAPABILITY, reason: "MSFile 数据面挂载到唯一 Window P2P Host 的 msfile lane" },
       { capability: P2PKH_PROTOCOL_SPEND_CAPABILITY, optional: true, reason: "BitFS 专款交易只通过 P2PKH 受控 signer 预签；P2PKH 未启用时买方准备保持不可用" },
       { capability: BREADCRUMB_REGISTRY_CAPABILITY, reason: "注册本地文件设置页面包屑" },
       { capability: BUSINESS_REGISTRY_CAPABILITY, reason: "注册首页文件获取投影和本地文件设置入口" },
@@ -1049,9 +1049,8 @@ const msfilePluginDefinition = {
     provides: [MSFILE_SERVICE_CAPABILITY],
     dependencies: defineRuntimeUnitDependencies([
       { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "shared-worker", reason: "文件设置、协议证据与 App 管理设置的受限句柄" },
-      { capability: WINDOW_P2P_WORKER_BRIDGE_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "由公共 Window executor 提供受限网络 lane" },
       { capability: VAULT_WALLET_STATE_CAPABILITY, sourceRuntime: "shared-worker", reason: "文件服务所属钱包身份" },
-      { capability: SAT_SUBSCRIPTION_SERVICE_CAPABILITY, sourceRuntime: "shared-worker", reason: "卖方与 Channel 服务依赖同一供应商运行态" },
+      { capability: SAT_SUBSCRIPTION_SERVICE_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "BitFS 发现与信令使用 Channel；直接读文件不等待广播供应商" },
       { capability: WOC_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "BitFS 资金恢复查询；缺席时文件设置仍可用" },
       { capability: WOC_WORKER_BROADCAST_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "BitFS exact outbox 广播；缺席时不得派发" },
     ]),
@@ -1061,23 +1060,28 @@ const msfilePluginDefinition = {
     const coordinator = ctx.capability(MSFILE_COORDINATOR_CLIENT_BINDING_CAPABILITY).bind(ctx.consumer, ctx.scope) as MsFileCoordinatorControl | undefined;
     if (!coordinator) throw new Error("MSFile Coordinator control is unavailable");
     ctx.provide(MSFILE_COORDINATOR_CONTROL_CAPABILITY, coordinator);
-    const laneRegistry = ctx.capability(WINDOW_P2P_EXECUTOR_CAPABILITY);
-    // MSFile 只注册自己的业务 lane；公共 Host 与 executor 由 Window P2P
-    // 系统插件拥有，避免两个插件各自建立网络实例。
     const protocolSpend = () => ctx.optionalCapability(P2PKH_PROTOCOL_SPEND_CAPABILITY);
-    const offLane = laneRegistry.register(new MsFileP2pLane(
-      protocolSpend,
-      () => ["stun:stun.l.google.com:19302"],
-    ));
+    const contentStore = ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, "");
+    const journal = ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, "bitfs-journal");
+    const lane = new MsFileP2pLane(protocolSpend);
     const service = new MsFileServiceProxy(coordinator);
+    service.usePageContent(contentStore);
+    const buyer = createBitfsBuyerWindowRuntime({
+      coordinator, service, content: contentStore, journal, lifecycle: ctx.scope.signal,
+      lane: (operation, signal) => lane.handle(operation, signal),
+    });
+    lane.buyer = buyer;
+    service.buyer = buyer;
+    const stopNetwork = installWindowP2pExecutor(coordinator, "msfile", lane, createWindowWebRtcInterconnect);
+    ctx.onDispose(stopNetwork);
     ctx.provide(MSFILE_SERVICE_CAPABILITY, createPublicMsFileService(service, () => ctx.scope.assertActive()));
     // 桶存储服务复用同一 owner 文件根；MasterSeed 算法来自官方 SDK。
-    // 块写入经 Coordinator 直写，避免页面 storage 数据面的端口并发上限。
     // 自有导入完整入库后经控制面通知 Worker 侧采集队列；购买/下载路径
     // 不经过 bucketService.upload，不会通知。
     const bucketService = createMsFileBucketService({
-      store: ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, ""),
+      store: contentStore,
       coordinator,
+      buyer,
       onStored: (meta) => {
         void coordinator.msfileControl({
           type: "collector.notify-stored",
@@ -1285,7 +1289,6 @@ const msfilePluginDefinition = {
 
     return () => {
       disposeAllMsFileMediaSessions();
-      offLane();
       // Registry 与 resource definition 由 host 按 ownership 统一回收。
       // teardown 只释放 setup 自己创建的运行时对象，避免 host 随后重复注销。
       service.dispose();

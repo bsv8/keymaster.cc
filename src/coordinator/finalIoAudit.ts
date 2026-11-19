@@ -33,7 +33,6 @@ export type FinalIoAuditOperation =
   | "channel.incoming-decrypt"
   | "channel.history-open"
   | "window-p2p.identity.sign"
-  | "window-p2p.spike-transfer"
   | "chain.height-sync"
   | "chain.fee-sync"
   | "p2pkh.sync"

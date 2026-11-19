@@ -37,6 +37,7 @@ export function createPublicMsFileService(service: MsFileService, assertActive: 
     readSeed: (...args: Parameters<MsFileService["readSeed"]>) => call(() => service.readSeed(...args)),
     readBlock: (...args: Parameters<MsFileService["readBlock"]>) => call(() => service.readBlock(...args)),
     ...(service.publishBitfsDemand ? { publishBitfsDemand: (...args: Parameters<NonNullable<MsFileService["publishBitfsDemand"]>>) => call(() => service.publishBitfsDemand!(...args)) } : {}),
+    ...(service.resumeBitfsDownload ? { resumeBitfsDownload: (seed: string) => call(() => service.resumeBitfsDownload!(seed)) } : {}),
     ...(service.getBitfsDemand ? { getBitfsDemand: (...args: Parameters<NonNullable<MsFileService["getBitfsDemand"]>>) => call(() => service.getBitfsDemand!(...args)) } : {}),
     ...(service.startBitfsPurchase ? { startBitfsPurchase: (...args: Parameters<NonNullable<MsFileService["startBitfsPurchase"]>>) => call(() => service.startBitfsPurchase!(...args)) } : {}),
     ...(service.cancelBitfsPurchase ? { cancelBitfsPurchase: (...args: Parameters<NonNullable<MsFileService["cancelBitfsPurchase"]>>) => call(() => service.cancelBitfsPurchase!(...args)) } : {}),

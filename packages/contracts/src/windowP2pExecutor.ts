@@ -1,16 +1,4 @@
-// Window P2P executor 的中性 capability 契约。
-import { defineCapability } from "webloom-framework";
-//
-// P2P 网络基础插件拥有唯一的 Window libp2p Host 和 executor lease；MSFile、
-// SatSubscription 等插件只能注册 lane，不能各自创建 Host。host 使用 unknown 是有意的：contracts
-// 不依赖 libp2p，具体 lane 在自己的插件边界内把它收窄为正式 SDK 类型。
-
-/** 唯一的 Window P2P executor capability。 */
-export const WINDOW_P2P_EXECUTOR_CAPABILITY = defineCapability<Pick<WindowP2pExecutorLaneRegistry, "register">>({
-  kind: "local",
-  id: "window-p2p.executor",
-  version: "1",
-});
+// 页面网络执行器与 Worker 之间的内部契约。
 
 /** Window/Worker bridge 允许跨边界传递的错误领域。 */
 export type WindowP2pExecutorErrorDomain = "window-p2p" | "sat-transport" | "msfile-transport";
@@ -60,20 +48,5 @@ export interface WindowP2pExecutorLane {
   /** Worker 直接拒绝一个尚未完成的入站事件；用于资源/身份错误快速 fail closed。 */
   rejectEvent?(event: unknown, error: WindowP2pExecutorError): Promise<void> | void;
   /** 接收 Worker 下发的集中资源配置；实现可选择不使用。 */
-  configure?(config: unknown): void;
-}
-
-export interface WindowP2pExecutorLaneRegistry {
-  /** 注册 lane；返回注销函数。 */
-  register(lane: WindowP2pExecutorLane): () => void;
-  /** executor host ready 时挂载所有已注册 lane。 */
-  attach(context: WindowP2pExecutorLaneContext): Promise<void>;
-  /** executor stop 时卸载所有 lane。 */
-  detach(): Promise<void>;
-  /** Worker bridge 请求 lane 执行受限操作。 */
-  dispatch(laneId: string, operation: unknown, signal: AbortSignal): Promise<unknown>;
-  /** Worker bridge 拒绝一个入站事件，不经过业务 operation 队列。 */
-  rejectEvent?(laneId: string, event: unknown, error: WindowP2pExecutorError): Promise<void> | void;
-  /** 更新所有 lane 的集中资源配置。 */
   configure?(config: unknown): void;
 }

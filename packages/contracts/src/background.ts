@@ -23,7 +23,7 @@ export const CHAIN_HEIGHT_SYNC_TASK_ID = "chain.chain-height-sync";
  *     任意整秒间隔。
  *   - 每个任务的缺省间隔不同（见 `backgroundSyncDefaultIntervalMs`），
  *     因此未配置时不能一律套用平台缺省。
- *   - UTXO 余额快照不在这个列表里：它是 smart 任务，由 WoC 空闲 2 秒
+ *   - UTXO 余额快照不在这个列表里：它是 smart 任务，由 WoC 空闲 30 秒
  *     的智能调度驱动，永远保持最新。
  */
 export const BACKGROUND_MANAGED_SYNC_TASK_IDS = [
@@ -337,7 +337,7 @@ export interface BackgroundService {
  * WoC 空闲事件驱动：
  *   - UNLOCK：Vault 解锁 / Key 初始化完成后立即同步一次；
  *   - INIT：后台任务在已解锁状态下完成注册后立即同步一次；
- *   - IDLE_SYNC：WoC 队列空闲满 2 秒后同步一轮（持续利用空闲时间）。
+ *   - IDLE_SYNC：WoC 队列空闲满 30 秒后同步一轮。
  */
 export const BACKGROUND_TRIGGER_REASON = {
   /** 手动触发（用户点击）。跳过冷却。 */
@@ -348,7 +348,7 @@ export const BACKGROUND_TRIGGER_REASON = {
   UNLOCK: "unlock",
   /** 任务注册完成后立即同步。 */
   INIT: "init",
-  /** WoC 空闲 2 秒后由智能调度触发。 */
+  /** WoC 空闲 30 秒后由智能调度触发。 */
   IDLE_SYNC: "idle-sync",
 } as const;
 

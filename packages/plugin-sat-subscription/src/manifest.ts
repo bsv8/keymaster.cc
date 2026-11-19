@@ -1,4 +1,4 @@
-import { WINDOW_P2P_WORKER_BRIDGE_CAPABILITY } from "@keymaster/contracts/window-p2p";
+import { installWindowP2pExecutor } from "@keymaster/window-network/window";
 import { VAULT_WORKER_CRYPTO_CAPABILITY, P2PKH_WORKER_TRANSFER_CAPABILITY } from "@keymaster/contracts";
 import { STORAGE_FILE_CLIENTS_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY } from "@keymaster/contracts";
 import { SAT_COORDINATOR_CLIENT_BINDING_CAPABILITY } from "@keymaster/contracts";
@@ -20,8 +20,7 @@ import type {
   SatSubscriptionAdminService,
   SatSubscriptionSpiService,
   SatSubscriptionSettingsSnapshot,
-  SessionCoordinatorClient,
-  WindowP2pExecutorLaneRegistry
+  SessionCoordinatorClient
 } from "@keymaster/contracts";
 import {
   CHANNEL_RUNTIME_CAPABILITY,
@@ -33,7 +32,6 @@ import {
   OWNED_RESOURCE_ACCESS_CAPABILITY,
   PAGE_UI_REGISTRY_CAPABILITY,
   type SatCoordinatorControl,
-  WINDOW_P2P_EXECUTOR_CAPABILITY,
   defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
 
@@ -199,7 +197,6 @@ const satSubscriptionPluginDefinition = {
     dependencies: defineRuntimeUnitDependencies([
       { capability: SAT_COORDINATOR_CLIENT_BINDING_CAPABILITY, sourceRuntime: "window-main", reason: "声明本插件的受限 Coordinator 连接" },
       { capability: I18N_SERVICE_CAPABILITY, sourceRuntime: "window-main", reason: "本单元的 setup 或 UI 使用" },
-      { capability: WINDOW_P2P_EXECUTOR_CAPABILITY, reason: "Sat 只能复用 Window P2P owner 的唯一 Host" },
       { capability: OWNED_RESOURCE_ACCESS_CAPABILITY, reason: "UI 仅消费本实例的网关资源" },
       { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "广播网关业务读取统一经过 Resource Store" },
       { capability: PAGE_UI_REGISTRY_CAPABILITY, reason: "注册 SatSubscription 广播网关" },
@@ -212,7 +209,6 @@ const satSubscriptionPluginDefinition = {
     provides: [SAT_SUBSCRIPTION_SERVICE_CAPABILITY, SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY],
     dependencies: defineRuntimeUnitDependencies([
       { capability: STORAGE_FILE_CLIENTS_CAPABILITY, sourceRuntime: "shared-worker", reason: "供应商状态的受限文件客户端" },
-      { capability: WINDOW_P2P_WORKER_BRIDGE_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "由公共 Window executor 提供受限网络 lane" },
       { capability: VAULT_WALLET_STATE_CAPABILITY, sourceRuntime: "shared-worker", reason: "供应商会话所属身份" },
       { capability: P2PKH_WORKER_TRANSFER_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "首次充值才解析 P2PKH 的受控 Worker 转账服务" },
     ]),
@@ -221,10 +217,8 @@ const satSubscriptionPluginDefinition = {
     const coordinator = ctx.capability(SAT_COORDINATOR_CLIENT_BINDING_CAPABILITY).bind(ctx.consumer, ctx.scope) as SatCoordinatorControl | undefined;
     if (!coordinator) throw new Error("Sat Coordinator control is unavailable");
     ctx.provide(SAT_COORDINATOR_CONTROL_CAPABILITY, coordinator);
-    const laneRegistry = ctx.capability(WINDOW_P2P_EXECUTOR_CAPABILITY);
-    // Window 只注册网络 lane；文件、状态、Channel crypto 和 provider handle
-    // 全部由 Coordinator SharedWorker 创建，避免多 Tab 重复连接/扣费。
-    const offLane = laneRegistry.register(new SatWindowP2pLane());
+    const stopNetwork = installWindowP2pExecutor(coordinator, "sat-subscription", new SatWindowP2pLane());
+    ctx.onDispose(stopNetwork);
     const admin = createSatWorkerAdminService(coordinator);
     ctx.provide(SAT_SUBSCRIPTION_SERVICE_CAPABILITY, admin);
     const channelRuntimeFactory: ChannelRuntimeFactory = {
@@ -274,9 +268,6 @@ const satSubscriptionPluginDefinition = {
       order: 25
     });
 
-    ctx.onDispose(async () => {
-      offLane();
-    });
   }
 } satisfies PluginManifest & { setup: PluginSetup };
 

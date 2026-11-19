@@ -15,7 +15,6 @@ import { marketPlugin, marketSetup } from "@keymaster/plugin-market";
 import { backgroundPlugin, backgroundSetup } from "@keymaster/plugin-background";
 import { msfilePlugin, msfileSetup } from "@keymaster/plugin-msfile";
 import { satSubscriptionPlugin, satSubscriptionSetup } from "@keymaster/plugin-sat-subscription";
-import { windowP2pPlugin, windowP2pSetup } from "@keymaster/plugin-window-p2p";
 import { p2pkhPlugin, p2pkhSetup } from "@keymaster/plugin-p2pkh";
 import { connectPlugin, connectSetup } from "@keymaster/plugin-connect";
 import {
@@ -32,7 +31,6 @@ export const WEB_PLUGIN_IMPLEMENTATIONS: readonly { manifest: PluginManifest; se
   { manifest: scanPlugin, setup: scanSetup },
   { manifest: storagePlatformPlugin, setup: storagePlatformSetup },
   { manifest: vaultPlugin, setup: vaultSetup },
-  { manifest: windowP2pPlugin, setup: windowP2pSetup },
   { manifest: msfilePlugin, setup: msfileSetup },
   { manifest: satSubscriptionPlugin, setup: satSubscriptionSetup },
   { manifest: connectPlugin, setup: connectSetup },

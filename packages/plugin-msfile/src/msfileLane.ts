@@ -1,8 +1,5 @@
-// MSFile 的 Window P2P lane。
-//
-// MSFile 只注册业务 lane；唯一 Host、lease、MessagePort bridge 由
-// `plugin-window-p2p` 管理。这样 MSFile 不会在每个页面或每个业务实例
-// 重复创建网络 Host。
+import type { createBitfsBuyerWindowRuntime } from "./bitfs/buyerWindowRuntime.js";
+// MSFile 页面单元的 Supplier 与 BitFS 网络入口。
 
 import type {
   WindowP2pExecutorLane,
@@ -28,6 +25,7 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
   private bitfs?: BitfsStreamRuntime;
   private bitfsWebRtc?: BitfsWebRtcStreamRuntime;
   private ownerSessionEpoch = "";
+  buyer?: ReturnType<typeof createBitfsBuyerWindowRuntime>;
 
   constructor(
     /** P2PKH 受控预签能力；P2PKH 未启用时专款准备保持不可用。 */
@@ -54,7 +52,12 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
         interconnect,
         host: context.host as BitfsWebRtcHost,
         stunServers: this.stunServers,
-        emit: (event, transfer) => context.emit(event, transfer),
+        emit: async (event, transfer) => {
+          const handled = await this.buyer?.onTransportEvent(event);
+          if (!handled && !(event.type === "bitfs-webrtc-frame" && event.direction === "inbound")) {
+            await context.emit(event, transfer);
+          }
+        },
         onError: (error, errorContext) => {
           const eventError = error && typeof error === "object" && "error" in error
             ? (error as { error?: unknown }).error
@@ -76,7 +79,7 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
           let pending: ReturnType<typeof setTimeout> | undefined;
           const flush = () => {
             pending = undefined;
-            Promise.resolve(context.emit({
+            void this.buyer?.onTransportEvent({
               type: "bitfs-webrtc-meter",
               sessionId: input.sessionId,
               webrtcSessionId: input.webrtcSessionId,
@@ -84,7 +87,7 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
               bytesIn: record.bytesIn,
               bytesOut: record.bytesOut,
               lastActivityAt: record.lastActivityAt,
-            })).catch(() => undefined);
+            }).catch(() => undefined);
           };
           const schedule = () => { if (pending === undefined) pending = setTimeout(flush, 500); };
           return {
@@ -107,6 +110,7 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
     this.bitfs = undefined;
     this.bitfsWebRtc = undefined;
     this.ownerSessionEpoch = "";
+    this.buyer?.stop();
     await bitfsWebRtc?.dispose().catch(() => undefined);
     await bitfs?.dispose().catch(() => undefined);
     await runtime?.dispose();
@@ -184,6 +188,8 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
     if (value.type === "bitfs-webrtc-buyer-offer") {
       const bitfsWebRtc = this.bitfsWebRtc;
       if (!bitfsWebRtc) throw new Error("MSFile lane WebRTC runtime is not attached");
+      const downloadSignal = this.buyer?.registerOffer(value);
+      if (!downloadSignal) throw new Error("BitFS 下载需求已停止");
       return bitfsWebRtc.acceptOffer({
         sessionId: value.sessionId,
         requestMessageId: value.requestMessageId,
@@ -191,7 +197,7 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
         peerPublicKeyHex: value.publicKeyHex,
         offerSdp: value.offerSdp,
         ownerSessionEpoch: this.bitfsOwnerSessionEpoch(),
-        signal,
+        signal: AbortSignal.any([signal, downloadSignal]),
       });
     }
     if (value.type === "bitfs-webrtc-signal") {

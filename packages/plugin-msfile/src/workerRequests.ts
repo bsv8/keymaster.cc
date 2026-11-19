@@ -237,7 +237,7 @@ export function createMsFileWorkerRequests(ports: MsFileWorkerRequestPorts) {
     }
     const controller = requestController ?? new AbortController();
     try {
-      if (request.kind === "msfile.control") return await ports.control.execute(request, controller.signal);
+      if (request.kind === "msfile.control") return await ports.control.execute({ ...request, clientId: actualClientId }, controller.signal);
       return await executeMsfileData(request, controller, actualClientId);
     } catch (err) {
       // 物理操作可能在 lock → unlock 期间因为旧 controller 被 abort。

@@ -62,7 +62,7 @@ export function createBitfsPurchaseTasks(store: BorrowedModuleFileStore, owner: 
     async list() { return (await read())?.row.tasks ?? []; },
     /** 旧记录只在索引不存在时迁入；之后不再从 phase 推断生命周期。 */
     async initialize(tasks: BitfsPurchaseTask[]) { await mutate(row => { if (row.revision === 0) row.tasks = structuredClone(tasks); }); },
-    async begin(taskId: string, demandId: string, now: number) {
+    async begin(taskId: string, demandId: string, now: number, firstSessionId?: string) {
       return mutate(row => {
         const active = row.tasks.find(t => t.state === "active");
         if (active) {
@@ -70,7 +70,7 @@ export function createBitfsPurchaseTasks(store: BorrowedModuleFileStore, owner: 
           return active;
         }
         if (row.tasks.some(t => t.taskId === taskId)) throw new Error("已结束任务不能重新激活；请使用新报价");
-        const task: BitfsPurchaseTask = { taskId, demandId, state: "active", createdAt: new Date(now).toISOString(), sessionIds: [] };
+        const task: BitfsPurchaseTask = { taskId, demandId, state: "active", createdAt: new Date(now).toISOString(), sessionIds: firstSessionId ? [firstSessionId] : [] };
         row.tasks.push(task); return task;
       });
     },

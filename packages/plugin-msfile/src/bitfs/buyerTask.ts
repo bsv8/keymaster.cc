@@ -197,6 +197,54 @@ export interface BitfsBuyerTask {
   recoverMaturedRefund(sessionId: string): Promise<BitfsMaturedRefundResult | undefined>;
 }
 
+export async function acceptBitfsBuyerQuote(input: {
+    sessionId: string;
+    counterpartyPublicKeyHex: string;
+    rawKind1: Uint8Array;
+  }, deps: Pick<BitfsBuyerTaskDeps, "ownerPublicKeyHex" | "seedHashHex" | "sessions" | "generation" | "nowMs" | "assertCurrentContext">): Promise<BitfsBuyerQuoteView> {
+  const owner = assertPublicKey(deps.ownerPublicKeyHex);
+  const seed = assertHash(deps.seedHashHex);
+  const sessionId = assertSessionId(input.sessionId);
+  deps.assertCurrentContext();
+  if (!(input.rawKind1 instanceof Uint8Array) || input.rawKind1.byteLength === 0) throw new TypeError("Kind 1 exact 报价不能为空");
+  const counterparty = assertPublicKey(input.counterpartyPublicKeyHex);
+  const quote = acceptBuyerQuote(bitfsWorkflowFacts(deps.nowMs()), input.rawKind1);
+  if (bytesToHex(quote.sellerPublicKey) !== counterparty) throw new Error("报价签名公钥与连接身份不一致");
+  if (bytesToHex(quote.terms.seedHash) !== seed || bytesToHex(quote.terms.buyerPublicKey) !== owner) {
+    throw new Error("报价没有绑定当前买方 Key 与请求 Seed");
+  }
+  const existing = await deps.sessions.get(sessionId);
+  if (existing) {
+    if (existing.role !== "buyer" || existing.ownerPublicKeyHex !== owner || existing.counterpartyPublicKeyHex !== counterparty
+      || existing.seedHashHex !== seed) {
+      throw new Error("同一 BitFS session ID 已绑定其它身份");
+    }
+    const saved = await deps.sessions.getEvidence(sessionId, "kind1-quote");
+    if (saved && !equal(saved, input.rawKind1)) throw new Error("同一买方会话不能替换已固定报价");
+    if (!saved) await deps.sessions.putEvidence(existing.sessionId, existing.revision, "kind1-quote", input.rawKind1, deps.nowMs());
+  } else {
+    deps.assertCurrentContext();
+    const created = await deps.sessions.create({
+      sessionId,
+      role: "buyer",
+      ownerPublicKeyHex: owner,
+      counterpartyPublicKeyHex: counterparty,
+      seedHashHex: seed,
+      generation: deps.generation,
+      phase: "quote-selected",
+    }, deps.nowMs());
+    await deps.sessions.putEvidence(created.sessionId, created.revision, "kind1-quote", input.rawKind1, deps.nowMs());
+  }
+  const view = toQuoteView(sessionId, seed, quote);
+  const latest = await deps.sessions.get(sessionId);
+  if (!latest) throw new Error("BitFS 报价会话写入后无法读取");
+  const quoteSummary = new TextEncoder().encode(JSON.stringify(view));
+  const savedSummary = await deps.sessions.getEvidence(sessionId, "quote-summary");
+  if (savedSummary && !equal(savedSummary, quoteSummary)) throw new Error("BitFS 静态报价摘要与已验签 Kind 1 不一致");
+  if (!savedSummary) await deps.sessions.putEvidence(latest.sessionId, latest.revision, "quote-summary", quoteSummary, deps.nowMs());
+  return view;
+}
+
 /** 创建固定 Key + Seed + 网络上下文的单报价买方任务。 */
 export function createBitfsBuyerTask(deps: BitfsBuyerTaskDeps): BitfsBuyerTask {
   const owner = assertPublicKey(deps.ownerPublicKeyHex);
@@ -276,51 +324,7 @@ export function createBitfsBuyerTask(deps: BitfsBuyerTaskDeps): BitfsBuyerTask {
     return deps.sessions.putEvidence(session.sessionId, session.revision, name, bytes, deps.nowMs());
   };
 
-  const acceptQuote = async (input: {
-    sessionId: string;
-    counterpartyPublicKeyHex: string;
-    rawKind1: Uint8Array;
-  }): Promise<BitfsBuyerQuoteView> => {
-      const sessionId = assertSessionId(input.sessionId);
-      deps.assertCurrentContext();
-      if (!(input.rawKind1 instanceof Uint8Array) || input.rawKind1.byteLength === 0) throw new TypeError("Kind 1 exact 报价不能为空");
-      const counterparty = assertPublicKey(input.counterpartyPublicKeyHex);
-      const quote = acceptBuyerQuote(bitfsWorkflowFacts(deps.nowMs()), input.rawKind1);
-      if (bytesToHex(quote.sellerPublicKey) !== counterparty) throw new Error("报价签名公钥与连接身份不一致");
-      if (bytesToHex(quote.terms.seedHash) !== seed || bytesToHex(quote.terms.buyerPublicKey) !== owner) {
-        throw new Error("报价没有绑定当前买方 Key 与请求 Seed");
-      }
-      const existing = await deps.sessions.get(sessionId);
-      if (existing) {
-        if (existing.role !== "buyer" || existing.ownerPublicKeyHex !== owner || existing.counterpartyPublicKeyHex !== counterparty
-          || existing.seedHashHex !== seed) {
-          throw new Error("同一 BitFS session ID 已绑定其它身份");
-        }
-        const saved = await deps.sessions.getEvidence(sessionId, "kind1-quote");
-        if (saved && !equal(saved, input.rawKind1)) throw new Error("同一买方会话不能替换已固定报价");
-        if (!saved) await saveExactEvidence(existing, "kind1-quote", input.rawKind1);
-      } else {
-        deps.assertCurrentContext();
-        const created = await deps.sessions.create({
-          sessionId,
-          role: "buyer",
-          ownerPublicKeyHex: owner,
-          counterpartyPublicKeyHex: counterparty,
-          seedHashHex: seed,
-          generation: deps.generation,
-          phase: "quote-selected",
-        }, deps.nowMs());
-        await saveExactEvidence(created, "kind1-quote", input.rawKind1);
-      }
-      const view = toQuoteView(sessionId, seed, quote);
-      let latest = await deps.sessions.get(sessionId);
-      if (!latest) throw new Error("BitFS 报价会话写入后无法读取");
-      const quoteSummary = new TextEncoder().encode(JSON.stringify(view));
-      const savedSummary = await deps.sessions.getEvidence(sessionId, "quote-summary");
-      if (savedSummary && !equal(savedSummary, quoteSummary)) throw new Error("BitFS 静态报价摘要与已验签 Kind 1 不一致");
-      if (!savedSummary) latest = await saveExactEvidence(latest, "quote-summary", quoteSummary);
-      return view;
-  };
+  const acceptQuote: BitfsBuyerTask["acceptQuote"] = input => acceptBitfsBuyerQuote(input, deps);
 
   const task: BitfsBuyerTask = {
     async publishDemand() {

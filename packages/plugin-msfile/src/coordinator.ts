@@ -66,12 +66,11 @@ export {
 } from "./bitfs/buyerDownloadPlan.js";
 export {
   BitfsBuyerProtocol,
-  recoverBitfsBuyerContentCommit,
   type BitfsBuyerProtocolDeps,
   type BitfsBuyerPurchasePhase,
   type BitfsBuyerPurchaseProgress,
   type BitfsBuyerStream,
-} from "./bitfs/buyerProtocol.js";
+} from "keymaster-bitfs";
 export {
   assertBitfsBuyerCloseBinding,
   encodeBitfsBuyerCloseBinding,
@@ -91,7 +90,7 @@ export {
 } from "./bitfs/broadcast.js";
 export { createBitfsWocChainPort, reconcileBitfsTransactions, reconcileBitfsSessionTransactions, readBitfsPoolSpendChain, type BitfsPoolSpendChain } from "./bitfs/wocChain.js";
 export { BitfsSeedIndex, BITFS_SEED_INDEX_PAGE_SIZE, BITFS_SEED_INDEX_VERIFY_CONCURRENCY, type BitfsSeedIndexEntry } from "./bitfs/seedIndex.js";
-export { BitfsSellerRuntime, type BitfsSellerMatch, type BitfsSellerRuntimeDeps } from "./bitfs/sellerRuntime.js";
+export { BitfsSellerRuntime, type BitfsSellerMatch, type BitfsSellerRuntimeDeps } from "keymaster-bitfs";
 export {
   BitfsSellerProtocol,
   createBitfsLocalSellerContentResolver,
@@ -99,7 +98,7 @@ export {
   type BitfsSellerContentResolver,
   type BitfsSellerContentResolution,
   type BitfsSellerProtocolDeps,
-} from "./bitfs/sellerProtocol.js";
+} from "keymaster-bitfs";
 export {
   BitfsSellerSessionManager,
   createUnavailableBitfsSellerProtocolPort,
@@ -108,7 +107,7 @@ export {
   type BitfsSellerSessionCloseReason,
   type BitfsSellerSessionManagerDeps,
   type BitfsSellerStreamTransport,
-} from "./bitfs/sellerSession.js";
+} from "keymaster-bitfs";
 export type { BitfsStreamEvent } from "./bitfs/sellerStreamRuntime.js";
 export type { BitfsWebRtcStreamEvent } from "./bitfs/webrtcStreamRuntime.js";
 // 内容存储只暴露 Worker-safe 的读写原语；买方写入和索引检查共用同一布局。

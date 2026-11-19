@@ -32,7 +32,7 @@
       "path": "./packages/plugin-connect"
     },
     {
-      "path": "./packages/plugin-window-p2p"
+      "path": "./packages/window-network"
     },
     {
       "path": "./packages/plugin-msfile"

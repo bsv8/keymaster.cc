@@ -34,7 +34,7 @@ export function MsFilePurchasePanel({ service, demand, maximumPrice, onPurchase 
         // 保留原报价按钮的购买状态判断，不增加费用预览、余额预检或新的准入条件。
         const blockedByOtherPurchase = Boolean(purchase && !samePurchase
           && purchase.phase !== "cancelled" && purchase.phase !== "refunded" && purchase.phase !== "failed" && purchase.phase !== "connection-closed");
-        const disabled = Boolean(starting || demand.existingPurchaseSessionId) || !service.startBitfsPurchase || !hasArbiter || aboveLimit || blockedByOtherPurchase || samePurchase;
+        const disabled = Boolean(starting || demand.existingPurchaseSessionId || demand.downloadReadOnly || demand.interrupted) || !service.startBitfsPurchase || !hasArbiter || aboveLimit || blockedByOtherPurchase || samePurchase;
         const reference = quoteContentReference(quote);
         const label = aboveLimit ? "超过本文件已选上限" : !hasArbiter ? "此报价没有可用仲裁方" : samePurchase ? purchase?.phase === "completed" ? "购买完成" : "查看购买进度" : blockedByOtherPurchase ? purchase?.phase === "completed" ? "该 Seed 已购买" : "请先完成当前购买" : "购买此报价";
         return <article className="msfile-quote-card" key={quote.sessionId}>
@@ -48,7 +48,7 @@ export function MsFilePurchasePanel({ service, demand, maximumPrice, onPurchase 
           <details><summary>报价详情与费用</summary><QuoteBill quote={quote} /></details>
         </article>;
       })}
-    </div> : !demand.existingPurchaseSessionId ? <p className="msfile-empty" role="status">需求已发出，尚未收到有效报价；页面会继续刷新报价。</p> : null}
+    </div> : demand.requestMessageId && !demand.existingPurchaseSessionId ? <p className="msfile-empty" role="status">需求已发出，尚未收到有效报价；页面会继续刷新报价。</p> : null}
     <p className="msfile-checkout__help">内容费参考按 Seed 和文件块单价计算；实际按剩余内容在卖家间分配采购预算，另计仲裁预留与链上费用。关池余款退回钱包。</p>
     {purchase || demand.existingPurchaseSessionId ? <PurchaseProgress key={demand.seedHashHex} demand={demand} /> : null}
     <details className="msfile-market__discovery"><summary>查询详情</summary><dl className="msfile-checkout__details">

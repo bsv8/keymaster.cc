@@ -223,6 +223,15 @@ export type CoordinatorClientRequestWithInternalStorage =
   | { kind: "storage.clear.root"; clientId: string; requestId: string; input: { declaration: import("./storage/access.js").PluginStorageDeclaration; appStorageName?: string }; expectedSessionEpoch: SessionEpoch };
 
 /** MSFile 设置/App 策略真值在 Coordinator；页面只通过 control RPC 读写。 */
+/** Wallet operations needed by the page-owned BitFS protocol. Content frames stay in the page. */
+export type CoordinatorBitfsBuyerWalletOperation =
+  | { type: "sign"; digest: ArrayBuffer; kind: number; document?: ArrayBuffer }
+  | { type: "prepare-opening"; sessionId: string; openingAmountSatoshis: string; expiryLockTime: number; minerFeeRateSatoshisPerKilobyte: string; arbiterPublicKeyHex: string }
+  | { type: "accept-opening"; sessionId: string; response: ArrayBuffer }
+  | { type: "fund-opening"; sessionId: string }
+  | { type: "settle-close"; sessionId: string }
+  | { type: "cancel-opening"; sessionId: string };
+
 export type CoordinatorMsFileControl =
   | { type: "settings.get" }
   | { type: "settings.readConcurrency.get" }
@@ -237,12 +246,9 @@ export type CoordinatorMsFileControl =
   | { type: "settings.bitfsBuyer.update"; input: MsFileBitfsBuyerSettings }
   /** 发布或复用指定 Seed 的 ChannelProtocol Hash 需求；不触发资金操作。 */
   | { type: "bitfs.demand.publish"; seedHashHex: string }
+  | { type: "bitfs.buyer.wallet"; seedHashHex: string; operation: CoordinatorBitfsBuyerWalletOperation }
   /** 读取指定 Seed 当前需求编号及已验签报价。 */
   | { type: "bitfs.demand.snapshot"; seedHashHex: string }
-  /** 用户明确选择报价后开始买方开池、交付和付款流程。 */
-  | { type: "bitfs.purchase.start"; seedHashHex: string; sessionId: string; /** 当前文件手动选择的完整 Block 最高价（聪）。 */ maxFullBlockPriceSatoshis?: string }
-  /** 在尚未产生付款签名时取消该报价购买，并尝试通过 Kind 12/13 回收费用池余款。 */
-  | { type: "bitfs.purchase.cancel"; seedHashHex: string; sessionId: string }
   /** 读取当前 Key 下已经持久化的买方任务及其资金恢复摘要。 */
   | { type: "bitfs.purchase.tasks.list" }
   /** 直接读取执行期间维护的资金账本，不从删除记录生成。 */
@@ -253,13 +259,13 @@ export type CoordinatorMsFileControl =
   | { type: "bucket.delete-file"; seedHashHex: string }
   | { type: "bitfs.demands.monitor" }
   | { type: "bitfs.purchase.reconcile"; seedHashHex: string; sessionId: string }
-  | { type: "bitfs.purchase.reconnect"; seedHashHex: string; sessionId: string }
   /** 只读历史仲裁进度；不自动续跑。 */
   | { type: "bitfs.arbitration.list" }
   /** 用户显式申请、取回或查询结算。 */
   | { type: "bitfs.arbitration.operate"; sessionId: string; action: "submit" | "retrieve" | "check" }
   /** 停止本地接收该需求的新报价并关闭其待处理 WebRTC 连接。 */
-  | { type: "bitfs.demand.cancel"; seedHashHex: string }
+  | { type: "bitfs.demand.cancel"; seedHashHex: string; requestMessageId?: string }
+  | { type: "bitfs.file.stored"; seedHashHex: string }
   | { type: "supplier.upsert"; supplier: MsFileSupplierConfig; expectedGeneration: number | null }
   | { type: "supplier.delete"; supplierPublicKeyHex: string; expectedGeneration: number | null }
   | { type: "supplier.probe"; supplierPublicKeyHex: string }
@@ -268,17 +274,6 @@ export type CoordinatorMsFileControl =
   | { type: "app-authorizations.list" }
   | { type: "approvals.pending" }
   | { type: "approval.resolve"; approvalId: string; decision: MsFileApprovalDecision }
-  /**
-   * 桶内文件块写入：页面只有 owner 文件句柄，但页面 storage 数据面
-   * 每个端口只允许少量并发；批量上传直接由 Coordinator 写入，避免
-   * 每个 256 KiB 块都排队等待页面存储槽位。
-   *
-   * 字节必须用 `ArrayBuffer` 而不是 `Uint8Array`：RPC DTO 校验会逐元素
-   * 检查 TypedArray（O(bytes)），256 KiB 块会让每个请求耗时数百毫秒。
-   */
-  | { type: "bucket.put-block"; seedHashHex: string; blockHashHex: string; bytes: ArrayBuffer }
-  /** 桶内文件块读取：下载/预览的块也由 Coordinator 直读，避免端口并发上限。 */
-  | { type: "bucket.get-block"; seedHashHex: string; blockHashHex: string }
   /**
    * 采集上报：自有导入文件完整入库后通知队列。购买/下载经
    * commitPurchasedMsFileContent 入库的不通知，不采集暂存块与采购证据。
@@ -344,22 +339,15 @@ export interface WindowP2pIdentitySignResult {
 }
 
 /** 仅供 001 Spike 验证 Coordinator ↔ Window 双向 transferable。 */
-export interface WindowP2pExecutorTransferResult {
-  bytes: ArrayBuffer;
-  /** Worker 接受该项后的在途总字节数。 */
-  acceptedPendingBytes: number;
-  /** 本轮 burst 在 Worker 中观测到的在途字节峰值。 */
-  peakPendingBytes: number;
-}
-
 /**
  * Window executor lease 与两个独立 typed signer RPC。
  * 请求绑定实际 MessagePort；lock/key switch/Worker 重启会清空 lease。
  */
+export type WindowNetworkDomain = "msfile" | "sat-subscription";
+
 export type CoordinatorClientRequestWithWindowP2pExecutor =
-  | { kind: "window-p2p.executor.acquire"; clientId: string; requestId: string; ownerPublicKeyHex: string; expectedSessionEpoch: SessionEpoch; /** 生产 executor 的专用双工 RPC 端口。 */ executorPort?: MessagePort }
+  | { kind: "window-p2p.executor.acquire"; clientId: string; requestId: string; ownerPublicKeyHex: string; expectedSessionEpoch: SessionEpoch; network?: WindowNetworkDomain; /** 生产 executor 的专用双工 RPC 端口。 */ executorPort?: MessagePort }
   | { kind: "window-p2p.executor.release"; clientId: string; requestId: string; leaseId: string }
-  | { kind: "window-p2p.executor.spike.transfer"; clientId: string; requestId: string; leaseId: string; expectedSessionEpoch: SessionEpoch; bytes: ArrayBuffer }
   | ({ kind: "window-p2p.executor.identity.sign-noise"; clientId: string; requestId: string } & WindowP2pNoiseSignRequest)
   | ({ kind: "window-p2p.executor.identity.sign-peer-record"; clientId: string; requestId: string } & WindowP2pPeerRecordSignRequest);
 
@@ -804,14 +792,13 @@ export interface SessionCoordinatorClient {
   storageControl(control: CoordinatorStorageControl): Promise<CoordinatorValueResult<unknown>>;
   storageCancel(targetRequestId: string): Promise<CoordinatorCommandResult>;
   storageSessionAbort(walletPublicKeyHex: string): Promise<CoordinatorCommandResult>;
-  msfileControl(control: CoordinatorMsFileControl): Promise<CoordinatorValueResult<unknown>>;
+  msfileControl(control: CoordinatorMsFileControl, signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
   msfileGrant(context: MsFileConnectAppContext): Promise<CoordinatorValueResult<string>>;
   msfileData(data: CoordinatorMsFileData, transfer?: ArrayBuffer[], signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
   msfileCancel(targetRequestId: string): Promise<CoordinatorCommandResult>;
   msfileSessionAbort(walletPublicKeyHex: string): Promise<CoordinatorCommandResult>;
-  windowP2pExecutorAcquire(ownerPublicKeyHex: string, executorPort?: MessagePort): Promise<CoordinatorValueResult<WindowP2pExecutorLease>>;
+  windowP2pExecutorAcquire(ownerPublicKeyHex: string, executorPort?: MessagePort, network?: WindowNetworkDomain): Promise<CoordinatorValueResult<WindowP2pExecutorLease>>;
   windowP2pExecutorRelease(leaseId: string): Promise<CoordinatorCommandResult>;
-  windowP2pExecutorSpikeTransfer(leaseId: string, expectedSessionEpoch: SessionEpoch, bytes: ArrayBuffer): Promise<CoordinatorValueResult<WindowP2pExecutorTransferResult>>;
   windowP2pExecutorSignNoiseStaticKey(request: Omit<WindowP2pNoiseSignRequest, "expectedSessionEpoch"> & { expectedSessionEpoch?: SessionEpoch }, signal?: AbortSignal): Promise<CoordinatorValueResult<WindowP2pIdentitySignResult>>;
   windowP2pExecutorSignPeerRecord(request: Omit<WindowP2pPeerRecordSignRequest, "expectedSessionEpoch"> & { expectedSessionEpoch?: SessionEpoch }, signal?: AbortSignal): Promise<CoordinatorValueResult<WindowP2pIdentitySignResult>>;
   /** 调用 SharedWorker 唯一 SatSubscription runtime；页面不直接持有 Sat K-V/连接。 */
@@ -906,17 +893,17 @@ export type P2pkhBroadcastAssemblyControl = Pick<SessionCoordinatorClient, "p2pk
 /** MSFile 插件 Coordinator 面。 */
 export type MsFileCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
   "msfileControl" | "msfileGrant" | "msfileData" | "msfileCancel" | "msfileSessionAbort"
->;
+> & WindowP2pCoordinatorControl;
 
 /** SatSubscription 插件 Coordinator 面。 */
 export type SatCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
   "satOperation" | "channelOperation"
->;
+> & WindowP2pCoordinatorControl;
 
 /** Window P2P 插件 Coordinator 面。 */
 export type WindowP2pCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
   "windowP2pExecutorAcquire" | "windowP2pExecutorRelease" |
-  "windowP2pExecutorSpikeTransfer" | "windowP2pExecutorSignNoiseStaticKey" |
+  "windowP2pExecutorSignNoiseStaticKey" |
   "windowP2pExecutorSignPeerRecord"
 >;
 
@@ -944,4 +931,3 @@ export const P2PKH_COORDINATOR_CONTROL_CAPABILITY = defineCapability<P2pkhCoordi
 export const WOC_COORDINATOR_CONTROL_CAPABILITY = defineCapability<P2pkhCoordinatorControl>({ kind: "local", id: "woc.coordinator-control", version: "1" });
 export const MSFILE_COORDINATOR_CONTROL_CAPABILITY = defineCapability<MsFileCoordinatorControl>({ kind: "local", id: "msfile.coordinator-control", version: "1" });
 export const SAT_COORDINATOR_CONTROL_CAPABILITY = defineCapability<SatCoordinatorControl>({ kind: "local", id: "sat.coordinator-control", version: "1" });
-export const WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY = defineCapability<WindowP2pCoordinatorControl>({ kind: "local", id: "window-p2p.coordinator-control", version: "1" });

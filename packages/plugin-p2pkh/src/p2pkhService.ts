@@ -1,4 +1,4 @@
-import { requireWocNetwork } from "@keymaster/contracts";
+import { requireWocNetwork, traceDev } from "@keymaster/contracts";
 import { sameWalletSession } from "@keymaster/contracts";
 import { sameNetworkIdentity, requireUnlockedWalletIdentity, bindWalletIdentity } from "@keymaster/contracts";
 // packages/plugin-p2pkh/src/p2pkhService.ts
@@ -191,6 +191,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
       balance: cloneP2pkhBalance(candidate.balance),
     };
     const published = cloneGlobalBalanceSnapshot(balanceSnapshot);
+    traceDev("keymaster.utxo", "balance.changed", () => ({ network: published.bsvNetwork, balance: published.balance }));
     publish(P2PKH_MSG.BALANCE_CHANGED, published);
     for (const listener of [...balanceListeners]) {
       try {
@@ -249,8 +250,10 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
       : await deps.coordinator.p2pkhUtxosGet({ ownerPublicKeyHex: input.ownerPublicKeyHex, network: input.network });
     if (result.status !== "ok") {
       const message = "message" in result ? result.message : "Coordinator UTXO snapshot request failed";
+      traceDev("keymaster.utxo", "snapshot.read.failed", () => ({ mode, network: input.network, message }));
       throw new Error(message);
     }
+    traceDev("keymaster.utxo", "snapshot.read", () => ({ mode, network: input.network, funds: result.value.funds }));
     return result.value;
   }
 
@@ -636,7 +639,11 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
       return raw;
     },
     getFunds: () => readAvailableUtxos("get"),
-    refreshFunds: () => readAvailableUtxos("refresh"),
+    async refreshFunds() {
+      const funds = await readAvailableUtxos("refresh");
+      await refreshBalanceSnapshot();
+      return funds;
+    },
     async listHistory(query) {
       const filter = { ...query };
       const repository = await ensureRepository();

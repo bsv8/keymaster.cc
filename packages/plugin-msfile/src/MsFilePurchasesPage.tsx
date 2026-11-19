@@ -60,7 +60,7 @@ function PurchaseRecords({ service, sessionId }: { service: MsFileBucketService;
     catch (cause) { if (mounted.current) setActionError(cause instanceof Error ? cause.message : String(cause)); }
     finally { if (mounted.current) setBusy(false); }
   };
-  const selected = sessionId ? records.find(item => item.sessionId === sessionId) : undefined;
+  const selected = sessionId ? (records.find(item => item.sessionId === sessionId) ?? records.find(item => item.taskId === sessionId)) : undefined;
   const history = records.filter(item => !item.historyDeleted);
   const phase = (item: MsFileBitfsTaskSnapshot) => t(`msfile.bucket.bitfs.phase.${item.phase}`, { defaultValue: item.phase });
   const taskLabel = (item: MsFileBitfsTaskSnapshot) => item.schedulerState?.failure ? (item.schedulerState.execution === "stopping" ? "已停止新增，已有工作收尾" : "已停止新增") : item.taskState === "active" ? t("msfile.purchases.task.active", { defaultValue: "进行中" }) : item.taskState === "ended" ? t("msfile.purchases.task.ended", { defaultValue: "已结束" }) : "—";
@@ -142,12 +142,20 @@ function PurchaseRecords({ service, sessionId }: { service: MsFileBucketService;
         <tr><th scope="row">{t("msfile.purchases.progress", { defaultValue: "已验收 Block" })}</th><td>{selected.verifiedBlockCount} / {selected.totalBlockCount ?? "—"}</td></tr>
       </tbody></table>
       {selected.fundingState === "not-opened" ? <p>{t("msfile.purchases.noPool", { defaultValue: "该次购买尚未开成费用池；保存的预算不代表资金已经锁入池中。" })}</p> : null}
+      {selected.downloadReadOnly ? <p>此文件正在下载。</p> : null}
+      {!selected.downloadReadOnly && !selected.historyDeleted && selected.taskEndReason !== "completed"
+        && selected.schedulerState?.content !== "complete" && service.deleteBitfsDownload ? (
+        <button disabled={busy} onClick={() => {
+          if (window.confirm("删除此文件的半成品？未结费用池和必要付款证据会保留。")) {
+            void operate(async () => { await service.deleteBitfsDownload!(selected.seedHashHex); });
+          }
+        }}>删除半成品</button>
+      ) : null}
       <div className="msfile-purchases__actions">
-        {service.reconcileBitfsTask ? <button disabled={busy} onClick={() => void operate(() => service.reconcileBitfsTask!(selected.seedHashHex, selected.sessionId))}>{t("msfile.purchases.reconcile", { defaultValue: "核对资金／处理到期退款" })}</button> : null}
-        {selected.canReconnect && service.reconnectBitfsTask ? <button disabled={busy} onClick={() => void operate(() => service.reconnectBitfsTask!(selected.seedHashHex, selected.sessionId))}>{t("msfile.purchases.reconnect", { defaultValue: "重新连接卖家" })}</button> : null}
+        {!selected.downloadReadOnly && service.reconcileBitfsTask ? <button disabled={busy} onClick={() => void operate(() => service.reconcileBitfsTask!(selected.seedHashHex, selected.sessionId))}>{t("msfile.purchases.reconcile", { defaultValue: "核对资金／处理到期退款" })}</button> : null}
         {selected.canCancel && service.cancelBitfsTask ? <button disabled={busy} onClick={() => void operate(() => service.cancelBitfsTask!(selected.seedHashHex, selected.sessionId))}>{t(selected.fundingState === "not-opened" ? "msfile.purchases.cancel" : "msfile.purchases.close", { defaultValue: selected.fundingState === "not-opened" ? "取消未开池购买" : "取消下载并与卖家协商关池" })}</button> : null}
       </div>
-      {service.deleteBitfsHistory ? <div className="msfile-purchases__delete">
+      {!selected.downloadReadOnly && service.deleteBitfsHistory ? <div className="msfile-purchases__delete">
         {!deleteConfirm ? <button disabled={busy} onClick={() => setDeleteConfirm(true)}>{selected.historyDeleted ? "清理已处理的恢复记录" : "删除本次采购记录"}</button> : <div role="group" aria-label="确认删除采购记录">
           <p>删除本次文件任务的采购历史和可清理日志，保留正式文件。未结清费用池及必要证据继续保留在“待处理费用池”，不会自动关池或退款。</p>
           <button disabled={busy} onClick={() => void operate(() => service.deleteBitfsHistory!(selected.seedHashHex, selected.sessionId))}>确认删除采购记录</button>

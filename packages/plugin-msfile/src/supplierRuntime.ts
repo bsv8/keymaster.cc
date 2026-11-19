@@ -1,7 +1,4 @@
-// MSFile 的 Window P2P lane runtime。
-//
-// 这里仅保留供应商连接/Stat/Read 业务；公共 Host、lease、TypedSigner 和
-// lane registry 由 plugin-window-p2p 统一拥有。
+// 通过 MSFile 页面单元的 libp2p Host 连接文件供应商。
 
 import { hexToBytes, peerIdFromPublicKeyBytes } from "bitcoin-libp2p/identity";
 import { WebRTCDirectError } from "bitcoin-libp2p/webrtc-direct";

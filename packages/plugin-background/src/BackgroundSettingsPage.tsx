@@ -5,7 +5,7 @@ import { BackgroundTasksPanel } from "./BackgroundTasksPanel.js";
 // 智能调度设置页：余额快照的智能刷新说明 + 各后台任务的同步管理。
 //
 // 设计缘由（2026-09-20）：
-//   - BSV 余额来自内存 UTXO 快照，由 WoC 空闲 2 秒的智能调度驱动，
+//   - BSV 余额来自内存 UTXO 快照，由 WoC 空闲 30 秒的智能调度驱动，
 //     不提供周期配置；页面只解释机制。
 //   - 其余后台任务（P2PKH 历史、联系人探测）可以
 //     单独设置同步间隔：30 秒 / 1 分钟 / 5 分钟 / 关闭。
@@ -278,7 +278,7 @@ function AvailableBackgroundSettingsPage({ backgroundService }: { backgroundServ
           {t("background.settings.smartTitle", { defaultValue: "BSV 余额快照（智能）" })}
         </h4>
         <p className="background-settings__hint">
-          {t("background.settings.smartDesc", { defaultValue: "余额来自内存 UTXO 快照：解锁后立即刷新，之后每次 WoC 队列空闲满 2 秒自动刷新，间隔不可配置。" })}
+          {t("background.settings.smartDesc", { defaultValue: "余额来自内存 UTXO 快照：解锁后立即刷新，之后每次 WoC 队列空闲满 30 秒自动刷新，间隔不可配置。" })}
         </p>
       </section>
 

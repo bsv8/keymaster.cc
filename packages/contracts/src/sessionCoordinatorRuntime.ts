@@ -7,7 +7,7 @@ import type {
   CoordinatorResponse, CoordinatorTopic, CoordinatorTopicEvent, CoordinatorSessionOpenResult,
   CoordinatorVaultOperation, CoordinatorStorageControl,
   CoordinatorMsFileControl, CoordinatorMsFileData, CoordinatorChannelOperation,
-  P2pkhProviderConfig, SessionEpoch, WindowP2pExecutorLease, WindowP2pExecutorTransferResult, WindowP2pIdentitySignResult,
+  P2pkhProviderConfig, SessionEpoch, WindowP2pExecutorLease, WindowP2pIdentitySignResult,
 } from "./sessionCoordinator.js";
 import type { ChannelPublishResult, ChannelSubscriptionSetResult, OpenedPrivateEnvelope } from "./channel.js";
 import type { KeyRef, VaultSealedSecret } from "./vault.js";
@@ -57,11 +57,11 @@ export type CoordinatorStorageControlResult = CoordinatorStorageControlResultFor
 export type CoordinatorMsFileControlResultFor<C extends CoordinatorMsFileControl> =
   C extends { type: "settings.get" } ? MsFileSettingsSnapshot : C extends { type: "settings.bitfsBuyer.get" } ? MsFileBitfsBuyerSettings :
   C extends { type: "settings.readConcurrency.get" } ? MsFileReadConcurrencySettings :
-  C extends { type: "bitfs.demand.publish" | "bitfs.demand.snapshot" | "bitfs.purchase.start" | "bitfs.purchase.cancel" | "bitfs.purchase.reconnect" } ? MsFileBitfsDemandSnapshot :
+  C extends { type: "bitfs.demand.publish" | "bitfs.demand.snapshot" } ? MsFileBitfsDemandSnapshot :
   C extends { type: "bitfs.arbitration.list" } ? MsFileArbitrationTask[] : C extends { type: "bitfs.demands.monitor" } ? MsFileDemandMonitorSnapshot :
   C extends { type: "bitfs.purchase.tasks.list" } ? MsFileBitfsTaskSnapshot[] : C extends { type: "bitfs.funding.pools.list" } ? MsFileBitfsFundingPoolSnapshot[] :
   C extends { type: "supplier.probe" } ? MsFileSupplierProbeResult : C extends { type: "app-authorizations.list" } ? MsFileAppAuthorizationView[] :
-  C extends { type: "approvals.pending" } ? CoordinatorMsFileStateEvent["pendingApprovals"] : C extends { type: "bucket.get-block" } ? ArrayBuffer :
+  C extends { type: "approvals.pending" } ? CoordinatorMsFileStateEvent["pendingApprovals"] :
   C extends { type: "collector.config.get" } ? MsFileCollectorConfig : C extends { type: "collector.status" } ? MsFileCollectorStatus : null;
   // 采集上报控制面结果：查询返回快照，变更返回 null。
   // Collector control results: queries return snapshots, mutations return null.
@@ -103,7 +103,7 @@ export type CoordinatorRpcResultForRequest<R extends CoordinatorRpcRequest> =
   R extends { kind: "storage.clear.root" } ? true :
   R extends { kind: "msfile.control"; control: infer C extends CoordinatorMsFileControl } ? CoordinatorMsFileControlResultFor<C> :
   R extends { kind: "msfile.data"; data: infer D extends CoordinatorMsFileData } ? CoordinatorMsFileDataResultFor<D> :
-  R extends { kind: "window-p2p.executor.acquire" } ? WindowP2pExecutorLease : R extends { kind: "window-p2p.executor.spike.transfer" } ? WindowP2pExecutorTransferResult :
+  R extends { kind: "window-p2p.executor.acquire" } ? WindowP2pExecutorLease :
   R extends { kind: "window-p2p.executor.identity.sign-noise" | "window-p2p.executor.identity.sign-peer-record" } ? WindowP2pIdentitySignResult :
   R extends { kind: "sat.operation"; operation: infer O extends CoordinatorSatOperation } ? CoordinatorSatOperationResultFor<O> :
   R extends { kind: "channel.operation"; operation: infer O extends CoordinatorChannelOperation } ? CoordinatorChannelOperationResultFor<O> :
@@ -218,10 +218,10 @@ const probe = (value: unknown) => fields(value, "supplierPublicKeyHex peerId con
 const quote = (value: unknown) => fields(value, "sessionId seedHashHex fileSizeBytes sellerPublicKeyHex seedPriceSatoshis fullBlockPriceSatoshis tailPriceSatoshis maxBlocksPerBatch quoteExpiresAtUnixSeconds recommendedFilename mediaType recentBytesPerSecond", { supportedArbiterPublicKeys: copy });
 const purchaseFields = "sessionId phase openingAmountSatoshis currentMaxFullBlockPriceSatoshis verifiedBlockCount verifiedBytes totalBlockCount message";
 const purchase = (value: unknown) => fields(value, purchaseFields);
-const purchaseTask = (value: unknown) => ({ ...fields(value, `${purchaseFields} historyDeleted taskId taskState taskEndReason createdAt updatedAt fundingState fundingTxid poolOutpoint refundLockTime seedHashHex sellerPublicKeyHex recommendedFilename fileSizeBytes fullBlockPriceSatoshis paidSatoshis minerFeeSatoshis lockedSatoshis pendingReturnSatoshis discoveryOnly canCancel canReconnect`, { schedulerState: copy }),
+const purchaseTask = (value: unknown) => ({ ...fields(value, `${purchaseFields} historyDeleted taskId taskState taskEndReason createdAt updatedAt fundingState fundingTxid poolOutpoint refundLockTime seedHashHex sellerPublicKeyHex recommendedFilename fileSizeBytes fullBlockPriceSatoshis paidSatoshis minerFeeSatoshis lockedSatoshis pendingReturnSatoshis discoveryOnly canCancel downloadReadOnly`, { schedulerState: copy }),
   verifiedBytes: (value as Row).verifiedBytes ?? null, availableQuotes: ((value as Row).availableQuotes as unknown[] | undefined)?.map(quote) ?? [],
 });
-const demand = (value: unknown) => fields(value, "seedHashHex requestMessageId expiresAtMs existingPurchaseSessionId currentMaxFullBlockPriceSatoshis", { quotes: each(quote), purchase });
+const demand = (value: unknown) => fields(value, "seedHashHex requestMessageId expiresAtMs existingPurchaseSessionId currentMaxFullBlockPriceSatoshis downloadReadOnly interrupted", { quotes: each(quote), purchase });
 const fundingPool = (value: unknown) => fields(value, "poolId seedHashHex network state fundingTxid openingOutpoint recoveryTxid sellerPublicKeyHex recommendedFilename poolAmountSatoshis lockedSatoshis pendingReturnSatoshis needsRecovery historyDeleted canManage");
 const arbitrationTask = (value: unknown) => fields(value, "sessionId seedHashHex role state message txid action");
 const demandMonitor = (value: unknown) => fields(value, "lastReceivedAtMs sellerEnabled", {
@@ -233,12 +233,12 @@ function msControlResult(control: CoordinatorMsFileControl, value: unknown): unk
     case "settings.get": return msSettings(value);
     case "settings.bitfsBuyer.get": return buyerSettings(value);
     case "settings.readConcurrency.get": return fields(value, concurrencyFields);
-    case "bitfs.demand.publish": case "bitfs.demand.snapshot": case "bitfs.purchase.start": case "bitfs.purchase.cancel": case "bitfs.purchase.reconnect": return demand(value);
+    case "bitfs.demand.publish": case "bitfs.demand.snapshot": return demand(value);
+    case "bitfs.buyer.wallet": return value;
     case "bitfs.arbitration.list": return (value as unknown[]).map(arbitrationTask);
     case "bitfs.demands.monitor": return demandMonitor(value);
     case "bitfs.funding.pools.list": return (value as unknown[]).map(fundingPool);
     case "bitfs.purchase.tasks.list": return (value as unknown[]).map(purchaseTask);
-    case "bucket.get-block": return value;
     case "supplier.probe": return probe(value);
     case "app-authorizations.list": return (value as unknown[]).map(appAuthorization);
     case "approvals.pending": return (value as unknown[]).map(pendingApproval);
@@ -316,7 +316,6 @@ function resultFor(request: CoordinatorRpcRequest, value: unknown): unknown {
     case "msfile.control": return msControlResult(request.control, value);
     case "msfile.data": return request.data.type === "stat" ? fields(value, "seedHashHex", { sources: each(msStatSource) }) : fields(value, "contentHashHex", { content: binary });
     case "window-p2p.executor.acquire": return fields(value, "leaseId sessionEpoch activePublicKeyHex");
-    case "window-p2p.executor.spike.transfer": return fields(value, "bytes acceptedPendingBytes peakPendingBytes");
     case "window-p2p.executor.identity.sign-noise": case "window-p2p.executor.identity.sign-peer-record": return fields(value, "signatureDer");
     case "sat.operation": return satResult(request.operation, value);
     case "channel.operation": return channelResult(request.operation, value);

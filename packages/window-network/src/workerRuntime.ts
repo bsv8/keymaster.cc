@@ -1,21 +1,19 @@
-import { defineWorkerRequestRoute } from "@keymaster/contracts";
 import {
   MSFILE_MAX_BLOCK_BYTES, MSFILE_MAX_SEED_BYTES, SAT_SUBSCRIPTION_RESOURCE_LIMITS, type CoordinatorClientRequest, type CoordinatorResponse,
   type WindowP2pExecutorLease, type WindowP2pExecutorError, type WindowP2pIdentitySignResult,
-  type SatWindowLaneOperation, type SatWindowLaneSspRequestEvent, type SessionEpoch,
+  type WindowNetworkDomain, type SatWindowLaneOperation, type SatWindowLaneSspRequestEvent, type SessionEpoch,
 } from "@keymaster/contracts";
 import type { WindowP2pExecutorOperation, WindowP2pExecutorConcurrencyConfig } from "@keymaster/contracts/window-p2p";
 import { noiseSigningPayload, peerIdFromPublicKeyBytes, parsePeerId, peerRecordUnsigned, sha256Bytes } from "bitcoin-libp2p/identity";
 import { MAX_WIRE_BYTES } from "sat-subscription-protocol/protocol";
 import { createWorkerBridgeBudget } from "./workerBridgeBudget.js";
-declare const __KEYMASTER_MSFILE_SPIKE__: boolean;
 
 export interface WindowP2pExecutorLeaseState extends WindowP2pExecutorLease {
   clientId: string;
   ownerPublicKeyHex: string;
   acquiredAt: number;
   lastPeerRecordSequence?: bigint;
-  /** 生产 Window executor 的专用数据面通道；Spike lease 没有此字段。 */
+  /** Window executor 的专用数据面通道。 */
   transportPort?: MessagePort;
   transportReady: boolean;
   /** Window 已应用的读取配置版本；未 ACK 时为 -1。 */
@@ -64,13 +62,13 @@ export interface ActiveSatInboundHandler {
   bridgeBytesReleased: boolean;
 }
 
-export type WindowP2pExecutorRequest = Extract<CoordinatorClientRequest, { kind: "window-p2p.executor.acquire" | "window-p2p.executor.release" | "window-p2p.executor.spike.transfer" | "window-p2p.executor.identity.sign-noise" | "window-p2p.executor.identity.sign-peer-record" }>;
+export type WindowP2pExecutorRequest = Extract<CoordinatorClientRequest, { kind: "window-p2p.executor.acquire" | "window-p2p.executor.release" | "window-p2p.executor.identity.sign-noise" | "window-p2p.executor.identity.sign-peer-record" }>;
 type ConnectionFence = { supplierId: string; ownerSessionEpoch: string; supplierGeneration: number };
 export interface WindowP2pWorkerPorts {
+  network: WindowNetworkDomain;
   session(): { vaultStatus: string; sessionEpoch: string; activePublicKeyHex?: string };
   configuration(): WindowP2pExecutorConcurrencyConfig;
   admission: { disconnected(peerId: string): boolean; response(requestId: string): CoordinatorResponse };
-  lifecycle: { activate(): void; stop(): void };
   signing: {
     publicKey(): Uint8Array;
     sign(request: Extract<CoordinatorClientRequest, { kind: "window-p2p.executor.identity.sign-noise" | "window-p2p.executor.identity.sign-peer-record" }>, digest: Uint8Array, owner: string, signal: AbortSignal): Promise<Uint8Array>;
@@ -81,7 +79,7 @@ export interface WindowP2pWorkerPorts {
     clearStates(): void;
   };
   events: {
-    changed(): void; ready(): void; revoked(): void;
+    changed(): void; ready(): void; revoked(lease: WindowP2pExecutorLeaseState): void;
     sellerEvent(event: object, lease: WindowP2pExecutorLeaseState): void;
   };
 }
@@ -102,27 +100,13 @@ export function createWindowP2pWorkerRuntime(ports: WindowP2pWorkerPorts) {
 
   const WINDOW_P2P_EXECUTOR_LEASE_TTL_MS = 5 * 60 * 1000;
 
-  const WINDOW_P2P_EXECUTOR_PRE_SIGN_YIELD_MS = typeof __KEYMASTER_MSFILE_SPIKE__ !== "undefined" && __KEYMASTER_MSFILE_SPIKE__
-    ? 250
-    : 25;
-
-  const WINDOW_P2P_EXECUTOR_TRANSFER_MAX_ITEMS = 5;
-
-  const WINDOW_P2P_EXECUTOR_TRANSFER_MAX_BYTES = 17 * 1024 * 1024;
-
-  const WINDOW_P2P_EXECUTOR_TRANSFER_MAX_ITEM_BYTES = 16 * 1024 * 1024;
+  const WINDOW_P2P_EXECUTOR_PRE_SIGN_YIELD_MS = 25;
 
   const UINT64_MAX = (1n << 64n) - 1n;
 
   let windowP2pExecutorLeaseTimer: ReturnType<typeof setTimeout> | undefined;
 
   let windowP2pExecutorIdentityTail: Promise<void> = Promise.resolve();
-
-  let windowP2pExecutorTransferPendingItems = 0;
-
-  let windowP2pExecutorTransferPendingBytes = 0;
-
-  let windowP2pExecutorTransferPeakBytes = 0;
 
   function rejectWindowP2pExecutorBridgePending(error: Error): void {
     windowP2pBridgeBudget.reset(error);
@@ -319,7 +303,7 @@ export function createWindowP2pWorkerRuntime(ports: WindowP2pWorkerPorts) {
     }
     if (data.type === "event") {
       const eventValue = data.event;
-      if (eventValue && typeof eventValue === "object" && (eventValue as { type?: unknown }).type === "ssp.state") {
+      if (ports.network === "sat-subscription" && eventValue && typeof eventValue === "object" && (eventValue as { type?: unknown }).type === "ssp.state") {
         const stateEvent = eventValue as {
           type: "ssp.state";
           supplierId?: unknown;
@@ -340,16 +324,8 @@ export function createWindowP2pWorkerRuntime(ports: WindowP2pWorkerPorts) {
         }
         return;
       }
-      if (eventValue && typeof eventValue === "object"
-        && ((eventValue as { type?: unknown }).type === "bitfs-seller-frame"
-          || (eventValue as { type?: unknown }).type === "bitfs-seller-session-closed"
-          || (eventValue as { type?: unknown }).type === "bitfs-webrtc-frame"
-          || (eventValue as { type?: unknown }).type === "bitfs-webrtc-quote-sent"
-          || (eventValue as { type?: unknown }).type === "bitfs-webrtc-signal-outbound"
-          || (eventValue as { type?: unknown }).type === "bitfs-webrtc-runtime-error"
-          || (eventValue as { type?: unknown }).type === "bitfs-webrtc-session-closed")) {
-        // BitFS 卖方会话事件：只允许路由到当前唯一会话管理器；无 bridge 额度。
-        ports.events.sellerEvent(eventValue, lease);
+      if (ports.network === "msfile") {
+        if (eventValue && typeof eventValue === "object") ports.events.sellerEvent(eventValue, lease);
         return;
       }
       if (!eventValue || typeof eventValue !== "object" || (eventValue as { type?: unknown }).type !== "ssp.request") {
@@ -425,6 +401,8 @@ export function createWindowP2pWorkerRuntime(ports: WindowP2pWorkerPorts) {
       if (windowP2pExecutorLease?.leaseId === leaseId) clearWindowP2pExecutorLeaseLocked();
     };
     port.start();
+    // 已连接的页面随 Coordinator peer 撤销。仅无物理端口的临时租约按 TTL 回收。
+    clearWindowP2pExecutorLeaseTimer();
   }
 
   let windowP2pExecutorConfigSync: {
@@ -479,6 +457,7 @@ export function createWindowP2pWorkerRuntime(ports: WindowP2pWorkerPorts) {
   }
 
   async function requestWindowP2pExecutorOperation(operation: WindowP2pExecutorOperation, signal?: AbortSignal): Promise<unknown> {
+    if (operation.laneId !== ports.network) throw windowP2pError("ERR_EXECUTOR_LANE", "Network executor does not own this lane", "not-sent");
     const lease = windowP2pExecutorLease;
     if (!lease || !lease.transportPort || !lease.transportReady || lease.sessionEpoch !== ports.session().sessionEpoch) {
       throw windowP2pError("ERR_EXECUTOR_UNAVAILABLE", "Window P2P executor is unavailable");
@@ -681,6 +660,7 @@ export function createWindowP2pWorkerRuntime(ports: WindowP2pWorkerPorts) {
 
   function scheduleWindowP2pExecutorLeaseExpiry(leaseId: string, acquiredAt: number): void {
     clearWindowP2pExecutorLeaseTimer();
+    if (windowP2pExecutorLease?.transportPort) return;
     const remaining = Math.max(0, WINDOW_P2P_EXECUTOR_LEASE_TTL_MS - (Date.now() - acquiredAt));
     windowP2pExecutorLeaseTimer = setTimeout(() => {
       windowP2pExecutorLeaseTimer = undefined;
@@ -712,12 +692,11 @@ export function createWindowP2pWorkerRuntime(ports: WindowP2pWorkerPorts) {
         windowP2pExecutorIdentityRequests.delete(requestId);
       }
     }
-    ports.lifecycle.stop();
-    ports.inbound.clearStates();
     windowP2pExecutorLease = undefined;
+    ports.inbound.clearStates();
     // 唯一 Window Host 消失后所有 BitFS 销售连接已不可用：立即清空会话并
     // 回到 degraded，不能停留在 selling。
-    ports.events.revoked();
+    ports.events.revoked(oldLease);
   }
 
   function acquireWindowP2pExecutorLease(input: {
@@ -736,13 +715,12 @@ export function createWindowP2pWorkerRuntime(ports: WindowP2pWorkerPorts) {
         return { ok: true, lease: { leaseId: windowP2pExecutorLease.leaseId, sessionEpoch: windowP2pExecutorLease.sessionEpoch, activePublicKeyHex: windowP2pExecutorLease.ownerPublicKeyHex } };
       }
       // 有界 TTL：超过租期视为旧 executor 已死，允许接管。
-      if (Date.now() - windowP2pExecutorLease.acquiredAt < WINDOW_P2P_EXECUTOR_LEASE_TTL_MS) {
+      if (windowP2pExecutorLease.transportPort || Date.now() - windowP2pExecutorLease.acquiredAt < WINDOW_P2P_EXECUTOR_LEASE_TTL_MS) {
         return { ok: false, reason: "busy" };
       }
       clearWindowP2pExecutorLeaseLocked();
     }
     const leaseId = `window-p2p-exec-lease-${crypto.randomUUID()}`;
-    ports.lifecycle.activate();
     windowP2pExecutorLease = {
       leaseId,
       clientId: input.clientId,
@@ -813,7 +791,7 @@ export function createWindowP2pWorkerRuntime(ports: WindowP2pWorkerPorts) {
       digest = sha256Bytes(noiseSigningPayload(staticKey));
     } else {
       if (request.addresses.length !== 0) {
-        throw new Error("Signed Peer Record addresses must be empty in the Window P2P executor spike");
+        throw new Error("Signed Peer Record addresses must be empty in the Window network executor");
       }
       const sequence = parseUint64Decimal(request.sequence);
       const expectedPeerId = peerIdFromPublicKeyBytes(publicKey);
@@ -867,6 +845,10 @@ export function createWindowP2pWorkerRuntime(ports: WindowP2pWorkerPorts) {
   async function executeWindowP2pExecutorRequest(request: WindowP2pExecutorRequest, actualClientId: string): Promise<CoordinatorResponse> {
     if (ports.admission.disconnected(actualClientId)) return ports.admission.response(request.requestId);
     if (request.kind === "window-p2p.executor.acquire") {
+      if ((request.network ?? "msfile") !== ports.network) {
+        request.executorPort?.close();
+        return executorIdentityError(request.requestId, "Invalid Window network", "validation-error");
+      }
       if (request.expectedSessionEpoch !== ports.session().sessionEpoch) {
         return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "stale-epoch" } };
       }
@@ -897,31 +879,6 @@ export function createWindowP2pWorkerRuntime(ports: WindowP2pWorkerPorts) {
       ports.events.changed();
       return { requestId: request.requestId, sessionEpoch: ports.session().sessionEpoch, ack: { status: "ok" } };
     }
-    if (request.kind === "window-p2p.executor.spike.transfer") {
-      executorLeaseIsCurrent(request.leaseId, actualClientId, request.expectedSessionEpoch);
-      if (!(request.bytes instanceof ArrayBuffer)) return executorIdentityError(request.requestId, "Window P2P executor transfer requires an ArrayBuffer", "validation-error");
-      if (request.bytes.byteLength > WINDOW_P2P_EXECUTOR_TRANSFER_MAX_ITEM_BYTES) return executorIdentityError(request.requestId, "Window P2P executor transfer item exceeds the byte limit", "validation-error");
-      if (windowP2pExecutorTransferPendingItems === 0) windowP2pExecutorTransferPeakBytes = 0;
-      if (windowP2pExecutorTransferPendingItems + 1 > WINDOW_P2P_EXECUTOR_TRANSFER_MAX_ITEMS) return executorIdentityError(request.requestId, "Window P2P executor transfer queue reached the item limit", "validation-error");
-      if (windowP2pExecutorTransferPendingBytes + request.bytes.byteLength > WINDOW_P2P_EXECUTOR_TRANSFER_MAX_BYTES) return executorIdentityError(request.requestId, "Window P2P executor transfer queue reached the byte limit", "validation-error");
-      windowP2pExecutorTransferPendingItems += 1;
-      windowP2pExecutorTransferPendingBytes += request.bytes.byteLength;
-      windowP2pExecutorTransferPeakBytes = Math.max(windowP2pExecutorTransferPeakBytes, windowP2pExecutorTransferPendingBytes);
-      const acceptedPendingBytes = windowP2pExecutorTransferPendingBytes;
-      try {
-        await new Promise<void>((resolve) => setTimeout(resolve, WINDOW_P2P_EXECUTOR_PRE_SIGN_YIELD_MS));
-        executorLeaseIsCurrent(request.leaseId, actualClientId, request.expectedSessionEpoch);
-        return {
-          requestId: request.requestId,
-          sessionEpoch: ports.session().sessionEpoch,
-          ack: { status: "ok" },
-          operationResult: { bytes: request.bytes, acceptedPendingBytes, peakPendingBytes: windowP2pExecutorTransferPeakBytes }
-        };
-      } finally {
-        windowP2pExecutorTransferPendingItems = Math.max(0, windowP2pExecutorTransferPendingItems - 1);
-        windowP2pExecutorTransferPendingBytes = Math.max(0, windowP2pExecutorTransferPendingBytes - request.bytes.byteLength);
-      }
-    }
     const controller = new AbortController();
     const key = windowP2pExecutorIdentityRequestKey(actualClientId, request.requestId);
     windowP2pExecutorIdentityRequests.set(key, { controller, clientId: actualClientId, leaseId: request.leaseId });
@@ -938,18 +895,16 @@ export function createWindowP2pWorkerRuntime(ports: WindowP2pWorkerPorts) {
       if (pending.clientId === peerId) { pending.controller.abort(); windowP2pExecutorIdentityRequests.delete(key); }
     }
   }
+  function disconnectClient(peerId: string) {
+    cancelIdentityClient(peerId);
+    if (windowP2pExecutorLease?.clientId === peerId) clearWindowP2pExecutorLeaseLocked();
+  }
   function cancelIdentityRequest(peerId: string, requestId: string) {
     const pending = windowP2pExecutorIdentityRequests.get(windowP2pExecutorIdentityRequestKey(peerId, requestId));
     if (pending?.clientId === peerId) pending.controller.abort();
   }
-  const route = defineWorkerRequestRoute<WindowP2pExecutorRequest>({
-    kinds: ["window-p2p.executor.acquire", "window-p2p.executor.release", "window-p2p.executor.spike.transfer", "window-p2p.executor.identity.sign-noise", "window-p2p.executor.identity.sign-peer-record"],
-    policy: request => ({ scheduling: "parallel", validateEpoch: false, cleanupOnly: request.kind === "window-p2p.executor.release" }),
-    execute: (request, call) => executeWindowP2pExecutorRequest(request, call.peerId),
-  });
   return {
-    route,
-    cancelIdentityClient, cancelIdentityRequest,
+    cancelIdentityClient, cancelIdentityRequest, disconnectClient,
     windowP2pExecutorIdentityRequests, windowP2pExecutorIdentityRequestKey,
     get windowP2pExecutorLease() { return windowP2pExecutorLease; }, set windowP2pExecutorLease(value: typeof windowP2pExecutorLease) { windowP2pExecutorLease = value; },
     activeSatInboundHandlers,

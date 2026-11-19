@@ -4,7 +4,7 @@ interface SatWorkerTransportPorts {
   operation(operation: SatWindowLaneOperation, signal?: AbortSignal): Promise<unknown>;
   cancelInbound(connectionId: string, reason: string): void;
 }
-/** Sat owns connection instances and registrations; WindowP2P only carries the wire. */
+/** Sat keeps its connection state and callbacks in the Worker. */
 export function createSatWorkerTransport(ports: SatWorkerTransportPorts) {
   const satIncomingHandlers = new Map<string, { supplierId: string; ownerSessionEpoch: string; supplierGeneration: number; handler: (wire: Uint8Array) => Promise<Uint8Array> }>();
   const satConnectionStateHandlers = new Map<string, {

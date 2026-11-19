@@ -9,16 +9,16 @@ import { createPreparedHost as createHost } from "@keymaster/p2p-host";
 import type {
   WindowP2pCoordinatorControl,
   WindowP2pExecutorError,
-  WindowP2pExecutorLaneRegistry,
+  WindowP2pExecutorLane,
+  WindowNetworkDomain,
 } from "@keymaster/contracts";
-import { SAT_SUBSCRIPTION_RESOURCE_LIMITS } from "@keymaster/contracts";
+import { SAT_SUBSCRIPTION_RESOURCE_LIMITS, traceDev } from "@keymaster/contracts";
 import {
   validateWindowP2pExecutorConcurrencyConfig,
   type WindowP2pExecutorConcurrencyConfig,
   type WindowP2pExecutorOperation,
 } from "@keymaster/contracts/window-p2p";
 import { KeymasterWindowP2pIdentitySigner } from "./identitySigner.js";
-import { createWindowWebRtcInterconnect } from "./webrtcInterconnect.js";
 import type { WindowWebRtcInterconnectContext } from "@keymaster/contracts/window-p2p";
 
 type Host = Awaited<ReturnType<typeof createHost>>;
@@ -123,8 +123,9 @@ interface InboundEventWaiter {
 
 export interface WindowP2pExecutorOptions {
   coordinator: WindowP2pCoordinatorControl;
-  /** 其它插件注册到唯一 Window Host 的受限 lane。 */
-  laneRegistry?: WindowP2pExecutorLaneRegistry;
+  network: WindowNetworkDomain;
+  createWebRtcInterconnect?: () => WindowWebRtcInterconnectContext;
+  lane: WindowP2pExecutorLane;
 }
 
 /**
@@ -134,7 +135,10 @@ export interface WindowP2pExecutorOptions {
 export class WindowP2pExecutor {
   private channel: MessageChannel;
   private readonly coordinator: WindowP2pCoordinatorControl;
-  private readonly laneRegistry?: WindowP2pExecutorLaneRegistry;
+  private readonly network: WindowNetworkDomain;
+  private readonly createWebRtcInterconnect?: () => WindowWebRtcInterconnectContext;
+  private readonly lane: WindowP2pExecutorLane;
+  private laneStarted = false;
   private lease?: import("@keymaster/contracts").WindowP2pExecutorLease;
   private signer?: KeymasterWindowP2pIdentitySigner;
   private host?: Host;
@@ -154,11 +158,14 @@ export class WindowP2pExecutor {
   /** dispose 可能同时由 pagehide 和 Host teardown 触发；两者必须共享一条收尾链。 */
   private disposing?: Promise<void>;
   private starting?: Promise<boolean>;
+  private stopping?: Promise<void>;
   private lifecycleToken = 0;
 
   constructor(options: WindowP2pExecutorOptions) {
     this.coordinator = options.coordinator;
-    this.laneRegistry = options.laneRegistry;
+    this.network = options.network;
+    this.createWebRtcInterconnect = options.createWebRtcInterconnect;
+    this.lane = options.lane;
     this.channel = new MessageChannel();
     this.bindChannel();
   }
@@ -196,7 +203,8 @@ export class WindowP2pExecutor {
         const eventId = event.data.event && typeof event.data.event === "object"
           ? (event.data.event as { eventId?: unknown }).eventId
           : undefined;
-        void Promise.resolve(this.laneRegistry?.rejectEvent?.(event.data.laneId, event.data.event, event.data.error))
+        if (!this.laneStarted || event.data.laneId !== this.lane.laneId) return;
+        void Promise.resolve(this.lane.rejectEvent?.(event.data.event, event.data.error))
           .catch(() => undefined)
           .finally(() => {
             if (typeof eventId === "string") this.releaseInboundEvent(eventId, false);
@@ -212,6 +220,7 @@ export class WindowP2pExecutor {
   }
 
   async start(): Promise<boolean> {
+    await this.stopping;
     if (this.disposed || this.lease) return Boolean(this.lease);
     if (this.starting) return this.starting;
     const run = this.startImpl();
@@ -233,7 +242,7 @@ export class WindowP2pExecutor {
     this.bindChannel();
     const snapshot = this.coordinator.getBootstrapSnapshot();
     if (snapshot.vaultStatus !== "unlocked" || !snapshot.activePublicKeyHex) return false;
-    const acquired = await this.coordinator.windowP2pExecutorAcquire(snapshot.activePublicKeyHex, this.channel.port2);
+    const acquired = await this.coordinator.windowP2pExecutorAcquire(snapshot.activePublicKeyHex, this.channel.port2, this.network);
     if (acquired.status !== "ok") return false;
     const leaseId = acquired.value.leaseId;
     if (this.disposed || lifecycleToken !== this.lifecycleToken) {
@@ -243,11 +252,11 @@ export class WindowP2pExecutor {
     this.lease = acquired.value;
     try {
       this.signer = new KeymasterWindowP2pIdentitySigner({ ...acquired.value, rpc: this.coordinator });
-      const webRtcInterconnect = createWindowWebRtcInterconnect();
+      const webRtcInterconnect = this.createWebRtcInterconnect?.();
       this.webRtcInterconnect = webRtcInterconnect;
       const host = await createHost({
         signer: this.signer,
-        transports: [webRTCDirect(), webSockets(), webRtcInterconnect.dialer.transport],
+        transports: [webRTCDirect(), webSockets(), ...(webRtcInterconnect ? [webRtcInterconnect.dialer.transport] : [])],
         listenAddrs: [],
         // Supplier 地址由受信任设置页保存并经过 public-key/PeerId/certhash
         // 校验。MSFile 的主要部署形态包含 loopback/LAN NAS，因此不能沿用
@@ -268,17 +277,19 @@ export class WindowP2pExecutor {
         releaseEvent: (eventId: string) => this.releaseInboundEvent(eventId),
         webRtcInterconnect
       };
-      await this.laneRegistry?.attach(laneContext);
+      this.laneStarted = true;
+      await this.lane.start(laneContext);
       // stop() 可能在 lane.attach() 等待期间撤销了 lease；attach 完成后再
       // 检查一次，避免旧 host/lane 在锁定或接管后发送 ready 或继续持有连接。
       if (this.disposed || lifecycleToken !== this.lifecycleToken || this.lease?.leaseId !== leaseId || this.host !== host) {
-        await this.laneRegistry?.detach().catch(() => undefined);
+        await this.stopLane();
         await this.discardStaleStart(host, this.signer, leaseId, true);
         return false;
       }
       this.channel.port1.postMessage({ type: "ready", leaseId: this.lease.leaseId, ok: true });
       return true;
     } catch (error) {
+      traceDev("runtime.window-network", "host.start.failed", () => ({ network: this.network, error }));
       const leaseId = this.lease?.leaseId;
       if (leaseId) this.channel.port1.postMessage({ type: "ready", leaseId, ok: false, errorMessage: errorText(error) });
       await this.stop();
@@ -302,6 +313,17 @@ export class WindowP2pExecutor {
   }
 
   async stop(): Promise<void> {
+    if (this.stopping) return this.stopping;
+    const run = this.stopImpl();
+    this.stopping = run;
+    try {
+      await run;
+    } finally {
+      if (this.stopping === run) this.stopping = undefined;
+    }
+  }
+
+  private async stopImpl(): Promise<void> {
     this.lifecycleToken += 1;
     for (const controller of this.pending.values()) controller.abort();
     this.pending.clear();
@@ -320,16 +342,23 @@ export class WindowP2pExecutor {
       catch { /* The revoked Coordinator binding cannot release; local cleanup must still complete. */ }
     }
 
-    await this.laneRegistry?.detach().catch(() => undefined);
     const host = this.host;
     const webRtcInterconnect = this.webRtcInterconnect;
+    const signer = this.signer;
     this.host = undefined;
     this.webRtcInterconnect = undefined;
+    this.signer = undefined;
+    await this.stopLane();
     if (host) await this.stopHostOnce(host);
     webRtcInterconnect?.dispose();
-    this.signer?.close();
-    this.signer = undefined;
+    signer?.close();
     await releaseLease;
+  }
+
+  private async stopLane(): Promise<void> {
+    if (!this.laneStarted) return;
+    this.laneStarted = false;
+    try { await this.lane.stop(); } catch { /* 继续释放 Host 与签名句柄 */ }
   }
 
   private async stopHostOnce(host: Host): Promise<void> {
@@ -377,8 +406,8 @@ export class WindowP2pExecutor {
     this.pending.set(request.requestId, controller);
     try {
       const operation = request.operation;
-      if (operation.type !== "lane" || !this.laneRegistry) throw new Error("Window P2P lane registry is unavailable");
-      const result = await this.laneRegistry.dispatch(operation.laneId, operation.operation, controller.signal);
+      if (operation.laneId !== this.lane.laneId || !this.laneStarted) throw new Error("Window network operation is unavailable");
+      const result = await this.lane.handle(operation.operation, controller.signal);
       // Sat lane 的 requestSsp/requestSpi 返回裸 Uint8Array；必须先复制成
       // 精确长度的 buffer 再 transfer，不能让 structured clone 复制大底层
       // ArrayBuffer，也不能把调用方的窄视图连同无关尾部带过 bridge。
@@ -401,23 +430,13 @@ export class WindowP2pExecutor {
   private async handleConfig(message: ExecutorConfigMessage): Promise<void> {
     const lease = this.lease;
     if (!lease || lease.leaseId !== message.leaseId) return;
-    if (!this.laneRegistry) {
-      this.channel.port1.postMessage({
-        type: "config-ack",
-        leaseId: lease.leaseId,
-        version: message.config.version,
-        ok: false,
-        errorMessage: "Window P2P lane registry is not ready",
-      } satisfies ExecutorConfigAck);
-      return;
-    }
     try {
       // Worker 与 Window 共用 builder 校验派生值；Window 只有在完整配置
       // 生效后才回 ACK，Worker 随后才允许发送新请求。
       const checked = validateWindowP2pExecutorConcurrencyConfig(message.config);
       this.bridgeMaxInFlightBytes = Math.min(checked.bridgeMaxInFlightBytes, SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxBridgeInFlightBytes);
       this.bridgeMaxPendingItems = Math.min(checked.bridgeMaxPendingItems, SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxBridgePendingItems);
-      this.laneRegistry.configure?.(checked);
+      this.lane.configure?.(checked);
       this.channel.port1.postMessage({ type: "config-ack", leaseId: lease.leaseId, version: checked.version, ok: true } satisfies ExecutorConfigAck);
     } catch (error) {
       this.channel.port1.postMessage({ type: "config-ack", leaseId: lease.leaseId, version: message.config.version, ok: false, errorMessage: errorText(error) } satisfies ExecutorConfigAck);
@@ -548,43 +567,36 @@ export class WindowP2pExecutor {
   }
 }
 
-let installedExecutor: WindowP2pExecutor | undefined;
-let installedUnsubscribe: (() => void) | undefined;
-let installRetryTimer: ReturnType<typeof setTimeout> | undefined;
-
-/** 页面只调用一次；多个 tab 各自竞争 Worker lease，失败者保持轻量重试。 */
-export function installWindowP2pExecutor(coordinator: WindowP2pCoordinatorControl, laneRegistry?: WindowP2pExecutorLaneRegistry): () => void | Promise<void> {
-  if (installedExecutor) return () => installedExecutor?.dispose();
-  const executor = new WindowP2pExecutor({ coordinator, laneRegistry });
-  installedExecutor = executor;
+/** 每个业务单元独立绑定本页 transport，由 Worker 按业务分配执行租约。 */
+export function installWindowP2pExecutor(
+  coordinator: WindowP2pCoordinatorControl,
+  network: WindowNetworkDomain,
+  lane: WindowP2pExecutorLane,
+  createWebRtcInterconnect?: () => WindowWebRtcInterconnectContext
+): () => Promise<void> {
+  const executor = new WindowP2pExecutor({ coordinator, network, lane, createWebRtcInterconnect });
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
   const attempt = (snapshot?: import("@keymaster/contracts").CoordinatorBootstrapSnapshot): void => {
     if (executor.isDisposed) return;
-    void executor.reconcileSession(snapshot).then((started) => {
-      // 没有 unlocked owner 时等待下一条 session.state 即可；不要在锁定态
-      // 或无 active key 时建立永不结束的页面重试计时器。只有 Worker 已经
-      // 暴露出可执行 owner、但本次 lease/Host 竞争失败时才做轻量重试。
+    void executor.reconcileSession(snapshot).then(started => {
       const current = coordinator.getBootstrapSnapshot();
-      if (!started && current.vaultStatus === "unlocked" && current.activePublicKeyHex && !installRetryTimer) {
-        installRetryTimer = setTimeout(() => { installRetryTimer = undefined; attempt(); }, 2_000);
+      if (!executor.isDisposed && !started && current.vaultStatus === "unlocked" && current.activePublicKeyHex && !retryTimer) {
+        retryTimer = setTimeout(() => { retryTimer = undefined; attempt(); }, 2_000);
       }
     }).catch(() => undefined);
   };
-  installedUnsubscribe = coordinator.subscribeTopic("session.state", (event: { vaultStatus?: string }) => {
+  const unsubscribe = coordinator.subscribeTopic("session.state", (event: { vaultStatus?: string }) => {
     if (event.vaultStatus === "unlocked") attempt(event as import("@keymaster/contracts").CoordinatorBootstrapSnapshot);
     else if (event.vaultStatus === "locked" || event.vaultStatus === "fatal") void executor.stop().catch(() => undefined);
   });
-  const pagehideHandler = () => { void executor.dispose().catch(() => undefined); };
-  if (typeof window !== "undefined") {
-    window.addEventListener("pagehide", pagehideHandler, { once: true });
+  const pagehide = (event: PageTransitionEvent) => { if (!event.persisted) void dispose().catch(() => undefined); };
+  async function dispose() {
+    if (retryTimer) clearTimeout(retryTimer);
+    unsubscribe();
+    window.removeEventListener("pagehide", pagehide);
+    await executor.dispose();
   }
+  window.addEventListener("pagehide", pagehide);
   attempt();
-  return () => {
-    if (installRetryTimer) clearTimeout(installRetryTimer);
-    installRetryTimer = undefined;
-    installedUnsubscribe?.();
-    installedUnsubscribe = undefined;
-    if (typeof window !== "undefined") window.removeEventListener("pagehide", pagehideHandler);
-    installedExecutor = undefined;
-    void executor.dispose();
-  };
+  return dispose;
 }

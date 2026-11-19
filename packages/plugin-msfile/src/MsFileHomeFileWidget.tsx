@@ -1,5 +1,5 @@
 import { MsFilePurchasePanel } from "./MsFilePurchasePanel.js";
-import { sameWalletSession } from "@keymaster/contracts";
+import { sameWalletSession, traceDev } from "@keymaster/contracts";
 import { useMsFileResources } from "./MsFileResourceContext.js";
 import { msfileErrorMessage } from "./msfileErrors.js";
 // packages/plugin-msfile/src/MsFileHomeFileWidget.tsx
@@ -144,6 +144,7 @@ interface HomeState {
   bitfsDemandError?: string;
   /** 用户购买/取消失败独立于报价刷新；读取报价成功不代表资金操作成功。 */
   bitfsPurchaseError?: HomeError;
+  bitfsPurchaseCompleted?: boolean;
 }
 
 interface FetchTask {
@@ -746,18 +747,43 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
     await readFile(task, "preview");
   }, [isCurrent, readFile, t]);
 
-  const startBitfsDemand = useCallback((task: FetchTask) => {
-    if (!service.publishBitfsDemand) return;
+  const startBitfsDemand = useCallback((task: FetchTask, existing?: MsFileBitfsDemandSnapshot, resume = false) => {
+    const publishDemand = resume ? service.resumeBitfsDownload : service.publishBitfsDemand;
+    if (!publishDemand) return;
+    const applySnapshot = (snapshot: MsFileBitfsDemandSnapshot): boolean => {
+      if (snapshot.completedPurchase) {
+        const { taskId, localFile } = snapshot.completedPurchase;
+        const [local] = buildStatViews({ seedHashHex: task.hash, sources: [localFile] }, settingsSnapshot, task.hash);
+        if (local?.selection) {
+          if (task.bitfsDemandPollTimer !== undefined) clearInterval(task.bitfsDemandPollTimer);
+          task.bitfsDemandPollTimer = undefined;
+          const stats = [local, ...task.stats.filter(view => view.entry.sourceKind !== "local-bitfs")];
+          task.stats = stats;
+          setState(previous => ({
+            ...previous, stats, notice: undefined, bitfsDemand: undefined, bitfsDemandError: undefined,
+            bitfsPurchaseError: undefined, bitfsPurchaseCompleted: true,
+          }));
+          traceDev("keymaster.bitfs.buyer-window", "completion.display", () => ({
+            seedHashHex: task.hash, taskId, fileSizeBytes: localFile.fileSizeBytes,
+          }));
+          void beginSelected(task, local.selection);
+          return true;
+        }
+      }
+      setState(previous => ({ ...previous, bitfsDemand: snapshot, bitfsDemandError: undefined }));
+      return false;
+    };
     const displayAndPoll = (snapshot: MsFileBitfsDemandSnapshot): void => {
       if (!isCurrent(task)) return;
-      setState((previous) => ({ ...previous, bitfsDemand: snapshot, bitfsDemandError: undefined }));
+      if (applySnapshot(snapshot)) return;
       const expiresAtMs = snapshot.expiresAtMs ?? Date.now() + 10 * 60 * 1_000;
-      let keepPollingAfterDemandExpires = isBitfsPurchaseActive(snapshot.purchase);
+      let keepPollingAfterDemandExpires = snapshot.downloadReadOnly || snapshot.interrupted || !!snapshot.existingPurchaseSessionId || isBitfsPurchaseActive(snapshot.purchase);
       if (task.bitfsDemandPollTimer !== undefined) clearInterval(task.bitfsDemandPollTimer);
       task.bitfsDemandPollTimer = setInterval(() => {
         if (!isCurrent(task) || (Date.now() >= expiresAtMs && !keepPollingAfterDemandExpires)) {
           if (task.bitfsDemandPollTimer !== undefined) clearInterval(task.bitfsDemandPollTimer);
           task.bitfsDemandPollTimer = undefined;
+          if (isCurrent(task)) setState(previous => ({ ...previous, notice: "等报价的时间已到，本次下载已结束。" }));
           return;
         }
         if (task.bitfsDemandPollBusy || !service.getBitfsDemand) return;
@@ -765,8 +791,8 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
         void service.getBitfsDemand(task.hash)
           .then((nextSnapshot) => {
             if (isCurrent(task)) {
-              keepPollingAfterDemandExpires = isBitfsPurchaseActive(nextSnapshot.purchase);
-              setState((previous) => ({ ...previous, bitfsDemand: nextSnapshot, bitfsDemandError: undefined }));
+              keepPollingAfterDemandExpires = nextSnapshot.downloadReadOnly || nextSnapshot.interrupted || !!nextSnapshot.existingPurchaseSessionId || isBitfsPurchaseActive(nextSnapshot.purchase);
+              applySnapshot(nextSnapshot);
             }
           })
           .catch((cause) => {
@@ -775,9 +801,13 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
           .finally(() => { task.bitfsDemandPollBusy = false; });
       }, 3_000);
     };
+    if (existing) {
+      displayAndPoll(existing);
+      return;
+    }
     const publish = async (): Promise<void> => {
       try {
-        const initial = await service.publishBitfsDemand!(task.hash);
+        const initial = await publishDemand.call(service, task.hash);
         displayAndPoll(initial);
       } catch (cause) {
         if (!isCurrent(task)) return;
@@ -794,7 +824,7 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
       }
     };
     void publish();
-  }, [isCurrent, makeError, service, t]);
+  }, [beginSelected, isCurrent, makeError, service, settingsSnapshot, t]);
 
   const startBitfsPurchase = useCallback(async (sessionId: string) => {
     const task = taskRef.current;
@@ -802,7 +832,8 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
     setState(previous => ({ ...previous, bitfsPurchaseError: undefined }));
     try {
       const snapshot = await service.startBitfsPurchase(task.hash, sessionId, forcedPriceLimit ?? undefined);
-      if (isCurrent(task)) setState(previous => ({ ...previous, bitfsDemand: snapshot, bitfsDemandError: undefined }));
+      if (isCurrent(task)) setState(previous => previous.bitfsPurchaseCompleted ? previous
+        : { ...previous, bitfsDemand: snapshot, bitfsDemandError: undefined });
     } catch (cause) {
       const error = makeError(cause);
       if (isCurrent(task)) setState(previous => ({ ...previous, bitfsPurchaseError: error }));
@@ -845,17 +876,23 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
     taskRef.current = task;
     setState({ phase: "stat-loading", hash, stats: [] });
     try {
-      const existing = await service.getBitfsDemand?.(hash);
+      const [result, existing] = await Promise.all([
+        service.stat({ seedHashHex: hash, signal: task.controller.signal }),
+        service.getBitfsDemand?.(hash),
+      ]);
       if (!isCurrent(task)) return;
-      if (existing?.existingPurchaseSessionId) {
-        setState({ phase: "supplier-selection", hash, stats: [], bitfsDemand: { ...existing, requestMessageId: null, expiresAtMs: null, quotes: [], purchase: null } });
+      const sources = existing?.completedPurchase
+        ? [existing.completedPurchase.localFile, ...result.sources.filter(entry => entry.sourceKind !== "local-bitfs")]
+        : result.sources;
+      const views = buildStatViews({ ...result, sources }, settingsSnapshot, hash);
+      task.stats = views;
+      const localAbsent = sources.some((entry) => entry.sourceKind === "local-bitfs" && entry.status === "absent");
+      const localAvailable = sources.some((entry) => entry.sourceKind === "local-bitfs" && entry.status === "available");
+      if (!localAvailable && existing && (existing.existingPurchaseSessionId || existing.downloadReadOnly || existing.interrupted)) {
+        setState({ phase: "supplier-selection", hash, stats: views, bitfsDemand: existing });
+        startBitfsDemand(task, existing);
         return;
       }
-      const result = await service.stat({ seedHashHex: hash, signal: task.controller.signal });
-      if (!isCurrent(task)) return;
-      const views = buildStatViews(result, settingsSnapshot, hash);
-      task.stats = views;
-      const localAbsent = result.sources.some((entry) => entry.sourceKind === "local-bitfs" && entry.status === "absent");
       if (localAbsent) startBitfsDemand(task);
       const candidates = views.map(candidateOf).filter((candidate): candidate is FileSelection => Boolean(candidate));
       if (candidates.length === 0) {
@@ -1042,6 +1079,7 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
           {state.error.message} <span className="msfile-home-file__diagnostic">{t("msfile.home.diagnostic", { defaultValue: "诊断代码" })}: <code>{state.error.code}</code></span>
         </p>
       ) : null}
+      {state.bitfsPurchaseCompleted ? <p className="msfile-home-file__notice" role="status">{t("msfile.home.bitfs.purchaseCompleted")}</p> : null}
       {state.notice ? <p className="msfile-home-file__notice" role="status">{state.bitfsDemand?.existingPurchaseSessionId || state.bitfsDemand?.purchase ? "已建立购买任务，执行与资金状态见下方进度。" : state.bitfsDemand?.quotes.length ? "已收到卖家报价，请查看报价并选择购买。" : state.notice}</p> : null}
 
       {state.bitfsDemand || fileSummary ? (
@@ -1052,7 +1090,17 @@ function MsFileHomeFileWidgetContent({ service, initialSeedHash }: { service: Ms
         </section>
       ) : null}
       {state.bitfsDemandError ? <p role="status" className="msfile-home-file__error">{state.bitfsDemandError}</p> : null}
-      {state.bitfsDemand && priceRange && forcedPriceLimit !== null ? (
+      {state.bitfsDemand?.downloadReadOnly ? <p className="msfile-home-file__notice">
+        此文件由另一个标签页下载。当前只显示进度。
+      </p> : null}
+      {state.bitfsDemand?.interrupted ? <div className="msfile-home-file__notice">
+        <p>此次下载已停止，已保存下载进度。</p>
+        {service.resumeBitfsDownload ? <button type="button" onClick={() => {
+          const task = taskRef.current;
+          if (task && isCurrent(task)) startBitfsDemand(task, undefined, true);
+        }}>继续下载</button> : null}
+      </div> : null}
+      {state.bitfsDemand && !state.bitfsDemand.downloadReadOnly && !state.bitfsDemand.interrupted && priceRange && forcedPriceLimit !== null ? (
         <section className="msfile-price-filter" aria-label="卖家价格筛选">
           <label htmlFor="msfile-home-bitfs-price-limit">完整 Block 最高价 <strong>{forcedPriceLimit} sats</strong></label>
           <input id="msfile-home-bitfs-price-limit" aria-label="本文件完整 Block 最高价" type="range" min={0} max={1000} step={1}

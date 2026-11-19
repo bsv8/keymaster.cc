@@ -808,10 +808,11 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     finally { if (onAbort) signal?.removeEventListener("abort", onAbort); }
   }
 
-  async msfileControl(control: import("@keymaster/contracts").CoordinatorMsFileControl): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
+  async msfileControl(control: import("@keymaster/contracts").CoordinatorMsFileControl, signal?: AbortSignal): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
     const request = { kind: "msfile.control" as const, clientId: this.clientId, requestId: this.generateRequestId(), control, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
     try {
-      const response = await this.sendRequest(request, control.type === "bitfs.purchase.start" ? 300_000 : this.requestTimeoutMs);
+      const opening = control.type === "bitfs.buyer.wallet" && control.operation.type === "prepare-opening";
+      const response = await this.sendRequest(request, opening ? 300_000 : this.requestTimeoutMs, signal);
       if (response.ack.status !== "ok") return response.ack;
       return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
@@ -908,8 +909,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   }
 
   /** 申请公共 Window P2P executor lease（同一 epoch 仅一个）。 */
-  async windowP2pExecutorAcquire(ownerPublicKeyHex: string, executorPort?: MessagePort): Promise<import("@keymaster/contracts").CoordinatorValueResult<import("@keymaster/contracts").WindowP2pExecutorLease>> {
-    const request = { kind: "window-p2p.executor.acquire" as const, clientId: this.clientId, requestId: this.generateRequestId(), ownerPublicKeyHex, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch, ...(executorPort ? { executorPort } : {}) };
+  async windowP2pExecutorAcquire(ownerPublicKeyHex: string, executorPort?: MessagePort, network?: import("@keymaster/contracts").WindowNetworkDomain): Promise<import("@keymaster/contracts").CoordinatorValueResult<import("@keymaster/contracts").WindowP2pExecutorLease>> {
+    const request = { kind: "window-p2p.executor.acquire" as const, clientId: this.clientId, requestId: this.generateRequestId(), ownerPublicKeyHex, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch, ...(network ? { network } : {}), ...(executorPort ? { executorPort } : {}) };
     try {
       const response = await this.sendRequest(request);
       if (response.ack.status !== "ok") return response.ack;
@@ -919,16 +920,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
   async windowP2pExecutorRelease(leaseId: string): Promise<CoordinatorCommandResult> {
     return this.requestCommand({ kind: "window-p2p.executor.release", clientId: this.clientId, requestId: this.generateRequestId(), leaseId });
-  }
-
-  /** 公共 P2P bridge 的 transferable 资源测试入口。 */
-  async windowP2pExecutorSpikeTransfer(leaseId: string, expectedSessionEpoch: import("@keymaster/contracts").SessionEpoch, bytes: ArrayBuffer): Promise<import("@keymaster/contracts").CoordinatorValueResult<import("@keymaster/contracts").WindowP2pExecutorTransferResult>> {
-    const request = { kind: "window-p2p.executor.spike.transfer" as const, clientId: this.clientId, requestId: this.generateRequestId(), leaseId, expectedSessionEpoch, bytes };
-    try {
-      const response = await this.sendRequest(request);
-      if (response.ack.status !== "ok") return response.ack;
-      return { status: "ok", value: requiredCoordinatorOperationResult(response, request.kind), sessionEpoch: response.sessionEpoch };
-    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
   }
 
   /** Window bridge RPC 1：由 Coordinator 构造标准 Noise 签名负载。 */
@@ -1186,14 +1177,16 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private async sendRequest<R extends CoordinatorClientCommandRequest>(
     request: R,
     timeoutMs?: number,
+    signal?: AbortSignal,
   ): Promise<CoordinatorRpcResponseForRequest<CoordinatorRpcRequestFromClient<R>>> {
-    return this.sendTypedRequest(toCoordinatorRpcRequest(request), request.requestId, timeoutMs);
+    return this.sendTypedRequest(toCoordinatorRpcRequest(request), request.requestId, timeoutMs, signal);
   }
 
   private async sendTypedRequest<R extends CoordinatorRpcRequest>(
     request: R,
     operationId = this.generateRequestId(),
     timeoutMs = this.requestTimeoutMs,
+    signal?: AbortSignal,
   ): Promise<CoordinatorRpcResponseForRequest<R>> {
     const runtime = this.runtimeHandle;
     if (!this.isConnected || !runtime) {
@@ -1204,6 +1197,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       const response = await runtime.capability(COORDINATOR_RPC_CAPABILITY).call(request, {
         operationId,
         timeoutMs,
+        signal,
       });
       if (this.runtimeHandle !== runtime || !this.isConnected || this.connectionAttempt !== attempt) {
         throw Object.assign(coordinatorSendError("Coordinator response belongs to a stale Runtime", "unknown"), { code: "service_reference_stale" });

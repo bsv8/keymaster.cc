@@ -87,13 +87,6 @@ const COORDINATOR_WORKER_UNIT_RUNTIME_DETAILS = [
     finalIoAuditEntries: [],
   },
   {
-    unitId: "window-p2p.coordinator-worker",
-    taskIds: [],
-    serviceIds: ["window-p2p.executor-lease"],
-    storagePurposes: [],
-    finalIoAuditEntries: [],
-  },
-  {
     unitId: "msfile.coordinator-worker",
     taskIds: [],
     serviceIds: ["msfile.service"],

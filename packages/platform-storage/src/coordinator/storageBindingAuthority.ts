@@ -5,6 +5,7 @@
 
 import type {
   CoordinatorValueResult,
+  CoordinatorBootstrapSnapshot,
   ModuleFileListPage,
   ModuleFileObject,
   ModuleFileStore,
@@ -18,6 +19,9 @@ import type {
   StorageBindingCoordinatorClient,
   StorageOwnerBinding,
 } from "@keymaster/contracts/storage-internal";
+
+import { createIndexedDbWalletStore } from "../local/indexedDbWalletStore.js";
+import { createModuleFileStore } from "../storage-access/wallet/moduleFileStore.js";
 
 function unwrap<T>(result: CoordinatorValueResult<unknown>, operation: string): T {
   if (result.status === "ok") return result.value as T;
@@ -39,6 +43,7 @@ export interface StorageBindingAuthorityOptions {
    */
   getWalletGeneration?: () => string | undefined;
   getRunGeneration?: () => string | undefined;
+  getPageWallet?: () => CoordinatorBootstrapSnapshot;
 }
 
 /** 将 Coordinator 内部 RPC 封装成 Host 使用的存储绑定权威。 */
@@ -61,6 +66,23 @@ export function createStorageBindingAuthority(
   }
   async function openOwnerFileStore(input: { pluginId: string; declaration: PluginStorageDeclaration }): Promise<ModuleFileStore> {
     const owner = binding(input);
+    const wallet = options.getPageWallet?.();
+    if (input.pluginId === "msfile" && wallet) {
+      const identity = wallet.activeKeyIdentity;
+      if (wallet.vaultStatus !== "unlocked" || !identity || wallet.walletGeneration !== owner.walletGeneration) {
+        throw new Error("MSFile wallet storage is unavailable");
+      }
+      const store = createIndexedDbWalletStore({ walletGeneration: owner.walletGeneration });
+      const files = createModuleFileStore({
+        store, binding: { ...owner, bsvNetwork: identity.bsvNetwork, publicKeyHex: identity.publicKeyHex, sessionEpoch: wallet.sessionEpoch },
+        isCurrent: () => {
+          const current = options.getPageWallet?.();
+          return current?.vaultStatus === "unlocked" && current.walletGeneration === owner.walletGeneration
+            && current.runGeneration === owner.runGeneration && current.sessionEpoch === wallet.sessionEpoch;
+        },
+      });
+      return { ...files, close() { files.close(); store.close(); } };
+    }
     let closed = false;
     const assertOpen = (): void => { if (closed) throw new Error("Storage handle is closed"); };
     // AbortSignal 是本地控制对象，不属于可序列化 RPC DTO。

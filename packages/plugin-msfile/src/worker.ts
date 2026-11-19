@@ -1,6 +1,6 @@
-import { WINDOW_P2P_WORKER_BRIDGE_CAPABILITY, type WindowP2pExecutorBridge } from "@keymaster/contracts/window-p2p";
+import type { WindowP2pExecutorBridge } from "@keymaster/contracts/window-p2p";
 import {
-  defineBuiltinWorkerPlugin, SAT_SUBSCRIPTION_SERVICE_CAPABILITY, WOC_CAPABILITY, WOC_WORKER_BROADCAST_CAPABILITY,
+  defineBuiltinWorkerPlugin, WOC_CAPABILITY, WOC_WORKER_BROADCAST_CAPABILITY,
   STORAGE_FILE_CLIENTS_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, MSFILE_SERVICE_CAPABILITY,
   type BorrowedModuleFileStore, type WocWorkerChainPort,
 } from "@keymaster/contracts";
@@ -8,6 +8,7 @@ import { createMsFileWorkerBitfsService } from "./msfileWorkerBitfsService.js";
 import type { MsFileServiceImpl } from "./msfileService.js";
 
 export function createMsfileWorkerPlugin(ports: {
+  bridge: WindowP2pExecutorBridge;
   bindBridge(bridge: () => WindowP2pExecutorBridge | undefined): () => void;
   bindChain(access: () => WocWorkerChainPort | undefined): () => void;
   start(instanceId: string, stores: { ownerPublicKeyHex: string; settings: BorrowedModuleFileStore; appSettings: BorrowedModuleFileStore }, assertActive: () => void): Promise<{ service: MsFileServiceImpl; revoke(): void; dispose(): Promise<void> }>;
@@ -15,9 +16,8 @@ export function createMsfileWorkerPlugin(ports: {
     identity: { instanceId: string; sessionEpoch: string }, signal: AbortSignal): ReturnType<Parameters<typeof createMsFileWorkerBitfsService>[1]>;
 }) {
   return defineBuiltinWorkerPlugin("msfile", [MSFILE_SERVICE_CAPABILITY], async context => {
-    const offBridge = ports.bindBridge(() => { context.scope.assertActive(); return context.optionalCapability(WINDOW_P2P_WORKER_BRIDGE_CAPABILITY)?.bind(context.consumer, context.scope); });
+    const offBridge = ports.bindBridge(() => { context.scope.assertActive(); return ports.bridge; });
     context.scope.onRevoke(offBridge);
-    context.capability(SAT_SUBSCRIPTION_SERVICE_CAPABILITY);
     const unbind = ports.bindChain(() => {
       context.scope.assertActive();
       const query = context.optionalCapability(WOC_CAPABILITY);

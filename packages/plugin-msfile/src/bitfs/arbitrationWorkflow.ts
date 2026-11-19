@@ -1,4 +1,4 @@
-import { parseBitfsBuyerPurchaseManifest } from "./buyerProtocol.js";
+import { parseBitfsBuyerPurchaseManifest } from "keymaster-bitfs";
 import { arbitrationContentItemCount, arbitrationFeeForItems } from "./arbitrationFees.js";
 import { OnlinePaymentWait } from "./onlinePaymentWait.js";
 // 仲裁应用编排：SDK 验证协议，应用保存进度、调度在线超时并执行显式操作。

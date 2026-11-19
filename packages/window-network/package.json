@@ -1,0 +1,19 @@
+{
+  "name": "@keymaster/window-network",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    "./window": "./src/windowExecutor.ts",
+    "./worker": "./src/workerRuntime.ts"
+  },
+  "dependencies": {
+    "@keymaster/contracts": "*",
+    "@libp2p/webrtc": "7.0.2",
+    "@libp2p/websockets": "10.1.25",
+    "bitcoin-libp2p": "0.3.2",
+    "@keymaster/p2p-host": "workspace:*",
+    "sat-subscription-protocol": "0.3.0"
+  },
+  "scripts": {}
+}

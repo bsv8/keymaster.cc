@@ -3,6 +3,7 @@
 // Coordinator SharedWorker RPC；状态经 `msfile.state` topic 订阅。
 
 import type {
+  BorrowedModuleFileStore,
   CoordinatorMsFileControl,
   CoordinatorMsFileData,
   CoordinatorValueResult,
@@ -33,9 +34,12 @@ import type {
   MsFileSupplierProbeResult,
   MsFileCoordinatorControl,
 } from "@keymaster/contracts";
-import { MSFILE_READ_CONCURRENCY_RECOMMENDED, MSFILE_SELLER_SETTINGS_DEFAULT, normalizeMsFileReadConcurrencySettings } from "@keymaster/contracts";
+import { MSFILE_LOCAL_SOURCE_ID, MSFILE_READ_CONCURRENCY_RECOMMENDED, MSFILE_SELLER_SETTINGS_DEFAULT, normalizeMsFileReadConcurrencySettings } from "@keymaster/contracts";
 import type { MsFileService } from "@keymaster/contracts";
 import { MsFileServiceError } from "./msfileErrors.js";
+
+import { createMsFileLocalContentSource } from "./bitfs/localContentSource.js";
+import { toArrayBuffer } from "./sha256.js";
 
 type StateEvent = {
   topic: "msfile.state";
@@ -320,29 +324,38 @@ export class MsFileServiceProxy implements MsFileService {
     return this.#control({ type: "approval.resolve", approvalId, decision }).then(() => undefined);
   }
 
-  /** 发布或复用本 Seed 的 ChannelProtocol 需求；此操作只广播需求，不动资金。 */
+  private pageContent?: ReturnType<typeof createMsFileLocalContentSource>;
+
+  usePageContent(store: BorrowedModuleFileStore): void {
+    this.pageContent = createMsFileLocalContentSource(store, {
+      onReadFailure: seedHashHex => this.#statCache.delete(seedHashHex),
+    });
+  }
+
+  buyer?: Pick<MsFileService, "publishBitfsDemand" | "resumeBitfsDownload" | "getBitfsDemand" | "startBitfsPurchase" | "cancelBitfsPurchase" | "cancelBitfsDemand">;
+
   publishBitfsDemand(seedHashHex: string): Promise<MsFileBitfsDemandSnapshot> {
-    return this.#control<MsFileBitfsDemandSnapshot>({ type: "bitfs.demand.publish", seedHashHex });
+    return this.buyer?.publishBitfsDemand?.(seedHashHex) ?? Promise.reject(new Error("下载页面不可用"));
   }
 
-  /** 读取当前需求编号和已经验签的报价摘要。 */
+  resumeBitfsDownload(seedHashHex: string): Promise<MsFileBitfsDemandSnapshot> {
+    return this.buyer?.resumeBitfsDownload?.(seedHashHex) ?? Promise.reject(new Error("下载页面不可用"));
+  }
+
   getBitfsDemand(seedHashHex: string): Promise<MsFileBitfsDemandSnapshot> {
-    return this.#control<MsFileBitfsDemandSnapshot>({ type: "bitfs.demand.snapshot", seedHashHex });
+    return this.buyer?.getBitfsDemand?.(seedHashHex) ?? this.#control({ type: "bitfs.demand.snapshot", seedHashHex });
   }
 
-  /** 用户选中已验签报价后启动购买；返回当前买方会话进度摘要。 */
   startBitfsPurchase(seedHashHex: string, sessionId: string, maxFullBlockPriceSatoshis?: string): Promise<MsFileBitfsDemandSnapshot> {
-    return this.#control<MsFileBitfsDemandSnapshot>({ type: "bitfs.purchase.start", seedHashHex, sessionId, ...(maxFullBlockPriceSatoshis === undefined ? {} : { maxFullBlockPriceSatoshis }) });
+    return this.buyer?.startBitfsPurchase?.(seedHashHex, sessionId, maxFullBlockPriceSatoshis) ?? Promise.reject(new Error("下载页面不可用"));
   }
 
-  /** 在还没有付款签名时取消购买，并返回关池回收进度。 */
   cancelBitfsPurchase(seedHashHex: string, sessionId: string): Promise<MsFileBitfsDemandSnapshot> {
-    return this.#control<MsFileBitfsDemandSnapshot>({ type: "bitfs.purchase.cancel", seedHashHex, sessionId });
+    return this.buyer?.cancelBitfsPurchase?.(seedHashHex, sessionId) ?? Promise.reject(new Error("下载页面不可用"));
   }
 
-  /** 停止本地接收该需求后续报价。 */
   cancelBitfsDemand(seedHashHex: string): Promise<void> {
-    return this.#control({ type: "bitfs.demand.cancel", seedHashHex }).then(() => undefined);
+    return this.buyer?.cancelBitfsDemand?.(seedHashHex) ?? Promise.resolve();
   }
 
   abortSession(walletPublicKeyHex: string): Promise<void> {
@@ -390,6 +403,11 @@ export class MsFileServiceProxy implements MsFileService {
   }
 
   readSeed(input: MsFileReadSeedInput): Promise<MsFileReadResult> {
+    if (input.sourceId === MSFILE_LOCAL_SOURCE_ID && this.pageContent) {
+      return this.pageContent.readSeed(input.seedHashHex, input.signal).then(content => ({
+        contentHashHex: input.seedHashHex, content: { $type: "binary", bytes: toArrayBuffer(content) },
+      }));
+    }
     return this.#dataFor<MsFileReadResult>(
       null,
       () => ({ type: "read-seed", sourceId: input.sourceId, seedHashHex: input.seedHashHex }),
@@ -399,6 +417,11 @@ export class MsFileServiceProxy implements MsFileService {
   }
 
   readBlock(input: MsFileReadBlockInput): Promise<MsFileReadResult> {
+    if (input.sourceId === MSFILE_LOCAL_SOURCE_ID && this.pageContent) {
+      return this.pageContent.readBlock(input.seedHashHex, input.blockHashHex, input.signal).then(content => ({
+        contentHashHex: input.blockHashHex, content: { $type: "binary", bytes: toArrayBuffer(content) },
+      }));
+    }
     return this.#dataFor<MsFileReadResult>(
       null,
       () => ({ type: "read-block", sourceId: input.sourceId, seedHashHex: input.seedHashHex, blockHashHex: input.blockHashHex }),

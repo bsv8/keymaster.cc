@@ -21,10 +21,10 @@ import { createMsFileWorkerRequests } from "@keymaster/plugin-msfile/worker";
 import { createStorageWorkerRequests } from "@keymaster/platform-storage/worker";
 import { createVaultWorkerKeys } from "@keymaster/plugin-vault/worker";
 import { createChannelWorkerRuntime } from "@keymaster/plugin-sat-subscription/worker";
-import { createWindowP2pWorkerRuntime } from "@keymaster/plugin-window-p2p/worker";
+import { createWindowP2pWorkerRuntime, type WindowP2pWorkerPorts, type WindowP2pExecutorRequest } from "@keymaster/window-network/worker";
+import { SAT_SUBSCRIPTION_RESOURCE_LIMITS } from "@keymaster/contracts";
 import { createVaultWorkerRuntime } from "@keymaster/plugin-vault/worker";
 import { createStorageWorkerPlugin } from "@keymaster/platform-storage/worker";
-import { createWindowP2pWorkerPlugin } from "@keymaster/plugin-window-p2p/worker";
 import { createSatSubscriptionWorkerPlugin, createSatWorkerLifecycle, type SatWorkerRuntimeState } from "@keymaster/plugin-sat-subscription/worker";
 import type { SatP2pkhService } from "@keymaster/plugin-sat-subscription";
 import { createMsfileWorkerPlugin, createMsFileWorkerLifecycle, productArbitrationServices } from "@keymaster/plugin-msfile/worker";
@@ -787,45 +787,125 @@ function isStorageConflictError(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && (error as { code?: unknown }).code === "storage_conflict");
 }
 
-const msfileWorkerProjection = createMsFileWorkerProjection({ session: () => ({ epoch: coordinatorState.sessionEpoch, unlocked: coordinatorState.vaultStatus === "unlocked" }), service: () => msfileWorkerLifecycle.service(), configChanged: () => windowP2pWorkerRuntime.syncWindowP2pExecutorConfig(), pump: () => msfileWorkerRequests.pumpMsfileDataWaiters(), publish: event => { publishTopicEvent("msfile.state", event); } });
+const msfileWorkerProjection = createMsFileWorkerProjection({ session: () => ({ epoch: coordinatorState.sessionEpoch, unlocked: coordinatorState.vaultStatus === "unlocked" }), service: () => msfileWorkerLifecycle.service(), configChanged: () => Promise.allSettled([...msfileNetworks.values()].map(network => network.syncWindowP2pExecutorConfig())), pump: () => msfileWorkerRequests.pumpMsfileDataWaiters(), publish: event => { publishTopicEvent("msfile.state", event); } });
 function emitMsFileState() { msfileWorkerProjection.emitMsFileState(); }
 
-const windowP2pWorkerRuntime = createWindowP2pWorkerRuntime({
-  session: () => ({ vaultStatus: coordinatorState.vaultStatus, sessionEpoch: coordinatorState.sessionEpoch, activePublicKeyHex: coordinatorState.activePublicKeyHex }),
-  configuration: () => msfileWorkerProjection.windowP2pExecutorConcurrencyConfig,
-  admission: { disconnected: peerId => revokedCoordinatorPeerIds.has(peerId), response: disconnectedClientResponse },
-  lifecycle: {
-    activate() { const unit = activateCoordinatorOwnerWorkerUnit("window-p2p.coordinator-worker"); coordinatorWorkerUnitRegistry.ready(unit.unitId, unit.instanceId); },
-    stop() { const unit = coordinatorWorkerUnitRegistry.get("window-p2p.coordinator-worker"); if (unit) stopCoordinatorWorkerUnit(unit.unitId, unit.instanceId); },
+const networkSession = () => ({ vaultStatus: coordinatorState.vaultStatus, sessionEpoch: coordinatorState.sessionEpoch, activePublicKeyHex: coordinatorState.activePublicKeyHex });
+const networkAdmission: WindowP2pWorkerPorts["admission"] = {
+  disconnected: peerId => revokedCoordinatorPeerIds.has(peerId),
+  response: disconnectedClientResponse,
+};
+const signNetworkIdentity: WindowP2pWorkerPorts["signing"] = {
+  publicKey() {
+    const owner = coordinatorState.activePublicKeyHex;
+    if (!owner) throw new Error("Window network active key is unavailable");
+    vaultWorkerKeys.vaultKeySession.assert(owner);
+    return validatePublicKey(cryptoHexToBytes(owner));
   },
-  signing: {
-    publicKey() {
-      const owner = coordinatorState.activePublicKeyHex;
-      if (!owner) throw new Error("Window P2P executor active key is unavailable");
-      vaultWorkerKeys.vaultKeySession.assert(owner);
-      return validatePublicKey(cryptoHexToBytes(owner));
+  sign: (_request, digest, owner, signal) => withCoordinatorFinalIoLease("write", signal,
+    () => vaultWorkerKeys.vaultKeySession.signDigest(digest, "der", owner),
+    { auditOperation: "window-p2p.identity.sign", durableLease: false }),
+};
+type WindowNetwork = ReturnType<typeof createWindowP2pWorkerRuntime>;
+const msfileNetworks = new Map<string, WindowNetwork>();
+let msfileSellerNetwork: WindowNetwork | undefined;
+
+function currentMsfileSellerNetwork(): WindowNetwork | undefined {
+  if (msfileSellerNetwork?.windowP2pExecutorLease?.transportReady) return msfileSellerNetwork;
+  msfileSellerNetwork = [...msfileNetworks.values()].find(network => network.windowP2pExecutorLease?.transportReady);
+  return msfileSellerNetwork;
+}
+
+function createMsfileNetwork(peerId: string): WindowNetwork {
+  const network = createWindowP2pWorkerRuntime({
+    network: "msfile",
+    session: networkSession,
+    configuration: () => msfileWorkerProjection.windowP2pExecutorConcurrencyConfig,
+    admission: networkAdmission,
+    signing: signNetworkIdentity,
+    inbound: { request: () => undefined, state: () => undefined, clearStates: () => undefined },
+    events: {
+      changed: () => emitMsFileState(),
+      ready() {
+        if (currentMsfileSellerNetwork() === network) refreshMsfileSellerTransport();
+      },
+      revoked(lease) {
+        if (msfileNetworks.get(peerId) === network) msfileNetworks.delete(peerId);
+        msfileBitfsRuntime.disconnectWindowTransport(lease.leaseId);
+        if (msfileSellerNetwork === network) {
+          msfileSellerNetwork = undefined;
+          msfileBitfsRuntime.msfileSellerSessionManager?.clear();
+          refreshMsfileSellerTransport();
+        }
+      },
+      sellerEvent: (event, lease) => handleBitfsSellerStreamEvent(event, lease),
     },
-    sign: (request, digest, owner, signal) => withCoordinatorFinalIoLease("write", signal,
-      () => vaultWorkerKeys.vaultKeySession.signDigest(digest, "der", owner),
-      { auditOperation: "window-p2p.identity.sign", durableLease: false }),
+  });
+  return network;
+}
+
+function refreshMsfileSellerTransport(): void {
+  const service = msfileWorkerLifecycle.service();
+  if (!service || coordinatorState.vaultStatus !== "unlocked" || !msfileBitfsRuntime.msfileSellerProtocolPort?.ready) return;
+  if (!currentMsfileSellerNetwork()) {
+    service.setSellerRuntimeStatus("degraded");
+    return;
+  }
+  service.setSellerRuntimeStatus((msfileBitfsRuntime.msfileSellerSessionManager?.activeCount() ?? 0) > 0 ? "selling" : "ready");
+  void drainMsfilePendingSellerHashRequests();
+}
+
+function clearMsfileNetworks(): void {
+  msfileSellerNetwork = undefined;
+  for (const network of msfileNetworks.values()) network.clearWindowP2pExecutorLeaseLocked();
+  msfileNetworks.clear();
+}
+
+const satNetworkConfig = {
+  version: 0,
+  supplierPendingReadLimit: 1,
+  bridgeMaxInFlightBytes: SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxBridgeInFlightBytes,
+  bridgeMaxPendingItems: SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxBridgePendingItems,
+};
+const satNetwork = createWindowP2pWorkerRuntime({
+  network: "sat-subscription",
+  session: networkSession,
+  configuration: () => satNetworkConfig,
+  admission: networkAdmission,
+  signing: signNetworkIdentity,
+  inbound: {
+    request: id => satIncomingHandlers.get(id),
+    state: id => satConnectionStateHandlers.get(id),
+    clearStates() {
+      const disconnected = [...satConnectionStateHandlers.values()];
+      satConnectionStateHandlers.clear();
+      for (const registration of disconnected) registration.handler("closed");
+    },
   },
-  inbound: { request: id => satIncomingHandlers.get(id), state: id => satConnectionStateHandlers.get(id), clearStates: () => satConnectionStateHandlers.clear() },
-  events: {
-    changed: () => emitMsFileState(),
-    ready() {
-      if (msfileBitfsRuntime.msfileSellerProtocolPort?.ready && coordinatorState.vaultStatus === "unlocked" && msfileWorkerLifecycle.service()) {
-        msfileWorkerLifecycle.service()!.setSellerRuntimeStatus((msfileBitfsRuntime.msfileSellerSessionManager?.activeCount() ?? 0) > 0 ? "selling" : "ready");
-        void drainMsfilePendingSellerHashRequests();
-      }
-    },
-    revoked() {
-      const seller = msfileBitfsRuntime.msfileSellerSessionManager;
-      if (seller) {
-        seller.clear();
-        if (coordinatorState.vaultStatus === "unlocked" && msfileWorkerLifecycle.service() && msfileBitfsRuntime.msfileSellerProtocolPort?.ready) msfileWorkerLifecycle.service()!.setSellerRuntimeStatus("degraded");
-      }
-    },
-    sellerEvent: (event, lease) => handleBitfsSellerStreamEvent(event, lease),
+  events: { changed() {}, ready() {}, revoked() {}, sellerEvent() {} },
+});
+const windowNetworkRoute = defineWorkerRequestRoute<WindowP2pExecutorRequest>({
+  kinds: ["window-p2p.executor.acquire", "window-p2p.executor.release", "window-p2p.executor.identity.sign-noise", "window-p2p.executor.identity.sign-peer-record"],
+  policy: request => ({ scheduling: "parallel", validateEpoch: false, cleanupOnly: request.kind === "window-p2p.executor.release" }),
+  async execute(request, call) {
+    if (request.kind === "window-p2p.executor.acquire") {
+      if (request.network === "sat-subscription") return satNetwork.executeWindowP2pExecutorRequest(request, call.peerId);
+      const network = msfileNetworks.get(call.peerId) ?? createMsfileNetwork(call.peerId);
+      const response = await network.executeWindowP2pExecutorRequest(request, call.peerId);
+      if (network.windowP2pExecutorLease) msfileNetworks.set(call.peerId, network);
+      return response;
+    }
+    const network = request.leaseId === satNetwork.windowP2pExecutorLease?.leaseId
+      ? satNetwork
+      : msfileNetworks.get(call.peerId);
+    if (network) return network.executeWindowP2pExecutorRequest(request, call.peerId);
+    return {
+      requestId: request.requestId,
+      sessionEpoch: coordinatorState.sessionEpoch,
+      ack: request.kind === "window-p2p.executor.release"
+        ? { status: "ok" }
+        : { status: "error", message: "Window network lease is unavailable" },
+    };
   },
 });
 
@@ -840,7 +920,10 @@ const msfileWorkerRequests = createMsFileWorkerRequests({
   changed: () => emitMsFileState(),
   available: () => isCoordinatorProductRegistered("msfile"), blocked: requestId => coordinatorProductBlockedResponse(requestId, "msfile"),
   admission: { revoked: peerId => revokedCoordinatorPeerIds.has(peerId), response: disconnectedClientResponse },
-  identity: { cancelClient: peerId => windowP2pWorkerRuntime.cancelIdentityClient(peerId), cancel: (peerId, requestId) => windowP2pWorkerRuntime.cancelIdentityRequest(peerId, requestId) },
+  identity: {
+    cancelClient(peerId) { msfileNetworks.get(peerId)?.cancelIdentityClient(peerId); satNetwork.cancelIdentityClient(peerId); },
+    cancel(peerId, requestId) { msfileNetworks.get(peerId)?.cancelIdentityRequest(peerId, requestId); satNetwork.cancelIdentityRequest(peerId, requestId); },
+  },
   control: { execute: (request, signal) => msfileBitfsRuntime.executeMsfileControl(request, signal), mutates: control => msfileBitfsRuntime.isMsfileMutationControl(control) },
   io: { run: (operation, signal, execute, options) => withCoordinatorFinalIoLease(operation, signal, execute, { ...options, auditOperation: options.auditOperation }) },
 });
@@ -865,8 +948,6 @@ const msfileWorkerLifecycle = createMsFileWorkerLifecycle({
     stopMsfileSellerRuntime();
     for (const pending of msfileWorkerRequests.msfileRequests.values()) pending.controller.abort();
     msfileWorkerRequests.msfileRequests.clear();
-    for (const pending of windowP2pWorkerRuntime.windowP2pExecutorIdentityRequests.values()) pending.controller.abort();
-    windowP2pWorkerRuntime.windowP2pExecutorIdentityRequests.clear();
     msfileWorkerRequests.msfileGrants.clear();
     msfileBitfsRuntime.revoke();
     msfileWorkerProjection.lastMsFileState = undefined;
@@ -898,7 +979,7 @@ const msfileBitfsRuntime = createBitfsWorkerRuntime({
   effectiveFeeRate: () => currentWalletFeeRate(),
   crypto: (owner) => vaultWorkerKeys.createWorkerActiveKeyCrypto(owner),
   blockHeight: readCoordinatorBitfsBlockHeight,
-  executor: (operation, signal?: AbortSignal) => testDomainUnitReadiness ? windowP2pWorkerRuntime.requestWindowP2pExecutorOperation(operation, signal) : msfileWorkerLifecycle.executor(operation, signal),
+  executor: (operation, signal?: AbortSignal) => testDomainUnitReadiness ? msfileBridge.request(operation, signal) : msfileWorkerLifecycle.executor(operation, signal),
   network: bitfsNetwork,
   availability: coordinatorUnitAvailability,
   subscribeAvailability: subscribeCoordinatorUnitAvailability,
@@ -933,7 +1014,19 @@ const msfileBitfsRuntime = createBitfsWorkerRuntime({
     return channelWorkerRuntime.publishChannelHashRequest(current, input, signal, prepared);
   },
   unknownPublishFailure: isUnknownChannelPublishFailure,
-  executorLease: () => windowP2pWorkerRuntime.windowP2pExecutorLease,
+  executorLease: () => currentMsfileSellerNetwork()?.windowP2pExecutorLease,
+  buyerExecutorLease: peerId => (msfileNetworks.get(peerId) ?? (testDomainUnitReadiness ? currentMsfileSellerNetwork() : undefined))?.windowP2pExecutorLease,
+  isWindowLeaseActive: leaseId => [...msfileNetworks.values()].some(network => network.windowP2pExecutorLease?.leaseId === leaseId),
+  async buyerExecutor(leaseId, operation, signal) {
+    const network = [...msfileNetworks.values()].find(entry => entry.windowP2pExecutorLease?.leaseId === leaseId);
+    if (!network) throw new Error("BitFS 下载标签页已断开");
+    const result = await network.requestWindowP2pExecutorOperation(operation, signal);
+    const lease = network.windowP2pExecutorLease;
+    if (lease?.leaseId !== leaseId || lease.sessionEpoch !== coordinatorState.sessionEpoch) {
+      throw new Error("BitFS 下载标签页已断开");
+    }
+    return result;
+  },
   allowLoopback: bitfsAllowsLoopbackWebsocket,
   isUnavailable: isCoordinatorUnitUnavailableError,
   publishPrivate: async (input) => {
@@ -954,21 +1047,14 @@ export const createMsfileBitfsBuyerTask = msfileBitfsRuntime.createMsfileBitfsBu
 const msfileBitfsBuyerRequests = msfileBitfsRuntime.msfileBitfsBuyerRequests;
 const msfileBitfsBuyerOfferCounts = msfileBitfsRuntime.msfileBitfsBuyerOfferCounts;
 const configureMsfileSellerRuntime = msfileBitfsRuntime.configureMsfileSellerRuntime;
-const msfileBitfsBuyerTasks = msfileBitfsRuntime.msfileBitfsBuyerTasks;
-const msfileBitfsBuyerPurchaseTails = msfileBitfsRuntime.msfileBitfsBuyerPurchaseTails;
 const msfileBitfsWebRtcBuyerLinks = msfileBitfsRuntime.msfileBitfsWebRtcBuyerLinks;
 const msfileBitfsWebRtcSellerLinks = msfileBitfsRuntime.msfileBitfsWebRtcSellerLinks;
 const stopMsfileSellerRuntime = msfileBitfsRuntime.stopMsfileSellerRuntime;
 const acceptMsfileBitfsWebRtcOffer = msfileBitfsRuntime.acceptMsfileBitfsWebRtcOffer;
-const handleMsfileSellerHashRequest = msfileBitfsRuntime.handleMsfileSellerHashRequest;
+const handleMsfileSellerHashRequest: (request: import("bsv8-channel-protocol/hash-request").VerifiedHashRequest) => Promise<void> = msfileBitfsRuntime.handleMsfileSellerHashRequest;
 const drainMsfilePendingSellerHashRequests = msfileBitfsRuntime.drainMsfilePendingSellerHashRequests;
 const handleBitfsSellerStreamEvent = msfileBitfsRuntime.handleBitfsSellerStreamEvent;
-const ensureMsfileBitfsBuyerRecovery = msfileBitfsRuntime.ensureMsfileBitfsBuyerRecovery;
-const ensureMsfileBitfsBuyerTask = msfileBitfsRuntime.ensureMsfileBitfsBuyerTask;
-const msfileBitfsBuyerDemandSnapshot = msfileBitfsRuntime.msfileBitfsBuyerDemandSnapshot;
 const msfileBitfsBuyerTaskKey = msfileBitfsRuntime.msfileBitfsBuyerTaskKey;
-const startMsfileBitfsBuyerPurchase = msfileBitfsRuntime.startMsfileBitfsBuyerPurchase;
-const cancelMsfileBitfsBuyerPurchase = msfileBitfsRuntime.cancelMsfileBitfsBuyerPurchase;
 const listMsfileBitfsBuyerTaskSnapshots = msfileBitfsRuntime.listMsfileBitfsBuyerTaskSnapshots;
 export const recoverMsfileBitfsFundingSplit = msfileFundingRuntime.recoverSplit;
 
@@ -1035,8 +1121,8 @@ let channelRevision = 0;
 /** Window lane 的连接状态事件；按 connectionId 和完整 fence 路由到当前 owner。 */
 
 const { transport: satSubscriptionTransport, incomingHandlers: satIncomingHandlers, stateHandlers: satConnectionStateHandlers } = createSatWorkerTransport({
-  operation: (operation, signal) => testDomainUnitReadiness ? windowP2pWorkerRuntime.satWindowLaneOperation(operation, signal) : satWorkerLifecycle.executor({type: "lane", laneId: "sat-subscription", operation}, signal),
-  cancelInbound: (connectionId, reason) => windowP2pWorkerRuntime.cancelSatInboundHandlersForConnection(connectionId, reason),
+  operation: (operation, signal) => testDomainUnitReadiness ? satNetwork.satWindowLaneOperation(operation, signal) : satWorkerLifecycle.executor({type: "lane", laneId: "sat-subscription", operation}, signal),
+  cancelInbound: (connectionId, reason) => satNetwork.cancelSatInboundHandlersForConnection(connectionId, reason),
 });
 interface SatWorkerConnection extends SatSupplierConnection {
   readonly state: "online" | "degraded" | "closed";
@@ -1085,7 +1171,7 @@ function releaseSatRelatedResources(reason: string): import("@keymaster/plugin-s
   // 先取消仍在 handler 中等待的入站 Publish，再移除连接注册表。取消只
   // 释放 bridge Wire，不提前释放 handler slot；slot 要等真实 Promise settle，
   // 防止永不结束的旧 handler 在新 owner 中制造未受控并发。
-  windowP2pWorkerRuntime.cancelSatInboundHandlers(undefined, `Sat runtime was released: ${reason}`);
+  satNetwork.cancelSatInboundHandlers(undefined, `Sat runtime was released: ${reason}`);
   satIncomingHandlers.clear();
   p2pkhWorkerOperations.dispose();
   const { starting: p2pkhStarting, protocolStarting } = workerTransferRuntime.release();
@@ -1441,9 +1527,8 @@ function abortCoordinatorPeerInflight(peerId: string): void {
   for (const [requestId, request] of msfileWorkerRequests.msfileRequests) {
     if (request.clientId === peerId) { request.controller.abort(); msfileWorkerRequests.msfileRequests.delete(requestId); }
   }
-  for (const [requestId, request] of windowP2pWorkerRuntime.windowP2pExecutorIdentityRequests) {
-    if (request.clientId === peerId) { request.controller.abort(); windowP2pWorkerRuntime.windowP2pExecutorIdentityRequests.delete(requestId); }
-  }
+  msfileNetworks.get(peerId)?.disconnectClient(peerId);
+  satNetwork.disconnectClient(peerId);
   for (const [grantId, grant] of msfileWorkerRequests.msfileGrants) if (grant.clientId === peerId) msfileWorkerRequests.msfileGrants.delete(grantId);
   // 浏览授权是专属授权：peer 一旦脱离 committed session，它名下签发的授权当场作废，
   // 随后任何 browse 调用都只能得到「不可用」。
@@ -1500,7 +1585,8 @@ function fenceCoordinatorPeerSession(
     selectCoordinatorStorageIoOwner();
   }
   if (options.physical) {
-    coordinatorPeers.delete(state.peer.peerId);
+    const peerId = state.peer.peerId;
+    coordinatorPeers.delete(peerId);
   }
   void drainCoordinatorPeer(state);
   return true;
@@ -2018,14 +2104,14 @@ function coordinatorProductBlockedResponse(requestId: string, pluginId: string):
 // ============================================================
 //
 // 设计缘由：
-//   - 资产余额（UTXO 快照）不再等固定周期：只要 WoC 队列空闲满 2 秒，
+//   - 资产余额（UTXO 快照）不再等固定周期：只要 WoC 队列空闲满 30 秒，
 //     就刷新一次余额快照，把「所有闲暇时间」用来获取余额。
-//   - 任何 WoC 请求开始都会打断计时；请求结束后重新从 0 计时 2 秒，
+//   - 任何 WoC 请求开始都会打断计时；请求结束后重新从 0 计时 30 秒，
 //     因此用户操作期间不会与后台同步抢队列。
 //   - 其余同步任务由「同步管理」按各自间隔调度；间隔为 0 表示关闭。
 //   - 解锁 / 初始化完成后立即同步一次。
 
-/** 智能调度：WoC 队列空闲满 2 秒后刷新余额快照。 */
+/** 智能调度：WoC 队列空闲满 30 秒后刷新余额快照。 */
 const backgroundWorkerRuntime = createWorkerBackgroundRuntime({
   createTaskRuntime: input => createCoordinatorTaskRuntime(input),
   state: () => ({ scheduleSettings: coordinatorState.scheduleSettings, vaultStatus: coordinatorState.vaultStatus, sessionEpoch: coordinatorState.sessionEpoch, runGeneration: coordinatorState.runGeneration, activePublicKeyHex: coordinatorState.activePublicKeyHex }),
@@ -2415,15 +2501,15 @@ type ChannelSeenMessageKind = "private" | "public" | "hash-request";
 /* ---------- Window P2P executor lease（施工单 001 §3.2） ----------
  * Coordinator 内存真值：同一 epoch+owner 同时最多一个 Window executor。
  * lock / key switch / Worker 重启直接清空；port 断开立即回收。 */
-const windowP2pExecutorTransport = createWindowP2pMsFileTransport({
-  get available() {
-    return windowP2pWorkerRuntime.windowP2pExecutorLease?.transportReady === true
-      && windowP2pWorkerRuntime.windowP2pExecutorLease.sessionEpoch === coordinatorState.sessionEpoch
-      && coordinatorState.vaultStatus === "unlocked";
+const msfileBridge = {
+  get available() { return currentMsfileSellerNetwork()?.windowP2pExecutorLease?.sessionEpoch === coordinatorState.sessionEpoch; },
+  request(operation: import("@keymaster/contracts/window-p2p").WindowP2pExecutorOperation, signal?: AbortSignal) {
+    const network = currentMsfileSellerNetwork();
+    if (!network) return Promise.reject(new Error("MSFile network is unavailable"));
+    return network.requestWindowP2pExecutorOperation(operation, signal);
   },
-  request: windowP2pWorkerRuntime.requestWindowP2pExecutorOperation,
-  dispose: () => undefined,
-});
+};
+const windowP2pExecutorTransport = createWindowP2pMsFileTransport(msfileBridge);
 
 const executeMsfileControl = msfileBitfsRuntime.executeMsfileControl;
 const isMsfileMutationControl = msfileBitfsRuntime.isMsfileMutationControl;
@@ -2539,11 +2625,6 @@ async function completeUnlockedBinding(cause: SessionStateEvent["cause"] = "unlo
     }
     noteBusinessRunStarted();
     bindCoordinatorTaskUnitsToOwner();
-    try {
-      await ensureMsfileBitfsBuyerRecovery(publicKeyHex);
-    } catch (error) {
-      console.warn("[msfile] BitFS buyer recovery gate remains closed", error instanceof Error ? error.message : String(error));
-    }
     await reconcileCoordinatorRuntime();
     if (coordinatorState.sessionEpoch !== bindingEpoch || coordinatorState.vaultStatus !== "unlocked") throw storageUnavailableError("Wallet unlock was revoked during runtime binding");
     // 批次在 reconcile 之后开启：观察本轮加载的最新收敛结果，避免把
@@ -2593,7 +2674,8 @@ function revokeWalletGrants(reason: "lock" | "reset"): void {
   const satCleanup = releaseSatRuntime(reason);
   walletRevocationCleanup?.push(satCleanup);
   void satCleanup.catch(() => undefined);
-  windowP2pWorkerRuntime.clearWindowP2pExecutorLeaseLocked();
+  clearMsfileNetworks();
+  satNetwork.clearWindowP2pExecutorLeaseLocked();
   stopCoordinatorOwnerWorkerUnits();
 }
 
@@ -3371,7 +3453,7 @@ function withCoordinatorWorkerLifecycle(plugin: ReturnType<typeof definePlugin>)
   };
 }
 const coordinatorRequestRoutes = new Map<string, import("@keymaster/contracts").WorkerRequestRoute>();
-for (const route of [vaultWorkerOperations.route, vaultAutoLock.route, storageWorkerRequests.route, msfileWorkerRequests.route, windowP2pWorkerRuntime.route, channelWorkerRuntime.route, p2pkhWorkerOperations.route, p2pkhWorkerSettings.route, chainFeePolicyRoute, backgroundWorkerRuntime.route,
+for (const route of [vaultWorkerOperations.route, vaultAutoLock.route, storageWorkerRequests.route, msfileWorkerRequests.route, windowNetworkRoute, channelWorkerRuntime.route, p2pkhWorkerOperations.route, p2pkhWorkerSettings.route, chainFeePolicyRoute, backgroundWorkerRuntime.route,
 defineWorkerRequestRoute<Extract<CoordinatorClientRequest, { kind: "lock" }>>({
   kinds: ["lock"], policy: () => ({ scheduling: "parallel", cleanupOnly: true, validateEpoch: false }), execute: (request, call) => handleLock(call.requestId, request, call.peerId),
 }),
@@ -3403,20 +3485,19 @@ const coordinatorRuntimePlugins = [
     browse: processRequest,
     revokeBrowse: () => storageWorkerRequests.storageBrowseCoordinator.revokeAll(),
   }),
-  createWindowP2pWorkerPlugin({
-    bridge: { get available() { return windowP2pWorkerRuntime.windowP2pExecutorLease?.transportReady === true; }, request: windowP2pWorkerRuntime.requestWindowP2pExecutorOperation },
-    revokeLease(identity) {
-      if (coordinatorWorkerUnitRegistry.get("window-p2p.coordinator-worker")?.instanceId === identity.instanceId && windowP2pWorkerRuntime.windowP2pExecutorLease?.sessionEpoch === identity.sessionEpoch && windowP2pWorkerRuntime.windowP2pExecutorLease.ownerPublicKeyHex === identity.ownerPublicKeyHex) windowP2pWorkerRuntime.clearWindowP2pExecutorLeaseLocked();
-    },
-  }),
   createSatSubscriptionWorkerPlugin({
+    bridge: { get available() { return satNetwork.windowP2pExecutorLease?.transportReady === true; }, request: satNetwork.requestWindowP2pExecutorOperation },
     bindBridge: satWorkerLifecycle.bindBridge,
     bindP2pkh: satWorkerLifecycle.bindP2pkh,
     async start(instanceId, storage, assertActive) {
       const runtime = await ensureSatRuntime(instanceId, storage, assertActive);
       let cleanup: Promise<void> | undefined;
       const revoke = () => {
-        if (!cleanup && satWorkerLifecycle.current() === runtime) { cleanup = releaseSatRuntime("unit-revoked"); void cleanup.catch(() => undefined); }
+        if (!cleanup && satWorkerLifecycle.current() === runtime) {
+          cleanup = releaseSatRuntime("unit-revoked");
+          satNetwork.clearWindowP2pExecutorLeaseLocked();
+          void cleanup.catch(() => undefined);
+        }
       };
       return {
         admin: runtime.admin, spi: runtime.spi, revoke,
@@ -3425,11 +3506,16 @@ const coordinatorRuntimePlugins = [
     },
   }),
   createMsfileWorkerPlugin({
+    bridge: msfileBridge,
     bindBridge: msfileWorkerLifecycle.bindBridge,
     bindChain: msfileWorkerLifecycle.bindChain,
     async start(instanceId, stores, assertActive) {
       const service = await ensureMsfileRuntime(instanceId, stores, assertActive);
-      const revoke = () => { if (msfileWorkerLifecycle.service() === service) releaseMsfileRuntime("unit-revoked"); };
+      const revoke = () => {
+        if (msfileWorkerLifecycle.service() !== service) return;
+        releaseMsfileRuntime("unit-revoked");
+        clearMsfileNetworks();
+      };
       return { service, revoke, async dispose() { await msfileWorkerLifecycle.disposeInstance(service); } };
     },
     async control(control, identity, scopeSignal) {
@@ -3825,7 +3911,6 @@ export function coordinatorTestingPorts(): CoordinatorTestingPorts {
     get vaultWorkerOperations() { return vaultWorkerOperations; },
     get walletRevocationCleanup() { return walletRevocationCleanup; },
     set walletRevocationCleanup(value: typeof walletRevocationCleanup) { walletRevocationCleanup = value; },
-    get windowP2pWorkerRuntime() { return windowP2pWorkerRuntime; },
     get wocWorkerRuntime() { return wocWorkerRuntime; },
     get workerStorageClients() { return workerStorageClients; },
     get workerWalletState() { return workerWalletState; },
@@ -3955,7 +4040,6 @@ export interface CoordinatorTestingPorts {
   vaultWorkerKeys: ReturnType<typeof createVaultWorkerKeys>;
   vaultWorkerOperations: ReturnType<typeof createVaultWorkerOperations>;
   walletRevocationCleanup: Promise<void>[] | undefined;
-  windowP2pWorkerRuntime: ReturnType<typeof createWindowP2pWorkerRuntime>;
   wocWorkerRuntime: ReturnType<typeof createWocWorkerRuntime>;
   workerStorageClients: ReturnType<typeof createWorkerStorageClients>;
   workerWalletState: ReturnType<typeof createWalletStateSource>;

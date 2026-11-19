@@ -1,10 +1,13 @@
 import react from "@vitejs/plugin-react";
 import appPackage from "./package.json";
-import { defineConfig, type Plugin } from "vite";
+import { defineConfig, searchForWorkspaceRoot, type Plugin } from "vite";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import { realpathSync } from "node:fs";
+import { join } from "node:path";
 
+const bitfsSource = join(realpathSync(new URL("./packages/plugin-msfile/node_modules/keymaster-bitfs", import.meta.url)), "src");
 const appVersion = appPackage.version;
 const storagePrivateGrant = randomBytes(32).toString("hex");
 const connectPrivateGrant = randomBytes(32).toString("hex");
@@ -91,6 +94,7 @@ export default defineConfig({
     host: "127.0.0.1",
     // 允许所有主机访问 dev server（避免需要逐个添加域名到白名单）。
     allowedHosts: true,
+    fs: { allow: [searchForWorkspaceRoot(fileURLToPath(new URL("./", import.meta.url))), bitfsSource] },
     headers: {
       // 开发服务器从 /src 提供 module SW 时也允许根 scope；生产由
       // public/_headers 为 Pages 提供同一响应头。
@@ -101,6 +105,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      "keymaster-bitfs": join(bitfsSource, "index.ts"),
       // WebLoom 在开发阶段通过 link 接入；所有 React Hook 必须解析到
       // Keymaster 应用的同一份 React，避免 peer 依赖产生第二份 dispatcher。
       react: new URL("./node_modules/react", import.meta.url).pathname,
@@ -109,11 +114,12 @@ export default defineConfig({
       // 用通用全局 URL 取绝对路径，避免依赖 node:url（本项目不引入 node 类型）。
       crypto: new URL("./src/shims/crypto.ts", import.meta.url).pathname
     },
-    dedupe: ["react", "react-dom"],
+    dedupe: ["react", "react-dom", "bsv8-channel-protocol", "bitfs-protocol"],
     // 让 Vite 直接消费 packages/* 源码（与 tsc 行为一致）。
     preserveSymlinks: false
   },
   optimizeDeps: {
+    exclude: ["keymaster-bitfs"],
     include: [
       "@noble/hashes/ripemd160",
       "@noble/hashes/sha256",
