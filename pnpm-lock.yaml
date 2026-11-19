@@ -54,9 +54,6 @@ importers:
       '@keymaster/plugin-vault':
         specifier: '*'
         version: link:packages/plugin-vault
-      '@keymaster/plugin-window-p2p':
-        specifier: '*'
-        version: link:packages/plugin-window-p2p
       '@keymaster/plugin-woc':
         specifier: '*'
         version: link:packages/plugin-woc
@@ -66,6 +63,9 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:packages/ui
+      '@keymaster/window-network':
+        specifier: workspace:*
+        version: link:packages/window-network
       '@libp2p/webrtc':
         specifier: 7.0.2
         version: 7.0.2(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)))
@@ -349,6 +349,9 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
+      '@keymaster/window-network':
+        specifier: workspace:*
+        version: link:../window-network
       '@libp2p/webrtc':
         specifier: 7.0.2
         version: 7.0.2(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)))
@@ -370,6 +373,9 @@ importers:
       cborg:
         specifier: 5.1.6
         version: 5.1.6
+      keymaster-bitfs:
+        specifier: 0.1.0
+        version: 0.1.0(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)))
       keymaster-trade-scheduler:
         specifier: 0.3.0
         version: 0.3.0
@@ -449,6 +455,9 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
+      '@keymaster/window-network':
+        specifier: workspace:*
+        version: link:../window-network
       '@libp2p/interface':
         specifier: 3.4.0
         version: 3.4.0
@@ -534,33 +543,6 @@ importers:
         specifier: 0.6.3
         version: 0.6.3(react@18.3.1)
 
-  packages/plugin-window-p2p:
-    dependencies:
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../contracts
-      '@keymaster/p2p-host':
-        specifier: workspace:*
-        version: link:../../coding/keymaster/p2p-host
-      '@keymaster/runtime':
-        specifier: '*'
-        version: link:../runtime
-      '@libp2p/webrtc':
-        specifier: 7.0.2
-        version: 7.0.2(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)))
-      '@libp2p/websockets':
-        specifier: 10.1.25
-        version: 10.1.25
-      bitcoin-libp2p:
-        specifier: 0.3.2
-        version: 0.3.2(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)))
-      sat-subscription-protocol:
-        specifier: 0.3.0
-        version: 0.3.0
-      webloom-framework:
-        specifier: 0.6.3
-        version: 0.6.3(react@18.3.1)
-
   packages/plugin-woc:
     dependencies:
       '@keymaster/contracts':
@@ -597,6 +579,27 @@ importers:
       '@keymaster/contracts':
         specifier: '*'
         version: link:../contracts
+
+  packages/window-network:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/p2p-host':
+        specifier: workspace:*
+        version: link:../../coding/keymaster/p2p-host
+      '@libp2p/webrtc':
+        specifier: 7.0.2
+        version: 7.0.2(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)))
+      '@libp2p/websockets':
+        specifier: 10.1.25
+        version: 10.1.25
+      bitcoin-libp2p:
+        specifier: 0.3.2
+        version: 0.3.2(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)))
+      sat-subscription-protocol:
+        specifier: 0.3.0
+        version: 0.3.0
 
 packages:
 
@@ -966,6 +969,9 @@ packages:
 
   '@libp2p/peer-store@12.0.32':
     resolution: {integrity: sha512-YFg6JrtN2dEBOL4ungkrQq3qL+fSJV2IKa8+9HFgNFkmf7YjGX0xY1HJpPS0ogsEAvJLZcTII3i+tHWNud1J1Q==}
+
+  '@libp2p/tcp@11.0.32':
+    resolution: {integrity: sha512-L3bgTQrKnFaDWsDxsPErJ7/VZmJiyb8959ByIJIB1whs06bbZJDyTG0yej+xvp6xgXzqXeWeCV6eh8S4B4gqwQ==}
 
   '@libp2p/utils@7.4.1':
     resolution: {integrity: sha512-e9cZeop+awI0rFczG4DvAwVeHqBhuCZfTyskvgONfKQrsT7L0BSlTlTTzZoFF8Dnb+QrzHsoIpnl0PrCr0h+Hg==}
@@ -1972,6 +1978,10 @@ packages:
 
   keyhold@2.1.0:
     resolution: {integrity: sha512-MsphUUVSp9VcpNuO5m7Ug4kd1yhUSr8HUBgZ22EzM0PwwzA1SU8fbf0omgy2apBW7yiVY5yX/7ITd2ow5BDvSQ==}
+
+  keymaster-bitfs@0.1.0:
+    resolution: {integrity: sha512-D5WUJ6v9+GXJIZeEWJiPis+WHUNeBdZqGPP92iVA+RYyGF0ZXrV2pRI91iaKxr/bhiihp2Tali3DGFuVyP1X8g==}
+    hasBin: true
 
   keymaster-connect@0.2.0:
     resolution: {integrity: sha512-2pjImZZRu908rPx3sZyXxFiKnSqgMw4Oiu0MWyEo0KkSoQBdpKirsNNuP/V+HQqN3Dt2uN8lkj0JJQUO68DSvQ==}
@@ -3375,6 +3385,17 @@ snapshots:
       uint8arraylist: 3.0.2
       uint8arrays: 6.1.1
 
+  '@libp2p/tcp@11.0.32':
+    dependencies:
+      '@libp2p/interface': 3.4.0
+      '@libp2p/utils': 7.4.5
+      '@multiformats/multiaddr': 13.0.3
+      '@multiformats/multiaddr-matcher': 3.0.2
+      main-event: 1.0.5
+      p-event: 8.0.1
+      progress-events: 1.1.0
+      uint8arraylist: 3.0.2
+
   '@libp2p/utils@7.4.1':
     dependencies:
       '@chainsafe/is-ip': 2.1.0
@@ -4613,6 +4634,31 @@ snapshots:
   keyhold@2.1.0:
     dependencies:
       '@noble/curves': 2.2.0
+
+  keymaster-bitfs@0.1.0(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))):
+    dependencies:
+      '@bsv/sdk': 2.0.5
+      '@chainsafe/libp2p-noise': 17.0.0
+      '@chainsafe/libp2p-yamux': 8.0.1
+      '@libp2p/crypto': 5.2.0
+      '@libp2p/identify': 4.1.18
+      '@libp2p/interface': 3.4.0
+      '@libp2p/tcp': 11.0.32
+      '@libp2p/websockets': 10.1.25
+      '@multiformats/multiaddr': 13.0.3
+      bitcoin-libp2p: 0.3.2(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)))
+      bitfs-protocol: 0.6.0(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)))
+      bsv8-channel-protocol: 0.6.0
+      cborg: 5.1.6
+      keymaster-trade-scheduler: 0.3.0
+      keymaster-utxo-manager: 0.7.0
+      libp2p: 3.5.1
+      masterseed: 1.1.0
+      sat-subscription-protocol: 0.3.0
+    transitivePeerDependencies:
+      - bufferutil
+      - react-native-webrtc
+      - utf-8-validate
 
   keymaster-connect@0.2.0:
     dependencies:

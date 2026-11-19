@@ -16,6 +16,7 @@
     "@keymaster/contracts": "*",
     "@keymaster/msfile-media": "*",
     "@keymaster/runtime": "*",
+    "@keymaster/window-network": "workspace:*",
     "webloom-framework": "0.6.3",
     "@keymaster/ui": "*",
     "masterseed": "1.1.0",
@@ -25,6 +26,7 @@
     "bitcoin-libp2p": "0.3.2",
     "bsv8-channel-protocol": "0.6.0",
     "bitfs-protocol": "0.6.0",
+    "keymaster-bitfs": "0.1.0",
     "keymaster-trade-scheduler": "0.3.0",
     "cborg": "5.1.6"
   },
