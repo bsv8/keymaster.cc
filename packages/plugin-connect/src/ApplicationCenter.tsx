@@ -1,5 +1,5 @@
 import { useConnectApps } from "./AppContext.js";
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { usePluginI18n, useResourceView } from "@keymaster/runtime";
 import { APPLICATION_OPERATION_LABELS, applicationCommandStatus, applicationCommandTerminal, type ApplicationConnection, type ApplicationConnectionsSnapshot, type ProtocolCommandRecord, type MsFilePendingApprovalView } from "@keymaster/contracts";
@@ -23,15 +23,15 @@ function useApplications() {
 function connectionFor(snapshot: ApplicationConnectionsSnapshot, command: ProtocolCommandRecord): ApplicationConnection | undefined {
   return snapshot.connections.find(connection => !connection.closedAt && connection.service.feedSnapshot().commands.some(value => value.id === command.id));
 }
-function Command({ connection, command, kind }: { connection: ApplicationConnection; command: ProtocolCommandRecord; kind: "live" | "history" }) {
+function Command({ connection, command }: { connection: ApplicationConnection; command: ProtocolCommandRecord }) {
   const { t } = usePluginI18n();
   const [now, setNow] = useState(Date.now());
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
   const auth = connection.service.connectAuthSnapshot();
-  if (kind === "live" && auth?.recordId === command.id) {
+  if (auth?.recordId === command.id) {
     return <ApplicationAuthentication key={command.id} service={connection.service} auth={auth} t={t} />;
   }
-  return <ul className="application-command"><CommandCard key={command.id} t={t} service={connection.service} command={command} now={now} initiallyExpanded kind={kind} /></ul>;
+  return <ul className="application-command"><CommandCard t={t} service={connection.service} command={command} now={now} initiallyExpanded kind="live" showHeader={false} /></ul>;
 }
 
 export function ApplicationConnectionControls() {
@@ -40,11 +40,9 @@ export function ApplicationConnectionControls() {
   const masked = useSyncExternalStore(listener => wallet.subscribe(listener), () => wallet.snapshot().screenMasked === true);
   // 完整钱包壳层装配后才接纳 App 主动拉起钱包的真实 opener。
   useEffect(() => { host.acceptOpener(window.opener); }, [host]);
-  const { t } = usePluginI18n();
   const msfile = useResourceView<{ approvals: MsFilePendingApprovalView[] }>(useConnectResources(), "connect.msfile-approvals", []);
   const msApprovals = msfile.data?.approvals ?? [];
   const pending = snapshot.commands.filter(needsAttention).filter(command => connectionFor(snapshot, command));
-  const [reviewing, setReviewing] = useState<string>();
   const [open, setOpen] = useState(false);
   const { controller: reminders, sound } = useApplicationReminders();
   const [seen, setSeen] = useState(false);
@@ -58,8 +56,7 @@ export function ApplicationConnectionControls() {
   const attention = [...pending.map(value => ({ id: value.id })), ...msApprovals.map(value => ({ id: `msfile:${value.approvalId}` }))];
   const count = attention.length;
   const pendingKey = attention.map(value => value.id).join("|");
-  function review(id?: string) {
-    setReviewing(id ?? attention[0]?.id);
+  function review() {
     setSeen(true);
     if (!wallet.snapshot().screenMasked) setOpen(true);
   }
@@ -73,7 +70,7 @@ export function ApplicationConnectionControls() {
       try {
         const notice = new Notification("Keymaster · 新的应用授权请求", { body: `有 ${count} 项待处理，请回到钱包核对来源和请求。`, tag: "keymaster-application-approval" });
         notifications.current.push(notice);
-        notice.onclick = () => { window.focus(); review(newPending[0]!.id); notice.close(); };
+        notice.onclick = () => { window.focus(); review(); notice.close(); };
       } catch { reminders.notificationFailed(); }
     }
   }, [pendingKey]);
@@ -95,9 +92,6 @@ export function ApplicationConnectionControls() {
     if ((!open || masked) && dialog.current?.open) dialog.current.close();
   }, [open, masked]);
   useEffect(() => () => { reminders.dispose(); notifications.current.forEach(value => value.close()); }, []);
-  const command = snapshot.commands.find(value => value.id === reviewing);
-  const connection = command ? connectionFor(snapshot, command) : undefined;
-  const msApproval = msApprovals.find(value => `msfile:${value.approvalId}` === reviewing);
   return <>
     <span className="application-controls"><button type="button" aria-label={`待审批 ${count}`} aria-haspopup="dialog" aria-expanded={open && !masked} aria-controls="application-activity-dialog" onClick={() => review()}><span className="application-controls__icon"><Inbox size={16} aria-hidden="true" />{count > 0 ? <span className="application-controls__badge" aria-hidden="true">{count}</span> : null}</span><span className="application-controls__label">待审批</span></button></span>
     {createPortal(<>
@@ -107,31 +101,22 @@ export function ApplicationConnectionControls() {
         <header><h2 id="application-approval-title">应用处理记录 <small>待处理 {count}</small></h2><button type="button" aria-label="关闭审批，返回原工作" onClick={() => setOpen(false)}>✕</button></header>
         <div className="application-drawer-body">
           {(!snapshot.historyAvailable || snapshot.error) && <p role="alert">历史记录暂时不可用，显示内容可能不完整。</p>}
-          <ApplicationActivityGroups snapshot={snapshot} approvals={msApprovals} selected={reviewing} onSelect={setReviewing} />
-          {command && <section className="application-review" aria-label="所选操作详情">
-            <h3>{METHOD_LABELS[command.method] ?? "应用操作"} · {applicationCommandStatus(command)}</h3>
-            {connection && !terminal(command)
-              ? <Command key={command.id} command={command} connection={connection} kind="live" />
-              : <><p>{command.manualApprovedAt ? "本次由你批准" : command.autoApproved ? "使用已有永久授权" : "未取得人工批准"}</p><p>{new Date(command.updatedAt).toLocaleString()}</p>{!terminal(command) && <p>此连接已失效，不能继续批准旧请求。</p>}{command.paymentStatus && <p>付款结果：{applicationCommandStatus(command)}</p>}</>}
-          </section>}
-          {msApproval && <MsFileApprovalSection key={msApproval.approvalId} t={t} approvalId={msApproval.approvalId} />}
+          {open && !masked && <ApplicationActivityGroups snapshot={snapshot} approvals={msApprovals} onInteraction={() => setSeen(true)} />}
         </div>
       </dialog>
     </>, document.body)}
   </>;
 }
-
-
 /** 按真实 App 身份分组；未验证的连接请求单独归组，不借用同来源 App 的身份。 */
-function ApplicationActivityGroups({ snapshot, approvals, selected, onSelect }: { snapshot: ApplicationConnectionsSnapshot; approvals: MsFilePendingApprovalView[]; selected?: string; onSelect(id: string): void }) {
+function ApplicationActivityGroups({ snapshot, approvals, onInteraction }: { snapshot: ApplicationConnectionsSnapshot; approvals: MsFilePendingApprovalView[]; onInteraction(): void }) {
+  const { t } = usePluginI18n();
   type Group = { id: string; name: string; icon?: string; url?: string; commands: ProtocolCommandRecord[]; approvals: MsFilePendingApprovalView[] };
   const groups = new Map<string, Group>();
+  const connectedApps = new Set(snapshot.connections.filter(connection => !connection.closedAt && connection.applicationKey).map(connection => connection.applicationKey));
   for (const command of snapshot.commands) {
     const id = command.applicationKey ?? `unverified:${command.origin}`;
     const app = snapshot.applications.find(app => app.key === command.applicationKey);
-    let site = "应用连接申请";
-    try { site = new URL(command.origin).hostname; } catch { /* 无有效来源时不猜测应用身份。 */ }
-    const group = groups.get(id) ?? { id, name: app?.display?.name ?? app?.name ?? site, icon: app?.display?.icon, url: app?.verifiedUrl ?? command.origin, commands: [], approvals: [] };
+    const group = groups.get(id) ?? { id, name: app?.display?.name ?? app?.name ?? "应用连接申请", icon: app?.display?.icon, url: app?.verifiedUrl ?? command.origin, commands: [], approvals: [] };
     group.commands.push(command); groups.set(id, group);
   }
   for (const approval of approvals) {
@@ -145,12 +130,65 @@ function ApplicationActivityGroups({ snapshot, approvals, selected, onSelect }: 
   const ordered = [...groups.values()].sort((a, b) => Number(waiting(b)) - Number(waiting(a)) || latest(b) - latest(a));
   return <div className="application-activity-groups">
     {!ordered.length && <p className="application-note">还没有应用处理记录。</p>}
-    {ordered.map(group => <section className="application-activity-group" key={group.id}>
-      <header><AppIcon icon={group.icon} url={group.url} name={group.name} size={36} /><h3>{group.name}</h3></header>
-      <ul>{group.approvals.map(approval => <li key={approval.approvalId}><button type="button" aria-pressed={selected === `msfile:${approval.approvalId}`} onClick={() => onSelect(`msfile:${approval.approvalId}`)}><span>调整文件价格上限</span><span>等待授权</span></button></li>)}
-      {[...group.commands].sort((a, b) => Number(needsAttention(b)) - Number(needsAttention(a)) || b.updatedAt - a.updatedAt).map(command => <li key={command.id}><button type="button" data-activity-id={command.id} aria-pressed={selected === command.id} onClick={() => onSelect(command.id)}><span>{METHOD_LABELS[command.method] ?? "应用操作"}</span><span>{!terminal(command) && !connectionFor(snapshot, command) ? "连接已结束" : applicationCommandStatus(command)}</span><time>{new Date(command.updatedAt).toLocaleString()}</time></button></li>)}</ul>
-    </section>)}
+    {ordered.map(group => {
+      const connected = connectedApps.has(group.id);
+      const status = connected ? "已连接" : "未连接";
+      return <section className="application-activity-group" key={group.id}>
+        <header>
+          <AppIcon icon={group.icon} url={group.url} name={group.name} size={36} />
+          <h3>{group.name}</h3>
+          <span className="application-connection-light" data-connected={connected} role="img" aria-label={status} title={status} />
+        </header>
+        <ul>
+          {group.approvals.map(approval => <ActivityRow key={approval.approvalId} title="调整文件价格上限" status="等待授权" pending onInteraction={onInteraction}>
+            <MsFileApprovalSection t={t} approvalId={approval.approvalId} />
+          </ActivityRow>)}
+          {[...group.commands].sort((a, b) => Number(needsAttention(b)) - Number(needsAttention(a)) || b.updatedAt - a.updatedAt).map(command => {
+            const connection = connectionFor(snapshot, command);
+            const title = METHOD_LABELS[command.method] ?? "应用操作";
+            const ended = !connection && !terminal(command);
+            const status = ended ? "连接已结束" : applicationCommandStatus(command);
+            return <ActivityRow key={command.id} id={command.id} title={title} status={status} origin={command.origin}
+              updatedAt={command.updatedAt} pending={Boolean(connection && needsAttention(command))} onInteraction={onInteraction}>
+              {connection && !terminal(command)
+                ? <Command command={command} connection={connection} />
+                : <>
+                  <p>{command.manualApprovedAt ? "本次由你批准" : command.autoApproved ? "使用已有永久授权" : "未取得人工批准"}</p>
+                  {ended && <p>此连接已失效，不能继续批准旧请求。</p>}
+                  {command.paymentStatus && <p>付款结果：{applicationCommandStatus(command)}</p>}
+                </>}
+            </ActivityRow>;
+          })}
+        </ul>
+      </section>;
+    })}
   </div>;
+}
+
+function ActivityRow({ id, title, status, origin, updatedAt, pending, onInteraction, children }: {
+  id?: string;
+  title: string;
+  status: string;
+  origin?: string;
+  updatedAt?: number;
+  pending: boolean;
+  onInteraction(): void;
+  children: ReactNode;
+}) {
+  const detailId = useId();
+  const [expandedOverride, setExpandedOverride] = useState<boolean>();
+  const expanded = expandedOverride ?? pending;
+  return <li className="application-activity-row">
+    <button type="button" className="application-activity-toggle" data-activity-id={id} aria-expanded={expanded} aria-controls={detailId} onClick={() => {
+      setExpandedOverride(!expanded);
+      onInteraction();
+    }}>
+      <span className="application-activity-title">{title}</span><span className="application-activity-status">{status}</span>
+      {origin && <span className="application-activity-origin">{origin}</span>}
+      {updatedAt !== undefined && <time>{new Date(updatedAt).toLocaleString()}</time>}
+    </button>
+    <div id={detailId} className="application-review" hidden={!expanded}>{expanded && children}</div>
+  </li>;
 }
 
 /** Read-only contribution inside the privacy mask; no application details or actions. */

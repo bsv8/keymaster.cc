@@ -250,7 +250,8 @@ export function CommandCard({
   initiallyExpanded,
   service,
   now,
-  kind
+  kind,
+  showHeader = true
 }: {
   t: (key: string, values?: { defaultValue?: string; seconds?: number }) => string;
   command: ProtocolCommandRecord;
@@ -258,6 +259,7 @@ export function CommandCard({
   service: ConnectService;
   now: number;
   kind: "live" | "history";
+  showHeader?: boolean;
 }) {
   // 展开态**必须**按 recordId 稳定绑定：组件 key={c.id} 由 React 保证，
   // 这里只在自己状态机内维护 expanded 布尔值。
@@ -282,7 +284,7 @@ export function CommandCard({
       data-phase={command.phase}
       data-payment-status={command.paymentStatus}
     >
-      <button
+      {showHeader && <button
         type="button"
         className="protocol-feed__card-head"
         aria-expanded={expanded}
@@ -322,8 +324,8 @@ export function CommandCard({
         <span className="protocol-feed__card-time">
           {new Date(command.updatedAt).toLocaleString()}
         </span>
-      </button>
-      {expanded ? (
+      </button>}
+      {(!showHeader || expanded) ? (
         <div className="protocol-feed__card-body">
           <CardBody
             t={t}

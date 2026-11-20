@@ -7,7 +7,7 @@ import { createRequire } from "node:module";
 import { realpathSync } from "node:fs";
 import { join } from "node:path";
 
-const bitfsSource = join(realpathSync(new URL("./packages/plugin-msfile/node_modules/keymaster-bitfs", import.meta.url)), "src");
+const bitfsSource = realpathSync(new URL("./packages/plugin-msfile/node_modules/keymaster-bitfs", import.meta.url));
 const appVersion = appPackage.version;
 const storagePrivateGrant = randomBytes(32).toString("hex");
 const connectPrivateGrant = randomBytes(32).toString("hex");
@@ -105,7 +105,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      "keymaster-bitfs": join(bitfsSource, "index.ts"),
+      "keymaster-bitfs": join(bitfsSource, "dist", "index.js"),
       // WebLoom 在开发阶段通过 link 接入；所有 React Hook 必须解析到
       // Keymaster 应用的同一份 React，避免 peer 依赖产生第二份 dispatcher。
       react: new URL("./node_modules/react", import.meta.url).pathname,

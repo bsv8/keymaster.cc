@@ -6,13 +6,12 @@ import { useConnectResources } from "./ConnectResourceContext.js";
 
 type Translate = (key: string, values?: { defaultValue?: string }) => string;
 
-/** 登录认证只属于所选外部申请，不启动或销毁钱包/协议宿主。 */
+/** 登录认证属于当前条目对应的外部申请。 */
 export function ApplicationAuthentication({ service, auth, t }: { service: ConnectService; auth: ConnectAuthSnapshot; t: Translate }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const wallet = auth.login?.wallet;
   return <section className="protocol-auth__panel">
-    <h2>{t("connect.connect.login.title", { defaultValue: "连接当前钱包" })}</h2>
     <p>该申请仅建立此应用的连接；不会自动授予签名、加解密或付款许可。</p>
     {wallet ? <p>{wallet.label} · <code>{formatShortPublicKey(wallet.publicKeyHex)}</code></p> : <p>Wallet identity is not ready.</p>}
     <form className="protocol-auth__form" onSubmit={async event => {
@@ -51,7 +50,6 @@ function MsFileApproval({ t, approvalId }: { t: Translate; approvalId?: string }
     finally { setBusy(false); }
   }
   return <div className="protocol-popup__msfile-approvals" role="group" aria-label={t("msfile.approvals.title", { defaultValue: "Price increase requested" })}>{approvals.map(value => <section key={value.approvalId} className="protocol-msfile-approval-card">
-    <h3>{t("msfile.approvals.title", { defaultValue: "Price increase requested" })}</h3>
     <dl><dt>App</dt><dd>{value.appName} ({value.appId})</dd><dt>Kind</dt><dd>{value.kind}</dd><dt>Current cap</dt><dd>{value.effectiveMaxPriceSatoshis}</dd><dt>Hash</dt><dd><code>{value.contentHashHint}…</code></dd></dl>
     {error ? <p role="alert">{error}</p> : null}
     <input type="text" inputMode="numeric" aria-label="New maximum price" placeholder={t("msfile.approvals.newLimit", { defaultValue: "New maximum price (satoshis)" })} value={amounts[value.approvalId] ?? ""} onChange={event => setAmounts(previous => ({ ...previous, [value.approvalId]: event.target.value.replace(/[^0-9]/g, "") }))} />
