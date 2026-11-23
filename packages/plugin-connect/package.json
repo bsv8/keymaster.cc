@@ -12,7 +12,7 @@
   },
   "types": "./src/index.ts",
   "dependencies": {
-    "keymaster-connect": "0.2.0",
+    "keymaster-connect": "0.3.0",
     "@bsv/sdk": "^1.6.12",
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
