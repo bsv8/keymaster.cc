@@ -17,7 +17,7 @@ export function createWindowConnect(ctx: PluginContext) {
   const probe=setInterval(check,100);
   off=ctx.consumer.subscribe(check);check();if(settled)off();
  });}
- let rpc:ReturnType<typeof commandClient>;
+ let ready: Promise<ReturnType<typeof commandClient>> | undefined;
  let subscription:ReturnType<ReturnType<typeof eventClient>["subscribe"]>|undefined;
  function commandClient(){return ctx.privateCapability(CONNECT_PRIVATE_COMMAND)}
  function eventClient(){return ctx.privateCapability(CONNECT_PRIVATE_EVENTS)}
@@ -34,7 +34,16 @@ export function createWindowConnect(ctx: PluginContext) {
   current={...next.applications,connections:next.applications.connections.map(c=>({...c,service:service(c.id)}))};
   listeners.forEach(listener=>listener());directoryListeners.forEach(listener=>listener());
  }
- const call=async(command:ConnectWorkerCommand,signal:AbortSignal=ctx.scope.signal)=>{await ready;ctx.scope.assertActive();const response=await rpc.call(command,{signal,timeoutMs:120_000});ctx.scope.assertActive();apply(response.snapshot);return response.value;};
+ const call=async(command:ConnectWorkerCommand,signal:AbortSignal=ctx.scope.signal)=>{
+  const attempt=ensureReady();
+  const rpc=await attempt;
+  ctx.scope.assertActive();
+  const response=await rpc.call(command,{signal,timeoutMs:120_000});
+  ctx.scope.assertActive();
+  if (ready !== attempt) throw new Error("Connect Worker connection changed");
+  apply(response.snapshot);
+  return response.value;
+ };
  const fire=(command:ConnectWorkerCommand)=>{void call(command).catch(error=>traceDev("connect.relay","command.failed",()=>({type:command.type,error})));};
  function connection(id:string):WorkerConnectionView {const found=state?.applications.connections.find(c=>c.id===id);if(!found)throw new Error("Connection expired");return found;}
  function service(id:string):ConnectService {
@@ -59,16 +68,39 @@ export function createWindowConnect(ctx: PluginContext) {
   else if(event.action==="focus"){if(source.view)source.view.focus();else source.source.focus();}
   else{source.view?.close();sources.delete(event.sourceId);sourceIds.delete(source.source);}
  }
- function unavailable(error:unknown){if(stopped)return;current={...current,historyAvailable:false,error:"Connect Worker 已断开，请刷新钱包。"};listeners.forEach(listener=>listener());traceDev("connect.relay","stream.failed",()=>({error}))}
+ function unavailable(error:unknown){if(stopped)return;current={...current,historyAvailable:false,error:"Connect Worker 暂不可用。"};listeners.forEach(listener=>listener());traceDev("connect.relay","stream.failed",()=>({error}))}
  // Never hold Window setup while session.open is waiting for Window setup to finish.
- const ready=Promise.resolve().then(async()=>{
-  const endpoints=await waitForEndpoints();if(stopped)throw new Error("Connect page closed");rpc=endpoints.rpc;
-  subscription=endpoints.events.subscribe({}, {signal:ctx.scope.signal,onNext:receive});
-  void subscription.closed.catch(unavailable);
-  await subscription.ready;
-  const response=await rpc.call({type:"snapshot"},{signal:ctx.scope.signal});apply(response.snapshot);
- });
- void ready.catch(unavailable);
+ function ensureReady(): Promise<ReturnType<typeof commandClient>> {
+  if (ready) return ready;
+  const attempt = Promise.resolve().then(async () => {
+   const { rpc, events } = await waitForEndpoints();
+   if (stopped) throw new Error("Connect page closed");
+   state = { ...state, revision: -1 };
+   const stream = events.subscribe({}, {
+    signal: ctx.scope.signal,
+    onNext: event => { if (ready === attempt) receive(event); },
+   });
+   subscription = stream;
+   void stream.closed.then(() => invalidate(new Error("Connect Worker stream closed")), invalidate);
+   await stream.ready;
+   const response = await rpc.call({ type: "snapshot" }, { signal: ctx.scope.signal });
+   if (ready !== attempt) throw new Error("Connect Worker connection changed");
+   apply(response.snapshot);
+   return rpc;
+  });
+  function invalidate(error: unknown) {
+   if (ready !== attempt) return;
+   ready = undefined;
+   const stream = subscription;
+   subscription = undefined;
+   stream?.cancel("connect-worker-unavailable");
+   unavailable(error);
+  }
+  ready = attempt;
+  void attempt.catch(invalidate);
+  return attempt;
+ }
+ void ensureReady();
  function register(source:Window,view?:ApplicationView):string {const id=crypto.randomUUID();sources.set(id,{source,view});sourceIds.set(source,id);return id;}
  const host:ApplicationConnections={
   snapshot:()=>current,subscribe(listener){listeners.add(listener);return()=>{listeners.delete(listener)}},

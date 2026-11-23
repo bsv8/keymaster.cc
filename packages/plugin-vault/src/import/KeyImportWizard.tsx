@@ -26,7 +26,7 @@ import { useInternalVault, useVaultImporters } from "../VaultInternalContext.js"
 //   - 不能把私钥材料或密码写到持久化介质；不能跳过 steps 的前置条件。
 
 import { useEffect, useReducer } from "react";
-import { Button, PageHeader, Select, TextArea, TextInput } from "@keymaster/ui";
+import { Button, PageHeader, TextArea, TextInput } from "@keymaster/ui";
 import {
   usePluginI18n
 } from "@keymaster/runtime";
@@ -42,8 +42,7 @@ import {
 } from "./importFileSniff.js";
 import {
   buildImportInput,
-  isJsonImporter,
-  type JsonInputMode
+  isJsonImporter
 } from "./jsonImportStateMachine.js";
 import {
   initialWizardState,
@@ -405,29 +404,21 @@ export function KeyImportWizard({ onCancel, vaultPassword, draftMode, onComplete
         <section className="first-time-import__input">
           {showJsonModeToggle ? (
             <>
-              <Select
-                label={t("vault.import.page.label.inputMode", { defaultValue: "输入方式" })}
-                value={jsonInputMode}
-                onChange={(e) =>
-                  dispatch({
-                    type: "import",
-                    action: {
-                      type: "switch-input-mode",
-                      next: (e.currentTarget.value as JsonInputMode) ?? "file"
-                    }
-                  })
-                }
-                options={[
-                  {
-                    value: "file",
-                    label: t("vault.import.page.option.jsonFile", { defaultValue: "JSON 文件" })
-                  },
-                  {
-                    value: "text",
-                    label: t("vault.import.page.option.jsonText", { defaultValue: "JSON 文本" })
-                  }
-                ]}
-              />
+              <fieldset className="import-input-mode">
+                <legend>{t("vault.import.page.label.inputMode", { defaultValue: "输入方式" })}</legend>
+                <div className="import-input-mode__options">
+                  {([
+                    { value: "file", label: t("vault.import.page.option.jsonFile", { defaultValue: "JSON 文件" }) },
+                    { value: "text", label: t("vault.import.page.option.jsonText", { defaultValue: "JSON 文本" }) },
+                  ] as const).map(({ value, label }) => (
+                    <label key={value}>
+                      <input type="radio" name="import-json-input-mode" checked={jsonInputMode === value}
+                        onChange={() => dispatch({ type: "import", action: { type: "switch-input-mode", next: value } })} />
+                      <span>{label}</span>
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
               {jsonInputMode === "text" ? (
                 <TextArea
                   label={t("vault.import.page.label.jsonText", { defaultValue: "JSON 文本" })}

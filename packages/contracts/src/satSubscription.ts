@@ -84,6 +84,7 @@ export type SatSupplierConnectionState =
   | "connecting"
   | "online"
   | "degraded"
+  | "awaiting-manual"
   | "disconnected";
 
 /** 本地订阅意图与远端观察值的状态。 */
@@ -211,6 +212,8 @@ export interface SatBillingPage {
 export interface SatSubscriptionAdminService {
   /** 读取当前 owner 的本地供应商设置与运行摘要。 */
   getSettingsSnapshot(): Promise<SatSubscriptionSettingsSnapshot>;
+  /** 用户开启下一轮拨号；只用于自动重试已停止的供应商。 */
+  reconnectManually(supplierId: string): Promise<void>;
   /** 新增或更新供应商配置。 */
   upsertSupplier(config: SatSupplierConfigV1): Promise<void>;
   /** 删除供应商；不自动回收余额。 */
@@ -363,6 +366,7 @@ export interface SatSupplierRuntimeView {
 export type CoordinatorSatOperation =
   | { type: "ensure" }
   | { type: "admin.getSettings" }
+  | { type: "admin.reconnectManually"; supplierId: string }
   | { type: "admin.upsertSupplier"; config: SatSupplierConfigV1 }
   | { type: "admin.deleteSupplier"; supplierId: string }
   | { type: "admin.setOwnerSettings"; settings: SatOwnerSupplierSettingsV1 }
@@ -378,6 +382,7 @@ export type CoordinatorSatOperation =
 /** Coordinator 推送给各页面的 Sat 事件。`noop` 只用于 baseline。 */
 export type CoordinatorSatEvent =
   | { type: "incoming"; event: SatIncomingPublish }
+  | { type: "connection-changed" }
   | { type: "noop" };
 
 /** Sat 事件主题快照；revision 用于跨 Tab 去重和乱序防护。 */

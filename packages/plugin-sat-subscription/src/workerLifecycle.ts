@@ -16,6 +16,7 @@ export interface SatWorkerLifecyclePorts {
   getP2pkh: Parameters<typeof createSatWorkerServices>[0]["getP2pkh"];
   deriveAddress(owner: string, network: "main" | "test", epoch: string): Promise<string>;
   incoming: Parameters<Services["service"]["subscribeEvents"]>[0];
+  onConnectionChanged?(): void;
   releaseRelated(reason: string): SatCleanupPhase[];
 }
 
@@ -67,6 +68,7 @@ export function createSatWorkerLifecycle(ports: SatWorkerLifecyclePorts) {
       const owned = await createSatWorkerServices({
         storage, ownerPublicKeyHex: owner, ownerGeneration, ownerSessionEpoch: identity.epoch,
         signal: controller.signal, network: ports.network(), devSupplierJson: ports.devSupplierJson?.(), transport: ports.transport(), assertFresh,
+        onConnectionChanged: () => { if (current?.ownerGeneration === ownerGeneration && !controller.signal.aborted) ports.onConnectionChanged?.(); },
         getOwnerPublicKeyHex: () => ports.session().owner ?? null,
         getOwnerGeneration: () => ports.session().owner === owner ? Math.max(1, generation + 1) : null,
         getP2pkh: () => p2pkhAccess ? p2pkhAccess() : ports.getP2pkh(),

@@ -7,7 +7,7 @@ import { useAppsModel } from "./useAppsModel.js";
 
 /** 应用目录与已连接应用在市场合并展示，权限仍由协议宿主按应用身份管理。 */
 export function MarketPage() {
-  const { directory, snapshot, applications, entries, busy, setBusy, error, setError, open } = useAppsModel();
+  const { directory, snapshot, reload, loading, loadFailed, applications, entries, busy, setBusy, error, setError, open } = useAppsModel();
   const [query, setQuery] = useState("");
   const [savingFavorite, setSavingFavorite] = useState<string>();
   const favoriteMutation = useRef(false);
@@ -38,7 +38,8 @@ export function MarketPage() {
   return <div className="apps-page apps-market">
     <PageHeader title="应用市场" description="发现应用，管理你的授权与使用记录。" actions={<Button variant="secondary" data-testid="apps-add-toggle" onClick={() => navigateTo("/settings/market")}>添加应用</Button>} />
     {error && <p role="alert">{error}</p>}
-    {snapshot.loading && <p className="apps-muted" role="status">正在加载应用…</p>}
+    {loadFailed && <div role="alert"><p>应用市场暂不可用。</p><Button size="sm" variant="secondary" onClick={() => void reload()}>重试</Button></div>}
+    {(loading || snapshot.loading) && <p className="apps-muted" role="status">正在加载应用…</p>}
     {snapshot.persistError && <p role="alert" data-testid="apps-persist-error">应用更改未能保存，请稍后重试。</p>}
     {!applications.historyAvailable && <p role="alert">应用使用记录暂时不可用。</p>}
     <section className="apps-market__section apps-market__favorites" aria-labelledby="apps-favorites-title">
@@ -51,7 +52,7 @@ export function MarketPage() {
       <div className="apps-list" data-testid="apps-list">
       {visibleEntries.map(entry => appCard(entry))}
       </div>
-      {!snapshot.loading && !visibleEntries.length && <p className="apps-muted" role="status">{needle ? "没有找到匹配的应用。" : "暂无应用，你也可以添加自己常用的应用。"}</p>}
+      {!loading && !loadFailed && !snapshot.loading && !visibleEntries.length && <p className="apps-muted" role="status">{needle ? "没有找到匹配的应用。" : "暂无应用，你也可以添加自己常用的应用。"}</p>}
     </section>
   </div>;
 }

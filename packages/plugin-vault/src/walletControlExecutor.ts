@@ -12,10 +12,10 @@ export async function executeWalletControl(control: WalletMutationControl, deps:
       await deps.lifecycle.rename(control.label);
       return { label: control.label };
     case "export-key-hold":
-      return { bytes: await deps.lifecycle.exportKeyHold(), keyHoldFormat: "keyhold" as const };
+      return { bytes: await deps.lifecycle.exportKeyHold(control.recovery), keyHoldFormat: "keyhold" as const };
     case "reset-wallet": {
-      const result = await deps.lifecycle.resetWallet({ confirmationLabel: control.confirmationLabel });
-      deps.reset();
+      const result = await deps.lifecycle.resetWallet(control);
+      if (control.recovery !== "keep-wallet") deps.reset();
       return result;
     }
   }

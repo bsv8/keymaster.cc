@@ -206,9 +206,9 @@ export type CoordinatorStorageControl =
   /** 只修改显示名称。 */
   | { type: "rename-key"; label: string }
   /** 原样导出加密 KeyHold；不是完整钱包备份。 */
-  | { type: "export-key-hold" }
+  | { type: "export-key-hold"; recovery?: true }
   /** 重置钱包：先撤销授权，再原子清空新格式全部数据。 */
-  | { type: "reset-wallet"; confirmationLabel: string };
+  | { type: "reset-wallet"; confirmationLabel: string; recovery?: "keep-wallet" | "all" };
 
 export type CoordinatorClientRequestWithStorage =
   | { kind: "storage.control"; clientId: string; requestId: string; control: CoordinatorStorageControl; expectedSessionEpoch: SessionEpoch }

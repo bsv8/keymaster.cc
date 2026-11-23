@@ -518,7 +518,7 @@ export function createIndexedDbWalletStore(options: IndexedDbWalletStoreOptions 
    * 尚在等待数据库连接的旧调用会被 beginTransaction 的二次检查拒绝。
    * 成功或失败均不复用此实例，新运行必须创建自己的引擎。
    */
-  async function resetWallet(options: { signal?: AbortSignal } = {}): Promise<{ walletGeneration: string; clearedAt: string }> {
+  async function resetWallet(options: { signal?: AbortSignal; keepWallet?: boolean } = {}): Promise<{ walletGeneration: string; clearedAt: string }> {
     assertOpen();
     if (options.signal?.aborted) throw fail("storage_unavailable", "Storage operation was cancelled");
     const connection = database();
@@ -528,9 +528,15 @@ export function createIndexedDbWalletStore(options: IndexedDbWalletStoreOptions 
       const opened = await connection;
       const transaction = opened.transaction([storeName, indexStoreName], "readwrite");
       const completed = transactionDone(transaction);
-      transaction.objectStore(storeName).clear();
-      transaction.objectStore(indexStoreName).clear();
-      await completed;
+      const stores = [transaction.objectStore(storeName), transaction.objectStore(indexStoreName)];
+      const clear = async (store: IDBObjectStore) => {
+        const paths = options.keepWallet ? [WALLET_KEYHOLD_PATH, WALLET_NETWORK_PATH] : [];
+        const preserved = await Promise.all(paths.map(path => requestToPromise(store.get(path))));
+        await requestToPromise(store.clear());
+        await Promise.all(paths.map((path, index) =>
+          preserved[index] === undefined ? undefined : requestToPromise(store.put(preserved[index], path))));
+      };
+      await Promise.all([completed, ...stores.map(clear)]);
       return { walletGeneration: "", clearedAt };
     } catch (caught) {
       throw mapIndexedDbError(caught);

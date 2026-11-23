@@ -690,6 +690,40 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
 .first-time-import__actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
 .first-time-import__error { color: var(--danger); font-size: 13px; margin: 0; }
 
+.import-input-mode { min-inline-size: 0; margin: 0; padding: 0; border: 0; }
+.import-input-mode legend { margin-bottom: 6px; padding: 0; color: var(--text-dim); font-size: 13px; font-weight: 600; }
+.import-input-mode__options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+.import-input-mode__options label { position: relative; min-width: 0; cursor: pointer; }
+.import-input-mode__options input { position: absolute; width: 1px; height: 1px; margin: 0; clip-path: inset(50%); }
+.import-input-mode__options span {
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+  min-height: 40px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+}
+.import-input-mode__options label:hover span { color: var(--text); background: var(--surface); }
+.import-input-mode__options input:checked + span {
+  border-color: color-mix(in srgb, var(--primary) 70%, var(--border));
+  background: color-mix(in srgb, var(--primary) 21%, var(--surface));
+  color: var(--text);
+}
+.import-input-mode__options input:focus-visible + span { outline: 2px solid var(--primary); outline-offset: 1px; }
+
 /* 首次设置是独立向导：每屏只完成一个决定，交互选项本身才使用卡片。 */
 .initial-setup { display: flex; flex-direction: column; gap: 16px; }
 .initial-setup__choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }

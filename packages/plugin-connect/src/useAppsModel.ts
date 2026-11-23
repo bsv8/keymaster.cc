@@ -6,7 +6,7 @@ import { type AppDirectoryEntry, type AppLaunchTarget } from "./catalog.js";
 /** 市场和详情共用目录、历史投影及启动宿主，不复制持久化状态。 */
 export function useAppsModel() {
   const { directory, connect, host } = useConnectApps();
-  const snapshot = useAppDirectory(directory);
+  const { snapshot, reload, loading, loadFailed } = useAppDirectory(directory);
   const store = useMemo(() => {
     let current = host.snapshot();
     return { snapshot: () => current, subscribe: (listener: () => void) => {
@@ -31,5 +31,5 @@ export function useAppsModel() {
     catch { setError("应用未能打开，请稍后重试。"); }
     finally { launching.current = false; setBusy(false); }
   }
-  return { directory, host, snapshot, applications, entries, busy, setBusy, error, setError, report, open };
+  return { directory, host, snapshot, reload, loading, loadFailed, applications, entries, busy, setBusy, error, setError, report, open };
 }

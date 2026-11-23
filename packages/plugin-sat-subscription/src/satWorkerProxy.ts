@@ -311,6 +311,7 @@ function idleChannelStatus(channel: string): ChannelSubscriptionStatus {
 export function createSatWorkerAdminService(coordinator: SatCoordinatorControl): SatSubscriptionAdminService {
   return {
     getSettingsSnapshot: () => callSat<SatSubscriptionSettingsSnapshot>(coordinator, { type: "admin.getSettings" }, "Sat settings"),
+    reconnectManually: (supplierId: string) => callSat<void>(coordinator, { type: "admin.reconnectManually", supplierId }, "Sat manual reconnect"),
     upsertSupplier: (config: SatSupplierConfigV1) => callSat<void>(coordinator, { type: "admin.upsertSupplier", config }, "Sat supplier save"),
     deleteSupplier: (supplierId: string) => callSat<void>(coordinator, { type: "admin.deleteSupplier", supplierId }, "Sat supplier delete"),
     setOwnerSettings: (settings: SatOwnerSupplierSettingsV1) => callSat<void>(coordinator, { type: "admin.setOwnerSettings", settings }, "Sat owner settings"),

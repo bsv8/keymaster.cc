@@ -74,7 +74,9 @@ export function createStorageWorkerControl(ports: StorageWorkerControlPorts) {
 
 
 
-    if (control.type === "initialize") {
+    if (control.type === "initialize"
+      || (control.type === "reset-wallet" && control.recovery !== undefined)
+      || (control.type === "export-key-hold" && control.recovery === true)) {
       return ok(await ports.wallet.execute(control));
     }
 
@@ -88,6 +90,7 @@ export function createStorageWorkerControl(ports: StorageWorkerControlPorts) {
       case "status":
       case "summary":
       case "cold-start":
+      case "export-key-hold":
         return "read";
       default:
         return "write";

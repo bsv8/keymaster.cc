@@ -8,7 +8,7 @@ import { launchTarget, type AppLaunchTarget } from "./catalog.js";
 /** 首页共用目录与钱包启动宿主；点击直接启动，身份验证仍由宿主完成。 */
 export function AppsHomeWidget() {
   const { directory, connect } = useConnectApps();
-  const snapshot = useAppDirectory(directory);
+  const { snapshot } = useAppDirectory(directory);
   const launching = useRef(false);
   const [busy, setBusy] = useState<string>();
   const [error, setError] = useState<string>();

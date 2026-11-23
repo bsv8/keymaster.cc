@@ -231,7 +231,7 @@ const storagePlatformPluginDefinition = {
     });
     const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope);
     pages.view.register({ kind: "frame", slot: "storage-guard", id: "storage.guard", label: "Storage",
-      render: location => createElement(StorageUnavailableGuard, { children: location.children }) });
+      render: location => createElement(StorageUnavailableGuard, { service, children: location.children }) });
     pages.view.register({ id: "storage.browse", kind: "page", path: "/settings/storage",
       label: { key: "storage.browse.business.label", fallback: "Local storage" },
       render: () => privateContents(StorageBrowsePage),

@@ -71,7 +71,7 @@ export interface WalletStore {
   /** 同一事务内批量提交;全部条件同时成立才写入。 */
   batch(input: WalletBatchInput, options?: { signal?: AbortSignal }): Promise<WalletBatchResult>;
   /** 永久封闭此引擎并原子清空全部数据；后续运行须创建新引擎。 */
-  resetWallet(options?: { signal?: AbortSignal }): Promise<{ walletGeneration: string; clearedAt: string }>;
+  resetWallet(options?: { signal?: AbortSignal; keepWallet?: boolean }): Promise<{ walletGeneration: string; clearedAt: string }>;
   /**
    * 浏览器持久化授权与配额。
    *
@@ -88,13 +88,14 @@ export interface WalletStore {
 export interface WalletVaultFiles { key: Uint8Array; network: Uint8Array }
 export interface WalletVaultKeyStore {
   readKey(): Promise<{ key?: WalletObject; network?: WalletObject }>;
+  readRecoveryKey(): Promise<WalletObject | undefined>;
   writeKey(files: WalletVaultFiles, condition: WalletWriteCondition): Promise<WalletPutResult>;
 }
 /** 初始化必须保留单事务提交；该端口只由可信 Worker 装配发放。 */
 export interface WalletVaultLifecycleStore {
   initializeKey(files: WalletVaultFiles): Promise<void>;
   cleanupLegacyMarkers(): Promise<void>;
-  resetWallet(): Promise<{ walletGeneration: string; clearedAt: string }>;
+  resetWallet(options?: { keepWallet?: boolean }): Promise<{ walletGeneration: string; clearedAt: string }>;
 }
 /** Vault 初始化记录固定路径，与 Coordinator 设置仓储隔离。 */
 export const WALLET_INITIALIZATION_PATH = ".keymaster/system/wallet/initialization/current";

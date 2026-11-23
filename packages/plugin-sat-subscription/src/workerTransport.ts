@@ -1,6 +1,7 @@
 import type { SatWindowLaneOperation } from "@keymaster/contracts";
 import type { SatSubscriptionTransport, SatSupplierConnection } from "./satProvider.js";
 interface SatWorkerTransportPorts {
+  isReady?(): boolean;
   operation(operation: SatWindowLaneOperation, signal?: AbortSignal): Promise<unknown>;
   cancelInbound(connectionId: string, reason: string): void;
 }
@@ -14,6 +15,7 @@ export function createSatWorkerTransport(ports: SatWorkerTransportPorts) {
     handler: (state: "online" | "degraded" | "closed") => void;
   }>();
   const satSubscriptionTransport: SatSubscriptionTransport = {
+    isReady: ports.isReady,
     async connect(input): Promise<SatSupplierConnection> {
       const connectionId = `sat-connection-${crypto.randomUUID()}`;
       const fence = { supplierId: input.supplier.supplierId, connectionId, ownerSessionEpoch: input.ownerSessionEpoch, supplierGeneration: input.supplierGeneration } as const;
@@ -27,6 +29,17 @@ export function createSatWorkerTransport(ports: SatWorkerTransportPorts) {
           handler: input.onSspRequest,
         });
       }
+      let connectionState: "online" | "degraded" | "closed" = "online";
+      const stateListeners = new Set<(state: "online" | "degraded" | "closed") => void>();
+      const setConnectionState = (next: "online" | "degraded" | "closed"): void => {
+        if (connectionState === "closed" || connectionState === next) return;
+        connectionState = next;
+        for (const listener of stateListeners) {
+          try { listener(next); } catch { /* 单个状态监听器不能打断连接。 */ }
+        }
+      };
+      // Window may report a transport failure before the connect response reaches the Worker.
+      satConnectionStateHandlers.set(connectionId, { ...fence, handler: setConnectionState });
       let result: { authenticatedPublicKeyHex: string };
       try {
         result = await ports.operation({
@@ -38,18 +51,9 @@ export function createSatWorkerTransport(ports: SatWorkerTransportPorts) {
       } catch (error) {
         ports.cancelInbound(connectionId, "Sat connection setup failed");
         satIncomingHandlers.delete(connectionId);
+        satConnectionStateHandlers.delete(connectionId);
         throw error;
       }
-      let connectionState: "online" | "degraded" | "closed" = "online";
-      const stateListeners = new Set<(state: "online" | "degraded" | "closed") => void>();
-      const setConnectionState = (next: "online" | "degraded" | "closed"): void => {
-        if (connectionState === next) return;
-        connectionState = next;
-        for (const listener of stateListeners) {
-          try { listener(next); } catch { /* 单个状态监听器不能打断连接。 */ }
-        }
-      };
-      satConnectionStateHandlers.set(connectionId, { ...fence, handler: setConnectionState });
       const connection: SatSupplierConnection = {
         ...fence,
         authenticatedPublicKeyHex: result.authenticatedPublicKeyHex,
@@ -61,25 +65,11 @@ export function createSatWorkerTransport(ports: SatWorkerTransportPorts) {
         },
         requestSsp: async (wire, signal) => {
           if (connectionState === "closed") throw new Error("Sat supplier connection is closed");
-          try {
-            const response = await ports.operation({ type: "requestSsp", ...fence, wire: wire.slice() }, signal) as Uint8Array;
-            setConnectionState("online");
-            return response;
-          } catch (error) {
-            setConnectionState("degraded");
-            throw error;
-          }
+          return await ports.operation({ type: "requestSsp", ...fence, wire: wire.slice() }, signal) as Uint8Array;
         },
         requestSpi: async (wire, signal) => {
           if (connectionState === "closed") throw new Error("Sat supplier connection is closed");
-          try {
-            const response = await ports.operation({ type: "requestSpi", ...fence, wire: wire.slice() }, signal) as Uint8Array;
-            setConnectionState("online");
-            return response;
-          } catch (error) {
-            setConnectionState("degraded");
-            throw error;
-          }
+          return await ports.operation({ type: "requestSpi", ...fence, wire: wire.slice() }, signal) as Uint8Array;
         },
         subscribeSspRequests: (handler) => {
           satIncomingHandlers.set(connectionId, { supplierId: input.supplier.supplierId, ownerSessionEpoch: input.ownerSessionEpoch, supplierGeneration: input.supplierGeneration, handler });

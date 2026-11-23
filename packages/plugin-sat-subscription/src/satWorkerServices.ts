@@ -14,6 +14,7 @@ export interface SatWorkerServicesDependencies {
   network: SatDefaultNetwork;
   devSupplierJson?: string;
   transport: SatSubscriptionTransport;
+  onConnectionChanged?(): void;
   assertFresh(): void;
   getOwnerPublicKeyHex: SatSpiServiceConfig["getOwnerPublicKeyHex"];
   getOwnerGeneration: SatSpiServiceConfig["getOwnerGeneration"];
@@ -35,7 +36,7 @@ export async function createSatWorkerServices(deps: SatWorkerServicesDependencie
       if (owner !== deps.ownerPublicKeyHex || owner !== deps.getOwnerPublicKeyHex()) throw new Error("SatSubscription owner changed");
       return state;
     };
-    provider = createSatSubscriptionProvider({ stateForOwner, transport: deps.transport, signal: deps.signal, ownerGeneration: deps.ownerGeneration, ownerSessionEpoch: deps.ownerSessionEpoch, logger: { warn: (event, data) => console.warn("[sat-subscription]", event, data) } });
+    provider = createSatSubscriptionProvider({ stateForOwner, transport: deps.transport, signal: deps.signal, ownerGeneration: deps.ownerGeneration, ownerSessionEpoch: deps.ownerSessionEpoch, onConnectionChanged: deps.onConnectionChanged, logger: { warn: (event, data) => console.warn("[sat-subscription]", event, data) } });
     handle = await provider.bind({ ownerPublicKeyHex: deps.ownerPublicKeyHex });
     deps.assertFresh();
     const boundProvider = provider;

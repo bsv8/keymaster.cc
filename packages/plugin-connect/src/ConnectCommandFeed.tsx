@@ -492,7 +492,23 @@ function ConfirmCardBody({
   );
 }
 
-export function PaymentPreviewDetails({ command }: { command: ProtocolCommandRecord }) {
+export function ApplicationRequestDetails({ command }: { command: ProtocolCommandRecord }) {
+  return <>
+    {command.seedHashHex && <dl className="protocol-popup__list"><FileSeedHashDetails seedHashHex={command.seedHashHex} /></dl>}
+    {command.textSummary && <p>{command.textSummary}</p>}
+    <PaymentPreviewDetails command={command} readOnly />
+  </>;
+}
+
+function FileSeedHashDetails({ seedHashHex }: { seedHashHex?: string }) {
+  if (!seedHashHex) return null;
+  return <>
+    <dt>文件种子哈希</dt>
+    <dd><code>{seedHashHex}</code></dd>
+  </>;
+}
+
+function PaymentPreviewDetails({ command, readOnly = false }: { command: ProtocolCommandRecord; readOnly?: boolean }) {
   const payment = command.paymentPreview;
   if (!payment) return null;
   const businessTotal = (() => {
@@ -516,7 +532,7 @@ export function PaymentPreviewDetails({ command }: { command: ProtocolCommandRec
     <dt>矿工费</dt><dd>{fee} sat</dd>
     <dt>自有找零</dt><dd>{change} sat</dd>
     <dt>钱包实际支出</dt><dd>{actualSpend} sat（含费）</dd>
-    <dt>批准绑定已保存计划</dt><dd><code>{(payment as { planDigest?: string }).planDigest ?? ""}</code></dd>
+    <dt>{readOnly ? "付款计划摘要" : "批准绑定已保存计划"}</dt><dd><code>{(payment as { planDigest?: string }).planDigest ?? ""}</code></dd>
   </dl>
     <div className="application-payment-outputs">
       <h4>业务输出（按 App 顺序）</h4>
@@ -528,7 +544,8 @@ export function PaymentPreviewDetails({ command }: { command: ProtocolCommandRec
         ))}
       </ol>
     </div>
-  <p className="application-warning">身份已验证不等于交易安全，请核对实际收款方、用途与花费。批准仅提交已冻结的原计划，不重新选币。</p></section>;
+    {!readOnly && <p className="application-warning">身份已验证不等于交易安全，请核对实际收款方、用途与花费。批准仅提交已冻结的原计划，不重新选币。</p>}
+  </section>;
 }
 
 function PaymentOutputExplanation({ output }: { output: { vout: number; scriptHex: string; valueSats: string; role: string } }) {
@@ -628,6 +645,7 @@ function ReadOnlyBody({
       <dd>
         <code>{command.requestId}</code>
       </dd>
+      <FileSeedHashDetails seedHashHex={command.seedHashHex} />
       {command.textSummary ? (
         <>
           <dt>{t("connect.feed.text", { defaultValue: "提示文案" })}</dt>
@@ -799,6 +817,7 @@ function RequestSummary({
       <dd>
         <code>{command.origin}</code>
       </dd>
+      <FileSeedHashDetails seedHashHex={command.seedHashHex} />
       {command.textSummary ? (
         <>
           <dt>{t("connect.feed.text", { defaultValue: "提示文案" })}</dt>

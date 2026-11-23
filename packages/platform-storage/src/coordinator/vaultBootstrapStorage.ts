@@ -18,11 +18,11 @@ export function createVaultBootstrapStorage(store: WalletStore): { keys: WalletV
     return { path: WALLET_KEYHOLD_PATH, size: files.key.byteLength, revision: (before.key?.revision ?? 0) + 1, lastModified: result.committedAt, contentType: "application/json" };
   }
   return Object.freeze({
-    keys: Object.freeze({ readKey: () => store.readBootstrapFiles(), writeKey: write }),
+    keys: Object.freeze({ readKey: () => store.readBootstrapFiles(), readRecoveryKey: () => store.get(WALLET_KEYHOLD_PATH), writeKey: write }),
     lifecycle: Object.freeze({
       cleanupLegacyMarkers: () => store.cleanupLegacyMarkers?.() ?? Promise.resolve(),
       async initializeKey(files: WalletVaultFiles) { await write(files, { ifNoneMatch: true }); },
-      resetWallet: () => store.resetWallet(),
+      resetWallet: (options?: { keepWallet?: boolean }) => store.resetWallet(options),
     }),
   });
 }

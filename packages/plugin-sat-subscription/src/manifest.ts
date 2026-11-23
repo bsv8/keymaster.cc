@@ -36,7 +36,7 @@ import {
 } from "@keymaster/contracts";
 
 export { SAT_SUBSCRIPTION_PLUGIN_ID } from "@keymaster/contracts";
-import { SatSubscriptionStatusBlock } from "./SatSubscriptionSettings.js";
+import { SatReconnectHeader, SatSubscriptionStatusBlock } from "./SatSubscriptionSettings.js";
 import { SatWindowP2pLane } from "./satWindowLane.js";
 import { createSatWorkerAdminService, createSatWorkerChannelRuntime, createSatWorkerSpiService } from "./satWorkerProxy.js";
 import { CENTRAL_STORAGE_DECLARATIONS } from "@keymaster/contracts";
@@ -100,6 +100,10 @@ const resources: I18nPluginResources = {
       "sat.settings.connectionState.connecting": "Connecting (yellow)",
       "sat.settings.connectionState.disabled": "Disabled (gray)",
       "sat.settings.connectionState.disconnected": "Disconnected (red)",
+      "sat.settings.connectionState.awaiting-manual": "Waiting for manual connection",
+      "sat.settings.connection.manual": "Connect manually",
+      "sat.settings.connection.reconnectBroadcast": "Reconnect broadcast",
+      "sat.settings.connection.reconnectFailed": "Could not request reconnection. Try again.",
       "sat.settings.spi.refresh": "Refresh SPI balance",
       "sat.settings.spi.refreshed": "SPI balance refreshed.",
       "sat.settings.spi.topupAmount": "Top-up amount (satoshis, positive integer)",
@@ -164,6 +168,10 @@ const resources: I18nPluginResources = {
       "sat.settings.connectionState.connecting": "连接中（黄灯）",
       "sat.settings.connectionState.disabled": "已停用（灰灯）",
       "sat.settings.connectionState.disconnected": "未连接（红灯）",
+      "sat.settings.connectionState.awaiting-manual": "等待手动连接",
+      "sat.settings.connection.manual": "手动连接",
+      "sat.settings.connection.reconnectBroadcast": "重新连接广播",
+      "sat.settings.connection.reconnectFailed": "广播连接请求失败，请重试",
       "sat.settings.spi.refresh": "刷新 SPI 余额",
       "sat.settings.spi.refreshed": "SPI 余额已刷新。",
       "sat.settings.spi.topupAmount": "充值金额（satoshis，正整数）",
@@ -258,6 +266,14 @@ const satSubscriptionPluginDefinition = {
 
     const status = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope);
     const reader = ctx.capability(OWNED_RESOURCE_ACCESS_CAPABILITY).bind(ctx.consumer, ctx.scope);
+    status.view.register({
+      id: "sat-subscription.reconnect",
+      kind: "header",
+      slot: "topbar",
+      order: 890,
+      label: { key: "sat.settings.connection.reconnectBroadcast", fallback: "Reconnect broadcast" },
+      render: () => createElement(SatResourceProvider, { reader, children: createElement(SatReconnectHeader, { service: admin }) }),
+    });
     const statusId = "sat-subscription.system-status";
     status.view.register({
       id: statusId,

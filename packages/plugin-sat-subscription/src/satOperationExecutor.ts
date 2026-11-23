@@ -16,6 +16,10 @@ export async function executeSatOperation(operation: CoordinatorSatOperation, ru
     case "admin.getSettings":
       value = await runtime.admin.getSettingsSnapshot();
       break;
+    case "admin.reconnectManually":
+      await runtime.admin.reconnectManually(operation.supplierId);
+      value = null;
+      break;
     case "admin.upsertSupplier":
       await runtime.admin.upsertSupplier(operation.config);
       value = null;

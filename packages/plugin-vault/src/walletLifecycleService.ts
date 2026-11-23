@@ -440,7 +440,13 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
     emit({ type: "renamed", label: updated.document.label });
   }
 
-  async function exportKeyHold(): Promise<Uint8Array> {
+  async function exportKeyHold(recovery?: true): Promise<Uint8Array> {
+    if (recovery === true) {
+      if ((await coldStart()).state !== "corrupt") {
+        throw new StorageRuntimeError("storage_wallet_corrupt", "Wallet recovery is only available for corrupt storage");
+      }
+      return deps.keys.exportRecovery();
+    }
     return await deps.keys.export();
   }
 
@@ -450,19 +456,23 @@ export function createWalletLifecycleService(deps: WalletLifecycleDeps): WalletL
    * 顺序很重要：先撤销，之后迟到的写入在任何数据层检查之前就已经被拒。数据
    * Storage 永久封闭旧引擎后原子清空；成功或失败都由新的物理运行接管。
    */
-  async function resetWallet(input: { confirmationLabel: string }): Promise<{ walletGeneration: string; clearedAt: string }> {
+  async function resetWallet(input: { confirmationLabel: string; recovery?: "keep-wallet" | "all" }): Promise<{ walletGeneration: string; clearedAt: string }> {
     const snapshot = await coldStart();
     if (snapshot.state === "uninitialized") {
       throw new StorageRuntimeError("storage_not_found", "There is no wallet to reset");
     }
     const expected = snapshot.key?.label;
-    if (typeof input.confirmationLabel !== "string" || input.confirmationLabel.length === 0
-      || (expected !== undefined && input.confirmationLabel !== expected)) {
+    const confirmed = input.recovery === undefined
+      ? typeof input.confirmationLabel === "string" && input.confirmationLabel.length > 0
+        && (expected === undefined || input.confirmationLabel === expected)
+      : snapshot.state === "corrupt" && (input.recovery === "keep-wallet" || input.recovery === "all")
+        && input.confirmationLabel === input.recovery;
+    if (!confirmed) {
       throw new StorageRuntimeError("storage_identity_required", "Reset confirmation does not match the current key label");
     }
     // 先撤销会话、grant 与任务权限。
     deps.revokeGrants("reset");
-    const cleared = await deps.store.resetWallet();
+    const cleared = await deps.store.resetWallet({ keepWallet: input.recovery === "keep-wallet" });
     walletGeneration = "";
     emit({ type: "reset", walletGeneration: cleared.walletGeneration });
     return cleared;

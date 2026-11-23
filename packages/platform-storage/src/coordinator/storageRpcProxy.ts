@@ -76,6 +76,14 @@ export class StorageRpcProxy implements StorageRuntimeController {
     return this.control<StorageRuntimeSummary>({ type: "summary" });
   }
 
+  clearCorruptWallet(recovery: "keep-wallet" | "all"): Promise<unknown> {
+    return this.control({ type: "reset-wallet", confirmationLabel: recovery, recovery });
+  }
+
+  exportCorruptWallet(): Promise<{ bytes: Uint8Array }> {
+    return this.control({ type: "export-key-hold", recovery: true });
+  }
+
   abortSession(walletPublicKeyHex: string): Promise<void> {
     return this.coordinator.storageSessionAbort(walletPublicKeyHex).then((result) => {
       if (result.status !== "ok") throw new StorageRuntimeError("storage_unavailable", "Storage session abort failed");

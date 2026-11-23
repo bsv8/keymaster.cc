@@ -9,6 +9,7 @@
 // 软件 KeyHold 沿用 keyhold SDK。只保留软件钱包，不支持硬件记录。
 
 import { Point } from "@noble/secp256k1";
+import { parseDocument, serializeDocument } from "keyhold";
 
 import type { NetworkKeyHoldDocument, StorageErrorCode } from "@keymaster/contracts";
 import { KEYHOLD_LIMITS, WALLET_KEYHOLD_PATH } from "@keymaster/contracts";
@@ -63,6 +64,7 @@ export interface WalletKeyRepository {
   import(bytes: Uint8Array): Promise<WalletKeyFile>;
   /** 导出标准 KeyHold 私钥文件，剥离本地网络属性；不需要密码。 */
   export(): Promise<Uint8Array>;
+  exportRecovery(): Promise<Uint8Array>;
   /** 校验旧密码后改密;仍只覆盖固定路径这一条记录。 */
   changePassword(input: { oldPassword: string; newPassword: string; iterations?: number }): Promise<WalletKeyFile>;
   /** 只修改显示名称,不改密、不换私钥。 */
@@ -188,6 +190,20 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
     return new TextEncoder().encode(exportPortableKeyHoldDocument(file.document));
   }
 
+  async function exportRecovery(): Promise<Uint8Array> {
+    const key = await store.readRecoveryKey();
+    if (!key) throw fail("storage_not_found", "KeyHold file does not exist");
+    if (key.bytes.byteLength > KEYHOLD_LIMITS.maxSerializedBytes) {
+      throw fail("storage_limit_exceeded", "KeyHold file exceeds its size limit");
+    }
+    try {
+      const document = parseDocument(new TextDecoder("utf-8", { fatal: true }).decode(key.bytes));
+      return new TextEncoder().encode(serializeDocument(document));
+    } catch {
+      throw fail("storage_wallet_corrupt", "Wallet Key file is invalid or incompatible");
+    }
+  }
+
   /**
    * 改密:先解锁再重新加密,最后以 revision 条件写覆盖同一条记录。
    *
@@ -264,5 +280,5 @@ export function createWalletKeyRepository(store: WalletVaultKeyStore): WalletKey
       } catch (caught) { return rethrowStorage(caught,"Software migration commit failed"); }
     } finally { privateKey.fill(0); }
   }
-  return { read, unlock, create, import: importFile, export: exportFile, changePassword, rename, commitSoftwareMigration };
+  return { read, unlock, create, import: importFile, export: exportFile, exportRecovery, changePassword, rename, commitSoftwareMigration };
 }

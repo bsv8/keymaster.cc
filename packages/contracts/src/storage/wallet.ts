@@ -368,13 +368,13 @@ export interface WalletLifecycleService {
   /** 只修改显示名称。 */
   rename(label: string): Promise<void>;
   /** 原样导出加密 KeyHold；不是完整钱包备份。 */
-  exportKeyHold(): Promise<Uint8Array>;
+  exportKeyHold(recovery?: true): Promise<Uint8Array>;
   /**
    * 重置钱包：撤销授权后原子清空新格式全部数据。
    *
    * 失败时不得报告完成，旧授权也不得因失败自动恢复。
    */
-  resetWallet(input: { confirmationLabel: string }): Promise<{ walletGeneration: string; clearedAt: string }>;
+  resetWallet(input: { confirmationLabel: string; recovery?: "keep-wallet" | "all" }): Promise<{ walletGeneration: string; clearedAt: string }>;
   /** 订阅跨 Tab 生命周期事件。 */
   subscribe(listener: (event: WalletLifecycleEvent) => void): () => void;
 }

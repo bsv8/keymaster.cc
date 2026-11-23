@@ -1658,6 +1658,8 @@ export interface ProtocolCommandRecord {
   status: string;
   /** 人类可读确认文案。 */
   textSummary: string;
+  /** msfile.content.read 请求中的完整 BitFS 文件种子哈希。 */
+  seedHashHex?: string;
   /** identity.get / connect.login 的请求 claims 列表（其它方法为空数组）。 */
   claimsSummary: string[];
   /** intent.sign / cipher.encrypt / cipher.decrypt 的内容类型。 */

@@ -141,6 +141,40 @@
 }
 
 /* SS 连接红绿灯：绿=已连接，红=未连接，黄=连接中/已降级，灰=已停用。 */
+.sat-reconnect-header {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.sat-reconnect-header .sat-reconnect-header__button {
+  min-height: 28px;
+  padding-inline: 10px;
+  border-color: #f18d28;
+  background: #ff9e3d;
+  color: #291300;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.sat-reconnect-header .sat-reconnect-header__button:hover:not(:disabled) {
+  background: #ffb36b;
+}
+
+.sat-reconnect-header > [role="status"] {
+  position: absolute;
+  z-index: 1;
+  inset-block-start: calc(100% + 6px);
+  inset-inline-end: 0;
+  width: max-content;
+  max-width: 200px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+}
+
 .sat-connection-light {
   display: inline-block;
   width: 12px;
@@ -156,7 +190,8 @@
   border-color: #238356;
 }
 
-.sat-connection-light[data-state="disconnected"] {
+.sat-connection-light[data-state="disconnected"],
+.sat-connection-light[data-state="awaiting-manual"] {
   background: #d64545;
   border-color: #b03232;
 }

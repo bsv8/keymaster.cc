@@ -1099,6 +1099,7 @@ const satWorkerLifecycle = createSatWorkerLifecycle({
   devSupplierJson: () => devServicesEnabled ? import.meta.env.VITE_KEYMASTER_DEV_SAT_SUPPLIER : undefined,
   getP2pkh: () => testDomainUnitReadiness ? ensureSatP2pkhService() : null,
   incoming: event => channelWorkerRuntime.handleIncomingChannelPublish(event),
+  onConnectionChanged: () => emitSatState({ type: "connection-changed" }),
   async deriveAddress(owner, network, epoch) {
     const result = await withCoordinatorFinalIoLease("write", undefined,
       () => { vaultWorkerKeys.assertActiveWalletIdentity(owner, epoch); return vaultWorkerKeys.executeActiveWalletCrypto({ type: "deriveP2pkhAddress", network }); },
@@ -1121,6 +1122,8 @@ let channelRevision = 0;
 /** Window lane 的连接状态事件；按 connectionId 和完整 fence 路由到当前 owner。 */
 
 const { transport: satSubscriptionTransport, incomingHandlers: satIncomingHandlers, stateHandlers: satConnectionStateHandlers } = createSatWorkerTransport({
+  isReady: () => satNetwork.windowP2pExecutorLease?.transportReady === true
+    && satNetwork.windowP2pExecutorLease.sessionEpoch === coordinatorState.sessionEpoch,
   operation: (operation, signal) => testDomainUnitReadiness ? satNetwork.satWindowLaneOperation(operation, signal) : satWorkerLifecycle.executor({type: "lane", laneId: "sat-subscription", operation}, signal),
   cancelInbound: (connectionId, reason) => satNetwork.cancelSatInboundHandlersForConnection(connectionId, reason),
 });

@@ -54,6 +54,38 @@ function bsvNetworkLabel(network: string): string {
   return `BSV/${network}`;
 }
 
+export function SatReconnectHeader({ service }: { service: SatSubscriptionAdminService }) {
+  const { t } = usePluginI18n();
+  const resources = useSatResources();
+  const waiting = useOptionalResourceSelector<SatSubscriptionSettingsSnapshot, string[]>(
+    resources, "sat-subscription.settings", [],
+    resource => resource.data?.supplierViews
+      .filter(view => view.connectionState === "awaiting-manual")
+      .map(view => view.supplierId) ?? [], []
+  );
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  if (!waiting.length && !busy) return null;
+
+  async function reconnect() {
+    setBusy(true);
+    setFailed(false);
+    try {
+      const results = await Promise.allSettled(waiting.map(id => service.reconnectManually(id)));
+      setFailed(results.some(result => result.status === "rejected"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <div className="sat-reconnect-header">
+    <Button size="sm" className="sat-reconnect-header__button" disabled={busy} onClick={() => void reconnect()}>
+      {t("sat.settings.connection.reconnectBroadcast", { defaultValue: "重新连接广播" })}
+    </Button>
+    {failed && <span role="status">{t("sat.settings.connection.reconnectFailed", { defaultValue: "广播连接请求失败，请重试" })}</span>}
+  </div>;
+}
+
 /** 连接状态 → 红绿灯中文说明（字段中文解释，不要靠英文猜）。 */
 function connectionStateLabel(state: string, tr: (key: string, fallback: string) => string): string {
   switch (state) {
@@ -65,6 +97,8 @@ function connectionStateLabel(state: string, tr: (key: string, fallback: string)
       return tr("sat.settings.connectionState.connecting", "连接中（黄灯）");
     case "disabled":
       return tr("sat.settings.connectionState.disabled", "已停用（灰灯）");
+    case "awaiting-manual":
+      return tr("sat.settings.connectionState.awaiting-manual", "等待手动连接");
     case "disconnected":
     default:
       return tr("sat.settings.connectionState.disconnected", "未连接（红灯）");
@@ -81,6 +115,7 @@ function connectionLightChinese(state: string): string {
     case "degraded": return "已降级";
     case "connecting": return "连接中";
     case "disabled": return "已停用";
+    case "awaiting-manual": return "等待手动连接";
     case "disconnected":
     default: return "未连接";
   }
@@ -192,6 +227,16 @@ function SatSubscriptionSettingsInner({
     } catch (cause) {
       setError(satErrorMessage(cause));
     } finally { setBusy(false); }
+  };
+
+  const reconnectManually = async (supplierId: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await service.reconnectManually(supplierId);
+      await reload();
+    } catch (cause) { setError(satErrorMessage(cause)); }
+    finally { setBusy(false); }
   };
 
   const editSupplier = (supplier: SatSupplierConfigV1) => {
@@ -427,6 +472,11 @@ function SatSubscriptionSettingsInner({
             </div>
             <div>{tr("sat.settings.desired", "期望订阅")}: {view?.desiredChannels.length ? view.desiredChannels.join(", ") : tr("sat.settings.none", "无")}；{tr("sat.settings.observed", "远端观察")}: {view?.observedChannels.length ? view.observedChannels.join(", ") : tr("sat.settings.none", "无")}</div>
             <div className="sat-subscription-settings__service-actions">
+              {connectionState === "awaiting-manual" && (
+                <Button size="sm" disabled={busy} onClick={() => void reconnectManually(supplier.supplierId)}>
+                  {tr("sat.settings.connection.manual", "手动连接")}
+                </Button>
+              )}
               <Button size="sm" variant="secondary" disabled={busy} onClick={() => void refreshSpi(supplier.supplierId)}>{tr("sat.settings.spi.refresh", "刷新 SPI 余额")}</Button>
               <Button size="sm" variant="secondary" disabled={busy || !supplier.enabled} onClick={() => void refreshSubscriptions(supplier.supplierId)}>{tr("sat.settings.subscriptions.refresh", "刷新远端订阅")}</Button>
               <Button size="sm" variant="secondary" disabled={busy || !supplier.enabled} onClick={() => void refreshBilling(supplier.supplierId)}>{tr("sat.settings.billing.refresh", "查询服务器账单")}</Button>

@@ -3200,7 +3200,7 @@ export class ConnectServiceImpl implements ConnectService {
     if (result) return result;
     const policy = await this.currentMsfileService()?.getBitfsBuyerSettings?.();
     if (policy?.buyerAutoPurchaseEnabled) {
-      rec.approvalSummary = `BitFS 文件 ${seedHashHex}，允许按钱包自动购买设置发现并购买，完整块上限 ${policy.maxFullBlockPriceSatoshis} 聪。`;
+      rec.approvalSummary = `允许按钱包自动购买设置发现并购买此文件，完整块上限 ${policy.maxFullBlockPriceSatoshis} 聪。`;
       await this.askForExecutionApproval(rec);
       await this.requireConnectContent(rec);
     }
@@ -3238,7 +3238,7 @@ export class ConnectServiceImpl implements ConnectService {
       }
       if (!request.purchase && !purchaseRequested && request.quotes.length) {
         const quote = request.quotes[0]!;
-        const describe = `BitFS 文件 ${seedHashHex}，卖方 ${quote.sellerPublicKeyHex}，${quote.fileSizeBytes} 字节，种子 ${quote.seedPriceSatoshis} 聪，完整块 ${quote.fullBlockPriceSatoshis} 聪，末块 ${quote.tailPriceSatoshis} 聪。钱包将按买方设置处理费用池与费用。`;
+        const describe = `卖方 ${quote.sellerPublicKeyHex}，${quote.fileSizeBytes} 字节，种子 ${quote.seedPriceSatoshis} 聪，完整块 ${quote.fullBlockPriceSatoshis} 聪，末块 ${quote.tailPriceSatoshis} 聪。钱包将按买方设置处理费用池与费用。`;
         rec.approvalSummary = describe;
         await this.askForExecutionApproval(rec);
         await this.requireConnectContent(rec);
@@ -5641,6 +5641,9 @@ export class ConnectServiceImpl implements ConnectService {
       decision,
       status,
       textSummary: rec.approvalSummary ?? this.summarizeText(rec.params),
+      ...(rec.method === "msfile.content.read"
+        ? { seedHashHex: (rec.params as MethodParams<"msfile.content.read">).seedHashHex }
+        : {}),
       claimsSummary: this.summarizeClaims(rec.params),
       contentType: this.summarizeContentType(rec.params),
       payloadSize: rec.payloadSize ?? this.summarizePayloadSize(rec.params),

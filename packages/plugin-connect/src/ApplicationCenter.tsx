@@ -6,9 +6,9 @@ import { APPLICATION_OPERATION_LABELS, applicationCommandStatus, applicationComm
 import { useConnectResources, useConnectWalletState } from "./ConnectResourceContext.js";
 import { AppIcon } from "@keymaster/ui";
 import { Inbox } from "lucide-react";
-const METHOD_LABELS = APPLICATION_OPERATION_LABELS;
-import { CommandCard } from "./ConnectCommandFeed.js";
+import { ApplicationRequestDetails, CommandCard } from "./ConnectCommandFeed.js";
 import { ApplicationAuthentication, MsFileApprovalSection } from "./ApplicationApprovals.js";
+import { applicationCommandApprovalDetail } from "./applicationPermissions.js";
 import "./applicationCenter.css";
 import { useApplicationReminders } from "./applicationReminders.js";
 
@@ -77,7 +77,7 @@ export function ApplicationConnectionControls() {
   useEffect(() => {
     const ids = snapshot.commands.filter(command => command.autoApproved && command.applicationKey && terminal(command) && !automatic.current.has(command.id));
     for (const command of ids) automatic.current.add(command.id);
-    if (ids.length) { setReminder(`已有许可自动执行 ${ids.length} 项；请在应用日志查看实际结果。`); void reminders.play(false); }
+    if (ids.length) { setReminder(`自动处理 ${ids.length} 项；请在应用日志查看实际结果。`); void reminders.play(false); }
   }, [snapshot.commands]);
   useEffect(() => {
     const icon = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
@@ -95,7 +95,7 @@ export function ApplicationConnectionControls() {
   return <>
     <span className="application-controls"><button type="button" aria-label={`待审批 ${count}`} aria-haspopup="dialog" aria-expanded={open && !masked} aria-controls="application-activity-dialog" onClick={() => review()}><span className="application-controls__icon"><Inbox size={16} aria-hidden="true" />{count > 0 ? <span className="application-controls__badge" aria-hidden="true">{count}</span> : null}</span><span className="application-controls__label">待审批</span></button></span>
     {createPortal(<>
-      {count && !masked ? <aside className={`application-alert ${seen ? "" : "is-unseen"}`} aria-label="待处理应用授权"><strong><i />待授权 {count} 项</strong><span>{[...pending.map(value => METHOD_LABELS[value.method] ?? "应用操作"), ...msApprovals.map(() => "MSFile 价格确认")].join(" · ")}</span><button type="button" onClick={() => review()}>查看并处理 →</button>{sound === "failed" ? <small role="status">提示音未播放</small> : null}</aside> : null}
+      {count && !masked ? <aside className={`application-alert ${seen ? "" : "is-unseen"}`} aria-label="待处理应用授权"><strong><i />待授权 {count} 项</strong><span>{[...pending.map(value => APPLICATION_OPERATION_LABELS[value.method] ?? "应用操作"), ...msApprovals.map(() => "MSFile 价格确认")].join(" · ")}</span><button type="button" onClick={() => review()}>查看并处理 →</button>{sound === "failed" ? <small role="status">提示音未播放</small> : null}</aside> : null}
       {reminder && !masked ? <aside className="application-automatic" role="status">{reminder}<button type="button" onClick={() => setReminder("")}>关闭</button></aside> : null}
       <dialog ref={dialog} id="application-activity-dialog" data-application-approval className="application-drawer" onCancel={() => setOpen(false)} onClose={() => setOpen(false)} aria-labelledby="application-approval-title">
         <header><h2 id="application-approval-title">应用处理记录 <small>待处理 {count}</small></h2><button type="button" aria-label="关闭审批，返回原工作" onClick={() => setOpen(false)}>✕</button></header>
@@ -145,17 +145,19 @@ function ApplicationActivityGroups({ snapshot, approvals, onInteraction }: { sna
           </ActivityRow>)}
           {[...group.commands].sort((a, b) => Number(needsAttention(b)) - Number(needsAttention(a)) || b.updatedAt - a.updatedAt).map(command => {
             const connection = connectionFor(snapshot, command);
-            const title = METHOD_LABELS[command.method] ?? "应用操作";
+            const title = APPLICATION_OPERATION_LABELS[command.method] ?? "应用操作";
             const ended = !connection && !terminal(command);
             const status = ended ? "连接已结束" : applicationCommandStatus(command);
+            const approvalDetail = applicationCommandApprovalDetail(command);
             return <ActivityRow key={command.id} id={command.id} title={title} status={status} origin={command.origin}
               updatedAt={command.updatedAt} pending={Boolean(connection && needsAttention(command))} onInteraction={onInteraction}>
               {connection && !terminal(command)
                 ? <Command command={command} connection={connection} />
                 : <>
-                  <p>{command.manualApprovedAt ? "本次由你批准" : command.autoApproved ? "使用已有永久授权" : "未取得人工批准"}</p>
+                  {approvalDetail && <p>{approvalDetail}</p>}
                   {ended && <p>此连接已失效，不能继续批准旧请求。</p>}
                   {command.paymentStatus && <p>付款结果：{applicationCommandStatus(command)}</p>}
+                  <ApplicationRequestDetails command={command} />
                 </>}
             </ActivityRow>;
           })}

@@ -15,7 +15,8 @@ import type {
   SatIncomingPublishHandler
 } from "@keymaster/contracts";
 import {
-  SAT_SUBSCRIPTION_RESOURCE_LIMITS
+  SAT_SUBSCRIPTION_RESOURCE_LIMITS,
+  traceDev
 } from "@keymaster/contracts";
 import {
   newPublish,
@@ -53,7 +54,8 @@ export class SatTransportError extends Error {
 
 /** Supplier 断线重连的退避上限；重连本身不重放未知结果的收费动作。 */
 const RECONNECT_BASE_DELAY_MS = 250;
-const RECONNECT_MAX_DELAY_MS = 30_000;
+const RECONNECT_WINDOW_MS = 60_000;
+const MAX_AUTOMATIC_RECONNECT_ATTEMPTS = 3;
 /** 订阅真值收敛的独立退避；不能复用连接重试状态。 */
 const SUBSCRIPTION_RECONCILE_BASE_DELAY_MS = 500;
 const SUBSCRIPTION_RECONCILE_MAX_DELAY_MS = 30_000;
@@ -89,6 +91,8 @@ export interface SatSupplierConnection {
 
 /** 生产 transport 由 Window executor 提供；provider 只消费 typed boundary。 */
 export interface SatSubscriptionTransport {
+  /** Window 执行器尚未就绪时，还没有向供应商拨号。 */
+  isReady?(): boolean;
   connect(input: {
     supplier: SatSupplierConfigV1;
     ownerPublicKeyHex: string;
@@ -123,6 +127,7 @@ export interface SatSubscriptionSpiRuntime {
 export type SatStateForOwner = (ownerPublicKeyHex: string) => Promise<SatSubscriptionStateStore>;
 
 export interface SatSubscriptionProviderConfig {
+  onConnectionChanged?(): void;
   /** 打开当前 owner 的 key-scoped 状态。 */
   stateForOwner: SatStateForOwner;
   /** Window executor/正式 SSP adapter。缺省时 provider 保持 unavailable。 */
@@ -249,7 +254,9 @@ export class SatSubscriptionHandle {
   private readonly connectingSuppliers = new Map<string, { generation: number; promise: Promise<void> }>();
   /** 每个 Supplier 独立的重连 timer/尝试次数。 */
   private readonly reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private readonly reconnectAttempts = new Map<string, number>();
+  private readonly reconnectRounds = new Map<string, {
+    startedAt: number; attempts: number; onlineSince?: number; paused?: true;
+  }>();
   /** 连接已在线但订阅刷新/对账失败时的独立重试 timer/尝试次数。 */
   private readonly subscriptionReconcileTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly subscriptionReconcileAttempts = new Map<string, number>();
@@ -406,6 +413,10 @@ export class SatSubscriptionHandle {
       const offState = activeConnection.onStateChange?.((state) => {
         this.handleConnectionState(supplier.supplierId, activeConnection!, state);
       });
+      if (this.connections.get(supplier.supplierId) !== activeConnection) {
+        offState?.();
+        return;
+      }
       if (offState) {
         this.offConnectionState.get(supplier.supplierId)?.();
         this.offConnectionState.set(supplier.supplierId, offState);
@@ -417,7 +428,9 @@ export class SatSubscriptionHandle {
         this.handleConnectionState(supplier.supplierId, activeConnection, activeConnection.state);
         return;
       }
-      this.reconnectAttempts.delete(supplier.supplierId);
+      const round = this.reconnectRounds.get(supplier.supplierId);
+      if (round) round.onlineSince = this.now();
+      this.cfg.onConnectionChanged?.();
       if (generation !== this.generation || this.state() === "closed") {
         unsubscribe();
         this.offConnectionState.get(supplier.supplierId)?.();
@@ -437,6 +450,7 @@ export class SatSubscriptionHandle {
       try { connection?.close(); } catch { /* connection 可能已关闭 */ }
       if (generation !== this.generation || this.state() === "closed" || this.cfg.signal?.aborted) return;
       this.connectionErrors.set(supplier.supplierId, error instanceof Error ? error.message : String(error));
+      traceDev("keymaster.sat", "supplier.connect.failed", () => ({ supplierId: supplier.supplierId, error }));
       this.scheduleReconnect(supplier.supplierId, generation);
     }
   }
@@ -457,20 +471,46 @@ export class SatSubscriptionHandle {
     this.stopSupplier(supplierId, false);
     this.scheduleReconnect(supplierId, this.generation);
     this.updateRuntimeHealth();
+    this.cfg.onConnectionChanged?.();
   }
 
   private scheduleReconnect(supplierId: string, generation: number): void {
     if (!this.cfg.transport || this.currentState === "closed" || generation !== this.generation || this.cfg.signal?.aborted) return;
     const supplier = this.stateStore.getSupplier(supplierId);
     if (!supplier?.enabled || this.connections.has(supplierId) || this.reconnectTimers.has(supplierId)) return;
-    const attempt = this.reconnectAttempts.get(supplierId) ?? 0;
-    const delay = Math.min(RECONNECT_MAX_DELAY_MS, RECONNECT_BASE_DELAY_MS * (2 ** Math.min(attempt, 7)));
-    this.reconnectAttempts.set(supplierId, attempt + 1);
+    const now = this.now();
+    let round = this.reconnectRounds.get(supplierId);
+    if (round?.paused) return;
+    if (!round || (round.onlineSince !== undefined && now - round.onlineSince >= RECONNECT_WINDOW_MS)) {
+      round = { startedAt: now, attempts: 0 };
+      this.reconnectRounds.set(supplierId, round);
+    }
+    round.onlineSince = undefined;
+    const delay = RECONNECT_BASE_DELAY_MS * (2 ** round.attempts);
+    if (round.attempts >= MAX_AUTOMATIC_RECONNECT_ATTEMPTS || now + delay >= round.startedAt + RECONNECT_WINDOW_MS) {
+      round.paused = true;
+      traceDev("keymaster.sat", "supplier.reconnect.paused", () => ({ supplierId, attempts: round.attempts }));
+      this.cfg.onConnectionChanged?.();
+      return;
+    }
     const timer = setTimeout(() => {
+      if (this.reconnectTimers.get(supplierId) !== timer) return;
       this.reconnectTimers.delete(supplierId);
       if (this.currentState === "closed" || generation !== this.generation) return;
       const current = this.stateStore.getSupplier(supplierId);
       if (!current?.enabled || this.connections.has(supplierId)) return;
+      if (this.now() >= round.startedAt + RECONNECT_WINDOW_MS) {
+        round.paused = true;
+        traceDev("keymaster.sat", "supplier.reconnect.paused", () => ({ supplierId, attempts: round.attempts }));
+        this.cfg.onConnectionChanged?.();
+        return;
+      }
+      if (this.cfg.transport?.isReady?.() === false) {
+        this.scheduleReconnect(supplierId, generation);
+        return;
+      }
+      round.attempts += 1;
+      traceDev("keymaster.sat", "supplier.reconnect.automatic", () => ({ supplierId, attempt: round.attempts }));
       void this.reconnectSupplier(current, generation);
     }, delay);
     this.reconnectTimers.set(supplierId, timer);
@@ -480,7 +520,6 @@ export class SatSubscriptionHandle {
     if (this.currentState === "closed" || generation !== this.generation || !this.cfg.transport || this.cfg.signal?.aborted) return;
     await this.connectSupplier(supplier, generation);
     if (this.connections.get(supplier.supplierId)) {
-      this.reconnectAttempts.delete(supplier.supplierId);
       // 重连后的第一步必须刷新远端真值，再按当前 Mux union 对账；不能依据
       // 上一次 Worker 的 observed 直接补发收费 Subscribe/Unsubscribe。
       void this.reconcileAfterReconnect(supplier.supplierId, generation);
@@ -488,6 +527,20 @@ export class SatSubscriptionHandle {
       return;
     }
     this.scheduleReconnect(supplier.supplierId, generation);
+  }
+
+  async reconnectManually(supplierId: string): Promise<void> {
+    this.assertOpen();
+    const supplier = this.stateStore.getSupplier(supplierId);
+    if (!supplier?.enabled || !this.cfg.transport) {
+      throw new SatSubscriptionError("config", "Supplier is unavailable");
+    }
+    if (!this.reconnectRounds.get(supplierId)?.paused || this.connections.has(supplierId)
+      || this.connectingSuppliers.has(supplierId)) return;
+    this.reconnectRounds.set(supplierId, { startedAt: this.now(), attempts: 0 });
+    traceDev("keymaster.sat", "supplier.reconnect.manual", () => ({ supplierId }));
+    this.cfg.onConnectionChanged?.();
+    await this.reconnectSupplier(supplier, this.generation);
   }
 
   /**
@@ -554,7 +607,7 @@ export class SatSubscriptionHandle {
     this.currentState = "closed";
     for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
     this.reconnectTimers.clear();
-    this.reconnectAttempts.clear();
+    this.reconnectRounds.clear();
     for (const timer of this.subscriptionReconcileTimers.values()) clearTimeout(timer);
     this.subscriptionReconcileTimers.clear();
     this.subscriptionReconcileAttempts.clear();
@@ -708,7 +761,7 @@ export class SatSubscriptionHandle {
     } catch (error) {
       const code = stableErrorCode(error);
       if (this.isCurrentSupplierGeneration(input.supplierId, requestGeneration)
-        && requestConnection?.state !== "online") {
+        && requestConnection && this.connections.get(input.supplierId) === requestConnection && requestConnection.state !== "online") {
         this.stopSupplier(input.supplierId, false);
         this.scheduleReconnect(input.supplierId, requestGeneration);
       }
@@ -798,7 +851,7 @@ export class SatSubscriptionHandle {
     } catch (error) {
       const code = stableErrorCode(error);
       if (this.isCurrentSupplierGeneration(input.supplierId, requestGeneration)
-        && requestConnection?.state !== "online") {
+        && requestConnection && this.connections.get(input.supplierId) === requestConnection && requestConnection.state !== "online") {
         this.stopSupplier(input.supplierId, false);
         this.scheduleReconnect(input.supplierId, requestGeneration);
       }
@@ -973,11 +1026,14 @@ export class SatSubscriptionHandle {
    */
   private async reconnectEnabledSuppliers(): Promise<void> {
     if (this.currentState !== "bound" || !this.cfg.transport) return;
-    for (const supplierId of new Set([...this.connections.keys(), ...this.offPublish.keys()])) {
+    for (const supplierId of new Set([...this.connections.keys(), ...this.offPublish.keys(), ...this.reconnectTimers.keys()])) {
       this.stopSupplier(supplierId);
     }
     const suppliers = this.stateStore.listSuppliers().filter((item) => item.enabled);
-    await Promise.all(suppliers.map((supplier) => this.connectSupplier(supplier, this.generation)));
+    await Promise.all(suppliers.map((supplier) => {
+      if (!this.reconnectRounds.has(supplier.supplierId)) return this.connectSupplier(supplier, this.generation);
+      this.scheduleReconnect(supplier.supplierId, this.generation);
+    }));
     this.updateRuntimeHealth();
   }
 
@@ -1063,7 +1119,7 @@ export class SatSubscriptionHandle {
     } catch (error) {
       const code = stableErrorCode(error);
       if (this.isCurrentSupplierGeneration(input.supplierId, requestGeneration)
-        && requestConnection?.state !== "online") {
+        && requestConnection && this.connections.get(input.supplierId) === requestConnection && requestConnection.state !== "online") {
         this.stopSupplier(input.supplierId, false);
         this.scheduleReconnect(input.supplierId, requestGeneration);
       }
@@ -1125,7 +1181,7 @@ export class SatSubscriptionHandle {
     } catch (error) {
       const code = stableErrorCode(error);
       if (this.isCurrentSupplierGeneration(input.supplierId, requestGeneration)
-        && requestConnection?.state !== "online") {
+        && requestConnection && this.connections.get(input.supplierId) === requestConnection && requestConnection.state !== "online") {
         this.stopSupplier(input.supplierId, false);
         this.scheduleReconnect(input.supplierId, requestGeneration);
       }
@@ -1236,6 +1292,8 @@ export class SatSubscriptionHandle {
         ...view,
         connectionState: !configured?.enabled
           ? "disabled" as const
+          : this.reconnectRounds.get(view.supplierId)?.paused
+            ? "awaiting-manual" as const
           : connection?.state === "online"
             ? "online" as const
             : connection?.state === "degraded"
@@ -1285,6 +1343,7 @@ export class SatSubscriptionHandle {
         this.updateRuntimeHealth();
         throw error;
       }
+      this.reconnectRounds.delete(normalized.supplierId);
       if (!normalized.enabled) {
         const settings = this.stateStore.getOwnerSettings();
         if (settings?.receiveSupplierIds.includes(normalized.supplierId)) {
@@ -1321,6 +1380,7 @@ export class SatSubscriptionHandle {
         this.updateRuntimeHealth();
         throw error;
       }
+      this.reconnectRounds.delete(supplierId);
       await this.reconnectEnabledSuppliers();
       await this.reconcilePhysicalSubscriptions(false);
       this.updateRuntimeHealth();
@@ -1333,7 +1393,6 @@ export class SatSubscriptionHandle {
       const timer = this.reconnectTimers.get(supplierId);
       if (timer !== undefined) clearTimeout(timer);
       this.reconnectTimers.delete(supplierId);
-      this.reconnectAttempts.delete(supplierId);
     }
     this.offConnectionState.get(supplierId)?.();
     this.offConnectionState.delete(supplierId);
@@ -1415,6 +1474,7 @@ export class SatSubscriptionProvider {
     };
     this.currentAdmin = {
       getSettingsSnapshot: () => handle.getSettingsSnapshot(),
+      reconnectManually: (supplierId) => handle.reconnectManually(supplierId),
       upsertSupplier: (config) => handle.upsertSupplier(config),
       deleteSupplier: (supplierId) => handle.deleteSupplier(supplierId),
       setOwnerSettings: (settings) => handle.setOwnerSettings(settings),

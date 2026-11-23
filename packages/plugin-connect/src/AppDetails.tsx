@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { Button } from "@keymaster/ui";
-import { APPLICATION_OPERATION_LABELS, applicationCommandStatus, type ApplicationConnections, type ApplicationConnectionsSnapshot, type ProtocolMethod } from "@keymaster/contracts";
+import { APPLICATION_OPERATION_LABELS, applicationCommandStatus, applicationCommandTerminal, type ApplicationConnections, type ApplicationConnectionsSnapshot, type ProtocolMethod } from "@keymaster/contracts";
+import { ApplicationRequestDetails } from "./ConnectCommandFeed.js";
+import { APPROVAL_METHODS, applicationCommandApprovalDetail, applicationPermissionDetail } from "./applicationPermissions.js";
 
-const METHODS: ProtocolMethod[] = ["identity.get", "intent.sign", "cipher.encrypt", "cipher.decrypt", "payment.pay"];
 const EVENTS = { connected: "建立会话", disconnected: "断开会话", "permission-granted": "开启永久授权", "permission-revoked": "取消永久授权" };
 
 /** 设置以应用公钥为主体，离线及无会话时仍可读取和撤销。 */
@@ -23,9 +24,20 @@ export function AppDetails({ applicationKey, host, snapshot }: { applicationKey:
   const events = snapshot.events.filter(event => event.applicationKey === applicationKey);
   const archived = events.filter(event => event.kind === "connected" && !connections.some(connection => connection.id === event.connectionId));
   const timeline = [
-    ...snapshot.commands.filter(command => command.applicationKey === applicationKey).map(command => ({ id: `command:${command.id}`, at: command.updatedAt, title: APPLICATION_OPERATION_LABELS[command.method] ?? "应用操作", status: applicationCommandStatus(command), detail: command.manualApprovedAt ? "本次由你批准" : command.autoApproved ? "使用已有永久授权" : command.phase === "rejected" ? "未获批准" : "", command: true })),
-    ...events.map(event => ({ id: `event:${event.id}`, at: event.at, title: EVENTS[event.kind], status: event.method ? APPLICATION_OPERATION_LABELS[event.method] ?? "应用操作" : "", detail: "", command: false })),
-  ].sort((a, b) => b.at - a.at).filter(item => `${item.title} ${item.status} ${item.detail} ${new Date(item.at).toLocaleString()}`.includes(filter));
+    ...snapshot.commands.filter(command => command.applicationKey === applicationKey).map(command => ({
+      id: `command:${command.id}`, at: command.updatedAt, title: APPLICATION_OPERATION_LABELS[command.method] ?? "应用操作",
+      status: applicationCommandStatus(command), detail: applicationCommandApprovalDetail(command), command,
+    })),
+    ...events.map(event => {
+      const permission = event.method ? applicationPermissionDetail(event.method) : undefined;
+      return {
+        id: `event:${event.id}`, at: event.at, title: EVENTS[event.kind],
+        status: event.method ? APPLICATION_OPERATION_LABELS[event.method] ?? "应用操作" : "",
+        detail: event.kind === "permission-revoked" && permission ? `已取消的许可内容 · ${permission}` : permission,
+        command: undefined,
+      };
+    }),
+  ].sort((a, b) => b.at - a.at).filter(item => `${item.title} ${item.status} ${item.detail ?? ""} ${new Date(item.at).toLocaleString()}`.includes(filter));
   return <div className="app-details" data-testid="app-details">
     <div className="app-details__tabs" role="group" aria-label="应用详情分类">
       {([["settings", "永久授权"], ["sessions", "会话"], ["history", "授权与处理历史"]] as const).map(([value, label]) => <Button key={value} variant="ghost" aria-pressed={tab === value} onClick={() => setTab(value)}>{label}</Button>)}
@@ -34,7 +46,7 @@ export function AppDetails({ applicationKey, host, snapshot }: { applicationKey:
     {error && <p role="alert">{error}</p>}
     {tab === "settings" && <>
       <p className="apps-muted">这些首选设置属于此应用，关闭或重新打开应用后仍然有效。</p>
-      {METHODS.map(method => <div className="app-details__row" key={method}>
+      {APPROVAL_METHODS.map(method => <div className="app-details__row" key={method}>
         <div><strong>{APPLICATION_OPERATION_LABELS[method]}</strong>{method === "payment.pay" && permissions?.includes(method) && <p className="apps-muted">自动付款不设金额上限。</p>}</div>
         <span>{permissions === undefined ? "读取中" : permissions.includes(method) ? "以后自动同意" : "每次询问"}</span>
         {permissions?.includes(method) && <Button size="sm" variant="secondary" disabled={busy} onClick={async () => {
@@ -60,7 +72,15 @@ export function AppDetails({ applicationKey, host, snapshot }: { applicationKey:
     </>}
     {tab === "history" && <>
       <label className="app-details__filter">筛选记录<input value={filter} onChange={event => setFilter(event.target.value)} placeholder="操作、状态或时间" /></label>
-      {timeline.map(item => <details className="app-details__history" key={item.id}><summary><span>{item.title}</span><span>{item.status}</span><time>{new Date(item.at).toLocaleString()}</time></summary>{item.detail && <p className="apps-muted">{item.detail}</p>}{item.command && <p className="apps-muted">{item.status === "付款待核实" ? "付款结果尚未确认，请勿重复付款。" : "此处展示操作及授权记录；需要处理的申请请从顶栏“待审批”打开。"}</p>}</details>)}
+      {timeline.map(item => <details className="app-details__history" key={item.id}>
+        <summary><span>{item.title}</span><span>{item.status}</span><time>{new Date(item.at).toLocaleString()}</time></summary>
+        {item.detail && <p className="apps-muted">{item.detail}</p>}
+        {item.command && <>
+          {item.status === "付款待核实" && <p className="apps-muted">付款结果尚未确认，请勿重复付款。</p>}
+          {!applicationCommandTerminal(item.command) && <p className="apps-muted">需要处理的申请请从顶栏“待审批”打开。</p>}
+          <ApplicationRequestDetails command={item.command} />
+        </>}
+      </details>)}
       {!timeline.length && <p className="apps-muted">没有符合条件的记录。</p>}
     </>}
   </div>;
