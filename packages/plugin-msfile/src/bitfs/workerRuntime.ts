@@ -2,7 +2,7 @@ import { selectMsFileSellerTransport } from "./sellerRuntime.js";
 import { bitfsDownloadLockName } from "./buyerDownloadLock.js";
 import { configureBitfsDebug, traceBitfs } from "./debug.js";
 import { collectorForOwner } from "../collector/collectorHost.js";
-import { requireWocNetwork } from "@keymaster/contracts";
+import { requireWocNetwork, traceDev } from "@keymaster/contracts";
 import { readSchedulerTaskState, schedulerFailureSettled, schedulerSuccessSettled, schedulerSessionResponsibilitiesSettled, schedulerTaskFields } from "./schedulerHost/taskState.js";
 import { view as schedulerView } from "keymaster-trade-scheduler";
 import { deleteBitfsPurchaseData } from "./purchaseCleanup.js";
@@ -1253,7 +1253,7 @@ async function configureMsfileSellerRuntime(
         const wocConfig = deps.woc()?.getConfig();
         await writeBitfsDiagnostic("seller-payment-transaction.json", {
           txid,
-          rawTxHex,
+          transactionBytes: rawTxHex.length / 2,
           network: deps.network(),
           wocBaseUrl: wocConfig?.baseUrl,
         });
@@ -1744,14 +1744,10 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: BitfsExecutorLea
     const sellerLink = msfileBitfsWebRtcSellerLinks.get(event.webrtcSessionId);
     if (sellerTransport && sellerLink && sellerLink.sessionId === event.sessionId
       && sellerLink.ownerSessionEpoch === deps.session().sessionEpoch) {
-       void manager?.handleFrame({ sessionId: event.sessionId, frame: event.frame }).catch(async (error) => {
-         const message = error instanceof Error ? error.message : String(error);
-         await writeBitfsDiagnostic("seller-protocol-frame-error.json", {
-           sessionId: event.sessionId,
-           webrtcSessionId: event.webrtcSessionId,
-           message,
-           stack: error instanceof Error ? error.stack : undefined
-         });
+       void manager?.handleFrame({ sessionId: event.sessionId, frame: event.frame }).catch(error => {
+         traceDev("keymaster.bitfs.seller", "protocol.frame.failed", () => ({
+           sessionId: event.sessionId, webrtcSessionId: event.webrtcSessionId, error,
+         }));
        });
        return;
     }
@@ -1763,14 +1759,10 @@ function handleBitfsSellerStreamEvent(rawEvent: unknown, lease: BitfsExecutorLea
     return;
   }
   if (event.type !== "bitfs-seller-frame" || !(event.frame instanceof Uint8Array)) return;
-  void manager.handleFrame({ sessionId: event.sessionId, frame: event.frame }).catch(async (error) => {
-    const message = error instanceof Error ? error.message : String(error);
-    await writeBitfsDiagnostic("seller-protocol-frame-error.json", {
-      sessionId: event.sessionId,
-      webrtcSessionId: event.webrtcSessionId,
-      message,
-      stack: error instanceof Error ? error.stack : undefined
-    });
+  void manager.handleFrame({ sessionId: event.sessionId, frame: event.frame }).catch(error => {
+    traceDev("keymaster.bitfs.seller", "protocol.frame.failed", () => ({
+      sessionId: event.sessionId, webrtcSessionId: event.webrtcSessionId, error,
+    }));
   });
 }
 
@@ -1938,9 +1930,14 @@ async function executeMsfileControlNow(
           value = { outcome: result.outcome, ...(result.kind4 ? { kind4: Uint8Array.from(result.kind4).buffer } : {}) };
           break;
         }
-        case "settle-close":
-          value = await task.submitOrReconcilePoolRecovery(operation.sessionId);
+        case "settle-close": {
+          const settlement = await task.submitOrReconcilePoolRecovery(operation.sessionId);
+          traceDev("keymaster.bitfs.settlement", "buyer.close.reconciled", () => ({ sessionId: operation.sessionId, closed: settlement.closed,
+            status: settlement.outcome.status, attempts: settlement.outcome.attempts,
+            reason: "reason" in settlement.outcome ? settlement.outcome.reason : undefined }));
+          value = settlement;
           break;
+        }
         case "cancel-opening":
           await task.cancelUnfundedOpening(operation.sessionId);
           value = null;
@@ -2255,6 +2252,18 @@ async function handleInboxWebRtc(webrtcBody: import("bsv8-channel-protocol/webrt
 }
 
   return {
+    async refreshSellerIndex(seedHashHex: string, signal?: AbortSignal) {
+      const index = msfileSellerIndex;
+      const context = demandMonitorScope();
+      if (!index || !msfileSellerRuntime) throw new Error("BitFS seller index is unavailable");
+      const generation = index.currentGeneration();
+      signal?.throwIfAborted();
+      await index.refresh(deps.files(""), seedHashHex, generation);
+      signal?.throwIfAborted();
+      if (context !== demandMonitorScope() || index !== msfileSellerIndex || index.get(seedHashHex)?.availability !== "available") {
+        throw new Error("BitFS seller cannot locate the imported file");
+      }
+    },
     executeMsfileControl,
     disconnectWindowTransport,
     handleInboxWebRtc,

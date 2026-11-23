@@ -24,6 +24,9 @@ export interface P2pkhWorkerTransfer {
   readonly identity: Readonly<import("./networkIdentity.js").NetworkIdentity>;
   prepareTransfer(input: P2pkhTransferRequest): Promise<unknown>;
   getPaymentStatus: NonNullable<import("./protocol.js").P2pkhProtocolAdapter["getPaymentStatus"]>;
+  cancelTransfer?(previewId: string): Promise<boolean>;
+  commitPayment?(previewId: string, completion: import("./p2pkhConnectPayment.js").P2pkhConnectCompletion): ReturnType<P2pkhWorkerTransfer["submitTransfer"]>;
+  retryPayment?(paymentId: string): Promise<Awaited<ReturnType<P2pkhWorkerTransfer["submitTransfer"]>> | undefined>;
   submitTransfer(preview: unknown): Promise<{ status: "local-confirmed" | "isolated" | "not-dispatched"; txid?: string; error?: string; rawTxHex: string; submissionId: string; localInputClaimIds: string[]; attempts: number; reason?: string }>;
 }
 export interface P2pkhWorkerTransferBinding {

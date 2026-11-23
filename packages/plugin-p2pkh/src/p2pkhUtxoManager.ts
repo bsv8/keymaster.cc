@@ -1,3 +1,4 @@
+import { createSignedPaymentOutbox } from "./signedPaymentOutbox.js";
 // Host identity/type adapter only. No transaction plans, submission registry,
 // payment conclusions or reconstruction of the kernel's occupancy invariants.
 import { traceDev, deriveP2pkhAddress, type BorrowedModuleFileStore } from "@keymaster/contracts";
@@ -16,7 +17,7 @@ export interface P2pkhFundingAllocation {
 export interface P2pkhAllFundingAllocation {
   allocationId: string; totalInSats: string; selectedInputs: P2pkhManagerInputEvidence[];
 }
-interface State { pool: FundingKernel; revision: number; resource: Resource; owner: string }
+interface State { pool: FundingKernel; revision: number; resource: Resource; owner: string; restored: Promise<Set<string>> }
 const instances = new WeakMap<object, P2pkhUtxoManager>();
 function walletScriptFor(resource: Resource): string {
   return p2pkhAddressToScriptHex(resource.address, resource.network);
@@ -24,6 +25,7 @@ function walletScriptFor(resource: Resource): string {
 export function createP2pkhUtxoManager(input: {files: BorrowedModuleFileStore}): P2pkhUtxoManager {
   const prior = instances.get(input.files); if (prior) return prior;
   const states = new Map<string, State>(); let disposed = false;
+  const outbox = createSignedPaymentOutbox(input.files);
   function state(owner: string, resource: Resource): State {
     if (disposed) throw new Error("UTXO allocation instance revoked");
     const key = `${owner.toLowerCase()}:${resource.network}`;
@@ -31,7 +33,9 @@ export function createP2pkhUtxoManager(input: {files: BorrowedModuleFileStore}):
     if (!value) {
       value = {pool: new FundingKernel({owner: owner.toLowerCase(), network: resource.network},
         {dustThresholdSats: "1"}),
-        revision: 0, resource, owner}; states.set(key, value);
+        revision: 0, resource, owner,
+        restored: outbox.restoredProtectedInputs({ ownerPublicKeyHex: owner, network: resource.network })}; states.set(key, value);
+      void value.restored.catch(() => { if (states.get(key) === value) states.delete(key); });
     }
     return value;
   }
@@ -47,13 +51,14 @@ export function createP2pkhUtxoManager(input: {files: BorrowedModuleFileStore}):
       changeSats: value.changeSats, totalInSats: value.totalInSats, selectedInputs: evidence(s, value.inputs)};
   }
   function operation<T>(s: State, kind: string, detail: unknown, run: () => T): T {
-    traceDev("keymaster.utxo", `${kind}.start`, () => ({owner: s.owner, network: s.resource.network, detail, funds: s.pool.funds()}));
+    const context = () => ({ owner: s.owner, network: s.resource.network, address: s.resource.address, observationRevision: s.revision, detail, funds: s.pool.funds() });
+    traceDev("keymaster.utxo", `${kind}.start`, context);
     try {
       const result = run();
-      traceDev("keymaster.utxo", `${kind}.finish`, () => ({owner: s.owner, network: s.resource.network, detail, result, funds: s.pool.funds()}));
+      traceDev("keymaster.utxo", `${kind}.finish`, () => ({ ...context(), result }));
       return result;
     } catch (error) {
-      traceDev("keymaster.utxo", `${kind}.error`, () => ({owner: s.owner, network: s.resource.network, detail, error, funds: s.pool.funds()}));
+      traceDev("keymaster.utxo", `${kind}.error`, () => ({ ...context(), error }));
       throw error;
     }
   }
@@ -62,8 +67,20 @@ export function createP2pkhUtxoManager(input: {files: BorrowedModuleFileStore}):
     async observe(request) {
       const s = state(request.ownerPublicKeyHex, request.resource);
       const walletScriptHex = walletScriptFor(s.resource);
-      s.pool.applySnapshot({generation: 1, revision: ++s.revision, utxos: request.utxos.filter(row => (row.script ?? walletScriptHex) === walletScriptHex).map(row => ({txid: row.txid, vout: row.vout, value: String(row.value),
-        status: row.status, height: row.height ?? 0}))});
+      const restored = await s.restored;
+      if (disposed) throw new Error("UTXO allocation instance revoked");
+      const walletRows = request.utxos.filter(row => (row.script ?? walletScriptHex) === walletScriptHex);
+      const eligible = walletRows.filter(row => !restored.has(`${row.txid}:${row.vout}`));
+      const utxos = eligible.map(row => ({ txid: row.txid, vout: row.vout, value: String(row.value), status: row.status, height: row.height ?? 0 }));
+      const change = s.pool.applySnapshot({ generation: 1, revision: s.revision + 1, utxos });
+      s.revision++;
+      traceDev("keymaster.utxo", "observation.applied", () => ({
+        network: s.resource.network, address: s.resource.address, observationRevision: s.revision,
+        providerInputs: request.utxos.length, excludedScriptMismatch: request.utxos.length - walletRows.length,
+        excludedRestoredProtection: walletRows.length - eligible.length, eligibleInputs: eligible.length,
+        eligibleSats: eligible.reduce((sum, row) => sum + BigInt(row.value), 0n).toString(),
+        change, funds: s.pool.funds(),
+      }));
     },
     async funds(request) { return scoped(request).pool.funds(); },
     async request(request) {
@@ -79,7 +96,12 @@ export function createP2pkhUtxoManager(input: {files: BorrowedModuleFileStore}):
       });
     },
     async release(request) {const s = scoped(request); operation(s, "release", request, () => s.pool.release(request.allocationId));},
-    async injectP2pkhUtxos(request) {const s = scoped(request); operation(s, "inject-p2pkh-utxos", request, () => s.pool.injectP2pkhUtxos(request.utxos));},
+    async injectP2pkhUtxos(request) {
+      const s = scoped(request);
+      const restored = await s.restored;
+      if (disposed) throw new Error("UTXO allocation instance revoked");
+      operation(s, "inject-p2pkh-utxos", request, () => s.pool.injectP2pkhUtxos(request.utxos.filter(row => !restored.has(`${row.txid}:${row.vout}`))));
+    },
   };
   instances.set(input.files, manager); return manager;
 }

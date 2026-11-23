@@ -285,6 +285,7 @@ export type P2pkhTransferRequest = import("@keymaster/contracts").P2pkhTransferR
  * 签名 key 与该 owner 一致——owner 变了就拒绝广播。
  */
 export interface P2pkhTransferPreview {
+  expiresAt?: number;
   paymentContext?: { channelId: string; sessionId: string | null };
   assetId: P2pkhAssetId;
   network: BsvNetwork;
@@ -375,6 +376,9 @@ export interface P2pkhService {
   getTransactionDetail(input: { txid: string }): Promise<P2pkhTransactionDetail | undefined>;
 
   /** 转移：prepare / preview。 */
+  cancelTransfer?(previewId: string): Promise<boolean>;
+  commitPayment?(previewId: string, completion: import("@keymaster/contracts").P2pkhConnectCompletion): Promise<P2pkhTransferResult>;
+  retryPayment?(paymentId: string): Promise<P2pkhTransferResult | undefined>;
   prepareTransfer(input: P2pkhTransferRequest): Promise<P2pkhTransferPreview>;
   /** 转移：广播 preview 中已经生成好的最终交易。 */
   submitTransfer(preview: P2pkhTransferPreview): Promise<P2pkhTransferResult>;

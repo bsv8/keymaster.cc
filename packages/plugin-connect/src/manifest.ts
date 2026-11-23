@@ -1,3 +1,4 @@
+import { WOC_CAPABILITY, WOC_WORKER_BROADCAST_CAPABILITY } from "@keymaster/contracts";
 import { createElement } from "react";
 import { CONNECT_APP_SOURCE_BATCH_CAPABILITY, APPLICATION_AI_TOOLS_CAPABILITY, BUSINESS_REGISTRY_CAPABILITY, STORAGE_FILE_CLIENTS_CAPABILITY, VAULT_WORKER_CRYPTO_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, P2PKH_WORKER_TRANSFER_CAPABILITY, MSFILE_SERVICE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, PAGE_UI_REGISTRY_CAPABILITY, PAGE_UI_RENDERER_CAPABILITY, OWNED_RESOURCE_ACCESS_CAPABILITY, I18N_SERVICE_CAPABILITY, defineRuntimeUnitDependencies, type ApplicationConnectionsSnapshot, type I18nPluginResources, type PluginContext, type PluginManifest, type PluginSetup } from "@keymaster/contracts";
 import { createWindowConnect } from "./windowConnect.js";
@@ -6,6 +7,7 @@ import { MarketPage } from "./MarketPage.js";
 import { AppDetailPage } from "./AppDetailPage.js";
 import { AppsHomeWidget } from "./AppsHomeWidget.js";
 import { ApplicationDisplaySettings } from "./ApplicationDisplaySettings.js";
+import { DomainServicesPage } from "./DomainServicesPage.js";
 import { ApplicationMaskStatus, ApplicationConnectionControls } from "./ApplicationCenter.js";
 import { bindConnectUi } from "./ConnectResourceContext.js";
 import { CONNECT_STORAGE_DECLARATIONS } from "./storage/protocolStorageDeclarations.js";
@@ -404,6 +406,8 @@ const connectPluginDefinition = {
     ]),
   }, {
     id: "protocol.coordinator-worker", runtime: "shared-worker", scopeKind: "storage",
+    connect: { providerMethods: ["domain.profiles", "domain.get_public_key",
+      "chain.get_height", "chain.list_script_history", "chain.get_transaction", "chain.list_script_unspent", "chain.broadcast", "application.key", "application.sign_message", "application.sign_payment"] },
     provides: [CONNECT_APP_SOURCE_BATCH_CAPABILITY], privateProvides: [CONNECT_PRIVATE_COMMAND, CONNECT_PRIVATE_EVENTS],
     storages: [CONNECT_STORAGE_DECLARATIONS.files],
     dependencies: defineRuntimeUnitDependencies([
@@ -411,6 +415,8 @@ const connectPluginDefinition = {
       { capability: VAULT_WALLET_STATE_CAPABILITY, sourceRuntime: "shared-worker", reason: "Worker 钱包身份与运行世代" },
       { capability: P2PKH_WORKER_TRANSFER_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "通过已绑定的 Worker 转账能力执行付款" },
       { capability: VAULT_WORKER_CRYPTO_CAPABILITY, sourceRuntime: "shared-worker", reason: "Vault 独占的受控密码学句柄" },
+      { capability: WOC_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "Connect chain queries" },
+      { capability: WOC_WORKER_BROADCAST_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "Connect chain broadcasts" },
       { capability: MSFILE_SERVICE_CAPABILITY, sourceRuntime: "shared-worker", optional: true, reason: "已声明的 MSFile 公开方法" },
     ]),
   }],
@@ -449,6 +455,13 @@ const connectPluginDefinition = {
       pages.register({ kind: "page", path: "/settings/application-display", id: "connect.application-display", label: { key: "connect.applicationDisplay.title", fallback: "Application settings" }, render: () => createElement(DisplaySettings) });
       ctx.capability(BUSINESS_REGISTRY_CAPABILITY).registerFeature("protocol", "settings", {
         id: "settings.application-display", label: { key: "connect.applicationDisplay.title", fallback: "Application settings" }, order: 30, icon: "PanelsTopLeft", entry: { path: "/settings/application-display", routeId: "connect.application-display" },
+      });
+      pages.register({
+        kind: "page", path: "/settings/domain", id: "connect.domain-services", label: "域名服务",
+        render: () => createElement(DomainServicesPage, { services: apps.domainSettings }),
+      });
+      ctx.capability(BUSINESS_REGISTRY_CAPABILITY).registerFeature("protocol", "settings", {
+        id: "settings.domain", label: "域名服务", order: 42, icon: "Globe", entry: { path: "/settings/domain", routeId: "connect.domain-services" },
       });
       const MaskStatus = bindConnectUi(ctx, ApplicationMaskStatus, apps);
       pages.register({ kind: "frame", slot: "screen-mask-status", id: "connect.mask-status", label: "待审批数量", render: () => createElement(MaskStatus) });

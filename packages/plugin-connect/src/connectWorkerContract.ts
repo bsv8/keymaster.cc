@@ -1,3 +1,4 @@
+import type { DomainServiceInput } from "./domain.js";
 import { defineCapability } from "webloom-framework";
 import type { ApplicationConnectionsSnapshot, ConnectAuthSnapshot, ConnectCommandFeedState, ApplicationOpenMode, LaunchAppViewInput, ProtocolMethod, ConnectedAiTool } from "@keymaster/contracts";
 import type { AppDirectorySnapshot } from "./catalog.js";
@@ -18,6 +19,10 @@ export type ConnectWorkerCommand =
  | { type: "favorite"; key: string }
  | { type: "select"; key: string; selection: { url?: string; indexseedhashhex?: string } }
  | { type: "delete-app"; key: string }
+ | { type: "domain-list" }
+ | { type: "domain-add"; service: DomainServiceInput }
+ | { type: "domain-edit"; service: DomainServiceInput }
+ | { type: "domain-remove"; id: string }
  | { type: "ai-invoke"; id: string; args: unknown };
 export interface WorkerConnectionView {
  id: string; applicationKey: string; createdAt: number; closedAt?: number;

@@ -17,7 +17,7 @@ import { createMsFileLocalContentSource } from "./localContentSource.js";
 import { createBitfsPurchaseTasks } from "./purchaseTasks.js";
 
 type Offer = Extract<MsFileP2pLaneOperation, { type: "bitfs-webrtc-buyer-offer" }>;
-type WireEvent = { type?: string; sessionId?: unknown; frame?: unknown; bytesIn?: unknown };
+type WireEvent = { type?: string; sessionId?: unknown; frame?: unknown; bytesIn?: unknown; reason?: unknown };
 
 export function createBitfsBuyerWindowRuntime(options: {
   coordinator: MsFileCoordinatorControl;
@@ -195,6 +195,8 @@ export function createBitfsBuyerWindowRuntime(options: {
       } else if (input.type === "bitfs-webrtc-meter" && typeof input.bytesIn === "number") {
         event = { type: "progress", sessionId, bytesIn: input.bytesIn };
       } else if (input.type === "bitfs-webrtc-session-closed") {
+        traceDev("keymaster.bitfs.buyer-window", "transport.closed", () => ({ sessionId,
+          reason: typeof input.reason === "string" ? input.reason : undefined }));
         event = { type: "closed", sessionId };
       } else {
         return Promise.resolve(false);

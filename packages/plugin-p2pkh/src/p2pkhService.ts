@@ -1,3 +1,4 @@
+import { createSignedPaymentOutbox, signedPaymentStatus } from "./signedPaymentOutbox.js";
 import { requireWocNetwork, traceDev } from "@keymaster/contracts";
 import { sameWalletSession } from "@keymaster/contracts";
 import { sameNetworkIdentity, requireUnlockedWalletIdentity, bindWalletIdentity } from "@keymaster/contracts";
@@ -117,7 +118,7 @@ export interface P2pkhServiceDeps {
   coordinator?: Pick<P2pkhCoordinatorControl, "p2pkhUtxosGet" | "p2pkhUtxosRefresh">
     & Partial<Pick<P2pkhCoordinatorControl, "subscribeTopic" | "p2pkhPaymentStatus">>;
   messageBus: MessageBus;
-  /** Issuing runtime instance; fences publications before asynchronous cleanup. */
+  /** Issuing runtime instance; fences dataSignatures before asynchronous cleanup. */
   signal?: AbortSignal;
   walletState: VaultWalletState;
   /** Host 已按 manifest 声明绑定的当前 owner K-V 句柄。 */
@@ -273,7 +274,9 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
     transferRetryControllers.clear();
   }
 
+  const signedPaymentOutbox = createSignedPaymentOutbox(deps.storage);
   const transfer = createP2pkhTransferService({
+    signedPaymentOutbox,
     vault: deps.vault,
     utxoManager: deps.utxoManager, submissions: deps.submissions,
     centralBroadcastService: deps.centralBroadcastService,
@@ -623,7 +626,10 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
       if (Object.keys(input).some(key => key !== "paymentId")) throw new TypeError("Payment status accepts only paymentId");
       const boundInput = { paymentId: input.paymentId, ownerPublicKeyHex: walletIdentity.publicKeyHex, network: walletIdentity.bsvNetwork };
       if (deps.submissions) {
-        const result = deps.submissions.paymentStatus(boundInput); assertWalletSession(); return result;
+        const result = deps.submissions.paymentStatus(boundInput);
+        const stored = result.status === "not_found" ? await signedPaymentOutbox.get(boundInput) : undefined;
+        assertWalletSession();
+        return stored ? signedPaymentStatus(stored) : result;
       }
       if (!deps.coordinator?.p2pkhPaymentStatus) throw new Error("Payment transaction status RPC unavailable");
       const result = await deps.coordinator.p2pkhPaymentStatus(boundInput); assertWalletSession();
@@ -688,6 +694,20 @@ export function createP2pkhService(deps: P2pkhServiceDeps): {
       const result: P2pkhTransferPreview = await transfer.prepare(preparedInput);
       assertWalletSession();
       return result;
+    },
+    async cancelTransfer(previewId) {
+      assertWalletSession();
+      return transfer.cancel(previewId);
+    },
+    async commitPayment(previewId, completion) {
+      assertWalletSession();
+      const result = await transfer.submitPrepared(previewId, { completion });
+      assertWalletSession();
+      return result;
+    },
+    async retryPayment(paymentId) {
+      assertWalletSession();
+      return transfer.retryPayment(walletIdentity.publicKeyHex, walletIdentity.bsvNetwork, paymentId);
     },
     async submitTransfer(preview) {
       assertWalletSession();

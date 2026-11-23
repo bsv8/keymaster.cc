@@ -529,7 +529,10 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           "providerMethods": [
             "msfile.stat",
             "msfile.seed.read",
-            "msfile.block.read"
+            "msfile.block.read",
+            "msfile.seller.status",
+            "msfile.import",
+            "msfile.content.read"
           ]
         },
         "permissions": [],
@@ -951,6 +954,26 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           {
             "capability": {
               "kind": "local",
+              "id": "woc.service",
+              "version": "1"
+            },
+            "sourceRuntime": "shared-worker",
+            "reason": "Connect chain queries",
+            "optional": true
+          },
+          {
+            "capability": {
+              "kind": "local",
+              "id": "woc.worker-broadcast",
+              "version": "1"
+            },
+            "sourceRuntime": "shared-worker",
+            "reason": "Connect chain broadcasts",
+            "optional": true
+          },
+          {
+            "capability": {
+              "kind": "local",
               "id": "msfile.service",
               "version": "1"
             },
@@ -959,6 +982,20 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             "optional": true
           }
         ],
+        "connect": {
+          "providerMethods": [
+            "domain.profiles",
+            "domain.get_public_key",
+            "chain.get_height",
+            "chain.list_script_history",
+            "chain.get_transaction",
+            "chain.list_script_unspent",
+            "chain.broadcast",
+            "application.key",
+            "application.sign_message",
+            "application.sign_payment"
+          ]
+        },
         "permissions": [],
         "storages": [
           {
@@ -1416,6 +1453,9 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
           "providerMethods": [
             "payment.pay",
             "payment.status",
+            "payment.prepare",
+            "payment.commit",
+            "payment.cancel",
             "feepool.prepare",
             "feepool.commit"
           ]

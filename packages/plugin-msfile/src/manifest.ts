@@ -1017,7 +1017,7 @@ const msfilePluginDefinition = {
   units: [{
     id: "msfile.window",
     runtime: "window-main",
-    connect: { providerMethods: ["msfile.stat", "msfile.seed.read", "msfile.block.read"] },
+    connect: { providerMethods: ["msfile.stat", "msfile.seed.read", "msfile.block.read", "msfile.seller.status", "msfile.import", "msfile.content.read"] },
     scopeKind: "owner-session",
     provides: [MSFILE_SERVICE_CAPABILITY, MSFILE_COORDINATOR_CONTROL_CAPABILITY, MSFILE_BUCKET_SERVICE_CAPABILITY],
     // 桶存储页面直接读写 `<owner>/msfiles/` 文件根（seeds/storage/meta）；

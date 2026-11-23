@@ -1,4 +1,6 @@
-import { defineBuiltinWorkerPlugin, STORAGE_FILE_CLIENTS_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, VAULT_WORKER_CRYPTO_CAPABILITY, P2PKH_WORKER_TRANSFER_CAPABILITY, MSFILE_SERVICE_CAPABILITY, CONNECT_APP_SOURCE_BATCH_CAPABILITY, traceDev, requireUnlockedWalletIdentity, type ConnectChannelRuntime, type P2pkhProtocolAdapter, type PluginContext, type ApplicationView, type LaunchAppViewInput, type VaultWalletState } from "@keymaster/contracts";
+import { openDomainDirectory } from "./storage/protocolStorageRepository.js";
+import { discoverDomainService, DomainQueryError, DomainSettingsError } from "./domain.js";
+import { WOC_CAPABILITY, WOC_WORKER_BROADCAST_CAPABILITY, defineBuiltinWorkerPlugin, STORAGE_FILE_CLIENTS_CAPABILITY, VAULT_WALLET_STATE_CAPABILITY, VAULT_WORKER_CRYPTO_CAPABILITY, P2PKH_WORKER_TRANSFER_CAPABILITY, MSFILE_SERVICE_CAPABILITY, CONNECT_APP_SOURCE_BATCH_CAPABILITY, traceDev, requireUnlockedWalletIdentity, type ConnectChannelRuntime, type P2pkhProtocolAdapter, type PluginContext, type ApplicationView, type LaunchAppViewInput, type VaultWalletState } from "@keymaster/contracts";
 import type { HandlerCallContext } from "webloom-framework";
 import { CONNECT_PRIVATE_COMMAND, CONNECT_PRIVATE_EVENTS, type ConnectWorkerSnapshot, type ConnectWorkerEvent, type ConnectWorkerCommand } from "./connectWorkerContract.js";
 import { ApplicationConnectionHost } from "./applicationConnectionHost.js";
@@ -13,6 +15,7 @@ interface Sink { push(event: ConnectWorkerEvent): void; stop(): void }
 export interface ConnectWorkerPorts {
  authorize(call: HandlerCallContext): string;
  walletOrigin(): string;
+ runChainBroadcast: NonNullable<ConnectServiceDeps["runChainBroadcast"]>;
  channel: ConnectChannelRuntime;
  lock(): Promise<import("@keymaster/contracts").CoordinatorCommandResult>;
 }
@@ -23,6 +26,7 @@ export function createConnectWorkerPlugin(ports: ConnectWorkerPorts) {
   const cryptoProvider = ctx.capability(VAULT_WORKER_CRYPTO_CAPABILITY);
   const files = ctx.capability(STORAGE_FILE_CLIENTS_CAPABILITY).bind(ctx.consumer, ctx.scope, "");
   const { repository, appDirectory } = configureConnectStorageRepository({ durablePolicy: files, sessions: files, commandHistory: files });
+  const domains = openDomainDirectory(files);
   const sources = new Map<string, Source>(), peers = new Map<string, Sink>(), decisions = new Map<string, Promise<void>>();
   const appCrypto = new Map<string, Awaited<ReturnType<typeof cryptoProvider.createActiveKeyCrypto>>>();
   const vault: ConnectServiceDeps["vault"] = {
@@ -38,6 +42,9 @@ export function createConnectWorkerPlugin(ports: ConnectWorkerPorts) {
    // This local Worker provider returns the actual product preview, never a Window-supplied preview DTO.
    prepareTransfer: async input => await (await getTransfer()).prepareTransfer(input) as Awaited<ReturnType<P2pkhProtocolAdapter["prepareTransfer"]>>,
    submitTransfer: async input => (await getTransfer()).submitTransfer(input),
+   commitPayment: async (previewId, completion) => (await getTransfer()).commitPayment!(previewId, completion),
+   retryPayment: async paymentId => (await getTransfer()).retryPayment!(paymentId),
+   cancelTransfer: async previewId => (await getTransfer()).cancelTransfer!(previewId),
    getPaymentStatus: async input => (await getTransfer()).getPaymentStatus(input),
   };
   let executionTail: Promise<void> = Promise.resolve();
@@ -61,7 +68,9 @@ export function createConnectWorkerPlugin(ports: ConnectWorkerPorts) {
     } };
     try { await execute(lease); } finally { if (held) release(); }
   };
-  const deps: ConnectServiceDeps = { vault, walletState: wallet, storageRepository: repository, walletOrigin: ports.walletOrigin(), runConnectRequest, runtimeSignal: ctx.scope.signal, hostedApplication: true, getP2pkhService: () => adapter, getMsfileService: () => ctx.optionalCapability(MSFILE_SERVICE_CAPABILITY), connectChannelRuntime: ports.channel };
+  const deps: ConnectServiceDeps = { vault, walletState: wallet, storageRepository: repository, domains, walletOrigin: ports.walletOrigin(), runConnectRequest, runtimeSignal: ctx.scope.signal, hostedApplication: true, runChainBroadcast: ports.runChainBroadcast, getP2pkhService: () => adapter,
+    getChain: () => ctx.optionalCapability(WOC_CAPABILITY),
+    getChainBroadcast: () => ctx.optionalCapability(WOC_WORKER_BROADCAST_CAPABILITY), getMsfileService: () => ctx.optionalCapability(MSFILE_SERVICE_CAPABILITY), connectChannelRuntime: ports.channel };
   const host = new ApplicationConnectionHost(deps, repository);
   await host.initialize();
   const directory = createAppDirectoryService({ repository: appDirectory, assertActive: () => ctx.scope.assertActive(), hasUsage(key) { const s = host.snapshot(); return !s.historyAvailable || !!s.error || s.applications.some(a => a.key === key) || s.events.some(e => e.applicationKey === key) || s.commands.some(c => c.applicationKey === key); }, forgetApp: (key, commit) => host.forgetApplication(key, commit) });
@@ -143,6 +152,26 @@ export function createConnectWorkerPlugin(ports: ConnectWorkerPorts) {
     case "favorite": return directory.toggleFavorite(command.key);
     case "select": return directory.select(command.key,command.selection);
     case "delete-app": return directory.deleteApp(command.key);
+    case "domain-list": return domains.list();
+    case "domain-add":
+    case "domain-edit": {
+     try {
+      const { bsvNetwork } = requireUnlockedWalletIdentity(wallet.snapshot());
+      const service = await discoverDomainService(command.service, bsvNetwork, signal);
+      signal.throwIfAborted();
+      ctx.scope.assertActive();
+      await domains.save(service, command.type === "domain-edit");
+      return { services: await domains.list() };
+     } catch (error) {
+      if (signal.aborted) throw error;
+      if (error instanceof DomainQueryError || error instanceof DomainSettingsError) return { error: error.message };
+      traceDev("connect.domain", "settings.save.failed", () => ({ error }));
+      return { error: "无法保存域名服务" };
+     }
+    }
+    case "domain-remove":
+     await domains.remove(command.id);
+     return domains.list();
     case "ai-invoke": return host.aiTools.invoke(command.id,command.args as Record<string, import("@keymaster/contracts").JSONValue>,signal);
     default: throw new Error("Unknown Connect command");
    }
@@ -150,7 +179,7 @@ export function createConnectWorkerPlugin(ports: ConnectWorkerPorts) {
   ctx.handlePrivate(CONNECT_PRIVATE_COMMAND,async(command,call)=>{
    const owner=ports.authorize(call); if(!peers.has(owner))throw new Error("Connect subscription is not ready");
    // Ingress and decisions never hold the control queue while waiting for an App response or user.
-   const result = await (command.type === "ai-invoke" ? execute(owner, command, call.signal) : serial(() => execute(owner, command)));
+   const result = await (["ai-invoke", "domain-add", "domain-edit"].includes(command.type) ? execute(owner, command, call.signal) : serial(() => execute(owner, command)));
    // Keep the selected promise in the response scope even after its claim is released.
    // Waiting outside controlTail leaves cancellation and other tabs' decisions available.
    let value = result;

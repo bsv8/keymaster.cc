@@ -78,6 +78,7 @@ export function createVaultWorkerKeys(ports: VaultWorkerKeyPorts) {
     sessionEpoch: () => ports.session().sessionEpoch,
     keySession: {
       assert: assertActiveWalletIdentity,
+      signApplicationDigests: vaultKeySession.signApplicationDigests,
       signDigest: (digest, format, publicKeyHex) => {
         assertActiveWalletIdentity(publicKeyHex);
         return vaultKeySession.signDigest(digest, format, publicKeyHex);

@@ -83,11 +83,19 @@ export function createP2pkhUtxoSnapshotStore(deps: {
     return { hasResult: true, seq, syncedAt: deps.now?.() ?? new Date().toISOString(), funds };
   }
   function enqueueRefresh(resource: P2pkhUtxoSnapshotResource, currentEpoch: number, signal: AbortSignal): Promise<P2pkhUtxoSnapshotResult> {
-    if (Number(running) + queue.length >= maxTasks) return Promise.reject(new Error("UTXO refresh queue full"));
+    const context = { network: resource.network, address: resource.address, generation: resource.generation };
+    if (Number(running) + queue.length >= maxTasks) {
+      traceDev("keymaster.utxo", "refresh.queue-full", () => ({ ...context, queued: queue.length, running }));
+      return Promise.reject(new Error("UTXO refresh queue full"));
+    }
+    const queuedAt = performance.now();
+    traceDev("keymaster.utxo", "refresh.queued", () => ({ ...context, queued: queue.length, running }));
     return new Promise((resolve, reject) => {
       queue.push({
         cancel() { reject(new Error("Manager observation session revoked")); },
         async start() {
+          const startedAt = performance.now();
+          traceDev("keymaster.utxo", "refresh.start", () => ({ ...context, queueWaitMs: startedAt - queuedAt }));
           try {
             check(currentEpoch);
             signal.throwIfAborted();
@@ -97,6 +105,9 @@ export function createP2pkhUtxoSnapshotStore(deps: {
             check(currentEpoch);
             signal.throwIfAborted();
             const rows = mergeP2pkhUnspentFacts(observed);
+            traceDev("keymaster.utxo", "refresh.received", () => ({
+              ...context, providerInputs: observed.length, uniqueInputs: rows.length, elapsedMs: performance.now() - startedAt,
+            }));
             const syncedAt = deps.now?.() ?? new Date().toISOString();
             await deps.manager.observe({
               ownerPublicKeyHex: resource.publicKeyHex, resource,
@@ -106,10 +117,15 @@ export function createP2pkhUtxoSnapshotStore(deps: {
             check(currentEpoch);
             const snapshot = await get(resource);
             traceDev("keymaster.utxo", "refresh.observed", () => ({
-              network: resource.network, address: resource.address, count: rows.length, funds: snapshot.funds,
+              ...context, count: rows.length, funds: snapshot.funds, elapsedMs: performance.now() - startedAt,
             }));
             resolve(snapshot);
-          } catch (error) { reject(error); }
+          } catch (error) {
+            traceDev("keymaster.utxo", "refresh.failed", () => ({
+              ...context, aborted: signal.aborted, elapsedMs: performance.now() - startedAt, error,
+            }));
+            reject(error);
+          }
         },
       });
       advance();

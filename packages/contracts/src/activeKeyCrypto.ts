@@ -87,6 +87,8 @@ export interface ActiveKeyCrypto {
   signConnectEnvelope?(input: {kind: "identity" | "intent"; envelope: ArrayBuffer; content?: ArrayBuffer; appSessionId: string}): Promise<ActiveKeyCryptoSignDigestResult>;
   /** Worker 钱包解析完整 BitFS 认证文档；涉金额授权仍走支付账本。 */
   signBitfsWire?(input:{kind:number;document:ArrayBuffer},signal?:AbortSignal):Promise<ActiveKeyCryptoSignDigestResult>;
+  /** Worker-only application-space signer. The Connect host checks the approved transaction. */
+  signApplicationDigests?(domain: string, digests: ArrayBuffer[], format: "der" | "compact"): Promise<ArrayBuffer[]>;
   signDigest(input: ActiveKeyCryptoSignDigestInput): Promise<ActiveKeyCryptoSignDigestResult>;
   deriveP2pkhAddress(): Promise<ActiveKeyCryptoDeriveP2pkhAddressResult>;
   /** 受控 HKDF 站点密钥派生：私钥不出 Worker，调用方只传 origin 与网络。 */

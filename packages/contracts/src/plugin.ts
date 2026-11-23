@@ -162,7 +162,7 @@ export interface RuntimeUnitDescriptor extends Omit<
   /** 同一单元需要多个 purpose/scope 时使用的命名声明。 */
   readonly storages?: readonly PluginStorageDeclaration[];
   /** Explicit external Connect V1 methods; internal capabilities are never published implicitly. */
-  readonly connect?: { readonly providerMethods: readonly ProtocolMethod[] };
+  readonly connect?: { readonly providerMethods: readonly (ProtocolMethod | import("keymaster-connect/protocol").ProtocolMethod)[] };
   /** 单元专属配置契约 / 部署默认值。 */
   readonly config?: KeymasterPluginConfig;
 }

@@ -1,3 +1,5 @@
+import { applicationKeyTweak } from "@keymaster/contracts/signing";
+import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { deriveP2pkhAddress, deriveAppCipherSiteKeyHKDF } from "@keymaster/contracts";
 import type { CoordinatorCryptoOperation, CoordinatorCryptoResult, EcdsaSignatureFormat } from "@keymaster/contracts";
 import { parsePrivateKey, parsePublicKey, publicKeyFromPrivate, inboxChannel, parseMessageID } from "bsv8-channel-protocol";
@@ -52,6 +54,31 @@ export function createWorkerKeySession(identity: () => WorkerKeyIdentity) {
       const captured = assert({ publicKeyHex });
       const signature = await signEcdsaDigest({ privateKeyBytes: privateKeyBytes!, digest, format });
       assert(captured); return signature;
+    },
+    async signApplicationDigests(purpose: string, digests: ArrayBuffer[], format: "der" | "compact", publicKeyHex: string): Promise<ArrayBuffer[]> {
+      const captured = assert({ publicKeyHex });
+      const tweak = applicationKeyTweak(purpose, publicKeyHex);
+      let scalar = 0n;
+      for (const byte of privateKeyBytes!) scalar = scalar * 256n + BigInt(byte);
+      scalar = (scalar + tweak) % secp256k1.Point.Fn.ORDER;
+      if (!scalar) throw new Error("Application key derivation failed");
+      const temporaryKey = new Uint8Array(32);
+      for (let i = temporaryKey.length - 1; i >= 0; i--) {
+        temporaryKey[i] = Number(scalar & 255n);
+        scalar >>= 8n;
+      }
+      try {
+        const signatures: ArrayBuffer[] = [];
+        for (const digest of digests) {
+          assert(captured);
+          const signature = await signEcdsaDigest({ privateKeyBytes: temporaryKey, digest: new Uint8Array(digest), format });
+          assert(captured);
+          signatures.push(Uint8Array.from(signature).buffer);
+        }
+        return signatures;
+      } finally {
+        temporaryKey.fill(0);
+      }
     },
     async deriveCipherSiteKey(origin: string, network: "main" | "test", appPublicKeyHex?: string): Promise<Uint8Array> {
       const captured = assert();

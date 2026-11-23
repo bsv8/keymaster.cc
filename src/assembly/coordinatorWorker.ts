@@ -3474,6 +3474,7 @@ const coordinatorRuntimePlugins = [
   createConnectWorkerPlugin({
     authorize: call => requireCoordinatorSessionPeer(call).peer.peerId,
     walletOrigin: () => globalThis.location.origin,
+    runChainBroadcast: (signal, submit) => withCoordinatorFinalIoLease("write", signal, submit, { auditOperation: "connect.chain.broadcast" }),
     channel: connectWorkerChannel,
     lock: async () => { await closeWalletRuntime("connect-logout"); return {status:"ok",sessionEpoch:coordinatorState.sessionEpoch}; },
   }),
@@ -3507,6 +3508,7 @@ const coordinatorRuntimePlugins = [
   }),
   createMsfileWorkerPlugin({
     bridge: msfileBridge,
+    refreshSellerIndex: msfileBitfsRuntime.refreshSellerIndex,
     bindBridge: msfileWorkerLifecycle.bindBridge,
     bindChain: msfileWorkerLifecycle.bindChain,
     async start(instanceId, stores, assertActive) {

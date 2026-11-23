@@ -1,3 +1,4 @@
+import { createConnectChainQueries } from "./connectChainQueries.js";
 // packages/plugin-woc/src/wocService.ts
 // WOC service：业务插件唯一依赖的 WOC 入口。
 //
@@ -87,7 +88,17 @@ export function createWocService(options: CreateWocServiceOptions): WocServiceHa
     };
   }
 
+  async function getRawTransaction(network: BsvNetwork, txid: string, opts?: WocRequestOptions): Promise<string> {
+      const payload: WocRawTransactionPayload = { network, txid, priority: opts?.priority ?? "background", signal: opts?.signal, timeoutMs: opts?.timeoutMs };
+      return messageBus.request<WocRawTransactionPayload, string>(WOC_MSG.TX_RAW, payload, dispatchOptions(opts));
+    }
+
   return {
+    ...createConnectChainQueries(
+      (network, path, opts) => messageBus.request(WOC_MSG.CHAIN_READ, {
+        network, path, priority: opts?.priority, timeoutMs: opts?.timeoutMs,
+      }, dispatchOptions(opts)), getRawTransaction),
+    getRawTransaction,
     ready: () => actor.ready(),
     getConfig: () => actor.getConfig(),
     updateConfig: (input) => actor.updateConfig(input),
@@ -268,11 +279,6 @@ export function createWocService(options: CreateWocServiceOptions): WocServiceHa
     async getSpentOutputs(network: BsvNetwork, outpoints: WocOutpoint[], opts?: WocRequestOptions): Promise<WocSpentResult[]> {
       const payload: WocSpentOutputsPayload = { network, outpoints: outpoints.map(p => ({ ...p })), priority: opts?.priority ?? "background", signal: opts?.signal, timeoutMs: opts?.timeoutMs };
       return messageBus.request<WocSpentOutputsPayload, WocSpentResult[]>(WOC_MSG.TX_SPENT_OUTPUTS, payload, dispatchOptions(opts));
-    },
-
-    async getRawTransaction(network: BsvNetwork, txid: string, opts?: WocRequestOptions): Promise<string> {
-      const payload: WocRawTransactionPayload = { network, txid, priority: opts?.priority ?? "background", signal: opts?.signal, timeoutMs: opts?.timeoutMs };
-      return messageBus.request<WocRawTransactionPayload, string>(WOC_MSG.TX_RAW, payload, dispatchOptions(opts));
     },
 
     async broadcast(

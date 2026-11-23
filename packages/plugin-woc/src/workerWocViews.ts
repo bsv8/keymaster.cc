@@ -38,6 +38,7 @@ export function createWorkerWocViews(service: WocServiceHandle, wallet: ReturnTy
     getAddressesUnconfirmedBalances: bind("getAddressesUnconfirmedBalances"), listAddressConfirmedHistory: bind("listAddressConfirmedHistory"),
     listAddressUnconfirmedHistory: bind("listAddressUnconfirmedHistory"), listAddressesHistory: bind("listAddressesHistory"),
     getTransactionObservation: bind("getTransactionObservation"), getChainHeight: bind("getChainHeight"), getFeeRecommendation: bind("getFeeRecommendation"),
+    listScriptHistory: bind("listScriptHistory"), listScriptUnspent: bind("listScriptUnspent"), getChainTransaction: bind("getChainTransaction"),
     getSpentOutput: bind("getSpentOutput"), getSpentOutputs: bind("getSpentOutputs"), getRawTransaction: bind("getRawTransaction"),
   });
   const broadcast: WocWorkerBroadcastService = Object.freeze({

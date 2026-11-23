@@ -1,3 +1,4 @@
+import { requiresApplicationApproval } from "./applicationPermissions.js";
 // packages/plugin-connect/src/ConnectCommandFeed.tsx
 // popup 命令流 feed 组件（活请求区 + 历史区 两段渲染）。
 //
@@ -280,6 +281,7 @@ export function CommandCard({
     <li
       className={cardClass}
       data-record-id={command.id}
+      data-method={command.method}
       data-status={command.status}
       data-phase={command.phase}
       data-payment-status={command.paymentStatus}
@@ -470,7 +472,7 @@ function ConfirmCardBody({
       />
       <ConfirmDetails t={t} command={command} />
       {command.paymentPreview ? <PaymentPreviewDetails command={command} /> : null}
-      {command.applicationKey ? <label className="application-remember"><input type="checkbox" checked={remember} disabled={busy} onChange={event => setRemember(event.target.checked)} />以后自动同意此应用的同类请求（仅 {command.method}）</label> : null}
+      {command.applicationKey && requiresApplicationApproval(command.method) ? <label className="application-remember"><input type="checkbox" checked={remember} disabled={busy} onChange={event => setRemember(event.target.checked)} />以后自动同意此应用的同类请求（仅 {command.method}）</label> : null}
       {remember && command.method === "payment.pay" ? <p className="application-warning">此应用后续付款将自动同意，不设金额上限。可在应用 → 设置取消。</p> : null}
       {error ? <p role="alert">{error}</p> : null}
       <div className="protocol-popup__actions">

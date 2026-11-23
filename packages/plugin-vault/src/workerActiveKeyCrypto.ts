@@ -7,7 +7,7 @@ import type { createWorkerKeySession } from "./workerKeySession.js";
 export interface WorkerActiveKeyCryptoDependencies {
   summary(): KeyIdentity | undefined;
   sessionEpoch(): SessionEpoch;
-  keySession: Pick<ReturnType<typeof createWorkerKeySession>, "assert" | "signDigest" | "deriveCipherSiteKey">;
+  keySession: Pick<ReturnType<typeof createWorkerKeySession>, "assert" | "signDigest" | "deriveCipherSiteKey" | "signApplicationDigests">;
   withIoLease<T>(operation: "sign" | "derive-address" | "derive-cipher", execute: () => Promise<T>): Promise<T>;
   signConnectEnvelope?(input: Parameters<NonNullable<ActiveKeyCrypto["signConnectEnvelope"]>>[0] & { publicKeyHex: string }): ReturnType<NonNullable<ActiveKeyCrypto["signConnectEnvelope"]>>;
   signBitfsWire?(input: Parameters<NonNullable<ActiveKeyCrypto["signBitfsWire"]>>[0] & { publicKeyHex: string }, signal?: AbortSignal): ReturnType<NonNullable<ActiveKeyCrypto["signBitfsWire"]>>;
@@ -48,6 +48,19 @@ export function createWorkerActiveKeyCryptoFactory(deps: WorkerActiveKeyCryptoDe
         const result=await deps.withIoLease("sign",async()=>{assert();const value=await deps.signConnectEnvelope!(frozen);assert();return value;});
         assert();return result;
       }} : {}),
+      async signApplicationDigests(purpose: string, digests: ArrayBuffer[], format: "der" | "compact") {
+        assert();
+        if (digests.length === 0 || digests.some(digest => !(digest instanceof ArrayBuffer) || digest.byteLength !== 32)) {
+          throw new Error("Invalid application signing request");
+        }
+        const frozen = digests.map(digest => digest.slice(0));
+        return deps.withIoLease("sign", async () => {
+          assert();
+          const result = await deps.keySession.signApplicationDigests(purpose, frozen, format, publicKeyHex);
+          assert();
+          return result;
+        });
+      },
       async signDigest(input) {
         assert();
         if (Object.keys(input).some(key => !["digest", "format"].includes(key))) throw new Error("Wallet selectors and unknown fields are not accepted");

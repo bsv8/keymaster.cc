@@ -29,6 +29,10 @@ import type {
 
 /** MSFile lane 的受限操作；顶层公共 executor 只接受 lane operation。 */
 export type MsFileP2pLaneOperation =
+  | ({ type: "bitfs-connect-buyer"; seedHashHex: string } & (
+    { action: "discover" | "snapshot" } |
+    { action: "purchase"; sessionId: string; maxFullBlockPriceSatoshis: string }
+  ))
   | { type: "bitfs-arbitration-info"; endpoint: import("./bitfs/arbitrationClient.js").BitfsArbitrationEndpoint }
   | { type: "bitfs-arbitration-exchange"; /** 报价选定的仲裁服务身份与地址。 */ endpoint: import("./bitfs/arbitrationClient.js").BitfsArbitrationEndpoint; /** 已持久化的 exact Kind 8/10。 */ request: Uint8Array }
   | { type: "stat"; /** 供应商配置。 */ supplier: MsFileSupplierConfig; /** Seed 的 64 位 hex 哈希。 */ seedHashHex: string; /** 发起时的供应商配置世代。 */ supplierGeneration: number }

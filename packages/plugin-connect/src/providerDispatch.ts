@@ -5,6 +5,8 @@ type Provider = { readonly id: string; readonly units: readonly { readonly id?: 
 export function createProviderDispatch<T, R>(handlers: Record<ProtocolMethod, (request: T) => Promise<R>>, providers: readonly Provider[] = BUILTIN_PLUGIN_DEFINITIONS): ReadonlyMap<ProtocolMethod, (request: T) => Promise<R>> {
   const dispatch = new Map<ProtocolMethod, (request: T) => Promise<R>>();
   for (const provider of providers) for (const unit of provider.units) for (const name of unit.connect?.providerMethods ?? []) {
+    // The Receiver-backed lookup path runs directly, without an approval record.
+    if (name === "domain.profiles" || name === "domain.get_public_key") continue;
     if (!(PROTOCOL_METHODS as readonly string[]).includes(name)) throw new Error(`Unknown Connect method declared by ${provider.id}: ${name}`);
     const method = name as ProtocolMethod;
     if (dispatch.has(method)) throw new Error(`Duplicate Connect provider for ${method}`);

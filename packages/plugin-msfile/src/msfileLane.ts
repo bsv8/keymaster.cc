@@ -124,6 +124,14 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
   async handle(operation: unknown, signal: AbortSignal): Promise<unknown> {
     const runtime = this.runtime;
     const value = operation as MsFileP2pLaneOperation;
+    if (value.type === "bitfs-connect-buyer") {
+      const buyer = this.buyer;
+      if (!buyer) throw new Error("BitFS buyer window is unavailable");
+      signal.throwIfAborted();
+      if (value.action === "discover") return buyer.publishBitfsDemand(value.seedHashHex);
+      if (value.action === "purchase") return buyer.startBitfsPurchase(value.seedHashHex, value.sessionId, value.maxFullBlockPriceSatoshis);
+      return buyer.getBitfsDemand(value.seedHashHex);
+    }
     if (value.type === "bitfs-arbitration-info") {
       if (!this.arbitration?.info) throw new Error("仲裁网络未就绪");
       return this.arbitration.info({ endpoint: value.endpoint, signal });

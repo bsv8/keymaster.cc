@@ -38,6 +38,7 @@ export type FinalIoAuditOperation =
   | "p2pkh.sync"
   | "p2pkh.utxo-snapshot"
   | "vault.operation"
+  | "connect.chain.broadcast"
   | "p2pkh.broadcast";
 
 export type FinalIoAuditOutcome = "completed" | "failed" | "unknown";

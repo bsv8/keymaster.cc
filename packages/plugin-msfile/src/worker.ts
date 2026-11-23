@@ -5,10 +5,12 @@ import {
   type BorrowedModuleFileStore, type WocWorkerChainPort,
 } from "@keymaster/contracts";
 import { createMsFileWorkerBitfsService } from "./msfileWorkerBitfsService.js";
+import { createConnectContent } from "./connectContent.js";
 import type { MsFileServiceImpl } from "./msfileService.js";
 
 export function createMsfileWorkerPlugin(ports: {
   bridge: WindowP2pExecutorBridge;
+  refreshSellerIndex(hash: string, signal?: AbortSignal): Promise<void>;
   bindBridge(bridge: () => WindowP2pExecutorBridge | undefined): () => void;
   bindChain(access: () => WocWorkerChainPort | undefined): () => void;
   start(instanceId: string, stores: { ownerPublicKeyHex: string; settings: BorrowedModuleFileStore; appSettings: BorrowedModuleFileStore }, assertActive: () => void): Promise<{ service: MsFileServiceImpl; revoke(): void; dispose(): Promise<void> }>;
@@ -38,12 +40,17 @@ export function createMsfileWorkerPlugin(ports: {
       const current = wallet.snapshot();
       if (current.status !== "unlocked" || current.activePublicKeyHex !== ownerPublicKeyHex || current.sessionEpoch !== identity.sessionEpoch) throw new Error("MSFile owner session revoked");
     };
+    const store = files.bind(context.consumer, context.scope, "");
+    const connectContent = createConnectContent(store, ports.bridge, () => {
+      const state = runtime.service.describeState();
+      return state.sellerSettings.sellerEnabled && (state.sellerRuntimeStatus === "ready" || state.sellerRuntimeStatus === "selling");
+    }, ports.refreshSellerIndex);
     const service = createMsFileWorkerBitfsService(runtime.service, async control => {
       assertOwner();
       const result = await ports.control(control, { instanceId: context.instanceId, sessionEpoch: identity.sessionEpoch }, context.scope.signal);
       assertOwner();
       return result;
-    }, assertOwner);
+    }, assertOwner, connectContent);
     context.provide(MSFILE_SERVICE_CAPABILITY, service);
   });
 }

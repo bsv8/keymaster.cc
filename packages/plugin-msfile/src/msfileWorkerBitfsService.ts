@@ -12,6 +12,7 @@ export function createMsFileWorkerBitfsService(
   service: MsFileService,
   execute: (control: BitfsControl) => Promise<MsFileBitfsDemandSnapshot | undefined>,
   assertActive: () => void,
+  connectContent?: MsFileService["connectContent"],
 ): MsFileService {
   const snapshot = async (control: BitfsControl): Promise<MsFileBitfsDemandSnapshot> => {
     const result = await execute(control);
@@ -22,6 +23,7 @@ export function createMsFileWorkerBitfsService(
   // and expose private references. The outer projection fences every result.
   return createPublicMsFileService({
     ...createPublicMsFileService(service, assertActive),
+    connectContent,
     getBitfsDemand: seedHashHex => snapshot({ type: "bitfs.demand.snapshot", seedHashHex }),
   }, assertActive);
 }

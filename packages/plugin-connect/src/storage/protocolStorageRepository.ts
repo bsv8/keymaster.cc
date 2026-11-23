@@ -1,3 +1,4 @@
+import { DomainSettingsError, validateDomainDirectory, type DomainDirectory, type DomainService } from "../domain.js";
 import type { AppDirectoryDocument, AppDirectoryRepository } from "../appDirectoryTypes.js";
 import { sameNetworkIdentity } from "@keymaster/contracts";
 import type {
@@ -66,6 +67,32 @@ function document<T>(files: BorrowedModuleFileStore, path: string, empty: () => 
     return operation;
   }
   return { read, update };
+}
+export function openDomainDirectory(files: BorrowedModuleFileStore): DomainDirectory {
+  const doc = document<DomainService[]>(files, "domain-services.json", () => [], (value): value is DomainService[] => {
+    if (!Array.isArray(value)) return false;
+    try { validateDomainDirectory(value); return true; } catch { return false; }
+  });
+  return {
+    list: async () => (await doc.read()).value,
+    async save(service, editing) {
+      await doc.update(services => {
+        if (services.some(item => item.id === service.id) !== editing) {
+          throw new DomainSettingsError("域名服务设置已变更，请刷新后重试");
+        }
+        upsert(services, service, item => item.id === service.id);
+        validateDomainDirectory(services);
+      });
+    },
+    async remove(id) {
+      await doc.update(services => {
+        const index = services.findIndex(service => service.id === id);
+        if (index < 0) return false;
+        services.splice(index, 1);
+        return true;
+      }, { shouldWrite: changed => changed });
+    },
+  };
 }
 const recordArray = (value: unknown): value is Array<Record<string, unknown>> => Array.isArray(value) && value.every(row => row && typeof row === "object" && !Array.isArray(row));
 export function openConnectApplicationRepository(stores: ConnectStorageStores): { repository: ConnectStorageRepository; appDirectory: AppDirectoryRepository } {

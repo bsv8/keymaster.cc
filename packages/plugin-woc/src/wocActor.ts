@@ -192,25 +192,22 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
     const cutoff = now - 1000;
     return timestamps.filter((t) => t > cutoff);
   }
+  const env = (import.meta as ImportMeta & { env?: { MODE?: string; VITE_KEYMASTER_DEV_WOC_RATE?: string } }).env;
+  const devPublicRate = env?.MODE === "development" || env?.MODE === "dev" ? Number(env.VITE_KEYMASTER_DEV_WOC_RATE) : NaN;
+
   function nextSendAt(): number {
     const now = Date.now();
     const merged = prune(localTimestamps, now);
-    const rate = Math.max(config.requestsPerSecond, 0.0001);
-    if (merged.length === 0) return now;
+    const devRate = config.baseUrl === DEFAULT_WOC_CONFIG.baseUrl && devPublicRate > 0 ? devPublicRate : Infinity;
+    const rate = Math.max(Math.min(config.requestsPerSecond, devRate), 0.0001);
+    const last = localTimestamps.at(-1);
+    const spacing = last === undefined ? now : last + 1000 / rate;
     const maxInWindow = Math.max(1, Math.floor(rate));
-    if (merged.length >= maxInWindow) {
-      const earliest = merged[0]!;
-      return earliest + 1000;
-    }
-    if (rate > 1) {
-      const last = merged[merged.length - 1]!;
-      const minSpacing = 1000 / rate;
-      return Math.max(now, last + minSpacing);
-    }
-    return now;
+    const window = merged.length >= maxInWindow ? merged[0]! + 1000 : now;
+    return Math.max(now, spacing, window);
   }
   function recordSendTime(t: number) {
-    localTimestamps.push(t);
+    localTimestamps.splice(0, localTimestamps.length, ...prune(localTimestamps, t), t);
   }
   function schedulePump() {
     if (pumpScheduled) return;
@@ -341,7 +338,23 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
     return `${config.baseUrl}${networkPath(network)}${path}`;
   }
 
-  async function fetchJson<T>(network: BsvNetwork, path: string, init: RequestInit, signal: AbortSignal, timeoutMs?: number): Promise<T> {
+  let transportFailures = 0;
+  async function fetchResponse(network: BsvNetwork, path: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
+    try {
+      const response = await fetch(fullUrl(network, path), { ...init, signal });
+      transportFailures = 0;
+      return response;
+    } catch (error) {
+      if (!signal.aborted && error instanceof TypeError) {
+        const delayMs = 2000 * 2 ** Math.min(transportFailures++, 2) + Math.floor(Math.random() * 750);
+        applyBackoff(delayMs, "WoC transport failure");
+        traceDev("keymaster.woc", "http.transport.failed", () => ({ network, path, method: init.method, delayMs, error }));
+      }
+      throw error;
+    }
+  }
+
+  async function fetchJson<T>(network: BsvNetwork, path: string, init: RequestInit, signal: AbortSignal, timeoutMs?: number, capturePageToken = false): Promise<T> {
     traceDev("keymaster.woc", "http.start", () => ({network, url: fullUrl(network, path), method: init.method ?? "GET", timeoutMs: timeoutMs ?? DEFAULT_TIMEOUT_MS, format: "json"}));
     const ctl = new AbortController();
     const onAbort = () => ctl.abort(signal.reason);
@@ -349,7 +362,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
     else signal.addEventListener("abort", onAbort, { once: true });
     const timer = setTimeout(() => ctl.abort(new Error("timeout")), timeoutMs ?? DEFAULT_TIMEOUT_MS);
     try {
-      const res = await fetch(fullUrl(network, path), { ...init, signal: ctl.signal });
+      const res = await fetchResponse(network, path, init, ctl.signal);
       if (res.status === 429) {
         const retryAfter = parseRetryAfter(res.headers.get("retry-after"));
         applyBackoff(retryAfter, "429 Too Many Requests");
@@ -361,7 +374,13 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
       }
       const body = await res.text();
       try {
-        return JSON.parse(body) as T;
+        const value = JSON.parse(body);
+        const nextPageToken = capturePageToken ? res.headers.get("next-page") : null;
+        if (nextPageToken && value && typeof value === "object" && !Array.isArray(value)) {
+          if (value.nextPageToken && value.nextPageToken !== nextPageToken) throw new Error("Conflicting WoC page tokens");
+          value.nextPageToken = nextPageToken;
+        }
+        return value as T;
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         throw Object.assign(new Error(`WOC returned invalid JSON for ${path}: ${detail}`, { cause: error }), { status: res.status, body });
@@ -380,11 +399,11 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
     else signal.addEventListener("abort", onAbort, { once: true });
     const timer = setTimeout(() => ctl.abort(new Error("timeout")), timeoutMs ?? DEFAULT_TIMEOUT_MS);
     try {
-      const res = await fetch(fullUrl(network, path), { ...init, signal: ctl.signal });
+      const res = await fetchResponse(network, path, init, ctl.signal);
       if (res.status === 429) {
         const retryAfter = parseRetryAfter(res.headers.get("retry-after"));
         applyBackoff(retryAfter, "429 Too Many Requests");
-        throw new Error(`WOC 429`);
+        throw Object.assign(new Error("WOC 429"), { status: 429 });
       }
       if (!res.ok) {
         throw new Error(`WOC ${res.status} ${res.statusText} ${path}`);
@@ -556,55 +575,59 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
    * 快照刷新失败并保留旧快照。
    */
   function getAddressUnspentAll(network: BsvNetwork, address: string, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<WocUtxoResponse[]> {
-    return enqueue({
-      priority: priorityOf(opts.priority ?? "background"),
-      signal: opts.signal,
-      label: WOC_MSG.UTXOS_ALL,
-      fn: async (signal) => {
-        // 404 不是“余额为 0”：`unspent/all` 的空结果必须由 HTTP 200 +
-        // result:[] + error:"" 表示（实测有效地址返回 200/[]，非法地址返回
-        // 400）。所有非 2xx 或顶层 error 一律失败，让上层保留旧快照。
-        const raw = await fetchJson<{ result?: unknown; error?: unknown }>(
-          network,
-          `/address/${encodeURIComponent(address)}/unspent/all`,
-          { method: "GET" },
-          signal,
-          opts.timeoutMs
-        );
-        // WoC 正常响应的 error 为 ""；非空 error 不能被当成空余额。
-        if (raw.error !== undefined && raw.error !== null && raw.error !== "") {
-          throw new Error(`WOC unspent/all returned an error: ${String(raw.error)}`);
-        }
-        if (!Array.isArray(raw.result)) throw new Error("WOC unspent/all returned an invalid result");
-        return (raw.result as Array<{ tx_hash: string; tx_pos: number; value: number; height?: number; status?: string; script?: string; isSpentInMempoolTx?: boolean }>).map((u) => {
-          // This is the external response ingress. Internal snapshot/manager
-          // consumers receive parsed facts and must not revalidate their schema.
-          if (typeof u.tx_hash !== "string") throw new Error("WOC unspent/all returned an invalid txid");
-          const txid = normalizeTxidHex(u.tx_hash);
-          if (!/^[0-9a-f]{64}$/.test(txid)) throw new Error("WOC unspent/all returned an invalid txid");
-          if (!Number.isSafeInteger(u.tx_pos) || u.tx_pos < 0 || u.tx_pos > 0xffffffff) throw new Error("WOC unspent/all returned an invalid tx_pos");
-          if (!Number.isSafeInteger(u.value) || u.value < 0) throw new Error("WOC unspent/all returned an invalid value");
-          if (u.status !== "confirmed" && u.status !== "unconfirmed") throw new Error("WOC unspent/all returned an unknown status");
-          // isSpentInMempoolTx 是必填布尔：缺失/非法一律整次失败，不能按 false 放行。
-          if (typeof u.isSpentInMempoolTx !== "boolean") throw new Error("WOC unspent/all returned an invalid isSpentInMempoolTx");
-          if (u.script !== undefined && typeof u.script !== "string") throw new Error("WOC unspent/all returned an invalid script");
-          // 已确认输出必须有正的高度；未确认输出高度归零。
-          const height = u.status === "confirmed"
-            ? (Number.isSafeInteger(u.height) && (u.height as number) > 0 ? (u.height as number) : (() => { throw new Error("WOC unspent/all returned an invalid confirmed height"); })())
-            : 0;
-          return {
-            txid,
-            vout: u.tx_pos,
-            value: u.value,
-            height,
-            status: u.status,
-            script: u.script,
-            isSpentInMempoolTx: u.isSpentInMempoolTx,
-            canonicalTxid: txid,
-            network
-          } satisfies WocUtxoResponse;
-        }).filter(row => !row.isSpentInMempoolTx);
+    const path = `/address/${encodeURIComponent(address)}/unspent/all`;
+    return readWithRetry(network, path, WOC_MSG.UTXOS_ALL, opts, async (signal) => {
+      // 404 不是“余额为 0”：`unspent/all` 的空结果必须由 HTTP 200 +
+      // result:[] + error:"" 表示（实测有效地址返回 200/[]，非法地址返回
+      // 400）。所有非 2xx 或顶层 error 一律失败，让上层保留旧快照。
+      const raw = await fetchJson<{ result?: unknown; error?: unknown }>(
+        network,
+        path,
+        { method: "GET" },
+        signal,
+        opts.timeoutMs
+      );
+      // WoC 正常响应的 error 为 ""；非空 error 不能被当成空余额。
+      if (raw.error !== undefined && raw.error !== null && raw.error !== "") {
+        throw new Error(`WOC unspent/all returned an error: ${String(raw.error)}`);
       }
+      if (!Array.isArray(raw.result)) throw new Error("WOC unspent/all returned an invalid result");
+      const parsed = (raw.result as Array<{ tx_hash: string; tx_pos: number; value: number; height?: number; status?: string; script?: string; isSpentInMempoolTx?: boolean }>).map((u) => {
+        // This is the external response ingress. Internal snapshot/manager
+        // consumers receive parsed facts and must not revalidate their schema.
+        if (typeof u.tx_hash !== "string") throw new Error("WOC unspent/all returned an invalid txid");
+        const txid = normalizeTxidHex(u.tx_hash);
+        if (!/^[0-9a-f]{64}$/.test(txid)) throw new Error("WOC unspent/all returned an invalid txid");
+        if (!Number.isSafeInteger(u.tx_pos) || u.tx_pos < 0 || u.tx_pos > 0xffffffff) throw new Error("WOC unspent/all returned an invalid tx_pos");
+        if (!Number.isSafeInteger(u.value) || u.value < 0) throw new Error("WOC unspent/all returned an invalid value");
+        if (u.status !== "confirmed" && u.status !== "unconfirmed") throw new Error("WOC unspent/all returned an unknown status");
+        // isSpentInMempoolTx 是必填布尔：缺失/非法一律整次失败，不能按 false 放行。
+        if (typeof u.isSpentInMempoolTx !== "boolean") throw new Error("WOC unspent/all returned an invalid isSpentInMempoolTx");
+        if (u.script !== undefined && typeof u.script !== "string") throw new Error("WOC unspent/all returned an invalid script");
+        // 已确认输出必须有正的高度；未确认输出高度归零。
+        const height = u.status === "confirmed"
+          ? (Number.isSafeInteger(u.height) && (u.height as number) > 0 ? (u.height as number) : (() => { throw new Error("WOC unspent/all returned an invalid confirmed height"); })())
+          : 0;
+        return {
+          txid,
+          vout: u.tx_pos,
+          value: u.value,
+          height,
+          status: u.status,
+          script: u.script,
+          isSpentInMempoolTx: u.isSpentInMempoolTx,
+          canonicalTxid: txid,
+          network
+        } satisfies WocUtxoResponse;
+      });
+      const unspent = parsed.filter(row => !row.isSpentInMempoolTx);
+      traceDev("keymaster.woc", "utxos.parsed", () => ({
+        network, address, rows: parsed.length, excludedSpentInMempool: parsed.length - unspent.length,
+        confirmed: unspent.filter(row => row.status === "confirmed").length,
+        unconfirmed: unspent.filter(row => row.status === "unconfirmed").length,
+        unspentSats: unspent.reduce((sum, row) => sum + BigInt(row.value), 0n).toString(),
+      }));
+      return unspent;
     });
   }
   function listAddressConfirmedHistory(network: BsvNetwork, address: string, page: { limit?: number; page?: number; nextPageToken?: string } | undefined, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<WocHistoryPage> {
@@ -682,97 +705,82 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
     });
   }
 
-  function queryTransactionObservation(
+  async function readWithRetry<T>(
+    network: BsvNetwork, path: string, label: string,
+    opts: { signal: AbortSignal; priority?: WocRequestPriority },
+    fn: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await enqueue({ priority: priorityOf(opts.priority ?? "background"), signal: opts.signal, label, fn });
+      } catch (error) {
+        const transient = error instanceof TypeError || (error as { status?: number })?.status === 429;
+        if (attempt === 3 || opts.signal.aborted || !transient) throw error;
+        traceDev("keymaster.woc", "read.retry", () => ({ network, path, label, attempt, error }));
+      }
+    }
+  }
+
+  async function queryTransactionObservation(
     network: BsvNetwork,
     txid: string,
     opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number },
   ): Promise<WocTransactionObservation> {
-    return enqueue({
-      priority: priorityOf(opts.priority ?? "background"),
-      signal: opts.signal,
-      label: WOC_MSG.TX_OBSERVATION,
-      fn: async (signal) => {
-        try {
-          const detail = await fetchJson<unknown>(
-            network,
-            `/tx/hash/${encodeURIComponent(txid)}`,
-            { method: "GET" },
-            signal,
-            opts.timeoutMs
-          );
-          if (isConfirmedTransactionDetail(detail)) {
-            return { canonicalTxid: txid, observation: "confirmed" as const };
-          }
-          if (detail && typeof detail === "object" && "txid" in detail && detail.txid === txid
-            && "vin" in detail && Array.isArray(detail.vin) && "vout" in detail && Array.isArray(detail.vout)) {
-            return { canonicalTxid: txid, observation: "unconfirmed" as const };
-          }
-        } catch (err) {
-          if (!isWocNotFoundError(err)) {
-            throw err;
-          }
-        }
-        try {
-          const propagation = await fetchJson(
-            network,
-            `/tx/hash/${encodeURIComponent(txid)}/propagation`,
-            { method: "GET" },
-            signal,
-            opts.timeoutMs
-          );
-          return { canonicalTxid: txid, observation: observedPropagation(propagation) };
-        } catch (err) {
-          if (isWocNotFoundError(err)) {
-            return { canonicalTxid: txid, observation: undefined };
-          }
-          throw err;
-        }
+    const path = `/tx/hash/${encodeURIComponent(txid)}`;
+    const read = async (suffix: string): Promise<unknown> => {
+      try {
+        return await readWithRetry(network, path + suffix, WOC_MSG.TX_OBSERVATION, opts,
+          signal => fetchJson(network, path + suffix, { method: "GET" }, signal, opts.timeoutMs));
+      } catch (error) {
+        if (isWocNotFoundError(error)) return undefined;
+        throw error;
       }
-    });
+    };
+    const detail = await read("");
+    if (isConfirmedTransactionDetail(detail)) return { canonicalTxid: txid, observation: "confirmed" };
+    if (detail && typeof detail === "object" && "txid" in detail && detail.txid === txid
+      && "vin" in detail && Array.isArray(detail.vin) && "vout" in detail && Array.isArray(detail.vout)) {
+      return { canonicalTxid: txid, observation: "unconfirmed" };
+    }
+    const propagation = await read("/propagation");
+    const peers = propagation as { queried_peers?: unknown; found_on_peers?: unknown } | undefined;
+    traceDev("keymaster.woc", "observation.propagation", () => ({ network, txid,
+      queriedPeers: typeof peers?.queried_peers === "number" ? peers.queried_peers : undefined,
+      foundOnPeers: typeof peers?.found_on_peers === "number" ? peers.found_on_peers : undefined }));
+    return { canonicalTxid: txid, observation: propagation === undefined ? undefined : observedPropagation(propagation) };
   }
 
-  function getRawTransaction(network: BsvNetwork, txid: string, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<string> {
+  async function getRawTransaction(network: BsvNetwork, txid: string, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<string> {
     const normalized = normalizeTxidHex(txid);
-    return enqueue({
-      priority: priorityOf(opts.priority ?? "background"), signal: opts.signal, label: WOC_MSG.TX_RAW,
-      fn: async (signal) => {
-        // WOC's raw transaction endpoint is /tx/<txid>/hex.  The older
-        // /tx/hash/<txid>/hex route now returns 404 even though the regular
-        // transaction endpoint and address history still work.  The live
-        // endpoint can return bare text such as `010000...` rather than a
-        // JSON string.  Reading it with Response.json() makes the browser
-        // parse the leading `01` as an invalid JSON number and fail at
-        // position 1, so read text first while retaining compatibility with
-        // the JSON object/string shapes used by older proxies.
-        let body: string;
-        try {
-          body = (await fetchText(network, `/tx/${encodeURIComponent(normalized)}/hex`, { method: "GET" }, signal, opts.timeoutMs)).trim();
-        } catch (error) {
-          if (!isWocNotFoundError(error) && !(error instanceof TypeError && !signal.aborted)) throw error;
-          // 未确认交易可能在单笔 hex 索引缺失，但正式批量端点已可读。
-          // 只补一次只读查询；不重广播、不把 txid 回执伪装成原始交易。
-          const rows = await fetchJson<unknown>(network, "/txs/hex", {
-            method: "POST", headers: { "content-type": "application/json" },
-            body: JSON.stringify({ txids: [normalized] }),
-          }, signal, opts.timeoutMs);
-          if (!Array.isArray(rows) || rows.length !== 1 || rows[0]?.txid !== normalized || typeof rows[0]?.hex !== "string") throw error;
-          const hex = rows[0].hex as string;
-          if (await calcCanonicalTxidFromRawTxHex(hex) !== normalized) throw new Error("WOC bulk raw transaction txid mismatch");
-          return hex;
-        }
-        let raw: unknown = body;
-        if (body.startsWith("{") || body.startsWith("[") || body.startsWith('"')) {
-          raw = JSON.parse(body) as unknown;
-        }
-        if (typeof raw === "string" && raw.length > 0) return raw;
-        if (!raw || typeof raw !== "object") throw new Error("WOC raw transaction response is invalid");
-        const candidate = raw as Record<string, unknown>;
-        for (const key of ["hex", "tx_hex", "rawtx", "rawTxHex", "transaction"] as const) {
-          if (typeof candidate[key] === "string") return candidate[key] as string;
-        }
-        throw new Error("WOC raw transaction response has no hex");
-      }
-    });
+    const path = `/tx/${encodeURIComponent(normalized)}/hex`;
+    let body: string;
+    try {
+      body = (await readWithRetry(network, path, WOC_MSG.TX_RAW, opts,
+        signal => fetchText(network, path, { method: "GET" }, signal, opts.timeoutMs))).trim();
+    } catch (error) {
+      if (!isWocNotFoundError(error) && !(error instanceof TypeError && !opts.signal.aborted)) throw error;
+      // The single-transaction hex index can lag the bulk index. This POST only reads.
+      const rows = await readWithRetry(network, "/txs/hex", WOC_MSG.TX_RAW, opts, signal =>
+        fetchJson<unknown>(network, "/txs/hex", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ txids: [normalized] }),
+        }, signal, opts.timeoutMs));
+      if (!Array.isArray(rows) || rows.length !== 1 || rows[0]?.txid !== normalized || typeof rows[0]?.hex !== "string") throw error;
+      const hex = rows[0].hex as string;
+      if (await calcCanonicalTxidFromRawTxHex(hex) !== normalized) throw new Error("WOC bulk raw transaction txid mismatch");
+      return hex;
+    }
+    let raw: unknown = body;
+    if (body.startsWith("{") || body.startsWith("[") || body.startsWith('"')) {
+      raw = JSON.parse(body) as unknown;
+    }
+    if (typeof raw === "string" && raw.length > 0) return raw;
+    if (!raw || typeof raw !== "object") throw new Error("WOC raw transaction response is invalid");
+    const candidate = raw as Record<string, unknown>;
+    for (const key of ["hex", "tx_hex", "rawtx", "rawTxHex", "transaction"] as const) {
+      if (typeof candidate[key] === "string") return candidate[key] as string;
+    }
+    throw new Error("WOC raw transaction response has no hex");
   }
 
   function getFeeRecommendation(network: BsvNetwork, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }) {
@@ -780,17 +788,13 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
       fn: async signal => parseWocFeeRecommendation(await fetchJson<unknown>(network, "/feerecommendation", { method: "GET" }, signal, opts.timeoutMs)) });
   }
 
-  function getChainHeight(network: BsvNetwork, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<number> {
-    return enqueue({
-      priority: priorityOf(opts.priority ?? "background"), signal: opts.signal, label: WOC_MSG.CHAIN_HEIGHT,
-      fn: async (signal) => {
-        const raw = await fetchJson<unknown>(network, "/chain/info", { method: "GET" }, signal, opts.timeoutMs);
-        if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("WOC chain info response is invalid");
-        const value = (raw as Record<string, unknown>).blocks ?? (raw as Record<string, unknown>).height;
-        if (!Number.isSafeInteger(value) || (value as number) < 0) throw new Error("WOC chain info response has no valid height");
-        return value as number;
-      }
-    });
+  async function getChainHeight(network: BsvNetwork, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<number> {
+    const raw = await readWithRetry(network, "/chain/info", WOC_MSG.CHAIN_HEIGHT, opts,
+      signal => fetchJson<unknown>(network, "/chain/info", { method: "GET" }, signal, opts.timeoutMs));
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("WOC chain info response is invalid");
+    const value = (raw as Record<string, unknown>).blocks ?? (raw as Record<string, unknown>).height;
+    if (!Number.isSafeInteger(value) || (value as number) < 0) throw new Error("WOC chain info response has no valid height");
+    return value as number;
   }
 
   function getSpentOutput(network: BsvNetwork, txid: string, vout: number, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<WocSpentOutput | null> {
@@ -841,17 +845,20 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         try {
           traceDev("keymaster.woc", "broadcast.dispatch", () => ({network, url: fullUrl(network, "/tx/raw"), transactionBytes: rawTxHex.length / 2, timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS}));
           // Read text even for 4xx/5xx: the exact body is part of the funds decision.
-          const res = await fetch(fullUrl(network, "/tx/raw"), {
+          const res = await fetchResponse(network, "/tx/raw", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ txhex: rawTxHex }), signal: ctl.signal,
-          });
+            body: JSON.stringify({ txhex: rawTxHex }),
+          }, ctl.signal);
           const evidence = { status: res.status, statusText: res.statusText, body: await res.text() };
           if (res.status === 429) applyBackoff(parseRetryAfter(res.headers.get("retry-after")), "429 Too Many Requests");
           const canonicalTxid = await calcCanonicalTxidFromRawTxHex(rawTxHex);
-          traceDev("keymaster.woc", "broadcast.receipt", () => ({network, canonicalTxid, ...evidence}));
+          traceDev("keymaster.woc", "broadcast.receipt", () => ({network, canonicalTxid, status: evidence.status, statusText: evidence.statusText}));
           const result = normalizeWocBroadcastReceipt(canonicalTxid, evidence);
           resetBackoff();
           return result;
+        } catch (error) {
+          traceDev("keymaster.woc", "broadcast.failed", () => ({ network, aborted: ctl.signal.aborted, error }));
+          throw error;
         } finally {
           clearTimeout(timer);
           signal.removeEventListener("abort", onAbort);
@@ -973,6 +980,11 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         const p = payload as WocSpentOutputPayload;
         return getSpentOutput(p.network, p.txid, p.vout, opts);
       }
+      case WOC_MSG.CHAIN_READ: {
+        const p = payload as WocCommonPayload & { network: BsvNetwork; path: string };
+        return readWithRetry(p.network, p.path, type, opts,
+          requestSignal => fetchJson(p.network, p.path, { method: "GET" }, requestSignal, opts.timeoutMs, true));
+      }
       case WOC_MSG.TX_RAW: {
         const p = payload as WocRawTransactionPayload;
         return getRawTransaction(p.network, p.txid, opts);
@@ -1012,6 +1024,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
       WOC_MSG.FEE_RECOMMENDATION,
       WOC_MSG.TX_SPENT_OUTPUT,
       WOC_MSG.TX_SPENT_OUTPUTS,
+      WOC_MSG.CHAIN_READ,
       WOC_MSG.TX_RAW,
       WOC_MSG.TX_BROADCAST,
       WOC_MSG.STAS_LIST_TOKENS,

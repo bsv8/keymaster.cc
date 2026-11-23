@@ -101,7 +101,9 @@ export type BinaryField = ConnectPublic.BinaryField;
 /** 协议方法名常量集合。 */
 // 费用池只保留钱包内部历史处理类型，不进入独立 Connect 的公开方法表。
 export const PROTOCOL_METHODS = [
-  ...CONNECT_PUBLIC_METHODS.filter((method): method is Exclude<typeof method, `price.${string}` | `storage.${string}`> => !method.startsWith("price.") && !method.startsWith("storage.")),
+  // Public domain queries execute alongside the approved-operation queue.
+  ...CONNECT_PUBLIC_METHODS.filter((method): method is Exclude<typeof method, `price.${string}` | `storage.${string}` | `domain.${string}`> =>
+    !method.startsWith("price.") && !method.startsWith("storage.") && !method.startsWith("domain.")),
   "feepool.prepare", "feepool.commit",
 ] as const;
 
@@ -133,6 +135,7 @@ export type ProtocolMethod = (typeof PROTOCOL_METHODS)[number];
  * "locked 时直接拒绝"的中间态都不属于 V1 公开语义。
  */
 export type ProtocolErrorCode =
+  | ConnectPublic.ProtocolErrorCode
   /** Transport authority was revoked or belongs to another wallet/Worker generation. */
   | "connection_expired"
   /** 授权已不存在或撤销；客户端清空当前连接并要求重新登录。 */
@@ -626,6 +629,12 @@ export interface ProtocolConnectPaymentRecord {
   appPublicKeyHex: string;
   requestDigest: string;
   params: PaymentPayParams;
+  reservation?: {
+    dataSignature?: ConnectPublic.PaymentDataSignature;
+    inputs: ConnectPublic.ChainOutpoint[];
+    expiresAt: number;
+    paymentPreview: import("./p2pkhConnectPayment.js").P2pkhConnectPaymentPreview;
+  };
   status: ConnectPaymentStatus;
   reason?: string;
   txid?: string;
@@ -1477,6 +1486,20 @@ export interface MethodParamsMap {
   "p2pkh.transfer": P2pkhTransferParams;
   "payment.pay": PaymentPayParams;
   "payment.status": PaymentStatusParams;
+  "payment.prepare": ConnectPublic.MethodParamsMap["payment.prepare"] & { walletPublicKeyHex: string };
+  "payment.commit": ConnectPublic.MethodParamsMap["payment.commit"] & { walletPublicKeyHex: string };
+  "payment.cancel": ConnectPublic.MethodParamsMap["payment.cancel"] & { walletPublicKeyHex: string };
+  "chain.get_height": ConnectPublic.MethodParamsMap["chain.get_height"] & { walletPublicKeyHex: string };
+  "chain.list_script_history": ConnectPublic.MethodParamsMap["chain.list_script_history"] & { walletPublicKeyHex: string };
+  "chain.get_transaction": ConnectPublic.MethodParamsMap["chain.get_transaction"] & { walletPublicKeyHex: string };
+  "chain.list_script_unspent": ConnectPublic.MethodParamsMap["chain.list_script_unspent"] & { walletPublicKeyHex: string };
+  "chain.broadcast": ConnectPublic.MethodParamsMap["chain.broadcast"] & { walletPublicKeyHex: string };
+  "application.key": ConnectPublic.MethodParamsMap["application.key"] & { walletPublicKeyHex: string };
+  "application.sign_message": ConnectPublic.MethodParamsMap["application.sign_message"] & { walletPublicKeyHex: string };
+  "application.sign_payment": ConnectPublic.MethodParamsMap["application.sign_payment"] & { walletPublicKeyHex: string };
+  "msfile.seller.status": ConnectPublic.MethodParamsMap["msfile.seller.status"] & { walletPublicKeyHex: string };
+  "msfile.import": ConnectPublic.MethodParamsMap["msfile.import"] & { walletPublicKeyHex: string };
+  "msfile.content.read": ConnectPublic.MethodParamsMap["msfile.content.read"] & { walletPublicKeyHex: string };
   "feepool.prepare": FeepoolPrepareParams;
   "feepool.commit": FeepoolCommitParams;
   "connect.login": ConnectLoginParams;
@@ -1502,6 +1525,20 @@ export interface MethodResultMap {
   "p2pkh.transfer": P2pkhTransferResult;
   "payment.pay": PaymentPayResult;
   "payment.status": PaymentStatusResult;
+  "payment.prepare": ConnectPublic.MethodResultMap["payment.prepare"];
+  "payment.commit": ConnectPublic.MethodResultMap["payment.commit"];
+  "payment.cancel": ConnectPublic.MethodResultMap["payment.cancel"];
+  "chain.get_height": ConnectPublic.MethodResultMap["chain.get_height"];
+  "chain.list_script_history": ConnectPublic.MethodResultMap["chain.list_script_history"];
+  "chain.get_transaction": ConnectPublic.MethodResultMap["chain.get_transaction"];
+  "chain.list_script_unspent": ConnectPublic.MethodResultMap["chain.list_script_unspent"];
+  "chain.broadcast": ConnectPublic.MethodResultMap["chain.broadcast"];
+  "application.key": ConnectPublic.MethodResultMap["application.key"];
+  "application.sign_message": ConnectPublic.MethodResultMap["application.sign_message"];
+  "application.sign_payment": ConnectPublic.MethodResultMap["application.sign_payment"];
+  "msfile.seller.status": ConnectPublic.MethodResultMap["msfile.seller.status"];
+  "msfile.import": ConnectPublic.MethodResultMap["msfile.import"];
+  "msfile.content.read": ConnectPublic.MethodResultMap["msfile.content.read"];
   "feepool.prepare": FeepoolPrepareResult;
   "feepool.commit": FeepoolCommitResult;
   "connect.login": ConnectLoginResult;
@@ -2008,10 +2045,16 @@ export interface ConnectSessionSnapshot {
 export interface P2pkhProtocolAdapter {
   /** 完整前序证据的链上读接口；缺失时费用池不能退回盲签摘要。 */
   getRawTransaction?(txid: string): Promise<string>;
+  cancelTransfer?(previewId: string): Promise<boolean>;
+  commitPayment?(previewId: string, completion: import("./p2pkhConnectPayment.js").P2pkhConnectCompletion): ReturnType<P2pkhProtocolAdapter["submitTransfer"]>;
+  retryPayment?(paymentId: string): Promise<Awaited<ReturnType<P2pkhProtocolAdapter["submitTransfer"]>> | undefined>;
   /** Local transaction outcome lookup only; never starts signing/broadcast/chain polling. */
   getPaymentStatus?(input: Pick<import("./p2pkhPaymentLookup.js").P2pkhPaymentLookupInput, "paymentId">): Promise<import("./p2pkhPaymentLookup.js").P2pkhPaymentLookupResult>;
   /** 当前钱包的业务转账预览；原样保留返回身份供提交时核对。 */
   prepareTransfer(input: import("./workerTransfer.js").P2pkhTransferRequest): Promise<{
+    previewId?: string;
+    expiresAt?: number;
+    managerAllocationId?: string;
     ownerPublicKeyHex: string;
     assetId: string;
     network: "main" | "test";

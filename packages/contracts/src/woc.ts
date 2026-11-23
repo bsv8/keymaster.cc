@@ -274,6 +274,10 @@ export interface WocQueryTransport {
   /** One batch, at most20. Unknown/null/empty error is not an unspent proof. */
   getSpentOutputs(network: BsvNetwork, outpoints: WocOutpoint[], options?: WocRequestOptions): Promise<WocSpentResult[]>;
 
+  listScriptHistory(network: BsvNetwork, input: import("keymaster-connect/protocol").ChainScriptHistoryParams, options?: WocRequestOptions): Promise<import("keymaster-connect/protocol").ChainScriptHistoryResult>;
+  listScriptUnspent(network: BsvNetwork, script: string, options?: WocRequestOptions): Promise<import("keymaster-connect/protocol").MethodResult<"chain.list_script_unspent">>;
+  getChainTransaction(network: BsvNetwork, txid: string, options?: WocRequestOptions): Promise<import("keymaster-connect/protocol").ChainTransactionResult>;
+
   /** Confirmed raw transaction bytes for provider adapters. */
   getRawTransaction(
     network: BsvNetwork,

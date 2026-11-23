@@ -1,3 +1,4 @@
+import type { SignedPaymentExact } from "./signedPaymentOutbox.js";
 // Caller-owned transaction intentions and outcomes, not a UTXO pool. No balances,
 // selection, occupancy, manager-state inference or restoration from disk.
 import type { BorrowedModuleFileStore, P2pkhPaymentLookupResult, ProtocolSpendInput, ProtocolSpendOutput } from "@keymaster/contracts";
@@ -11,6 +12,7 @@ export interface SubmissionPlan extends FundingIdentity {
  submissionId: string;
  allocationId?: string;
  paymentId?: string;
+ dataSignature?: NonNullable<import("@keymaster/contracts").P2pkhConnectPaymentFacts["dataSignature"]>;
  unsignedTxHex: string;
  inputs: ProtocolSpendInput[];
  outputs: ProtocolSpendOutput[];
@@ -118,6 +120,17 @@ export function createP2pkhSubmissionRuntime(files: BorrowedModuleFileStore): P2
     if (sameScope(row, scope) && row.txid === txid && row.rawTxHex === scope.rawTxHex) transition(row, "accepted", "reliable-observation");
    }
   },
+  restoreSignedPayment(exact: SignedPaymentExact) {
+    active();
+    if (exact.status !== "unknown") throw new Error("Only unresolved signed payments can be restored");
+    if (submissions.has(exact.plan.submissionId)) return;
+    submissions.set(exact.plan.submissionId, { plan: structuredClone(exact.plan), state: "unknown", txid: exact.txid, rawTxHex: exact.rawTxHex });
+  },
+  byPaymentId(scope: FundingIdentity & {paymentId: string}) {
+   active();
+   const row = [...submissions.values()].find(row => sameScope(row, scope) && row.plan.paymentId === scope.paymentId);
+   return row && structuredClone(row);
+  },
   paymentStatus(scope: FundingIdentity & {paymentId: string}): P2pkhPaymentLookupResult {
    active(); const row = [...submissions.values()].find(row => sameScope(row, scope) && row.plan.paymentId === scope.paymentId);
    if (!row) return {status: "not_found"};
@@ -146,5 +159,7 @@ export interface P2pkhSubmissionRuntime {
  beginDispatch(scope: ExactScope): RuntimeSubmission;
  outcome(scope: SubmissionScope & {state: "accepted" | "already-known" | "unknown" | "rejected"}): void;
  observeAccepted(scope: FundingIdentity & {rawTxHex: string}): void;
+ restoreSignedPayment(exact: SignedPaymentExact): void;
+ byPaymentId(scope: FundingIdentity & {paymentId: string}): RuntimeSubmission | undefined;
  paymentStatus(scope: FundingIdentity & {paymentId: string}): P2pkhPaymentLookupResult;
 }

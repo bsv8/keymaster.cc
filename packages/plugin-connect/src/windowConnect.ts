@@ -1,3 +1,4 @@
+import type { DomainService, DomainServiceInput } from "./domain.js";
 import { PROTOCOL_VERSION, type ProtocolClosingMessage } from "keymaster-connect/protocol";
 import { PAGE_UI_RENDERER_CAPABILITY, traceDev, type PluginContext, type ApplicationConnections, type ApplicationConnectionsSnapshot, type ApplicationAiTools, type ApplicationView, type ConnectService, type LaunchAppViewInput } from "@keymaster/contracts";
 import { CONNECT_PRIVATE_COMMAND, CONNECT_PRIVATE_EVENTS, type ConnectWorkerSnapshot, type ConnectWorkerCommand, type WorkerConnectionView } from "./connectWorkerContract.js";
@@ -114,5 +115,14 @@ export function createWindowConnect(ctx: PluginContext) {
   for (const { source } of sources.values()) { try { if (!source.closed) source.postMessage(closing, "*"); } catch { /* best effort during unload */ } }
   stopped=true;clearInterval(timer);window.removeEventListener("message",onMessage);window.removeEventListener("pagehide",dispose);window.removeEventListener("pageshow",onRestore);for(const {view}of sources.values())view?.close();sources.clear();sourceIds.clear();subscription?.cancel("wallet-page-closed");listeners.clear();directoryListeners.clear();}
  window.addEventListener("message",onMessage);window.addEventListener("pagehide",dispose);window.addEventListener("pageshow",onRestore);
- return {host,directory,connect,aiTools,dispose};
+ const domainSettings = {
+  list: () => call({type:"domain-list"}) as Promise<DomainService[]>,
+  async save(service: DomainServiceInput, editing: boolean) {
+   const result = await call({type: editing ? "domain-edit" : "domain-add", service}) as { services: DomainService[] } | { error: string };
+   if ("error" in result) throw new Error(result.error);
+   return result.services;
+  },
+  remove: (id: string) => call({type:"domain-remove", id}) as Promise<DomainService[]>,
+ };
+ return {host,directory,connect,aiTools,domainSettings,dispose};
 }

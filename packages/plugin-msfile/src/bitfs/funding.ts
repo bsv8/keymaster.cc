@@ -4,6 +4,7 @@
 // 只有 Worker 的交易广播器可以把已保存交易交给节点。
 
 import { traceBitfs } from "./debug.js";
+import { traceDev } from "@keymaster/contracts";
 import type {
   BsvNetwork,
   ProtocolSpendPreview,
@@ -869,7 +870,21 @@ export async function prepareBitfsFunding(input: {
   if (session.phase !== "quote-selected") throw new BitfsFundingError("invalid_transition", "只能在报价固定后、Kind 2 签署前准备 FundingTx");
   const change = await deps.resolveOwnerAddress({ ownerPublicKeyHex: owner, network });
   const changeScript = assertScript(change.scriptHex);
-  const selection = await deps.planFunding({ ownerPublicKeyHex: owner, network, amountSatoshis: outputAmountNumber, feeRateSatoshisPerKb: input.feeRateSatoshisPerKb, outputs: [{ scriptHex: outputScript, value: outputAmount }] });
+  const logFunding = (event: string, details: () => object = () => ({})) => traceDev("keymaster.bitfs.funding", event, () => ({
+    sessionId: input.sessionId, network, address: change.address, ...details(),
+  }));
+  logFunding("opening.selection.start", () => ({
+    amountSatoshis: outputAmountNumber, feeRateSatoshisPerKb: input.feeRateSatoshisPerKb, maxFeeSatoshis: input.maxFeeSatoshis,
+  }));
+  const selection = await deps.planFunding({ ownerPublicKeyHex: owner, network, amountSatoshis: outputAmountNumber,
+    feeRateSatoshisPerKb: input.feeRateSatoshisPerKb, outputs: [{ scriptHex: outputScript, value: outputAmount }] }).catch(error => {
+    logFunding("opening.selection.failed", () => ({ error }));
+    throw error;
+  });
+  logFunding("opening.selection.success", () => ({
+    allocationId: selection.allocationId, submissionId: selection.submissionId, inputCount: selection.selected.length,
+    totalInSats: selection.totalInputSatoshis, feeSats: selection.feeSats, changeSats: selection.changeSats,
+  }));
   let preview: ProtocolSpendPreview | undefined;
   try {
     deps.assertCurrentContext({ ownerPublicKeyHex: owner, network, generation: input.generation });

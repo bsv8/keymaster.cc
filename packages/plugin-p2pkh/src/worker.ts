@@ -105,6 +105,15 @@ export function createP2pkhWorkerRuntime(ports: P2pkhWorkerPorts) {
           async transfer(input: Parameters<typeof service.transfer>[0]) { context.scope.assertActive(); const result = await service.transfer(input); context.scope.assertActive(); return result; },
           async getPaymentStatus(input: Parameters<typeof service.getPaymentStatus>[0]) { context.scope.assertActive(); const result = await service.getPaymentStatus(input); context.scope.assertActive(); return result; },
           async prepareTransfer(input: Parameters<typeof service.prepareTransfer>[0]) { context.scope.assertActive(); const result = await service.prepareTransfer(input); context.scope.assertActive(); return result; },
+          async cancelTransfer(previewId: string) { context.scope.assertActive(); return service.cancelTransfer!(previewId); },
+          async commitPayment(...args: Parameters<NonNullable<typeof service.commitPayment>>) {
+            context.scope.assertActive();
+            return service.commitPayment!(...args);
+          },
+          async retryPayment(paymentId: string) {
+            context.scope.assertActive();
+            return service.retryPayment!(paymentId);
+          },
           async submitTransfer(preview: unknown) { context.scope.assertActive(); const result = await service.submitTransfer(preview as Parameters<typeof service.submitTransfer>[0]); context.scope.assertActive(); return result; },
         });
       },

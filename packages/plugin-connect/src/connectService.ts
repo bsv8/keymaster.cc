@@ -1,3 +1,7 @@
+import { planApplicationPayment } from "./applicationPayment.js";
+import { Transaction } from "@bsv/sdk";
+import { applicationPublicKey, applicationMessageDigest, paymentSigningObject } from "keymaster-connect/signing";
+import { DomainQueryError, queryDomain, type DomainDirectory, type DomainQuery } from "./domain.js";
 import { applicationKey, permissionKeyFor, requiresApplicationApproval, readApplicationPermissions, setApplicationPermission } from "./applicationPermissions.js";
 import { verifyLoginPublicationProof, PublicationProofValidationError } from "./publicationProof.js";
 import { projectNetworkIdentity, sameNetworkIdentity, type NetworkIdentity } from "@keymaster/contracts";
@@ -236,6 +240,9 @@ export interface ConnectServiceDeps {
   /** 提供实例撤销时立即失效，早于异步 dispose。 */
   runtimeSignal?: AbortSignal;
   walletOrigin?: string;
+  getChain?: () => import("@keymaster/contracts").WocService | undefined;
+  getChainBroadcast?: () => import("@keymaster/contracts").WocWorkerBroadcastService | undefined;
+  runChainBroadcast?: <T>(signal: AbortSignal | undefined, submit: (signal: AbortSignal) => Promise<T>) => Promise<T>;
   runConnectRequest?: (execute: (lease: ConnectExecutionLease) => Promise<void>) => Promise<void>;
   vault: Pick<VaultService, "status" | "getCurrentKey" | "createActiveKeyCrypto" | "createAppViewSession" | "disposeAppViewSession" | "lock">;
   walletState: VaultWalletState;
@@ -245,6 +252,7 @@ export interface ConnectServiceDeps {
    * 必要写入会抛错。
    */
   storageRepository?: ConnectStorageRepository;
+  domains?: DomainDirectory;
   /**
    * 可选 P2PKH 业务适配。manifest 从 plugin-p2pkh 暴露的 `p2pkh.service`
    * capability 取值注入；缺时 `p2pkh.transfer` 走 internal_error。
@@ -323,6 +331,7 @@ interface RequestRecord {
   verifiedPublication?: import("@keymaster/contracts").AppSourceEntry;
   verifiedDisplay?:{name:string;description:string;icon:string};
   manualApprovedAt?: number;
+  approvalSummary?: string;
   paymentPreview?: import("@keymaster/contracts").P2pkhConnectPaymentPreview;
   paymentStatus?: import("@keymaster/contracts").ConnectPaymentStatus;
   paymentApproval?: (approved: boolean) => void;
@@ -623,6 +632,7 @@ export class ConnectServiceImpl implements ConnectService {
   private channelSessionEpoch = 0;
   /** 协议绑定/在途关联只由独立 Receiver 持有；本类只保存业务执行记录。 */
   private readonly receiver: KeymasterConnectReceiver;
+  private readonly domainRequests = new Set<ReceiverRequest>();
 
   private assertWalletGeneration(rec: RequestRecord): void {
     const lifecycle = this.deps.walletState.snapshot();
@@ -1050,6 +1060,11 @@ export class ConnectServiceImpl implements ConnectService {
       // first so a late client cancel cannot abort an already approved request.
       const id = (event.data as { id?: unknown }).id;
       if (typeof id !== "string") return;
+      if ([...this.domainRequests].some(request => request.id === id && request.origin === event.origin && request.source === event.source)) {
+        const cancelled = this.receiver.acceptCancel(event);
+        if (cancelled) this.receiver.replyError(cancelled, { code: "user_rejected", message: "Domain query cancelled" });
+        return;
+      }
       const candidate = this.findRequestByTransportId(event.source as Window | null, event.origin, id);
       if (!candidate || !this.isRequestCancellable(candidate)) return;
       const parsed = this.receiver.acceptCancel(event);
@@ -1072,6 +1087,10 @@ export class ConnectServiceImpl implements ConnectService {
     const revision = this.sessionRevision;
     const context = await this.receiver.accept(event);
     if (!context || revision !== this.sessionRevision) return;
+    if (context.method === "domain.profiles" || context.method === "domain.get_public_key") {
+      await this.handleDomainRequest(context, context as DomainQuery);
+      return;
+    }
     const method = PROTOCOL_METHODS.find(method => method === context.method);
     if (!method) {
       this.receiver.replyError(context, { code: "invalid_request", message: "Method is not available in this wallet" });
@@ -1082,6 +1101,33 @@ export class ConnectServiceImpl implements ConnectService {
 
     // 来源、绑定、公开范围、wire 参数和重复在途 ID 已由独立 Receiver 校验。
     await this.acceptRequest(event, parsed);
+  }
+
+  private async handleDomainRequest(context: ReceiverRequest, query: DomainQuery): Promise<void> {
+    this.domainRequests.add(context);
+    try {
+      const directory = this.deps.domains;
+      if (!directory) throw new DomainQueryError("domain_service_unavailable", "Domain queries unavailable");
+      if (await this.preCheckConnectSession(context.networkIdentity, context.origin)) {
+        throw new DomainQueryError("authorization_expired", "Domain query requires an active connection");
+      }
+      this.receiver.assertCurrent(context);
+      context.signal.throwIfAborted();
+      const result = await queryDomain(directory, context.networkIdentity.bsvNetwork, query, context.signal);
+      if (await this.preCheckConnectSession(context.networkIdentity, context.origin)) {
+        throw new DomainQueryError("authorization_expired", "Domain query requires an active connection");
+      }
+      context.signal.throwIfAborted();
+      this.receiver.replyResult(context, result);
+    } catch (error) {
+      if (context.signal.aborted) return;
+      const failure = error instanceof DomainQueryError || error instanceof ProtocolValidationError
+        ? { code: error.code, message: error.message }
+        : { code: "domain_service_unavailable" as const, message: "Domain query failed" };
+      this.receiver.replyError(context, failure);
+    } finally {
+      this.domainRequests.delete(context);
+    }
   }
 
   /**
@@ -2162,8 +2208,15 @@ export class ConnectServiceImpl implements ConnectService {
     }
 
     if (this.isTerminalPhase(rec.phase)) return;
+    if (method === "payment.cancel" && this.lockStateValue === "unlocked") {
+      // The worker's reservation transition arbitrates this call even while the
+      // same connection is waiting for commit approval.
+      this.setRecordPhase(recordId, "executing");
+      await this.runRequest(rec);
+      return;
+    }
     // Payment must first obtain a real frozen preview; its external approval is requested before submit, not at the internal wallet signer.
-    if (method === "payment.pay") {
+    if (method === "payment.pay" || method === "payment.commit" || method === "application.sign_payment" || method === "application.sign_message" || method === "msfile.import" || method === "msfile.content.read") {
       rec.autoExecuteAfterUnlock = true;
       this.applyManualPhaseDecision(recordId, origin, true);
       return;
@@ -2446,7 +2499,8 @@ export class ConnectServiceImpl implements ConnectService {
       try { return (await readApplicationPermissions(this.deps.storageRepository, this.permKey(_rec))).includes(parsed.method); }
       catch { return false; } // unknown permission never silently authorizes execution
     }
-    if (parsed.method === "payment.status" || parsed.method === "feepool.prepare" || parsed.method === "feepool.commit") return true;
+    if (parsed.method.startsWith("chain.") || parsed.method.startsWith("application.") || parsed.method === "msfile.seller.status") return true;
+    if (parsed.method === "payment.prepare" || parsed.method === "payment.cancel" || parsed.method === "payment.status" || parsed.method === "feepool.prepare" || parsed.method === "feepool.commit") return true;
     // connect.* 走 manual 路径（施工单 2026-06-28 001）：
     //   - connect.login：用户必须明确确认当前钱包；
     //   - connect.logout：unlocked 时直接入队执行（不需要额外确认 UI），
@@ -2722,6 +2776,8 @@ export class ConnectServiceImpl implements ConnectService {
     const rec = this.requestsByRecordId.get(recordId);
     if (!rec) return;
     if (!this.isRequestCancellable(rec)) return;
+    rec.cancelRequested = true;
+    rec.abortController?.abort();
     this.clearConfirmTimeout(recordId);
     rec.paymentApproval?.(false);
     rec.paymentApproval = undefined;
@@ -2985,7 +3041,9 @@ export class ConnectServiceImpl implements ConnectService {
             traceDev("connect.session", "commandHistory.failed", () => ({ error }))
           );
         } else {
-          await this.persistFeedCommandFor(rec);
+          await this.persistFeedCommandFor(rec).catch(error =>
+            traceDev("connect.session", "commandHistory.failed", () => ({ error }))
+          );
           await this.replyResultToRec(rec, result);
         }
         if (rec.method === "connect.logout") this.deps.applicationLoggedOut?.();
@@ -3019,6 +3077,17 @@ export class ConnectServiceImpl implements ConnectService {
     "cipher.decrypt": rec => this.executeCipherDecrypt(rec),
     "payment.pay": rec => this.executePaymentPay(rec),
     "payment.status": rec => this.executePaymentStatus(rec),
+    "payment.prepare": rec => this.executePaymentPrepare(rec),
+    "payment.commit": rec => this.executePaymentReservation(rec, true),
+    "payment.cancel": rec => this.executePaymentReservation(rec, false),
+    "chain.get_height": rec => this.withChain(rec, async (woc, options) => ({ height: await woc.getChainHeight(options) })),
+    "chain.list_script_history": rec => this.withChain(rec, (woc, options) => woc.listScriptHistory(rec.params as MethodParams<"chain.list_script_history">, options)),
+    "chain.get_transaction": rec => this.executeChainTransaction(rec),
+    "chain.list_script_unspent": rec => this.withChain(rec, (woc, options) => woc.listScriptUnspent((rec.params as MethodParams<"chain.list_script_unspent">).script, options)),
+    "chain.broadcast": rec => this.executeChainBroadcast(rec),
+    "application.key": rec => this.executeApplicationKey(rec),
+    "application.sign_message": rec => this.executeApplicationMessage(rec),
+    "application.sign_payment": rec => this.executeApplicationPayment(rec),
     "feepool.prepare": async rec => { await this.executeFeepoolPrepareAndFinalize(rec); return null; },
     "feepool.commit": async rec => { await this.executeFeepoolCommitAndFinalize(rec); return null; },
     "connect.login": rec => this.executeConnectLogin(rec),
@@ -3026,6 +3095,9 @@ export class ConnectServiceImpl implements ConnectService {
     "connect.launch": rec => this.executeConnectLaunch(rec),
     "channel.publish": rec => this.executeChannelPublish(rec),
     "channel.subscription_set": rec => this.executeChannelSubscriptionSet(rec),
+    "msfile.seller.status": async rec => (await this.requireConnectContent(rec)).sellerStatus(),
+    "msfile.import": rec => this.executeMsfileImport(rec),
+    "msfile.content.read": rec => this.executeMsfileContentRead(rec),
     "msfile.stat": rec => this.executeMsfileStat(rec),
     "msfile.seed.read": rec => this.executeMsfileSeedRead(rec),
     "msfile.block.read": rec => this.executeMsfileBlockRead(rec),
@@ -3091,6 +3163,103 @@ export class ConnectServiceImpl implements ConnectService {
         origin: session.origin
       }
     };
+  }
+
+  private async requireConnectContent(rec: RequestRecord): Promise<NonNullable<MsFileService["connectContent"]>> {
+    const { service } = await this.requireMsfileContext(rec, rec.walletPublicKeyHex);
+    if (!service.connectContent) throw protocolError("internal_error", "BitFS content service is unavailable");
+    this.receiver.assertCurrent(rec.protocol);
+    return service.connectContent;
+  }
+
+  private async executeMsfileImport(rec: RequestRecord): Promise<{ seedHashHex: string }> {
+    const input = rec.params as MethodParams<"msfile.import">;
+    const content = await this.requireConnectContent(rec);
+    if (!content.sellerStatus().ready) throw protocolError("msfile_unavailable", "BitFS seller is not ready");
+    rec.approvalSummary = `导入并出售 ${input.fileName}（${input.content.bytes.byteLength} 字节），价格使用当前 Key 的售卖设置。`;
+    await this.askForExecutionApproval(rec);
+    await this.requireConnectContent(rec);
+    return content.importFile({ fileName: input.fileName, content: input.content }, rec.protocol.signal);
+  }
+
+  private async executeMsfileContentRead(rec: RequestRecord): Promise<ConnectPublic.MsFileContentResult> {
+    const { seedHashHex } = rec.params as MethodParams<"msfile.content.read">;
+    const content = await this.requireConnectContent(rec);
+    const signal = rec.protocol.signal;
+    const diagnostic = (event: string, details: Record<string, unknown> = {}) => {
+      traceDev("keymaster.connect.content", event, () => ({ requestId: rec.transportRequestId, seedHashHex, ...details }));
+    };
+    const verifyCurrent = () => {
+      signal?.throwIfAborted();
+      this.assertWalletGeneration(rec);
+      this.receiver.assertCurrent(rec.protocol);
+    };
+    let result = await content.readLocal(seedHashHex, signal);
+    verifyCurrent();
+    diagnostic("read.start", { local: Boolean(result) });
+    if (result) return result;
+    const policy = await this.currentMsfileService()?.getBitfsBuyerSettings?.();
+    if (policy?.buyerAutoPurchaseEnabled) {
+      rec.approvalSummary = `BitFS 文件 ${seedHashHex}，允许按钱包自动购买设置发现并购买，完整块上限 ${policy.maxFullBlockPriceSatoshis} 聪。`;
+      await this.askForExecutionApproval(rec);
+      await this.requireConnectContent(rec);
+    }
+    verifyCurrent();
+    let request = await content.discover(seedHashHex, signal);
+    const expires = request.expiresAtMs;
+    let purchaseRequested = false;
+    let lastProgress: string | undefined;
+    while (true) {
+      verifyCurrent();
+      const purchase = request.purchase;
+      const phase = purchase?.phase;
+      const stopped = phase !== undefined && ["failed", "cancelled", "connection-closed", "refunded"].includes(phase);
+      const allBlocksVerified = purchase?.totalBlockCount != null && purchase.totalBlockCount > 0 &&
+        purchase.verifiedBlockCount === purchase.totalBlockCount;
+      const progress = `${phase}:${request.quotes.length}:${purchase?.verifiedBlockCount}:${Boolean(request.completedPurchase)}`;
+      if (progress !== lastProgress) {
+        lastProgress = progress;
+        diagnostic("read.progress", { phase, quotes: request.quotes.length, verifiedBlockCount: purchase?.verifiedBlockCount,
+          totalBlockCount: purchase?.totalBlockCount, completedPurchase: Boolean(request.completedPurchase) });
+      }
+      // Read the verified durable file independently of pool settlement. Reading it
+      // neither changes the purchase journal nor releases the scheduler's slot.
+      if (request.completedPurchase || phase === "closing-pool" || phase === "close-unknown" || allBlocksVerified || stopped) {
+        result = await content.readLocal(seedHashHex, signal);
+        verifyCurrent();
+        if (result) {
+          diagnostic("read.return", { phase, completedPurchase: Boolean(request.completedPurchase), bytes: result.content.bytes.byteLength });
+          return result;
+        }
+      }
+      if (stopped) {
+        diagnostic("read.stopped", { phase, message: purchase?.message });
+        throw protocolError("internal_error", "BitFS purchase stopped before the file was available");
+      }
+      if (!request.purchase && !purchaseRequested && request.quotes.length) {
+        const quote = request.quotes[0]!;
+        const describe = `BitFS 文件 ${seedHashHex}，卖方 ${quote.sellerPublicKeyHex}，${quote.fileSizeBytes} 字节，种子 ${quote.seedPriceSatoshis} 聪，完整块 ${quote.fullBlockPriceSatoshis} 聪，末块 ${quote.tailPriceSatoshis} 聪。钱包将按买方设置处理费用池与费用。`;
+        rec.approvalSummary = describe;
+        await this.askForExecutionApproval(rec);
+        await this.requireConnectContent(rec);
+        verifyCurrent();
+        request = await content.purchase(seedHashHex, quote, signal);
+        purchaseRequested = true;
+        diagnostic("purchase.started", { sessionId: quote.sessionId, phase: request.purchase?.phase });
+        continue;
+      }
+      if ((!request.purchase && (expires === null || Date.now() >= expires)) ||
+          (!request.requestMessageId && !request.downloadReadOnly)) {
+        diagnostic("read.unavailable", { phase, purchaseRequested, discoveryExpired: expires === null || Date.now() >= expires });
+        throw protocolError("internal_error", "BitFS file unavailable or no seller quote received");
+      }
+      const poll = async () => {
+        await new Promise<void>(resolve => setTimeout(resolve, 750));
+        verifyCurrent();
+        return content.snapshot(seedHashHex, signal);
+      };
+      request = await (rec.executionLease ? rec.executionLease.waitForUser(poll) : poll());
+    }
   }
 
   private async executeMsfileStat(rec: RequestRecord): Promise<MsFileStatResult> {
@@ -4041,8 +4210,16 @@ export class ConnectServiceImpl implements ConnectService {
 
   /* ============== payment.pay / payment.status ============== */
 
-  private async executePaymentPay(rec: RequestRecord): Promise<PaymentPayResult> {
-    const params = rec.params as PaymentPayParams;
+  private executePaymentPay(rec: RequestRecord): Promise<PaymentPayResult> {
+    return this.executeNewPayment(rec, rec.params as PaymentPayParams);
+  }
+
+  private async executePaymentPrepare(rec: RequestRecord): Promise<ConnectPublic.PaymentPrepareResult> {
+    const { clientRequestId, walletPublicKeyHex, outputs, dataSignature } = rec.params as MethodParams<"payment.prepare">;
+    return this.executeNewPayment(rec, { clientRequestId, walletPublicKeyHex, outputs }, dataSignature);
+  }
+
+  private async executeNewPayment(rec: RequestRecord, params: PaymentPayParams, dataSignature?: ConnectPublic.PaymentDataSignature): Promise<ConnectPublic.PaymentPrepareResult> {
     const p2pkhService = this.currentP2pkhService();
     if (!p2pkhService?.prepareTransfer) throw protocolError("internal_error", "p2pkh service not available");
     const session = await this.requireConnectSession(rec, params.walletPublicKeyHex);
@@ -4065,7 +4242,7 @@ export class ConnectServiceImpl implements ConnectService {
       this.receiver.assertCurrent(rec.protocol);
       this.assertSessionOwnerIsActive(session);
     };
-    const requestDigest = paymentRequestDigest(identity, normalized);
+    const requestDigest = paymentRequestDigest(identity, normalized, dataSignature);
     const key = paymentRequestKey(identity, params.clientRequestId);
     const now = Date.now();
     const record: ProtocolConnectPaymentRecord = {
@@ -4095,14 +4272,16 @@ export class ConnectServiceImpl implements ConnectService {
       if (claimed.record.requestDigest !== requestDigest) throw protocolError("id_conflict", "clientRequestId was already used with different payment facts");
       const existing = await this.refreshConnectPaymentFromSubmission(rec, claimed.record);
       rec.paymentStatus = existing.status;
-      return paymentResultFromRecord(existing);
+      return preparedPaymentResult(existing);
     }
     let current = claimed.record;
+    let reservedPreviewId: string | undefined;
     let submissionStarted = false;
     try {
       assertBoundPayment();
       const preview = await p2pkhService.prepareTransfer({
         payment: {
+          dataSignature,
           paymentId: current.paymentId,
           clientRequestId: params.clientRequestId,
           outputs: normalized.outputs.map(output => ({ amount: output.amount, script: output.script })),
@@ -4112,70 +4291,293 @@ export class ConnectServiceImpl implements ConnectService {
           publisherPublicKeyHex: identity.appPublicKeyHex,
         },
       });
+      reservedPreviewId = preview.previewId;
       assertBoundPayment();
       const payment = (preview as { payment?: import("@keymaster/contracts").P2pkhConnectPaymentPreview }).payment;
       if (!payment) throw new Error("Connect payment preview is missing its frozen plan");
+      let reservation: ProtocolConnectPaymentRecord["reservation"];
+      if (dataSignature) {
+        if (!preview.previewId || !preview.expiresAt) throw new Error("Staged payment reservation missing expiration");
+        // Use the serialized transaction's order, independent of allocation representation.
+        const inputs = Transaction.fromHex(preview.rawTxHex).inputs.map(input => ({
+          txid: input.sourceTXID!, vout: input.sourceOutputIndex,
+        }));
+        reservation = { dataSignature, expiresAt: preview.expiresAt, inputs, paymentPreview: payment };
+      }
       current = {
         ...current,
-        allocationId: (preview as { managerAllocationId?: string }).managerAllocationId,
-        previewId: (preview as { previewId?: string }).previewId,
+        allocationId: preview.managerAllocationId,
+        previewId: preview.previewId,
+        ...(reservation ? { reservation } : {}),
         feeSatoshis: Number(payment.feeSats),
         changeSatoshis: Number(payment.changeAmountSats),
         updatedAt: Date.now(),
       };
       current = await storeConnectPaymentRecord(repo, current);
       assertBoundPayment();
-      rec.paymentPreview = payment;
-      const permitted = await readApplicationPermissions(repo, this.permKey(rec));
-      assertBoundPayment();
-      rec.autoApproved = permitted.includes("payment.pay");
-      if (!rec.autoApproved) {
-        const ask = () => new Promise<boolean>(resolve => {
-          rec.paymentApproval = resolve;
-          this.setRecordPhase(rec.recordId, "confirming");
-          const timeout = this.resolveConfirmTimeoutSnapshot(rec.origin);
-          this.startConfirmTimeout(rec.recordId, timeout.initialSeconds, timeout.startedFromFallback);
-          this.emit(); this.emitFeed();
-        });
-        const approved = await (rec.executionLease ? rec.executionLease.waitForUser(ask) : ask());
-        if (!approved) throw protocolError("user_rejected", "External payment was not approved");
-        this.setRecordPhase(rec.recordId, "executing");
-      }
-      assertBoundPayment();
+      if (reservation) return preparedPaymentResult(current);
+      await this.approvePayment(rec, payment, assertBoundPayment, true);
       submissionStarted = true;
-      const submitted = await p2pkhService.submitTransfer({ ...preview, ownerPublicKeyHex: identity.ownerPublicKeyHex } as never);
-      const reason = submitted.error ?? submitted.reason ?? "";
-      const status: import("@keymaster/contracts").ConnectPaymentStatus =
-        submitted.status === "local-confirmed" && submitted.txid
-          ? submitted.delivery === "already-known" ? "already_known" : "accepted"
-          : submitted.reason === "transaction-rejected" ? "failed"
-          : submitted.status === "not-dispatched" && reason === "cancelled"
-            ? "not_signed"
-            : "unknown";
-      const candidateTxid = typeof submitted.txid === "string" && /^[0-9a-f]{64}$/iu.test(submitted.txid) ? submitted.txid.toLowerCase() : undefined;
-      current = {
-        ...current,
-        status,
-        ...(candidateTxid ? { txid: candidateTxid } : {}),
-        ...(reason ? { reason: reason.slice(0, 256) } : {}),
-        updatedAt: Date.now(),
-      };
-      current = await storeConnectPaymentRecord(repo, current);
-      rec.paymentStatus = current.status;
-      if (this.isTerminalPhase(rec.phase)) await this.persistFeedCommandFor(rec);
-      return paymentResultFromRecord(current);
+      const submitted = await p2pkhService.submitTransfer(preview);
+      return this.recordPaymentSubmission(rec, current, submitted);
     } catch (error) {
-      current = {
-        ...current,
-        status: submissionStarted ? "unknown" : "not_signed",
-        reason: (error instanceof Error ? error.message : String(error)).slice(0, 256),
-        updatedAt: Date.now(),
-      };
-      current = await storeConnectPaymentRecord(repo, current).catch(() => current);
-      rec.paymentStatus = current.status;
-      if (this.isTerminalPhase(rec.phase)) await this.persistFeedCommandFor(rec);
-      return paymentResultFromRecord(current);
+      if (!submissionStarted && reservedPreviewId) {
+        await p2pkhService.cancelTransfer?.(reservedPreviewId).catch(error => console.warn("Connect payment cleanup failed", error));
+      }
+      return this.recordPaymentFailure(rec, current, submissionStarted, error);
     }
+  }
+
+  private async approvePayment(rec: RequestRecord, payment: import("@keymaster/contracts").P2pkhConnectPaymentPreview,
+    assertBoundPayment: () => void, allowAutomatic: boolean): Promise<void> {
+    rec.paymentPreview = payment;
+    rec.autoApproved = allowAutomatic && (await readApplicationPermissions(this.deps.storageRepository, this.permKey(rec))).includes("payment.pay");
+    assertBoundPayment();
+    if (!rec.autoApproved) {
+      await this.askForExecutionApproval(rec);
+    }
+    assertBoundPayment();
+  }
+
+  private async askForExecutionApproval(rec: RequestRecord): Promise<void> {
+    this.receiver.assertCurrent(rec.protocol);
+    rec.autoApproved = false;
+    const ask = () => new Promise<boolean>(resolve => {
+      rec.paymentApproval = resolve;
+      this.setRecordPhase(rec.recordId, "confirming");
+      const timeout = this.resolveConfirmTimeoutSnapshot(rec.origin);
+      this.startConfirmTimeout(rec.recordId, timeout.initialSeconds, timeout.startedFromFallback);
+      this.emit(); this.emitFeed();
+    });
+    const approved = await (rec.executionLease ? rec.executionLease.waitForUser(ask) : ask());
+    if (!approved) throw protocolError("user_rejected", "Operation was not approved");
+    this.setRecordPhase(rec.recordId, "executing");
+  }
+
+  private async withChain<T>(rec: RequestRecord, run: (woc: import("@keymaster/contracts").WocService,
+    opts: import("@keymaster/contracts").WocRequestOptions, session: ConnectSessionRecord) => Promise<T>): Promise<T> {
+    const session = await this.requireConnectSession(rec, rec.walletPublicKeyHex);
+    this.assertSessionOwnerIsActive(session);
+    const woc = this.deps.getChain?.();
+    if (!woc || !sameNetworkIdentity(woc.identity, session.networkIdentity)) throw protocolError("internal_error", "Chain service unavailable");
+    const result = await run(woc, { priority: "interactive", signal: rec.protocol.signal }, session);
+    this.assertWalletGeneration(rec);
+    this.receiver.assertCurrent(rec.protocol);
+    this.assertSessionOwnerIsActive(session);
+    return result;
+  }
+
+  private executeChainTransaction(rec: RequestRecord): Promise<ConnectPublic.ChainTransactionResult> {
+    return this.withChain(rec, async (woc, opts) => {
+      const { txid, observedRawTxHex } = rec.params as MethodParams<"chain.get_transaction">;
+      const result = await woc.getChainTransaction(txid, opts);
+      if (result.state !== "not_observed" || !observedRawTxHex) return result;
+      const observed = Transaction.fromHex(observedRawTxHex);
+      if (observed.id("hex") !== txid) throw protocolError("invalid_request", "Observed transaction does not match txid");
+      const inputs = observed.inputs.map(input => ({ txid: input.sourceTXID!, vout: input.sourceOutputIndex }));
+      for (let offset = 0; offset < inputs.length; offset += 20) {
+        const evidence = await woc.getSpentOutputs(inputs.slice(offset, offset + 20), opts);
+        if (evidence.some(row => row.spender?.status === "confirmed" && row.spender.txid !== txid)) return { state: "invalid" };
+      }
+      return result;
+    });
+  }
+
+  private executeChainBroadcast(rec: RequestRecord): Promise<ConnectPublic.ChainBroadcastResult> {
+    return this.withChain(rec, async (_woc, opts, session) => {
+      const { rawTxHex } = rec.params as MethodParams<"chain.broadcast">;
+      const tx = Transaction.fromHex(rawTxHex);
+      if (tx.toHex() !== rawTxHex || !tx.inputs.length || !tx.outputs.length) throw protocolError("invalid_request", "Invalid transaction bytes");
+      const txid = tx.id("hex");
+      const broadcast = this.deps.getChainBroadcast?.();
+      if (!broadcast) throw protocolError("internal_error", "Chain broadcast unavailable");
+      const submit = async (signal: AbortSignal) => {
+        await this.requireConnectSession(rec, rec.walletPublicKeyHex);
+        this.assertSessionOwnerIsActive(session);
+        signal.throwIfAborted();
+        return broadcast.broadcast(session.networkIdentity.bsvNetwork, rawTxHex, { signal });
+      };
+      try {
+        if (!this.deps.runChainBroadcast) throw new Error("Chain broadcast authority unavailable");
+        await this.deps.runChainBroadcast(opts.signal, submit);
+        return { state: "accepted", txid };
+      } catch (error) {
+        const code = (error as { code?: string }).code;
+        traceDev("keymaster.connect", "chain.broadcast.failed", () => ({ txid, code }));
+        return { state: code === "woc-tx-rejected" ? "rejected" : "unknown", txid };
+      }
+    });
+  }
+
+  private async executeApplicationKey(rec: RequestRecord): Promise<{ publicKeyHex: string }> {
+    const session = await this.requireConnectSession(rec, rec.walletPublicKeyHex);
+    this.assertSessionOwnerIsActive(session);
+    this.receiver.assertCurrent(rec.protocol);
+    const { purpose } = rec.params as MethodParams<"application.key">;
+    return { publicKeyHex: applicationPublicKey(purpose, session.ownerPublicKeyHex) };
+  }
+
+  private async executeApplicationMessage(rec: RequestRecord): Promise<ConnectPublic.MethodResult<"application.sign_message">> {
+    const { purpose, message } = rec.params as MethodParams<"application.sign_message">;
+    const session = await this.requireConnectSession(rec, rec.walletPublicKeyHex);
+    this.assertSessionOwnerIsActive(session);
+    const digest = applicationMessageDigest(purpose, new Uint8Array(message.bytes));
+    rec.approvalSummary = `应用密钥用途 ${purpose}，签署 ${message.bytes.byteLength} 字节消息，签名摘要 ${bytesToHex(digest)}。`;
+    await this.askForExecutionApproval(rec);
+    const [signature] = await this.signApplicationDigests(rec, session, purpose, [Uint8Array.from(digest).buffer], "compact");
+    return { publicKeyHex: applicationPublicKey(purpose, session.ownerPublicKeyHex), signature: { $type: "binary", bytes: signature! } };
+  }
+
+  private async signApplicationDigests(rec: RequestRecord, session: ConnectSessionRecord, purpose: string, digests: ArrayBuffer[], format: "der" | "compact") {
+    await this.requireConnectSession(rec, rec.walletPublicKeyHex);
+    this.assertWalletGeneration(rec);
+    this.receiver.assertCurrent(rec.protocol);
+    this.assertSessionOwnerIsActive(session);
+    const signer = await this.deps.vault.createActiveKeyCrypto();
+    try {
+      if (!signer.signApplicationDigests || signer.getIdentity().publicKeyHex !== session.ownerPublicKeyHex) {
+        throw protocolError("internal_error", "Application key signer unavailable");
+      }
+      const signatures = await signer.signApplicationDigests(purpose, digests, format);
+      this.receiver.assertCurrent(rec.protocol);
+      return signatures;
+    } finally {
+      signer.dispose();
+    }
+  }
+
+  private executeApplicationPayment(rec: RequestRecord): Promise<{ rawTxHex: string }> {
+    return this.withChain(rec, async (woc, opts, session) => {
+      const params = rec.params as MethodParams<"application.sign_payment">;
+      const plan = await planApplicationPayment(params, session.networkIdentity, woc, opts);
+      rec.approvalSummary = `应用密钥用途 ${params.purpose}，收款地址 ${params.address}，金额 ${plan.amount} 聪，矿工费 ${params.feeSatoshis} 聪，${params.inputs.length} 个输入。`;
+      await this.askForExecutionApproval(rec);
+      return plan.finish(await this.signApplicationDigests(rec, session, params.purpose, plan.digests, "der"));
+    });
+  }
+
+  private readonly committingPayments = new Map<string, RequestRecord>();
+
+  private async executePaymentReservation(rec: RequestRecord, commit: boolean): Promise<ConnectPublic.PaymentPayResult> {
+    const params = rec.params as MethodParams<"payment.commit">;
+    const session = await this.requireConnectSession(rec, params.walletPublicKeyHex);
+    const assertBound = () => {
+      this.assertWalletGeneration(rec);
+      this.receiver.assertCurrent(rec.protocol);
+      this.assertSessionOwnerIsActive(session);
+    };
+    const repo = this.deps.storageRepository;
+    const service = this.currentP2pkhService();
+    if (!repo?.getConnectPayment || !service?.cancelTransfer || !service.commitPayment) throw protocolError("internal_error", "Payment reservations unavailable");
+    const key = paymentRequestKey({
+      origin: rec.origin, ownerPublicKeyHex: session.ownerPublicKeyHex.toLowerCase(),
+      network: session.networkIdentity.bsvNetwork, appPublicKeyHex: permissionKeyFor(rec.origin, session.appPublicKeyHex),
+    }, params.clientRequestId);
+    const found = await repo.getConnectPayment(key);
+    assertBound();
+    if (!found?.reservation || found.previewId !== params.reservationId) {
+      throw protocolError("payment_not_found", "Payment reservation was not found for this identity");
+    }
+    let current = found;
+    const planned = found.reservation;
+    const previewId = params.reservationId;
+    const signingObjectHex = commit ? bytesToHex(new Uint8Array(params.signingObject.bytes)) : undefined;
+    current = await this.refreshConnectPaymentFromSubmission(rec, current);
+    if (commit && current.status === "pending" && planned.dataSignature &&
+        signingObjectHex !== bytesToHex(paymentSigningObject(planned.dataSignature, planned.inputs))) {
+      throw protocolError("invalid_request", "Payment signing object does not match the reserved plan");
+    }
+    if (commit && (current.status === "unknown" || current.status === "signed_not_dispatched")) {
+      assertBound();
+      const retried = await service.retryPayment?.(current.paymentId);
+      return retried ? this.recordPaymentSubmission(rec, current, retried) : paymentResultFromRecord(current);
+    }
+    if (!commit || !planned.dataSignature || planned.expiresAt <= Date.now()) {
+      assertBound();
+      if (current.status === "pending" && await service.cancelTransfer(previewId)) {
+        current = await storeConnectPaymentRecord(repo, { ...current, status: "not_signed", reason: "cancelled", updatedAt: Date.now() });
+        const inReview = this.committingPayments.get(key);
+        if (inReview?.paymentApproval) {
+          this.clearConfirmTimeout(inReview.recordId);
+          const complete = inReview.paymentApproval;
+          inReview.paymentApproval = undefined;
+          complete(false);
+        }
+      }
+      return paymentResultFromRecord(await this.refreshConnectPaymentFromSubmission(rec, current));
+    }
+    if (current.status !== "pending" || this.committingPayments.has(key)) return paymentResultFromRecord(current);
+    this.committingPayments.set(key, rec);
+    let submissionStarted = false;
+    try {
+      await this.approvePayment(rec, planned.paymentPreview, assertBound, false);
+      await this.requireConnectSession(rec, rec.walletPublicKeyHex);
+      current = await this.refreshConnectPaymentFromSubmission(rec, current);
+      assertBound();
+      if (current.status !== "pending") return paymentResultFromRecord(current);
+      submissionStarted = true;
+      const submitted = await service.commitPayment(previewId, {
+        signingObjectHex: signingObjectHex!,
+        persistSigned: async txid => {
+          await this.requireConnectSession(rec, rec.walletPublicKeyHex);
+          assertBound();
+          current = await storeConnectPaymentRecord(repo, {
+            ...current, txid, status: "signed_not_dispatched", updatedAt: Date.now(),
+          });
+          if (current.txid !== txid) throw new Error("Unable to persist the signed payment");
+          assertBound();
+        },
+      });
+      return this.recordPaymentSubmission(rec, current, submitted);
+    } catch (error) {
+      if (!submissionStarted) {
+        await service.cancelTransfer(previewId).catch(error => console.warn("Connect reservation cleanup failed", error));
+      } else {
+        const actual = await this.refreshConnectPaymentFromSubmission(rec, current).catch(() => current);
+        if (actual.status !== "pending") return paymentResultFromRecord(actual);
+      }
+      return this.recordPaymentFailure(rec, current, submissionStarted, error);
+    } finally {
+      this.committingPayments.delete(key);
+    }
+  }
+
+  private async recordPaymentSubmission(rec: RequestRecord, current: ProtocolConnectPaymentRecord,
+    submitted: Awaited<ReturnType<P2pkhProtocolAdapter["submitTransfer"]>>): Promise<PaymentPayResult> {
+    const repo = this.deps.storageRepository!;
+    const reason = submitted.error ?? submitted.reason ?? "";
+    const status: import("@keymaster/contracts").ConnectPaymentStatus =
+      submitted.status === "local-confirmed" && submitted.txid
+        ? submitted.delivery === "already-known" ? "already_known" : "accepted"
+        : submitted.reason === "transaction-rejected" ? "failed"
+        : submitted.status === "not-dispatched" && reason === "cancelled"
+          ? "not_signed"
+          : "unknown";
+    const candidateTxid = typeof submitted.txid === "string" && /^[0-9a-f]{64}$/iu.test(submitted.txid) ? submitted.txid.toLowerCase() : undefined;
+    current = {
+      ...current,
+      status,
+      ...(candidateTxid ? { txid: candidateTxid } : {}),
+      ...(reason ? { reason: reason.slice(0, 256) } : {}),
+      updatedAt: Date.now(),
+    };
+    current = await storeConnectPaymentRecord(repo, current);
+    rec.paymentStatus = current.status;
+    if (this.isTerminalPhase(rec.phase)) await this.persistFeedCommandFor(rec);
+    return paymentResultFromRecord(current);
+  }
+
+  private async recordPaymentFailure(rec: RequestRecord, current: ProtocolConnectPaymentRecord, submissionStarted: boolean, error: unknown): Promise<PaymentPayResult> {
+    current = {
+      ...current,
+      status: submissionStarted ? "unknown" : "not_signed",
+      reason: (error instanceof Error ? error.message : String(error)).slice(0, 256),
+      updatedAt: Date.now(),
+    };
+    current = await storeConnectPaymentRecord(this.deps.storageRepository!, current);
+    rec.paymentStatus = current.status;
+    if (this.isTerminalPhase(rec.phase)) await this.persistFeedCommandFor(rec);
+    return paymentResultFromRecord(current);
   }
 
   /** Runtime transaction outcome lookup plus business CAS; no signing or chain I/O. */
@@ -4192,10 +4594,33 @@ export class ConnectServiceImpl implements ConnectService {
     const value = await service.getPaymentStatus({ paymentId: record.paymentId });
     await assertAuthorized();
     const manager = value;
-    if (manager.status === "not_found") return record;
+    if (manager.status === "not_found") {
+      if (record.status === "pending" && record.reservation && record.reservation.expiresAt <= Date.now() && !record.txid) {
+        return storeConnectPaymentRecord(this.deps.storageRepository!, { ...record, status: "not_signed", reason: "cancelled", updatedAt: Date.now() });
+      }
+      return record;
+    }
     if (manager.status === "pending" && record.txid) throw protocolError("id_conflict", "Signed payment lost its transaction exact");
     if (manager.status === "not_signed" && (record.txid || record.status === "signed_not_dispatched" || record.release)) throw protocolError("id_conflict", "Unsigned release contradicts signed payment facts");
     if ((record.allocationId && manager.allocationId && manager.allocationId !== record.allocationId) || (record.txid && manager.txid && manager.txid !== record.txid.toLowerCase())) throw protocolError("id_conflict", "Payment transaction identity/exact mismatch");
+    if (record.reservation && manager.txid && (manager.status === "unknown" || manager.status === "signed_not_dispatched")) {
+      const woc = this.deps.getChain?.();
+      if (woc && sameNetworkIdentity(woc.identity, record.networkIdentity)) {
+        try {
+          const opts = { priority: "interactive" as const, signal: rec.abortController?.signal };
+          const seen = await woc.getTransactionObservation(manager.txid, opts);
+          if (seen.observation && calcTxidFromRawTxHex(await woc.getRawTransaction(manager.txid, opts)) === manager.txid) {
+            await assertAuthorized();
+            return storeConnectPaymentRecord(this.deps.storageRepository!, {
+              ...record, txid: manager.txid, status: "accepted", reason: undefined, updatedAt: Date.now(),
+            });
+          }
+        } catch (error) {
+          traceDev("keymaster.connect", "payment.observe.failed", () => ({ txid: manager.txid, error }));
+          await assertAuthorized();
+        }
+      }
+    }
     const updated = await storeConnectPaymentRecord(this.deps.storageRepository!, {
       ...record, status: manager.status,
       allocationId: manager.allocationId ?? record.allocationId,
@@ -5215,7 +5640,7 @@ export class ConnectServiceImpl implements ConnectService {
       phase: rec.phase,
       decision,
       status,
-      textSummary: this.summarizeText(rec.params),
+      textSummary: rec.approvalSummary ?? this.summarizeText(rec.params),
       claimsSummary: this.summarizeClaims(rec.params),
       contentType: this.summarizeContentType(rec.params),
       payloadSize: rec.payloadSize ?? this.summarizePayloadSize(rec.params),
@@ -5484,7 +5909,9 @@ export class ConnectServiceImpl implements ConnectService {
   }
 
   private isRequestCancellable(rec: RequestRecord): boolean {
-    return rec.phase === "confirming" || rec.phase === "waiting_unlock_manual";
+    return rec.phase === "confirming" || rec.phase === "waiting_unlock_manual" ||
+      rec.phase === "executing" && (rec.method === "msfile.content.read" ||
+        rec.method.startsWith("chain.") && rec.method !== "chain.broadcast");
   }
 
   /**
@@ -5622,6 +6049,7 @@ function mergeConnectPaymentRecord(existing: ProtocolConnectPaymentRecord, next:
     txid: existing.txid ?? next.txid,
     allocationId: existing.allocationId ?? next.allocationId,
     previewId: existing.previewId ?? next.previewId,
+    reservation: existing.reservation ?? next.reservation,
     ...(next.release === undefined && existing.release ? { release: existing.release, reason: existing.reason } : {}),
     createdAt: existing.createdAt,
   };
@@ -5683,14 +6111,21 @@ function paymentRequestKey(identity: Parameters<typeof paymentIdentityKey>[0], c
   return bytesToHex(sha256Bytes(new TextEncoder().encode(JSON.stringify([paymentIdentityKey(identity), clientRequestId]))));
 }
 
-function paymentRequestDigest(identity: Parameters<typeof paymentIdentityKey>[0], params: PaymentPayParams): string {
+function paymentRequestDigest(identity: Parameters<typeof paymentIdentityKey>[0], params: PaymentPayParams, dataSignature?: ConnectPublic.PaymentDataSignature): string {
   return bytesToHex(sha256Bytes(new TextEncoder().encode(JSON.stringify([
     "keymaster.connect-payment-request.v1",
     paymentIdentityKey(identity),
     params.clientRequestId,
     params.outputs.map(output => [output.amount, output.script.toLowerCase()]),
     params.assetId ?? "",
+    ...(dataSignature ? [[dataSignature.outputIndex, dataSignature.offset, dataSignature.prefixHex, dataSignature.suffixHex]] : []),
   ]))));
+}
+
+function preparedPaymentResult(record: ProtocolConnectPaymentRecord): ConnectPublic.PaymentPrepareResult {
+  const result = paymentResultFromRecord(record);
+  if (record.status !== "pending" || !record.reservation || !record.previewId || record.reservation.expiresAt <= Date.now()) return result;
+  return { ...result, reservation: { reservationId: record.previewId, inputs: record.reservation.inputs, expiresAt: record.reservation.expiresAt } };
 }
 
 function paymentResultFromRecord(record: ProtocolConnectPaymentRecord): PaymentPayResult {

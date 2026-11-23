@@ -6,6 +6,7 @@ import type { ConnectPaymentOutput } from "./protocol.js";
 
 /** Facts the protocol handler hands to the P2PKH service before coin selection. */
 export interface P2pkhConnectPaymentFacts {
+  dataSignature?: import("keymaster-connect/protocol").PaymentDataSignature;
   paymentId: string;
   clientRequestId: string;
   /** 业务输出；顺序即链上顺序，找零由钱包追加。 */
@@ -16,6 +17,12 @@ export interface P2pkhConnectPaymentFacts {
   origin: string;
   /** Verified App publisher. */
   publisherPublicKeyHex: string;
+}
+
+/** Local Worker completion; the signed exact is persisted before any dispatch. */
+export interface P2pkhConnectCompletion {
+  signingObjectHex: string;
+  persistSigned(txid: string): Promise<void>;
 }
 
 /** Frozen facts returned with a payment preview and persisted by the manager. */

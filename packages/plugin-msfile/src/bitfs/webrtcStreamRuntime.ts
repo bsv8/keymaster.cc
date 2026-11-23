@@ -133,6 +133,7 @@ export class BitfsWebRtcStreamRuntime {
   private readonly attemptOwners = new Map<string, SessionEntry>();
   private readonly pendingInbound = new Map<BitfsConnection, PendingInbound>();
   private readonly closing = new Map<string, Promise<void>>();
+  private readonly dialHost: BitfsWebRtcHost;
   private readonly unsubscribeConnection: () => void;
   private readonly handlerReady: Promise<void>;
   private handlerRegistered = false;
@@ -140,6 +141,10 @@ export class BitfsWebRtcStreamRuntime {
   private disposePromise?: Promise<void>;
 
   constructor(private readonly options: BitfsWebRtcStreamRuntimeOptions) {
+    const host = options.host;
+    const dial: BitfsWebRtcHost["dial"] = (address, dialOptions) => host.dial(address, { ...dialOptions, force: true });
+    // A connection belongs to one BitFS session even while a different session for the peer is closing.
+    this.dialHost = Object.create(host, { dial: { value: dial } });
     options.interconnect.setStunServers(options.stunServers());
     this.handlerReady = this.options.host.handle(BITFS_PROTOCOL_ID, (stream, connection) => this.onInboundStream(stream, connection), { maxInboundStreams: 1 })
       .then(() => { this.handlerRegistered = true; });
@@ -176,7 +181,7 @@ export class BitfsWebRtcStreamRuntime {
     this.sessions.set(entry.sessionId, entry);
     try {
       if (entry.controller.signal.aborted) throw normalizeError(entry.controller.signal.reason, "The operation was aborted", "AbortError");
-      const dial = this.options.interconnect.dialer.dial(this.options.host, {
+      const dial = this.options.interconnect.dialer.dial(this.dialHost, {
         remotePeerId: entry.remotePeerId,
         publicKey: entry.publicKey,
         connectionId: entry.connectionId,
@@ -538,7 +543,7 @@ export class BitfsWebRtcStreamRuntime {
       return;
     }
     if (!this.bindConnection(entry, result.connection, true)) {
-      await closeConnectionWithin(result.connection);
+      if (!this.connectionOwners.has(result.connection)) await closeConnectionWithin(result.connection);
       throw new Error("BitFS WebRTC dial connection is already owned");
     }
     await this.install(entry, result.connection);

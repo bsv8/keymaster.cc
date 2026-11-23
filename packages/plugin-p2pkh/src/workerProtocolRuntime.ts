@@ -3,8 +3,8 @@ import { createP2pkhProtocolSpendService } from "./p2pkhProtocolSpend.js";
 import { createProtectedOutpointRegistry } from "./registries/protectedOutpointRegistry.js";
 import { createWalletProtectedOutpoints } from "./registries/walletProtectedOutpoints.js";
 import { createWorkerProtocolEvidence } from "./workerProtocolEvidence.js";
-import { buildUnsigned } from "keymaster-utxo-manager";
-import { deriveP2pkhAddress } from "@keymaster/contracts";
+import { buildUnsigned, codeOf, type Funds } from "keymaster-utxo-manager";
+import { deriveP2pkhAddress, traceDev } from "@keymaster/contracts";
 import { p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
 import type { P2pkhUtxoManager } from "./p2pkhUtxoManager.js";
 import type { P2pkhSubmissionRuntime } from "./p2pkhSubmissionRuntime.js";
@@ -18,6 +18,7 @@ export interface WorkerProtocolDependencies {
   central: CentralBroadcastService;
   manager: P2pkhUtxoManager;
   submissions: P2pkhSubmissionRuntime;
+  refreshFundingInputs(): Promise<Funds>;
 }
 
 /** Claims protection for UTXO manager; retired forum responsibility excluded (decision B). */
@@ -91,21 +92,53 @@ export async function createWorkerProtocolRuntime(deps: WorkerProtocolDependenci
     const walletScriptHex = p2pkhAddressToScriptHex(address, input.network);
     const outputs = input.outputs ?? [{scriptHex: walletScriptHex, value: String(input.amountSatoshis)}];
     if (outputs.reduce((sum, row) => sum + BigInt(row.value), 0n) !== BigInt(input.amountSatoshis)) throw new Error("Funding amount differs from declared business outputs");
-    const allocation = await deps.manager.request({ownerPublicKeyHex: input.ownerPublicKeyHex,
+    const submissionId = crypto.randomUUID();
+    const request = {ownerPublicKeyHex: input.ownerPublicKeyHex,
       resource: {resourceId: `p2pkh:${input.network}`, network: input.network, address}, amountSats: String(input.amountSatoshis),
-      feeRateSatPerKb: String(input.feeRateSatoshisPerKb), outputScriptLengths: outputs.map(row => row.scriptHex.length / 2)});
+      feeRateSatPerKb: String(input.feeRateSatoshisPerKb), outputScriptLengths: outputs.map(row => row.scriptHex.length / 2)};
+    const log = (event: string, details: () => object = () => ({})) => traceDev("keymaster.p2pkh.funding", event, () => ({
+      submissionId, network: input.network, address, ...details(),
+    }));
+    const select = async (attempt: number) => {
+      log("selection.start", () => ({ attempt, amountSats: request.amountSats, feeRateSatPerKb: request.feeRateSatPerKb, outputScriptLengths: request.outputScriptLengths }));
+      try {
+        const allocation = await deps.manager.request(request);
+        log("selection.success", () => ({ attempt, allocationId: allocation.allocationId, inputCount: allocation.selectedInputs.length,
+          totalInSats: allocation.totalInSats, feeSats: allocation.feeSats, changeSats: allocation.changeSats }));
+        return allocation;
+      } catch (error) {
+        log("selection.failed", () => ({ attempt, code: codeOf(error), error }));
+        throw error;
+      }
+    };
+    const allocation = await select(1).catch(async error => {
+      const code = codeOf(error);
+      if (code !== "no-utxos" && code !== "insufficient") throw error;
+      check();
+      log("refresh.start", () => ({ selectionCode: code }));
+      try {
+        const funds = await deps.refreshFundingInputs();
+        log("refresh.success", () => ({ funds }));
+      } catch (refreshError) {
+        log("refresh.failed", () => ({ error: refreshError }));
+        throw new Error("Could not refresh wallet funding inputs", { cause: refreshError });
+      }
+      check();
+      return select(2);
+    });
     try {
       check();
       const selected = allocation.selectedInputs.map(row => ({txid: row.utxo.txid, vout: row.utxo.vout, value: row.utxo.value, address: row.utxo.address}));
       const txOutputs = [...outputs, ...(BigInt(allocation.changeSats) > 0n ? [{scriptHex: walletScriptHex, value: allocation.changeSats}] : [])];
       const unsignedTxHex = buildUnsigned({inputs: selected, outputs: txOutputs});
-      const submissionId = crypto.randomUUID();
       deps.submissions.prepare({...input, submissionId, allocationId: allocation.allocationId, unsignedTxHex, inputs: selected,
         outputs: outputs.map(row => ({scriptHex: row.scriptHex, value: Number(row.value)})), feeSatoshis: Number(allocation.feeSats),
         changeSatoshis: Number(allocation.changeSats), ...(BigInt(allocation.changeSats) > 0n ? {changeAddress: address} : {})});
+      log("plan.prepared", () => ({ allocationId: allocation.allocationId, inputCount: selected.length }));
       return {allocationId: allocation.allocationId, submissionId, selected, totalInputSatoshis: Number(allocation.totalInSats),
         businessSats: allocation.businessSats, feeSats: allocation.feeSats, changeSats: allocation.changeSats, unsignedTxHex};
     } catch (error) {
+      log("plan.failed", () => ({ allocationId: allocation.allocationId, error }));
       await deps.manager.release({...input, allocationId: allocation.allocationId});
       throw error;
     }

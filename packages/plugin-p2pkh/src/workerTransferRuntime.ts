@@ -139,6 +139,16 @@ export function createWorkerTransferRuntime(deps: WorkerTransferDependencies) {
        assertActive, owner, network, storage: deps.storage(), crypto: deps.crypto,
       central: central!,
       manager: utxoManager!, submissions: createP2pkhSubmissionRuntime(deps.storage()),
+      async refreshFundingInputs() {
+        assertActive();
+        const result = await deps.snapshot({ ownerPublicKeyHex: owner, network }, true);
+        assertActive();
+        if (result.status !== "ok") {
+          throw new Error(`Wallet UTXO refresh failed (${result.status})${"message" in result ? `: ${result.message}` : ""}`);
+        }
+        if (!result.value.hasResult) throw new Error("Wallet UTXO snapshot unavailable");
+        return result.value.funds;
+      },
     });
     protocolStarting = run;
     try { const candidate = await run; try { assertActive(); } catch (error) { candidate.dispose(); throw error; } protocol = candidate; return candidate; }

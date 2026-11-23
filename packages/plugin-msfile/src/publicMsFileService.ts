@@ -42,6 +42,14 @@ export function createPublicMsFileService(service: MsFileService, assertActive: 
     ...(service.startBitfsPurchase ? { startBitfsPurchase: (...args: Parameters<NonNullable<MsFileService["startBitfsPurchase"]>>) => call(() => service.startBitfsPurchase!(...args)) } : {}),
     ...(service.cancelBitfsPurchase ? { cancelBitfsPurchase: (...args: Parameters<NonNullable<MsFileService["cancelBitfsPurchase"]>>) => call(() => service.cancelBitfsPurchase!(...args)) } : {}),
     ...(service.cancelBitfsDemand ? { cancelBitfsDemand: (...args: Parameters<NonNullable<MsFileService["cancelBitfsDemand"]>>) => call(() => service.cancelBitfsDemand!(...args)) } : {}),
+    ...(service.connectContent ? { connectContent: Object.freeze({
+      sellerStatus: () => call(() => service.connectContent!.sellerStatus()),
+      importFile: (...args: Parameters<NonNullable<MsFileService["connectContent"]>["importFile"]>) => call(() => service.connectContent!.importFile(...args)),
+      readLocal: (hash: string, signal?: AbortSignal) => call(() => service.connectContent!.readLocal(hash, signal)),
+      discover: (hash: string, signal?: AbortSignal) => call(() => service.connectContent!.discover(hash, signal)),
+      snapshot: (hash: string, signal?: AbortSignal) => call(() => service.connectContent!.snapshot(hash, signal)),
+      purchase: (...args: Parameters<NonNullable<MsFileService["connectContent"]>["purchase"]>) => call(() => service.connectContent!.purchase(...args)),
+    }) } : {}),
     connect: Object.freeze(Object.assign(Object.create(null), {
       stat: (...args: Parameters<MsFileService["connect"]["stat"]>) => call(() => service.connect.stat(...args)),
       readSeed: (...args: Parameters<MsFileService["connect"]["readSeed"]>) => call(() => service.connect.readSeed(...args)),

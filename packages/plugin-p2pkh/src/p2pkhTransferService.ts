@@ -1,7 +1,11 @@
+import type { createSignedPaymentOutbox } from "./signedPaymentOutbox.js";
+import { assertPaymentSignatureSlot, paymentSigningObject } from "@keymaster/contracts/signing";
+import { sha256 } from "@noble/hashes/sha2.js";
+import { bytesToHex } from "@noble/hashes/utils";
 // Ordinary transfers own their original plan; the manager owns input allocation.
 // Internal DTOs are trusted. Manager owns spendability; single-use previews,
 // original exact, cancellation and broadcast responsibility belong to this caller.
-import type { CentralBroadcastService, CoordinatorP2pkhBroadcastResult, CoordinatorValueResult, P2pkhBroadcastSubmission, VaultService } from "@keymaster/contracts";
+import type { P2pkhConnectCompletion, CentralBroadcastService, CoordinatorP2pkhBroadcastResult, CoordinatorValueResult, P2pkhBroadcastSubmission, VaultService } from "@keymaster/contracts";
 import type { MessageBus } from "webloom-framework";
 import type { P2pkhLocalTransaction, P2pkhTransferInput, P2pkhTransferPreview, P2pkhTransferResult, ReadyKeyIdentity } from "./p2pkhContracts.js";
 import { assetIdToNetwork, makeResourceId } from "./p2pkhContracts.js";
@@ -20,6 +24,7 @@ export interface P2pkhTransferServiceDeps {
   centralBroadcastService?: CentralBroadcastService;
   broadcastWithCoordinator?: (input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; submission?: P2pkhBroadcastSubmission }) => Promise<CoordinatorValueResult<unknown>>;
   utxoManager?: P2pkhUtxoManager;
+  signedPaymentOutbox: ReturnType<typeof createSignedPaymentOutbox>;
   submissions?: P2pkhSubmissionRuntime;
   /** These host accessors reject revoked/unready wallet sessions. */
   getActiveKey: () => ReadyKeyIdentity;
@@ -27,32 +32,38 @@ export interface P2pkhTransferServiceDeps {
 }
 export interface P2pkhTransferService {
   prepare(input: P2pkhTransferInput, context?: { retry?: boolean; signal?: AbortSignal }): Promise<P2pkhTransferPreview>;
-  submit(preview: P2pkhTransferPreview, options?: { signal?: AbortSignal }): Promise<P2pkhTransferResult>;
+  cancel(previewId: string): Promise<boolean>;
+  retryPayment(ownerPublicKeyHex: string, network: "main" | "test", paymentId: string): Promise<P2pkhTransferResult | undefined>;
+  submit(preview: P2pkhTransferPreview, options?: { signal?: AbortSignal; completion?: P2pkhConnectCompletion }): Promise<P2pkhTransferResult>;
   /** Submit the Worker's remembered allocation; never rebuild from caller metadata. */
-  submitPrepared(previewId: string, options?: { signal?: AbortSignal }): Promise<P2pkhTransferResult>;
+  submitPrepared(previewId: string, options?: { signal?: AbortSignal; completion?: P2pkhConnectCompletion }): Promise<P2pkhTransferResult>;
 }
 export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pkhTransferService {
   const prepared = new Map<string, { preview: P2pkhTransferPreview; expires: number; timer?: ReturnType<typeof setTimeout> }>();
-  const releaseReservation = (preview: P2pkhTransferPreview): void => {
-    if (!preview.managerAllocationId || !deps.utxoManager || !deps.submissions) return;
+  const releaseReservation = async (preview: P2pkhTransferPreview): Promise<boolean> => {
+    if (!preview.managerAllocationId || !deps.utxoManager || !deps.submissions) return false;
     const scope = {ownerPublicKeyHex: preview.ownerPublicKeyHex, network: preview.network};
-    try {
-      const plan = deps.submissions.preparedForAllocation({...scope, allocationId: preview.managerAllocationId});
-      if (deps.submissions.cancelUnsigned({...scope, submissionId: plan.submissionId})) void deps.utxoManager.release({...scope, allocationId: preview.managerAllocationId}).catch(() => undefined);
-    } catch { /* Already signing, consumed or revoked: never release by expiry. */ }
+    const plan = deps.submissions.preparedForAllocation({...scope, allocationId: preview.managerAllocationId});
+    if (!deps.submissions.cancelUnsigned({...scope, submissionId: plan.submissionId})) return false;
+    await deps.utxoManager.release({...scope, allocationId: preview.managerAllocationId});
+    return true;
   };
+  function expire(preview: P2pkhTransferPreview): void {
+    void releaseReservation(preview).catch(error => console.warn("Transfer expiration cleanup failed", error));
+  }
   function remember(preview: P2pkhTransferPreview): P2pkhTransferPreview {
     const now = Date.now();
     for (const [id, entry] of prepared) {
       if (entry.expires > now) continue;
       if (entry.timer) clearTimeout(entry.timer);
-      prepared.delete(id); releaseReservation(entry.preview);
+      prepared.delete(id); expire(entry.preview);
     }
     if (prepared.size >= 32) throw new Error("Too many pending transfer previews");
+    preview.expiresAt = now + 120000;
     const entry: { preview: P2pkhTransferPreview; expires: number; timer?: ReturnType<typeof setTimeout> } = { preview: structuredClone(preview), expires: now + 120000 };
     entry.timer = setTimeout(() => {
       if (prepared.get(preview.previewId) !== entry) return;
-      prepared.delete(preview.previewId); releaseReservation(entry.preview);
+      prepared.delete(preview.previewId); expire(entry.preview);
     }, 120000);
     (entry.timer as ReturnType<typeof setTimeout> & { unref?: () => void }).unref?.();
     prepared.set(preview.previewId, entry);
@@ -63,13 +74,20 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
     if (!entry || entry.expires <= Date.now()) {
       prepared.delete(previewId);
       if (entry?.timer) clearTimeout(entry.timer);
-      if (entry) releaseReservation(entry.preview);
+      if (entry) expire(entry.preview);
       throw new Error("Transfer preview expired or already submitted");
     }
     if (consume) { if (entry.timer) clearTimeout(entry.timer); prepared.delete(previewId); }
     return structuredClone(entry.preview);
   }
   return {
+    async cancel(previewId) {
+      const entry = prepared.get(previewId);
+      if (!entry) return false;
+      if (entry.timer) clearTimeout(entry.timer);
+      prepared.delete(previewId);
+      return releaseReservation(entry.preview);
+    },
     async prepare(input, context) {
       const manager = deps.utxoManager;
       if (!manager || !deps.submissions) throw new Error("Transfer requires the allocation pool and transaction runtime");
@@ -80,6 +98,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       const resource = await stateRepository.getResource(makeResourceId(network));
       if (!resource) throw new Error(`P2PKH resource not found for owner ${owner.publicKeyHex} (${network})`);
       const payment = input.payment;
+      if (payment?.dataSignature) assertPaymentSignatureSlot(payment.outputs, payment.dataSignature);
       const sendAll = input.sendAll === true;
       if (payment && sendAll) throw new Error("Connect payment cannot use sendAll");
       if (payment && (!Array.isArray(payment.outputs) || payment.outputs.length === 0)) throw new Error("Connect payment outputs must be non-empty");
@@ -133,7 +152,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         const business = Number(businessSats), fee = Number(feeSats), change = Number(changeSats);
         const businessTotal = payment ? businessOutputs.map(row => ({ value: Number(row.valueSats), scriptHex: row.scriptHex })) : [{ value: business, scriptHex: businessScriptHexes[0]! }];
         deps.submissions.prepare({ownerPublicKeyHex: owner.publicKeyHex, network, submissionId, allocationId: reservation.allocationId,
-          paymentId: payment?.paymentId, unsignedTxHex, inputs: selected, outputs: businessTotal,
+          paymentId: payment?.paymentId, dataSignature: payment?.dataSignature, unsignedTxHex, inputs: selected, outputs: businessTotal,
           feeSatoshis: fee, feeRateSatoshisPerKb: input.feeRateSatoshisPerKb!, changeSatoshis: change, ...(change > 0 ? {changeAddress} : {})});
         const allocation = { requestedSatoshis: business, feeReserveSatoshis: fee, selected, totalInputSatoshis: Number(reservation.totalInSats), changeSatoshis: change };
         const paymentPreview = payment ? {
@@ -163,6 +182,29 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         throw error;
       }
     },
+    async retryPayment(ownerPublicKeyHex, network, paymentId) {
+      const scope = { ownerPublicKeyHex, network, paymentId };
+      const outbox = await deps.signedPaymentOutbox.get(scope);
+      if (!outbox || outbox.status !== "unknown" || !deps.submissions) return undefined;
+      let retained = deps.submissions.byPaymentId(scope);
+      if (!retained) {
+        deps.submissions.restoreSignedPayment(outbox);
+        retained = deps.submissions.byPaymentId(scope);
+      }
+      if (!retained?.rawTxHex || !retained.txid || !retained.plan.allocationId ||
+          (retained.state !== "unknown" && retained.state !== "signed") || !deps.centralBroadcastService) return undefined;
+      await resolveOwnerKeyIdentity(deps, ownerPublicKeyHex);
+      const { rawTxHex, txid, plan } = retained;
+      const result = await deps.centralBroadcastService.submitOnce({
+        ...scope, resourceId: makeResourceId(network), submissionId: plan.submissionId,
+        managerAllocationId: plan.allocationId, rawTxHex, txid,
+      });
+      if (result.status === "local-confirmed" || result.status === "already-known") {
+        await deps.signedPaymentOutbox.resolve(paymentId, result.status === "already-known" ? "already_known" : "accepted")
+          .catch(error => console.warn("Staged payment outcome write failed", error));
+      }
+      return mapTransferResult(result, { rawTxHex, txid }, plan.submissionId);
+    },
     async submitPrepared(previewId, options) { return this.submit(recall(previewId), options); },
     async submit(preview, options) {
       // Recall before any async work. Caller display metadata is not a second
@@ -174,7 +216,13 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       if (!transactions) throw new Error("Transaction runtime unavailable");
       const scope = {ownerPublicKeyHex: remembered.ownerPublicKeyHex, network: remembered.network};
       const plan = transactions.preparedForAllocation({...scope, allocationId: remembered.managerAllocationId});
+      const signingObject = plan.dataSignature && paymentSigningObject(plan.dataSignature, plan.inputs);
+      if (options?.completion?.signingObjectHex !== (signingObject ? bytesToHex(signingObject) : undefined)) {
+        throw new Error("Payment signing object does not match the reserved plan");
+      }
       let dispatchAttempted = false;
+      let signingStarted = false;
+      let exactRetained = false;
       try {
         if (options?.signal?.aborted) {
           recall(remembered.previewId, true);
@@ -193,12 +241,22 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         // This checks a real asynchronous wallet replacement, not an internal
         // DTO's shape. A late task must not sign with a newly active wallet.
         if (currentChangeAddress !== remembered.changeAddress) throw new Error("Transfer owner session changed");
-        const frozen = recall(remembered.previewId, true);
         const selected = plan.inputs;
-        // Manager already supplies trusted prevout parameters; signing needs no parent bytes.
         if (options?.signal?.aborted) throw new Error("Transfer signing cancelled");
+        const frozen = recall(remembered.previewId, true);
+        const unsigned = unsignedFromExact(plan.unsignedTxHex);
         transactions.beginSigning({...scope, submissionId: plan.submissionId});
-        const rawTxHex = await signP2pkhTx(unsignedFromExact(plan.unsignedTxHex), selected, async digest => {
+        signingStarted = true;
+        if (plan.dataSignature && signingObject) {
+          const digest = Uint8Array.from(sha256(signingObject)).buffer;
+          const { signature } = await activeCrypto.signDigest({ digest, format: "compact" });
+          const { offset, outputIndex } = plan.dataSignature;
+          if (signature.byteLength !== 64) throw new Error("Expected a compact signature");
+          const script = unsigned.outputs[outputIndex]!.script;
+          script.set(new Uint8Array(signature), offset);
+          frozen.outputs[outputIndex]!.scriptHex = bytesToHex(script);
+        }
+        const rawTxHex = await signP2pkhTx(unsigned, selected, async digest => {
           const result = await activeCrypto.signDigest({ digest: new Uint8Array(digest).buffer as ArrayBuffer, format: "der" });
           return new Uint8Array(result.signature);
         }, owner.publicKeyHex);
@@ -206,6 +264,11 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         const signedSize = rawTxHexByteLength(rawTxHex);
         if (signedSize > frozen.serializedSizeBytes) throw new Error("P2PKH signature exceeded fee size bound");
         const signed = { ...frozen, rawTxHex, txid: calcTxidFromRawTxHex(rawTxHex), serializedSizeBytes: signedSize };
+        if (plan.dataSignature) {
+          await deps.signedPaymentOutbox.putSigned(plan, rawTxHex, signed.txid);
+          exactRetained = true;
+          await options!.completion!.persistSigned(signed.txid);
+        }
         const submissionId = plan.submissionId, now = new Date().toISOString();
         const localSubmission: P2pkhLocalTransaction = {
           id: submissionId, resourceId: resource.resourceId, publicKeyHex: owner.publicKeyHex, network, txid: signed.txid,
@@ -245,14 +308,17 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         }
         // The central path may already have recorded rejection. Release is
         // idempotent; do not skip cleanup merely because the outcome is recorded.
-        if (transactions.read({...scope, submissionId}).state === "rejected") {
-          await manager.release({...scope, allocationId: frozen.managerAllocationId!});
+        const settled = transactions.read({...scope, submissionId}).state;
+        if (plan.dataSignature && plan.paymentId && (settled === "accepted" || settled === "already-known" || settled === "rejected")) {
+          await deps.signedPaymentOutbox.resolve(plan.paymentId, settled === "rejected" ? "failed" : settled === "already-known" ? "already_known" : "accepted")
+            .catch(error => console.warn("Staged payment outcome write failed", error));
         }
+        if (settled === "rejected") await manager.release({...scope, allocationId: frozen.managerAllocationId!});
         return mapTransferResult(result, signed, submissionId);
       } catch (error) {
         try {
           const state = transactions.read({...scope, submissionId: plan.submissionId}).state;
-          if (state === "prepared" || (!dispatchAttempted && (state === "signing" || state === "signed")) || state === "cancelled" || state === "rejected") {
+          if (state === "prepared" || (signingStarted && !exactRetained && !dispatchAttempted && (state === "signing" || state === "signed"))) {
             // Seal first so late signer results cannot be dispatched. Only an
             // uncertain broadcast keeps its allocation frozen.
             transactions.cancelUndispatched({...scope, submissionId: plan.submissionId});
@@ -267,7 +333,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
     },
   };
 }
-function mapTransferResult(result: CoordinatorP2pkhBroadcastResult, preview: P2pkhTransferPreview, submissionId: string): P2pkhTransferResult {
+function mapTransferResult(result: CoordinatorP2pkhBroadcastResult, preview: Pick<P2pkhTransferPreview, "rawTxHex" | "txid">, submissionId: string): P2pkhTransferResult {
   const common = { rawTxHex: preview.rawTxHex, submissionId, localInputClaimIds: [], attempts: 1 };
   if (result.status === "isolated") return { ...common, status: "isolated", txid: result.txid, error: result.reason, reason: result.providerCode === "woc-tx-rejected" ? "transaction-rejected" : "isolated" };
   if (result.status === "not-dispatched") return { ...common, status: "not-dispatched", txid: preview.txid, error: result.reason,

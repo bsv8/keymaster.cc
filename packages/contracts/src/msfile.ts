@@ -972,6 +972,14 @@ export interface MsFileService {
   cancelBitfsDemand?(seedHashHex: string): Promise<void>;
 
   readonly connect: MsFileConnectGateway;
+  readonly connectContent?: {
+    sellerStatus(): { ready: boolean };
+    importFile(input: import("keymaster-connect/protocol").MsFileImportParams, signal?: AbortSignal): Promise<{ seedHashHex: string }>;
+    readLocal(seedHashHex: string, signal?: AbortSignal): Promise<import("keymaster-connect/protocol").MsFileContentResult | undefined>;
+    discover(seedHashHex: string, signal?: AbortSignal): Promise<MsFileBitfsDemandSnapshot>;
+    snapshot(seedHashHex: string, signal?: AbortSignal): Promise<MsFileBitfsDemandSnapshot>;
+    purchase(seedHashHex: string, quote: MsFileBitfsQuoteView, signal?: AbortSignal): Promise<MsFileBitfsDemandSnapshot>;
+  };
 }
 
 export const MSFILE_SERVICE_CAPABILITY = defineCapability<MsFileService>({

@@ -78,13 +78,16 @@ export function createP2pkhWorkerOperations(ports: P2pkhWorkerOperationPorts) {
       const evidence = createWorkerProtocolEvidence(ports.storage()), protocol = await evidence.getProtocolSubmission(scope.submissionId);
       if (protocol) await evidence.putProtocolSubmission({...protocol, status: "broadcast-pending-woc", updatedAt: new Date().toISOString()});
      } catch (error) {console.warn("Successful protocol submission audit failed", error);}
-    } else if (outcome?.status === "not-dispatched" || outcome?.providerCode === "woc-tx-rejected") {
+    } else if (retained.state !== "unknown" && (outcome?.status === "not-dispatched" || outcome?.providerCode === "woc-tx-rejected")) {
      transactions.outcome({...scope, state: "rejected"});
      const evidence = createWorkerProtocolEvidence(ports.storage()), protocol = await evidence.getProtocolSubmission(scope.submissionId);
      if (protocol) await evidence.putProtocolSubmission({...protocol, status: "rejected", droppedReason: outcome.providerCode === "woc-tx-rejected" ? "transaction-rejected" : "not-dispatched", updatedAt: new Date().toISOString()});
      await manager.release({...request, allocationId: submission.managerAllocationId});
     } else {
      transactions.outcome({...scope, state: "unknown"});
+     if (retained.state === "unknown") {
+       return {requestId, sessionEpoch: epoch(), ack: {status: "ok"}, operationResult: {status: "isolated", txid: retained.txid, reason: "prior-dispatch-unresolved"}};
+     }
     }
     ports.changed({type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "balance", "submission"]});
     return response;
