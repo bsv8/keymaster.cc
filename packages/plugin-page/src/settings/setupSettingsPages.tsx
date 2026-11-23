@@ -5,12 +5,20 @@ import { PAGE_UI_REGISTRY_CAPABILITY, BUSINESS_REGISTRY_CAPABILITY, BREADCRUMB_R
 import { SettingsDiagnosticsProvider } from "./SettingsDiagnosticsContext.js";
 import { PluginManagerPage } from "./PluginManagerPage.js";
 import { SystemStatusPage } from "./SystemStatusPage.js";
+import { AppearanceSettingsPage } from "./AppearanceSettingsPage.js";
+
+const appearanceLabel = { key: "settings.appearance.title", fallback: "Appearance" };
 const settingsBusiness: import("@keymaster/contracts").PluginBusinessContribution = {
   domains: [{
     id: "settings",
     label: { key: "settings.business.domain", fallback: "Settings" },
     order: 900,
     features: [{
+      id: "settings.appearance",
+      label: appearanceLabel,
+      order: 10,
+      entry: { path: "/settings/appearance", routeId: "settings.appearance.page" }
+    }, {
       id: "settings.plugins",
       label: { key: "settings.business.plugins", fallback: "Plugin settings" },
       order: 40,
@@ -28,9 +36,15 @@ const settingsBusiness: import("@keymaster/contracts").PluginBusinessContributio
 
 /** Page 自己持有通用设置容器和诊断视图；贡献块仍由业务提供方渲染。 */
 export function setupSettingsPages(ctx: PluginContext) {
-
-
-
+    const Appearance = bindPageUi(ctx, AppearanceSettingsPage);
+    ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope).view.register({
+      id: "settings.appearance.page", path: "/settings/appearance", kind: "page", settingsPlacement: "embedded",
+      label: appearanceLabel, render: () => createElement(Appearance),
+    });
+    ctx.capability(BREADCRUMB_REGISTRY_CAPABILITY).register({
+      id: "settings.appearance.crumbs", order: 190, match: path => path === "/settings/appearance",
+      resolve: () => [{ label: { key: "settings.crumb.settings", fallback: "Settings" } }, { label: appearanceLabel }],
+    });
     ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope).view.register({
       id: "settings.system-status.page", path: "/settings/system-status",
       kind: "page", settingsPlacement: "embedded",

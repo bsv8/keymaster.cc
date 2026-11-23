@@ -36,6 +36,7 @@ import { applyInitialTheme } from "@keymaster/plugin-page";
 import { installInsecureContextCryptoFallback } from "@keymaster/plugin-vault";
 import "./shims/buffer.js";
 import "./styles/global.css";
+import "./styles/appearance.css";
 import "./styles/plugins.css";
 import "./styles/pi-wallet.css";
 
