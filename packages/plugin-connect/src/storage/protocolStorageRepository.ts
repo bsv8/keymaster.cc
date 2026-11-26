@@ -4,7 +4,7 @@ import { sameNetworkIdentity } from "@keymaster/contracts";
 import type {
   BorrowedModuleFileStore, ConnectSessionRecord, ProtocolCommandRecord, ProtocolFeePoolDeliveryRecord,
   ProtocolFeePoolRecord, ProtocolConnectPaymentRecord, ProtocolOriginSettingsRecord, ConnectStorageRepository,
-  ApplicationConnectionEvent, ConnectedApplication, ProtocolMethod, ApplicationOpenMode,
+  ApplicationConnectionEvent, ConnectedApplication, ProtocolMethod, ApplicationOpenMode, ConnectMsFileReadRecord,
 } from "@keymaster/contracts";
 
 export const CONNECT_STORAGE_VERSION = 1;
@@ -102,6 +102,15 @@ export function openConnectApplicationRepository(stores: ConnectStorageStores): 
     return (data.mode === "iframe" || data.mode === "popup") && [data.applications, data.events, data.permissions, data.origins, data.feePools, data.deliveries, data.payments].every(recordArray);
   });
   const commands = document<ProtocolCommandRecord[]>(stores.commandHistory, "command-history.json", () => [], (value): value is ProtocolCommandRecord[] => recordArray(value) && value.every(row => typeof row.id === "string" && typeof row.updatedAt === "number"));
+  type ReadRecord = { status?: ConnectMsFileReadRecord };
+  function readOperation(key: string) {
+    if (!/^[0-9a-f]{64}$/u.test(key)) throw new Error("Invalid file operation key");
+    return document<ReadRecord>(stores.durablePolicy, `msfile-read-operations/${key}.json`, () => ({}), (value): value is ReadRecord => {
+      if (!value || typeof value !== "object") return false;
+      const status = (value as ReadRecord).status;
+      return Boolean(status && typeof status.clientRequestId === "string" && typeof status.seedHashHex === "string" && typeof status.phase === "string");
+    });
+  }
   const sessions = document<ConnectSessionRecord[]>(stores.sessions, "sessions.json", () => [], (value): value is ConnectSessionRecord[] => recordArray(value) && value.every(row => typeof row.sessionId === "string" && typeof row.appPublicKeyHex === "string" && typeof row.authorizationId === "string"));
   const sortedCommands = async () => (await commands.read()).value.sort((a,b) => b.updatedAt-a.updatedAt);
   const repository: ConnectStorageRepository = {
@@ -159,6 +168,22 @@ export function openConnectApplicationRepository(stores: ConnectStorageStores): 
     async putConnectPayment(record) { await policy.update(data => upsert(data.payments,record,row => row.key===record.key)); },
     async putConnectPaymentIfRevision(record,revision) { await policy.update(data => upsert(data.payments,record,row => row.key===record.key), { ifRevision: revision }); },
     listConnectPaymentsByOrigin: async origin => (await policy.read()).value.payments.filter(row => row.origin===origin),
+    claimConnectRead(key, status) {
+      return readOperation(key).update(row => {
+        if (row.status) return row.status;
+        row.status = status;
+        return undefined;
+      }, { shouldWrite: existing => existing === undefined });
+    },
+    getConnectRead: async key => (await readOperation(key).read()).value.status,
+    async putConnectRead(key, status) {
+      await readOperation(key).update(row => {
+        if (!row.status || row.status.clientRequestId !== status.clientRequestId || row.status.seedHashHex !== status.seedHashHex) {
+          throw new Error("Unknown file operation");
+        }
+        row.status = status;
+      });
+    },
     async putConnectSession(record) {
       if (!record.appPublicKeyHex || !record.authorizationId) throw new Error("Verified App identity required");
       await sessions.update(rows => upsert(rows,record,row => row.sessionId===record.sessionId));

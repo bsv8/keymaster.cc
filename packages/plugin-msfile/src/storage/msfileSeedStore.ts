@@ -711,6 +711,49 @@ export async function inspectLocalMsFileSeed(input: {
 }
 
 /** 从 local MSFile 读取并验证一个 Seed，不加载 Block 内容。 */
+export async function readLocalMsFileRange(input: {
+  store: BorrowedModuleFileStore;
+  seedHashHex: string;
+  offset: number;
+  length: number;
+  signal: AbortSignal;
+}): Promise<{ fileSizeBytes: number; mediaType: string; bytes?: Uint8Array } | undefined> {
+  const { store, seedHashHex, offset, length, signal } = input;
+  const metaBytes = await getFile(store, metaPath(seedHashHex), signal);
+  if (!metaBytes) return undefined;
+  const meta = parseMsFileSeedMeta(metaBytes, seedHashHex);
+  const seed = await getFile(store, seedPath(seedHashHex), signal);
+  if (!seed) return undefined;
+  const info = await verifySeed([seed], Digest.fromHex(seedHashHex), signal);
+  const blockSize = Number(BLOCK_SIZE_BIGINT);
+  const fileSizeBytes = Number(meta.fileSizeBytes);
+  if (!Number.isSafeInteger(fileSizeBytes) || Math.ceil(fileSizeBytes / blockSize) !== Number(info.blockCount)) {
+    fail("integrity", "BitFS 文件长度与 Seed 不匹配");
+  }
+  const descriptor = { fileSizeBytes, mediaType: meta.mediaType };
+  const end = Math.min(offset + length, fileSizeBytes);
+  if (offset >= end) return descriptor;
+  const first = Math.floor(offset / blockSize);
+  const last = Math.floor((end - 1) / blockSize);
+  const bytes = new Uint8Array(end - offset);
+  const seedAccess = createSeedRandomAccess(seed);
+  let written = 0;
+  for (let index = first; index <= last; index++) {
+    const hash = await readBlockHash(seedAccess, info.seedSize, BigInt(index), signal);
+    const block = await getFile(store, blockPath(seedHashHex, hash.toHex()), signal);
+    if (!block) return undefined;
+    const base = index * blockSize;
+    if (block.length !== Math.min(blockSize, fileSizeBytes - base)) fail("integrity", "BitFS Block 长度无效");
+    verifyBlock(block, hash, signal);
+    const part = block.subarray(Math.max(0, offset - base), Math.min(block.length, end - base));
+    bytes.set(part, written);
+    written += part.length;
+  }
+  signal.throwIfAborted();
+  return { ...descriptor, bytes };
+}
+
+/** 从 local MSFile 读取并验证一个 Seed，不加载 Block 内容。 */
 export async function readLocalMsFileSeed(input: {
   /** 当前 Owner 的 `msfiles/` 文件根。 */
   store: BorrowedModuleFileStore;

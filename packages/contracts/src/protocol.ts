@@ -1120,6 +1120,7 @@ export interface ConnectSessionRecord {
  *     实际上跑了一次 `identity.get` 取真值快照，存进 session 持久化。
  */
 export interface ConnectLoginParams {
+  loginChallenge?: string;
   /** 人类可读确认文案。 */
   text: string;
   /**
@@ -1139,6 +1140,7 @@ export interface ConnectLoginParams {
  * 任何 key 域 surrogate id（硬切换 002 后连内部借用句柄也按 hex 走）。
  */
 export interface ConnectLoginResult {
+  loginProof?: { envelope: BinaryField; signature: BinaryField };
   authorizationId: string;
   networkIdentity: import("./networkIdentity.js").NetworkIdentity;
   /** 钱包压缩公钥；后续请求用它定位身份。 */
@@ -1222,6 +1224,7 @@ export interface ConnectAuthSnapshot {
  *   - 成功结果与登录一致，业务只使用接收端签发的当前绑定。
  */
 export interface ConnectLaunchParams {
+  loginChallenge?: string;
   /** 由 launcher 写入 client app 启动 URL 的 launchToken。一次性消费。 */
   launchToken: string;
   /** 与 launcher 预建 session 绑定的完整签名 proof。 */
@@ -1229,6 +1232,7 @@ export interface ConnectLaunchParams {
 
 /** `connect.launch` 成功结果（与 `connect.login` 对齐）。 */
 export interface ConnectLaunchResult {
+  loginProof?: { envelope: BinaryField; signature: BinaryField };
   authorizationId: string;
   networkIdentity: import("./networkIdentity.js").NetworkIdentity;
   walletPublicKeyHex: string;
@@ -1492,6 +1496,7 @@ export interface MethodParamsMap {
   "chain.get_height": ConnectPublic.MethodParamsMap["chain.get_height"] & { walletPublicKeyHex: string };
   "chain.list_script_history": ConnectPublic.MethodParamsMap["chain.list_script_history"] & { walletPublicKeyHex: string };
   "chain.get_transaction": ConnectPublic.MethodParamsMap["chain.get_transaction"] & { walletPublicKeyHex: string };
+  "chain.get_transactions": ConnectPublic.MethodParamsMap["chain.get_transactions"] & { walletPublicKeyHex: string };
   "chain.list_script_unspent": ConnectPublic.MethodParamsMap["chain.list_script_unspent"] & { walletPublicKeyHex: string };
   "chain.broadcast": ConnectPublic.MethodParamsMap["chain.broadcast"] & { walletPublicKeyHex: string };
   "application.key": ConnectPublic.MethodParamsMap["application.key"] & { walletPublicKeyHex: string };
@@ -1500,6 +1505,10 @@ export interface MethodParamsMap {
   "msfile.seller.status": ConnectPublic.MethodParamsMap["msfile.seller.status"] & { walletPublicKeyHex: string };
   "msfile.import": ConnectPublic.MethodParamsMap["msfile.import"] & { walletPublicKeyHex: string };
   "msfile.content.read": ConnectPublic.MethodParamsMap["msfile.content.read"] & { walletPublicKeyHex: string };
+  "msfile.content.status": ConnectPublic.MethodParamsMap["msfile.content.status"] & { walletPublicKeyHex: string };
+  "msfile.content.open": ConnectPublic.MethodParamsMap["msfile.content.open"] & { walletPublicKeyHex: string };
+  "msfile.content.price": ConnectPublic.MethodParamsMap["msfile.content.price"] & { walletPublicKeyHex: string };
+  "msfile.content.range": ConnectPublic.MethodParamsMap["msfile.content.range"] & { walletPublicKeyHex: string };
   "feepool.prepare": FeepoolPrepareParams;
   "feepool.commit": FeepoolCommitParams;
   "connect.login": ConnectLoginParams;
@@ -1531,6 +1540,7 @@ export interface MethodResultMap {
   "chain.get_height": ConnectPublic.MethodResultMap["chain.get_height"];
   "chain.list_script_history": ConnectPublic.MethodResultMap["chain.list_script_history"];
   "chain.get_transaction": ConnectPublic.MethodResultMap["chain.get_transaction"];
+  "chain.get_transactions": ConnectPublic.MethodResultMap["chain.get_transactions"];
   "chain.list_script_unspent": ConnectPublic.MethodResultMap["chain.list_script_unspent"];
   "chain.broadcast": ConnectPublic.MethodResultMap["chain.broadcast"];
   "application.key": ConnectPublic.MethodResultMap["application.key"];
@@ -1539,6 +1549,10 @@ export interface MethodResultMap {
   "msfile.seller.status": ConnectPublic.MethodResultMap["msfile.seller.status"];
   "msfile.import": ConnectPublic.MethodResultMap["msfile.import"];
   "msfile.content.read": ConnectPublic.MethodResultMap["msfile.content.read"];
+  "msfile.content.status": ConnectPublic.MethodResultMap["msfile.content.status"];
+  "msfile.content.open": ConnectPublic.MethodResultMap["msfile.content.open"];
+  "msfile.content.price": ConnectPublic.MethodResultMap["msfile.content.price"];
+  "msfile.content.range": ConnectPublic.MethodResultMap["msfile.content.range"];
   "feepool.prepare": FeepoolPrepareResult;
   "feepool.commit": FeepoolCommitResult;
   "connect.login": ConnectLoginResult;
@@ -1821,6 +1835,12 @@ export interface ProtocolLockSummary {
  */
 export type ProtocolPopupLockState = "locked" | "unlocked";
 
+/** Wallet execution and recovery state stored for a Connect file read. */
+export interface ConnectMsFileReadRecord extends Omit<ConnectPublic.MsFileReadStatus, "phase" | "error"> {
+  phase: "accepted" | "awaiting-approval" | "discovering" | "downloading" | "available" | "interrupted" | "failed" | "cancelled";
+  error?: ProtocolError;
+}
+
 /**
  * 协议存储 K-V 抽象。实现走 platform K-V repository；测试用 `fake-indexeddb`。
  *
@@ -1925,6 +1945,9 @@ export interface ConnectStorageRepository {
   /** CAS write used for monotonic payment status/fact updates. */
   putConnectPaymentIfRevision?(record: ProtocolConnectPaymentRecord, revision: number): Promise<void>;
   listConnectPaymentsByOrigin?(origin: string): Promise<ProtocolConnectPaymentRecord[]>;
+  claimConnectRead?(key: string, status: ConnectMsFileReadRecord): Promise<ConnectMsFileReadRecord | undefined>;
+  getConnectRead?(key: string): Promise<ConnectMsFileReadRecord | undefined>;
+  putConnectRead?(key: string, status: ConnectMsFileReadRecord): Promise<void>;
 
   putLaunchToken?(record: LaunchTokenRecord): Promise<void>;
   /** 按 token 读一条记录；未消费时返回，未命中返回 null。 */

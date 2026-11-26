@@ -13,15 +13,15 @@ const packageName = "webloom-framework";
 const registry = process.env.WEBLOOM_NPM_REGISTRY ?? process.env.npm_config_registry ?? "https://registry.npmjs.org/";
 const root = mkdtempSync(join(tmpdir(), "keymaster-webloom-registry-consumer-"));
 
-function runNpm(args) {
-  const result = spawnSync("npm", args, {
+function runPnpm(args) {
+  const result = spawnSync("pnpm", args, {
     cwd: root,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
   if (result.status !== 0) {
     const detail = String(result.stderr ?? result.stdout ?? "").trim().replace(/\s+/gu, " ");
-    throw new Error(detail || `npm exited with ${String(result.status)}`);
+    throw new Error(detail || `pnpm exited with ${String(result.status)}`);
   }
 }
 
@@ -36,20 +36,17 @@ try {
     },
   }, null, 2)}\n`);
 
-  runNpm([
+  runPnpm([
     "install",
-    "--package-lock-only",
+    "--lockfile-only",
     "--ignore-scripts",
-    "--no-audit",
-    "--no-fund",
     "--registry",
     registry,
   ]);
-  runNpm([
-    "ci",
+  runPnpm([
+    "install",
+    "--frozen-lockfile",
     "--ignore-scripts",
-    "--no-audit",
-    "--no-fund",
     "--registry",
     registry,
   ]);

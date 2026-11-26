@@ -205,6 +205,8 @@ export interface ProtocolFundingPlanRequest {
   amountSatoshis: number;
   feeRateSatoshisPerKb: number;
   outputs?: Array<{ scriptHex: string; value: string }>;
+  /** 为一次新的协议开池生成独立交易，同一提交仍按原交易重试。 */
+  distinctTransaction?: boolean;
 }
 
 /**

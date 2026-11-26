@@ -9,9 +9,13 @@ export const APPLICATION_OPERATION_LABELS: Record<ProtocolMethod, string> = {
   "feepool.prepare": "准备服务付款", "feepool.commit": "提交服务付款",
   "application.key": "获取应用密钥公钥", "application.sign_message": "使用应用密钥签署消息", "application.sign_payment": "使用应用密钥签署付款",
   "chain.get_height": "查询区块高度", "chain.list_script_history": "查询脚本交易历史",
-  "chain.get_transaction": "查询链上交易", "chain.list_script_unspent": "查询脚本未花费输出", "chain.broadcast": "广播交易",
+  "chain.get_transaction": "查询链上交易", "chain.get_transactions": "批量查询链上交易", "chain.list_script_unspent": "查询脚本未花费输出", "chain.broadcast": "广播交易",
   "channel.publish": "发布消息", "channel.subscription_set": "更新订阅", "msfile.stat": "查看文件", "msfile.seed.read": "读取文件信息", "msfile.block.read": "读取文件内容",
   "msfile.seller.status": "查询文件售卖状态", "msfile.import": "导入并出售文件", "msfile.content.read": "读取文件（本地或购买）",
+  "msfile.content.status": "查询文件读取状态",
+  "msfile.content.open": "打开文件读取任务",
+  "msfile.content.price": "查询或调整下载任务块价",
+  "msfile.content.range": "读取文件范围",
 };
 export function applicationCommandTerminal(command: ProtocolCommandRecord): boolean {
   return ["approved", "rejected", "failed", "timed_out"].includes(command.phase);

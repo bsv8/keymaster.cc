@@ -117,7 +117,7 @@ export class MsFileServiceProxy implements MsFileService {
     globalSettings: null,
     ...MSFILE_READ_CONCURRENCY_RECOMMENDED,
     sellerSettings: { ...MSFILE_SELLER_SETTINGS_DEFAULT, supportedArbiterPublicKeys: [] },
-    sellerRuntimeStatus: "disabled",
+    sellerRuntimeStatus: "waiting-unlock",
     pendingApprovals: [],
   };
   readonly #listeners = new Set<() => void>();
@@ -140,10 +140,10 @@ export class MsFileServiceProxy implements MsFileService {
       const next: StateEvent = {
         ...event,
         ...concurrency,
-        // 旧 Worker baseline 没有卖方字段时采用关闭态，避免设置回读与
+        // 缺少运行快照时使用初始状态，避免设置回读与
         // baseline 在 undefined/default 之间反复切换并触发通知循环。
         sellerSettings: event.sellerSettings ?? { ...MSFILE_SELLER_SETTINGS_DEFAULT, supportedArbiterPublicKeys: [] },
-        sellerRuntimeStatus: event.sellerRuntimeStatus ?? "disabled",
+        sellerRuntimeStatus: event.sellerRuntimeStatus ?? "waiting-unlock",
       };
       const changed = !isSameStateEvent(this.#current, next);
       this.#current = next;

@@ -555,8 +555,8 @@ export function createBitfsBuyerTask(deps: BitfsBuyerTaskDeps): BitfsBuyerTask {
     },
 
     async cancelUnfundedOpening(sessionId) {
-      const session = await readSession(sessionId);
-      if (session.phase !== "cancel-opening" && session.phase !== "cancelled") {
+      let session = await readSession(sessionId);
+      if (!["opening-presign", "cancel-opening", "cancelled"].includes(session.phase)) {
         throw new Error("当前买方会话没有已保存的未开池取消意图");
       }
       if (session.evidence.includes("kind3-opening-response") || session.evidence.includes("kind4-funding-delivery")
@@ -592,12 +592,16 @@ export function createBitfsBuyerTask(deps: BitfsBuyerTaskDeps): BitfsBuyerTask {
       const parsed = rawFunding ? deps.parseTransaction(toHex(rawFunding), plan.txid) : undefined;
       if (parsed && parsed.canonicalTxid !== plan.txid) throw new Error("待取消 FundingTx 原文与专款账本 txid 不一致");
       const outbox = await deps.transactions.getTransactionRecord(plan.txid);
-      if (outbox && outbox.state !== "prepared") {
+      if (outbox && (outbox.state !== "prepared" || outbox.attempts !== 0)) {
         throw new Error("FundingTx 已进入派发或链上核对阶段；不能按未开池取消释放资金");
       }
       if (!plan.p2pkhSubmissionId) throw new Error("FundingTx 缺少 P2PKH 提交编号；专款输入继续受保护");
       if (plan.state === "result-unknown" || plan.state === "observed") {
         throw new Error("FundingTx 已进入派发或链上核对阶段；专款输入继续受保护");
+      }
+      if (session.phase === "opening-presign") {
+        deps.assertCurrentContext();
+        session = await deps.sessions.update(sessionId, session.revision, { phase: "cancel-opening" }, deps.nowMs());
       }
 
       // P2PKH 释放会先把提交标为不可派发；账本稍后释放时，即使中途退出也仍能安全重试。

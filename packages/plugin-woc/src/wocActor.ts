@@ -788,13 +788,16 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
       fn: async signal => parseWocFeeRecommendation(await fetchJson<unknown>(network, "/feerecommendation", { method: "GET" }, signal, opts.timeoutMs)) });
   }
 
-  async function getChainHeight(network: BsvNetwork, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<number> {
+  async function getChainTip(network: BsvNetwork, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }) {
     const raw = await readWithRetry(network, "/chain/info", WOC_MSG.CHAIN_HEIGHT, opts,
       signal => fetchJson<unknown>(network, "/chain/info", { method: "GET" }, signal, opts.timeoutMs));
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("WOC chain info response is invalid");
-    const value = (raw as Record<string, unknown>).blocks ?? (raw as Record<string, unknown>).height;
-    if (!Number.isSafeInteger(value) || (value as number) < 0) throw new Error("WOC chain info response has no valid height");
-    return value as number;
+    const info = raw as Record<string, unknown>;
+    const height = info.blocks ?? info.height;
+    if (typeof height !== "number" || !Number.isSafeInteger(height) || height < 0) throw new Error("WOC chain info response has no valid height");
+    const hash = info.bestblockhash;
+    if (typeof hash !== "string" || !/^[0-9a-f]{64}$/iu.test(hash)) throw new Error("WOC chain info response has no valid best block hash");
+    return { height, blockHash: hash.toLowerCase() };
   }
 
   function getSpentOutput(network: BsvNetwork, txid: string, vout: number, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<WocSpentOutput | null> {
@@ -970,7 +973,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
       case WOC_MSG.FEE_RECOMMENDATION: return getFeeRecommendation((payload as WocChainHeightPayload).network, opts);
       case WOC_MSG.CHAIN_HEIGHT: {
         const p = payload as WocChainHeightPayload;
-        return getChainHeight(p.network, opts);
+        return getChainTip(p.network, opts);
       }
       case WOC_MSG.TX_SPENT_OUTPUTS: {
         const p = payload as WocSpentOutputsPayload;
@@ -984,6 +987,13 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         const p = payload as WocCommonPayload & { network: BsvNetwork; path: string };
         return readWithRetry(p.network, p.path, type, opts,
           requestSignal => fetchJson(p.network, p.path, { method: "GET" }, requestSignal, opts.timeoutMs, true));
+      }
+      case WOC_MSG.CHAIN_TRANSACTION_BATCH: {
+        const p = payload as WocCommonPayload & { network: BsvNetwork; txids: string[]; mode: "raw" | "status" };
+        const path = p.mode === "raw" ? "/txs/hex" : "/txs/status";
+        return readWithRetry(p.network, path, type, opts, requestSignal => fetchJson(p.network, path, {
+          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ txids: p.txids }),
+        }, requestSignal, opts.timeoutMs));
       }
       case WOC_MSG.TX_RAW: {
         const p = payload as WocRawTransactionPayload;
@@ -1025,6 +1035,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
       WOC_MSG.TX_SPENT_OUTPUT,
       WOC_MSG.TX_SPENT_OUTPUTS,
       WOC_MSG.CHAIN_READ,
+      WOC_MSG.CHAIN_TRANSACTION_BATCH,
       WOC_MSG.TX_RAW,
       WOC_MSG.TX_BROADCAST,
       WOC_MSG.STAS_LIST_TOKENS,

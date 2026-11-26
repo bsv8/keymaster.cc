@@ -102,25 +102,10 @@ export type CollectorSha256 = (input: Uint8Array) => Promise<Uint8Array>;
 
 /** 默认 gzip 能力（CompressionStream，Worker/页面可用）。 */
 export async function defaultCollectorGzip(canonical: Uint8Array): Promise<Uint8Array> {
-  const stream = new CompressionStream("gzip");
-  const writer = stream.writable.getWriter();
-  await writer.write(canonical as BufferSource);
-  await writer.close();
-  const chunks: Uint8Array[] = [];
-  const reader = stream.readable.getReader();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-  }
-  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return out;
+  // 消费可读端时再向压缩流写入，避免 Chromium 的背压阻塞 write/close。
+  const source = new Blob([Uint8Array.from(canonical)]).stream();
+  const compressed = source.pipeThrough(new CompressionStream("gzip"));
+  return new Uint8Array(await new Response(compressed).arrayBuffer());
 }
 
 /** 默认 SHA-256 能力（SubtleCrypto）。 */

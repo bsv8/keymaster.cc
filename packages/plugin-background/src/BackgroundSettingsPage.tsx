@@ -447,13 +447,6 @@ function CustomIntervalEditor({
   );
 }
 
-/**
- * 当前区块链高度。
- *
- * 设计缘由：这里的值来自 `chain.height` 资源，底层是 Coordinator 单点广播的
- * `chain.height` 主题；本页通过 Resource Store 订阅，等价于 ChainHeightReader
- * 的订阅/退订，因此后台同步任务每成功一次，本区块就自动重渲染一次。
- */
 function ChainFeeReadout() {
   const { t } = usePluginI18n();
   const reader = useBackgroundResources();
@@ -466,6 +459,7 @@ function ChainFeeReadout() {
   </section>;
 }
 
+/** 通过 Resource Store 订阅 Coordinator 广播的高度变化。 */
 function ChainHeightReadout() {
   const { t } = usePluginI18n();
   const resources = useBackgroundResources();

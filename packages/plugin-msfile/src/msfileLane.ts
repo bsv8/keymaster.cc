@@ -124,13 +124,24 @@ export class MsFileP2pLane implements WindowP2pExecutorLane {
   async handle(operation: unknown, signal: AbortSignal): Promise<unknown> {
     const runtime = this.runtime;
     const value = operation as MsFileP2pLaneOperation;
+    if (value.type === "bitfs-connect-range") {
+      if (!this.buyer) throw new Error("BitFS buyer window is unavailable");
+      const { seedHashHex, taskId, offset, length } = value;
+      const { bytes, ...descriptor } = await this.buyer.readPlaybackRange(seedHashHex, taskId, offset, length, signal);
+      return { type: "ok", ...descriptor, ...(bytes ? { content: bytes } : {}) };
+    }
+    if (value.type === "bitfs-connect-price") {
+      if (!this.buyer) throw new Error("BitFS buyer window is unavailable");
+      await this.buyer.setDownloadPrice(value.seedHashHex, value.taskId, value.maxFullBlockPriceSatoshis, signal);
+      return { type: "ok" };
+    }
     if (value.type === "bitfs-connect-buyer") {
       const buyer = this.buyer;
       if (!buyer) throw new Error("BitFS buyer window is unavailable");
       signal.throwIfAborted();
-      if (value.action === "discover") return buyer.publishBitfsDemand(value.seedHashHex);
-      if (value.action === "purchase") return buyer.startBitfsPurchase(value.seedHashHex, value.sessionId, value.maxFullBlockPriceSatoshis);
-      return buyer.getBitfsDemand(value.seedHashHex);
+      if (value.action === "discover") return buyer.publishBitfsDemand(value.seedHashHex, value.manualPurchase);
+      if (value.action === "purchase") return buyer.startBitfsPurchase(value.seedHashHex, value.sessionId, value.maxFullBlockPriceSatoshis, value.requireNew);
+      return buyer.getBitfsDemand(value.seedHashHex, value.taskId);
     }
     if (value.type === "bitfs-arbitration-info") {
       if (!this.arbitration?.info) throw new Error("仲裁网络未就绪");

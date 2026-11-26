@@ -43,7 +43,7 @@ export function createMsfileWorkerPlugin(ports: {
     const store = files.bind(context.consumer, context.scope, "");
     const connectContent = createConnectContent(store, ports.bridge, () => {
       const state = runtime.service.describeState();
-      return state.sellerSettings.sellerEnabled && (state.sellerRuntimeStatus === "ready" || state.sellerRuntimeStatus === "selling");
+      return state.sellerRuntimeStatus === "ready" || state.sellerRuntimeStatus === "selling";
     }, ports.refreshSellerIndex);
     const service = createMsFileWorkerBitfsService(runtime.service, async control => {
       assertOwner();

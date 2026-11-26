@@ -18,6 +18,7 @@ import { createConnectChainQueries } from "./connectChainQueries.js";
 
 import type {
   BsvNetwork,
+  ChainTip,
   WocBalanceResponse,
   WocBroadcastResult,
   WocConfig,
@@ -50,6 +51,8 @@ import {
 } from "./wocMessages.js";
 
 export interface WocServiceHandle extends WocQueryTransport, WocWorkerBroadcastService {
+  /** 钱包后台高度同步使用的节点查询。 */
+  getChainTip(network: BsvNetwork, options?: WocRequestOptions): Promise<ChainTip>;
   /** 保留兼容的异步就绪钩子；配置已由 Coordinator bootstrap 提供。 */
   ready(): Promise<void>;
   /** 停止调度器(用于测试)。 */
@@ -97,7 +100,10 @@ export function createWocService(options: CreateWocServiceOptions): WocServiceHa
     ...createConnectChainQueries(
       (network, path, opts) => messageBus.request(WOC_MSG.CHAIN_READ, {
         network, path, priority: opts?.priority, timeoutMs: opts?.timeoutMs,
-      }, dispatchOptions(opts)), getRawTransaction),
+      }, dispatchOptions(opts)), getRawTransaction,
+      (network, input, opts) => messageBus.request(WOC_MSG.CHAIN_TRANSACTION_BATCH, {
+        network, ...input, priority: opts?.priority, timeoutMs: opts?.timeoutMs,
+      }, dispatchOptions(opts))),
     getRawTransaction,
     ready: () => actor.ready(),
     getConfig: () => actor.getConfig(),
@@ -256,14 +262,14 @@ export function createWocService(options: CreateWocServiceOptions): WocServiceHa
       return messageBus.request<WocChainHeightPayload, import("@keymaster/contracts").WocFeeRecommendation>(WOC_MSG.FEE_RECOMMENDATION, payload, dispatchOptions(opts));
     },
 
-    async getChainHeight(network: BsvNetwork, opts?: WocRequestOptions): Promise<number> {
+    async getChainTip(network: BsvNetwork, opts?: WocRequestOptions): Promise<ChainTip> {
       const payload: WocChainHeightPayload = {
         network,
         priority: opts?.priority ?? "background",
         signal: opts?.signal,
         timeoutMs: opts?.timeoutMs,
       };
-      return messageBus.request<WocChainHeightPayload, number>(WOC_MSG.CHAIN_HEIGHT, payload, dispatchOptions(opts));
+      return messageBus.request<WocChainHeightPayload, ChainTip>(WOC_MSG.CHAIN_HEIGHT, payload, dispatchOptions(opts));
     },
 
     async getSpentOutput(network: BsvNetwork, txid: string, vout: number, opts?: WocRequestOptions): Promise<WocSpentOutput | null> {

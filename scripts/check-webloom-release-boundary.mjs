@@ -57,8 +57,8 @@ if (existsSync(lockfile)) {
   if (!resolution) {
     violations.push(`${lockfile}: 缺少 ${packageName}@${releaseVersion} 的 frozen registry integrity`);
   } else {
-    const npmView = (field) => {
-      const result = spawnSync("npm", [
+    const pnpmView = (field) => {
+      const result = spawnSync("pnpm", [
         "view",
         `${packageName}@${releaseVersion}`,
         field,
@@ -68,29 +68,27 @@ if (existsSync(lockfile)) {
       ], { encoding: "utf8" });
       if (result.status !== 0) {
         const detail = String(result.stderr ?? result.stdout ?? "").trim().replace(/\s+/gu, " ");
-        throw new Error(detail || `npm view exited with ${String(result.status)}`);
+        throw new Error(detail || `pnpm view exited with ${String(result.status)}`);
       }
       const raw = String(result.stdout ?? "").trim();
       try {
         const parsed = JSON.parse(raw);
-        // npm 11 returns an array even for a single npm view field; npm 10
-        // returned the scalar directly.  Normalize both forms for the
-        // frozen-registry integrity check.
+        // pnpm view 可能返回数组或标量，统一两种形式后核对发布完整性。
         if (Array.isArray(parsed)) return parsed.length === 1 ? parsed[0] : parsed;
         return parsed;
       } catch { return raw; }
     };
 
     try {
-      const publishedVersion = npmView("version");
+      const publishedVersion = pnpmView("version");
       if (publishedVersion !== releaseVersion) {
         violations.push(`${packageName}@${releaseVersion}: registry ${registry} 返回版本 ${String(publishedVersion)}`);
       }
-      const publishedIntegrity = npmView("dist.integrity");
+      const publishedIntegrity = pnpmView("dist.integrity");
       if (publishedIntegrity !== resolution) {
         violations.push(`${packageName}@${releaseVersion}: lockfile integrity 与 registry dist.integrity 不一致`);
       }
-      const publishedTarball = npmView("dist.tarball");
+      const publishedTarball = pnpmView("dist.tarball");
       if (typeof publishedTarball !== "string" || !/^https?:\/\//u.test(publishedTarball)) {
         violations.push(`${packageName}@${releaseVersion}: registry dist.tarball 不是公开 HTTP(S) 地址`);
       }

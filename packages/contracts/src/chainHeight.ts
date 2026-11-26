@@ -11,35 +11,34 @@
 import { defineCapability } from "webloom-framework";
 import type { BsvNetwork } from "./vault.js";
 
-/** 链高度快照；这是系统内唯一的链高度形态。 */
-export interface ChainHeightSnapshot {
-  /**
-   * 节点报告的最佳链高度。
-   * `available=false` 时为 0，调用方必须先看 available，不得直接使用 height。
-   */
+/** 节点在同一次响应中报告的最佳链高度和区块哈希。 */
+export interface ChainTip {
   height: number;
+  blockHash: string;
+}
+
+/** 调用方先检查 available，再使用链尖数据。 */
+export type ChainHeightSnapshot = {
   /** 该高度所属网络。 */
   network: BsvNetwork;
-  /** 是否存在可信的节点读数；false 表示还没有成功读取过。 */
-  available: boolean;
-  /** 最近一次成功读取的本地时间（Unix 毫秒）；available=false 时省略。 */
+  /** 此快照所对应的成功读取时间（Unix 毫秒）；available=false 时省略。 */
   updatedAtMs?: number;
-  /** 窗口内单调递增版本；只有高度或可用性变化时才递增。 */
+  /** 链尖或可用性变化时递增。 */
   revision: number;
-}
+} & ({ available: true } & ChainTip | { available: false; height: 0; blockHash?: never });
 
 /**
  * 链高度读取器：系统内 get / 订阅 / 退订 的唯一入口。
  *
  * 设计缘由：读取是同步的纯内存操作，订阅不会发起网络请求；真正的网络读取
  * 由后台同步任务按用户设置的间隔完成。因此消费方既能立即拿到当前值，也能在
- * 每次后台同步成功后被动收到更新，而不必各自轮询节点。
+ * 链尖或可用性变化时被动收到更新。
  */
 export interface ChainHeightReader {
   /** 同步读取当前链高度快照；不会触发网络请求。 */
   get(): ChainHeightSnapshot;
   /**
-   * 订阅链高度变化。
+   * 立即收到当前快照，随后在高度、区块哈希或可用性变化时收到新快照。
    * 返回的函数就是退订句柄：调用后该 handler 不再收到任何回调。
    */
   subscribe(handler: (snapshot: ChainHeightSnapshot) => void): () => void;

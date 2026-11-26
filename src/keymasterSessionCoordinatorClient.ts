@@ -1445,6 +1445,9 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         && Number.isSafeInteger(event.chainHeight.height)
         && event.chainHeight.height >= 0
         && typeof event.chainHeight.available === "boolean"
+        && (event.chainHeight.available
+          ? typeof event.chainHeight.blockHash === "string" && /^[0-9a-f]{64}$/u.test(event.chainHeight.blockHash)
+          : event.chainHeight.height === 0 && event.chainHeight.blockHash === undefined)
         && (event.chainHeight.network === "main" || event.chainHeight.network === "test")
         && Number.isSafeInteger(event.chainHeight.revision);
     }

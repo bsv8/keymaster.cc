@@ -1,4 +1,5 @@
 import { createBitfsBuyerWindowRuntime } from "./bitfs/buyerWindowRuntime.js";
+import { configureBitfsDebug } from "./bitfs/debug.js";
 import { createWindowWebRtcInterconnect } from "./bitfs/webrtcInterconnect.js";
 import { installWindowP2pExecutor } from "@keymaster/window-network/window";
 import { MsFileDemandsPage } from "./MsFileDemandsPage.js";
@@ -79,11 +80,9 @@ const resources: I18nPluginResources = {
       "msfile.demands.sellerSettings": "Selling settings",
       "msfile.demands.memory": "Latest 20 verified demands · session memory only",
       "msfile.demands.lastReceived": "Last received",
-      "msfile.demands.selling": "Sell files",
       "msfile.demands.enabled": "Enabled",
       "msfile.demands.disabled": "Disabled",
       "msfile.demands.subscription": "Demand subscription",
-      "msfile.demands.offNotice": "Selling is off. This page does not subscribe; earlier session records remain visible.",
       "msfile.demands.connections": "Broadcast connections",
       "msfile.demands.supplier": "Supplier",
       "msfile.demands.connection": "Connection",
@@ -155,7 +154,7 @@ const resources: I18nPluginResources = {
       "msfile.settings.section.suppliers": "File sources",
       "msfile.settings.section.suppliers.desc": "Choose which suppliers may answer Stat and Read requests.",
       "msfile.settings.section.seller": "Sell local files",
-      "msfile.settings.section.seller.desc": "Control whether this Key may sell complete local files through BitFS.",
+      "msfile.settings.section.seller.desc": "Set BitFS prices and terms for local files.",
       "msfile.settings.section.apps": "App permissions",
       "msfile.settings.section.apps.desc": "Review Connect Apps and define app-specific spending limits.",
       "msfile.settings.overview.label": "Configuration status",
@@ -176,6 +175,7 @@ const resources: I18nPluginResources = {
       "msfile.settings.bitfsBuyer.maxBlockPrice": "Maximum automatic full Block price (satoshis)",
       "msfile.settings.bitfsBuyer.concurrency": "Concurrent file purchases (1–16)",
       "msfile.settings.bitfsBuyer.poolBlocks": "Download scheduler: blocks per fee pool batch (1–64)",
+      "msfile.settings.bitfsBuyer.schedulerSeatsPerSeller": "Download scheduler: parallel seats per seller (1–16)",
       "msfile.settings.bitfsBuyer.schedulerTotalSeats": "Download scheduler: total seats per task (2–16)",
       "msfile.settings.bitfsBuyer.schedulerFloatingSeats": "Download scheduler: floating seats for unmeasured sellers",
       "msfile.settings.bitfsBuyer.schedulerMode": "Download scheduler",
@@ -243,7 +243,6 @@ const resources: I18nPluginResources = {
       "msfile.settings.supplier.save": "Save changes",
       "msfile.settings.supplier.cancel": "Cancel",
       "msfile.settings.supplier.close": "Close",
-      "msfile.settings.seller.enable": "Allow this Key to sell local files",
       "msfile.settings.seller.seedPrice": "Seed sale price (satoshis)",
       "msfile.settings.seller.blockPrice": "Full 256 KiB Block sale price (satoshis)",
       "msfile.settings.seller.quoteLifetime": "Quote lifetime (seconds, 30–86400)",
@@ -252,9 +251,7 @@ const resources: I18nPluginResources = {
       "msfile.settings.seller.minRefundDelayBlocks": "Minimum remaining blocks accepted for buyer pools",
       "msfile.settings.seller.minRefundDelayBlocksHint": "Checked before presigning a new pool. Reject requests below this limit; saved opening responses retain their original evidence.",
       "msfile.settings.seller.save": "Save selling settings",
-      "msfile.settings.seller.warning": "While selling is active, Vault auto-lock is paused but never bypassed. Manual lock still stops selling immediately and clears the in-memory index.",
       "msfile.settings.seller.degraded": "“Dependency unavailable” means the BitFS seller protocol or Window transport is not ready, so no quote will be offered.",
-      "msfile.settings.seller.status.disabled": "Off",
       "msfile.settings.seller.status.waiting-unlock": "Waiting for unlock",
       "msfile.settings.seller.status.waiting-dependency": "Waiting for dependency to become ready",
       "msfile.settings.seller.status.indexing": "Building local index",
@@ -557,11 +554,9 @@ const resources: I18nPluginResources = {
       "msfile.demands.sellerSettings": "出售文件设置",
       "msfile.demands.memory": "最新 20 条已验签需求 · 仅本次会话内存",
       "msfile.demands.lastReceived": "最近收到",
-      "msfile.demands.selling": "出售文件",
       "msfile.demands.enabled": "开启",
       "msfile.demands.disabled": "关闭",
       "msfile.demands.subscription": "需求订阅",
-      "msfile.demands.offNotice": "出售已关闭。本页不会订阅，仍保留本次会话先前听到的需求。",
       "msfile.demands.connections": "广播连接",
       "msfile.demands.supplier": "广播服务",
       "msfile.demands.connection": "连接状态",
@@ -633,7 +628,7 @@ const resources: I18nPluginResources = {
       "msfile.settings.section.suppliers": "文件来源",
       "msfile.settings.section.suppliers.desc": "选择哪些供应商可以响应 Stat 和 Read 请求。",
       "msfile.settings.section.seller": "出售本地文件",
-      "msfile.settings.section.seller.desc": "控制当前 Key 是否可以通过 BitFS 出售完整本地文件。",
+      "msfile.settings.section.seller.desc": "设置 BitFS 本地文件的售价和交易条件。",
       "msfile.settings.section.apps": "应用权限",
       "msfile.settings.section.apps.desc": "查看 Connect App，并为应用设置单独的支付限额。",
       "msfile.settings.overview.label": "配置状态",
@@ -654,6 +649,7 @@ const resources: I18nPluginResources = {
       "msfile.settings.bitfsBuyer.maxBlockPrice": "自动购买完整 Block 最高价（聪）",
       "msfile.settings.bitfsBuyer.concurrency": "同时购买文件任务数（1–16）",
       "msfile.settings.bitfsBuyer.poolBlocks": "调度器：一个费用池的批次块数（1–64）",
+      "msfile.settings.bitfsBuyer.schedulerSeatsPerSeller": "调度器：每个卖家的并行下载席位（1–16）",
       "msfile.settings.bitfsBuyer.schedulerTotalSeats": "调度器：任务内总席位（2–16）",
       "msfile.settings.bitfsBuyer.schedulerFloatingSeats": "调度器：未测速卖家浮动位",
       "msfile.settings.bitfsBuyer.schedulerMode": "下载调度器",
@@ -720,7 +716,6 @@ const resources: I18nPluginResources = {
       "msfile.settings.supplier.save": "保存修改",
       "msfile.settings.supplier.cancel": "取消",
       "msfile.settings.supplier.close": "关闭",
-      "msfile.settings.seller.enable": "允许当前 Key 出售本地文件",
       "msfile.settings.seller.seedPrice": "单个 Seed 售价（聪）",
       "msfile.settings.seller.blockPrice": "完整 256 KiB Block 售价（聪）",
       "msfile.settings.seller.quoteLifetime": "报价有效时间（秒，30–86400）",
@@ -729,9 +724,7 @@ const resources: I18nPluginResources = {
       "msfile.settings.seller.minRefundDelayBlocks": "接受买方费用池的最低剩余区块数",
       "msfile.settings.seller.minRefundDelayBlocksHint": "收到开池请求时检查。剩余区块数低于此值就拒绝开池；已签出的开池响应仍按原证据恢复。",
       "msfile.settings.seller.save": "保存卖方设置",
-      "msfile.settings.seller.warning": "卖方运行期间会暂停 Vault 自动锁，但不会绕过解锁；手动锁定仍会立即停止出售并清除内存索引。",
       "msfile.settings.seller.degraded": "“依赖暂不可用”表示 BitFS 卖方协议或 Window 传输尚未就绪，此时不会对外报价。",
-      "msfile.settings.seller.status.disabled": "未开启",
       "msfile.settings.seller.status.waiting-unlock": "等待解锁",
       "msfile.settings.seller.status.waiting-dependency": "等待依赖就绪",
       "msfile.settings.seller.status.indexing": "正在建立本地索引",
@@ -1019,7 +1012,7 @@ const msfilePluginDefinition = {
   units: [{
     id: "msfile.window",
     runtime: "window-main",
-    connect: { providerMethods: ["msfile.stat", "msfile.seed.read", "msfile.block.read", "msfile.seller.status", "msfile.import", "msfile.content.read"] },
+    connect: { providerMethods: ["msfile.stat", "msfile.seed.read", "msfile.block.read", "msfile.seller.status", "msfile.import", "msfile.content.read", "msfile.content.status", "msfile.content.open", "msfile.content.price", "msfile.content.range"] },
     scopeKind: "owner-session",
     provides: [MSFILE_SERVICE_CAPABILITY, MSFILE_COORDINATOR_CONTROL_CAPABILITY, MSFILE_BUCKET_SERVICE_CAPABILITY],
     // 桶存储页面直接读写 `<owner>/msfiles/` 文件根（seeds/storage/meta）；
@@ -1059,6 +1052,10 @@ const msfilePluginDefinition = {
   }],
   i18n: resources,
   setup(ctx: PluginContext) {
+    const diagnosticsMode = (import.meta as ImportMeta & { readonly env?: { readonly MODE?: string } }).env?.MODE;
+    const diagnosticsEnabled = diagnosticsMode === "dev" || diagnosticsMode === "development";
+    configureBitfsDebug(diagnosticsEnabled);
+    ctx.onDispose(() => configureBitfsDebug(false));
     const coordinator = ctx.capability(MSFILE_COORDINATOR_CLIENT_BINDING_CAPABILITY).bind(ctx.consumer, ctx.scope) as MsFileCoordinatorControl | undefined;
     if (!coordinator) throw new Error("MSFile Coordinator control is unavailable");
     ctx.provide(MSFILE_COORDINATOR_CONTROL_CAPABILITY, coordinator);
@@ -1181,8 +1178,8 @@ const msfilePluginDefinition = {
     });
 
     // business.registry 支持在 home 域尚未加载时追加入口；home 插件加载后
-    // 会自动显示这个投影。entry 同时是该业务特征的正式页面入口，便于
-    // 用户从侧栏或直接访问 /msfile/files；首页模块复用同一个组件和状态机。
+    // 显示侧栏入口。钱包内部资源和 Seed URI 继续使用正式文件页，
+    // 也可直接访问 /msfile/files。
     const reader = ctx.capability(OWNED_RESOURCE_ACCESS_CAPABILITY).bind(ctx.consumer, ctx.scope);
     setupMsFileUriActions(ctx);
     const pages = ctx.capability(PAGE_UI_REGISTRY_CAPABILITY).bind(ctx.consumer, ctx.scope);
@@ -1225,9 +1222,7 @@ const msfilePluginDefinition = {
       render: () => createElement(MsFileResourceProvider, { reader, children: createElement(MsFileSettings) }),
     });
     // Bind once per plugin instance so parent renders preserve card state and tasks.
-    const HomeFileWidget = bindMsFileUi(ctx, MsFileHomeFileWidget);
     const BucketHomeWidget = bindMsFileUi(ctx, MsFileBucketHomeWidget);
-    pages.view.register({ kind: "home", slot: "main", id: "msfile.file-fetch", label: "MSFile", space: { id: "msfile.files", label: { key: "msfile.home.space", fallback: "Files" }, order: 600 }, order: 10, visibleWhen: ({ unlocked }) => unlocked, render: () => createElement(HomeFileWidget) });
     pages.view.register({ kind: "home", slot: "main", id: "msfile.bucket-storage", label: "MSFile", space: { id: "msfile.files", label: { key: "msfile.home.space", fallback: "Files" }, order: 600 }, order: 20, visibleWhen: ({ unlocked }) => unlocked, render: () => createElement(BucketHomeWidget) });
     const business = ctx.capability(BUSINESS_REGISTRY_CAPABILITY);
     business.registerFeature(MSFILE_PLUGIN_ID, "home", {

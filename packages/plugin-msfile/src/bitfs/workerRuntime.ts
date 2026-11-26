@@ -79,7 +79,7 @@ function buyerContentStore(owner: string, seed: string, sessionId: string) {
 
 const demandMonitorScope = () => { const current = deps.session(); return JSON.stringify([current.activePublicKeyHex, current.sessionEpoch, current.runGeneration]); };
 
-/** 当前 owner 的 BitFS 卖方派生索引；锁定、切 Key 或关闭卖方时立即丢弃。 */
+/** 当前 owner 的 BitFS 卖方派生索引；钱包退出、切 Key 或卖方运行态撤销时丢弃。 */
 let msfileSellerIndex: BitfsSeedIndex | undefined;
 let arbitrationScope: { key: string; controller: AbortController; promise: Promise<BitfsArbitrationWorkflow>; flow?: BitfsArbitrationWorkflow } | undefined;
 async function arbitrationReserve(service: MsFileServiceImpl, arbiterPublicKeys: readonly string[], display?: { base?: string; perItem?: string }): Promise<bigint> {
@@ -186,7 +186,7 @@ let msfileBitfsTransactionJournal: BitfsTransactionJournal | undefined;
 /** 当前 owner 的 BitFS 专款账本；普通 P2PKH 读取和广播都用它检查受保护输出。 */
 /** 只通过 Worker 内 WoC 句柄广播/对账的 BitFS 交易器。 */
 let msfileBitfsBroadcaster: BitfsTransactionBroadcaster | undefined;
-/** 卖方会话 generation；锁定、切 Key、关闭卖方或重建 runtime 时推进。 */
+/** 卖方会话 generation；钱包退出、切 Key 或重新装配卖方时推进。 */
 let msfileSellerSessionEpoch = 0;
 /** ChannelProtocol WebRTC session_id 到 Worker 卖方会话的短期映射。 */
 const msfileBitfsWebRtcSellerLinks = new Map<string, {
@@ -844,7 +844,7 @@ function stopMsfileSellerRuntime(): void {
  *
  * 依赖就绪与否只由唯一判定实现回答，变化靠进程内订阅推过来：没有轮询、没有
  * 等待休眠、没有超时猜测。双向都处理——依赖掉线如实报不可用，依赖回来自动
- * 重跑装配，用户不需要手动再切一次开关。重判是幂等的：只有依赖可用性真的翻转
+ * 重跑装配。重判是幂等的：只有依赖可用性真的翻转
  * 才动作，其它单元的抖动只做一次同态重判。
  */
 let msfileSellerDependencyUnsubscribe: (() => void) | undefined;
@@ -866,7 +866,7 @@ const MSFILE_SELLER_DEPENDENCY_UNIT_ID = "sat-subscription.coordinator-worker";
 /**
  * 订阅依赖可用性。
  *
- * - 依赖不可用：如实报「等待依赖」，**不拆解**已建好的部分、**不要求用户重切**。
+ * - 依赖不可用：如实报「等待依赖」，保留已装配的部分。
  * - 依赖可用：重跑一次装配（幂等），把状态推进到就绪。
  */
 function watchMsfileSellerDependency(
@@ -877,12 +877,11 @@ function watchMsfileSellerDependency(
   const serviceRef = service;
   msfileSellerDependencyReady = deps.availability(MSFILE_SELLER_DEPENDENCY_UNIT_ID).state === "ready";
   msfileSellerDependencyUnsubscribe = deps.subscribeAvailability(() => {
-    // 订阅已被同一次变化里的清理动作取消（开关关闭 / 锁定）时直接退出。
+    // 订阅已被同一次变化里的清理动作取消时直接退出。
     if (msfileSellerDependencyUnsubscribe === undefined) return;
     if (deps.service() !== serviceRef) return;
     if (deps.session().activePublicKeyHex !== ownerPublicKeyHex) return;
     const settings = serviceRef.describeState().sellerSettings;
-    if (!settings.sellerEnabled) return;
     const ready = deps.availability(MSFILE_SELLER_DEPENDENCY_UNIT_ID).state === "ready";
     if (ready === msfileSellerDependencyReady) return;
     msfileSellerDependencyReady = ready;
@@ -1146,15 +1145,8 @@ async function configureMsfileSellerRuntime(
   settings: import("@keymaster/contracts").MsFileSellerSettings,
 ): Promise<import("@keymaster/contracts").MsFileSellerRuntimeStatus> {
   stopMsfileSellerRuntime();
-  // 用户开关与实际可接单状态是两个正交维度：开关关 → 短路，不评估可用性，
-  // 不残留索引与运行时。
-  if (!settings.sellerEnabled) {
-    return "disabled";
-  }
   if (settings.supportedArbiterPublicKeys.length === 0) return "configuration-error";
-  // 依赖先判、且只判一次；同时订阅双向变化——依赖掉线如实报不可用，依赖回来
-  // 自动重跑。收款运行时还在预热时这不是永久配置错误：不拆索引、不要求用户
-  // 再切一次开关。
+  // 订阅依赖的双向变化。依赖掉线时报告等待状态，恢复时重新装配。
   watchMsfileSellerDependency(service, ownerPublicKeyHex);
   if (msfileSellerDependencyReady !== true) return "waiting-dependency";
   service.setSellerRuntimeStatus("indexing");
@@ -1300,8 +1292,7 @@ async function configureMsfileSellerRuntime(
     return protocolPort.ready ? "ready" : "degraded";
   } catch (error) {
     if (controller.signal.aborted) return "waiting-unlock";
-    // 依赖在装配途中变得不可用：这仍然是「还没好」，不是配置坏了。不拆解、
-    // 不报永久错误；订阅就绪后自动重跑，用户不需要手动再切一次开关。
+    // 依赖在装配途中变得不可用，恢复后重新装配。
     if (deps.isUnavailable(error)) {
       controller.abort();
       watchMsfileSellerDependency(service, ownerPublicKeyHex);
@@ -1354,7 +1345,6 @@ async function handleMsfileSellerHashRequest(
   const manager = msfileSellerSessionManager;
   const protocolPort = msfileSellerProtocolPort;
   const service = deps.service();
-  if (service && !service.describeState().sellerSettings.sellerEnabled) return;
   await writeBitfsDiagnostic("seller-hash-request-entry.json", {
     hash: request.body.hash,
     from: request.from_public_key,
@@ -1447,7 +1437,7 @@ async function handleMsfileSellerHashRequest(
     console.warn("[msfile] seller hash request did not match", request.body.hash);
     return;
   }
-  // match 期间可能发生锁定、切 Key、关闭卖方或 runtime 重建；迟到结果不得建会话。
+  // 匹配期间重新装配或撤销运行态时，迟到结果不得创建会话。
   if (epoch !== msfileSellerSessionEpoch
     || msfileSellerRuntime !== runtime
     || msfileSellerSessionManager !== manager
@@ -1961,6 +1951,7 @@ async function executeMsfileControlNow(
       const task = await createMsfileBitfsBuyerTask({ ownerPublicKeyHex: owner, seedHashHex: control.seedHashHex, network: deps.network(), signal });
       await navigator.locks.request(bitfsDownloadLockName(owner, control.seedHashHex), { ifAvailable: true }, async lock => {
         if (!lock) throw new Error("此文件正在下载");
+        if (saved.phase === "opening-presign") await task.cancelUnfundedOpening(control.sessionId);
         await restoreMsfileBitfsBuyerPurchaseSummary({ ownerPublicKeyHex: owner, seedHashHex: control.seedHashHex, sessionId: control.sessionId, task });
       });
       value = null; break;
@@ -1969,7 +1960,7 @@ async function executeMsfileControlNow(
       const scope = demandMonitorScope();
       const network = await deps.demandNetworkStatus();
       if (demandMonitorScope() !== scope || deps.session().vaultStatus !== "unlocked") throw new Error("文件需求观察所属会话已结束");
-      value = { ...demandMonitor.snapshot(scope), sellerEnabled: service.describeState().sellerSettings.sellerEnabled, network };
+      value = { ...demandMonitor.snapshot(scope), network };
       break;
     }
     case "bitfs.funding.pools.list": {

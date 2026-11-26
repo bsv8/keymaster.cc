@@ -532,7 +532,11 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             "msfile.block.read",
             "msfile.seller.status",
             "msfile.import",
-            "msfile.content.read"
+            "msfile.content.read",
+            "msfile.content.status",
+            "msfile.content.open",
+            "msfile.content.price",
+            "msfile.content.range"
           ]
         },
         "permissions": [],
@@ -989,6 +993,7 @@ export const BUILTIN_PLUGIN_DEFINITIONS = [
             "chain.get_height",
             "chain.list_script_history",
             "chain.get_transaction",
+            "chain.get_transactions",
             "chain.list_script_unspent",
             "chain.broadcast",
             "application.key",

@@ -203,8 +203,8 @@ function ownerResult(data: CoordinatorOwnerStorageData, value: unknown): unknown
 function ownerDataResponse(value: unknown): unknown { return copy(value); }
 const concurrencyFields = "mediaBlockReadConcurrency globalSeedReadConcurrency globalBlockReadConcurrency globalStatConcurrency";
 const price = (value: unknown) => fields(value, "seedMaxPriceSatoshis blockMaxPriceSatoshis");
-const sellerSettings = (value: unknown) => fields(value, "sellerEnabled seedPriceSatoshis fullBlockPriceSatoshis maxBlocksPerBatch quoteLifetimeSeconds paymentTimeoutSeconds maxConcurrentSales minRefundDelayBlocks", { supportedArbiterPublicKeys: copy });
-const buyerSettings = (value: unknown) => fields(value, "buyerAutoPurchaseEnabled maxFullBlockPriceSatoshis maxConcurrentDownloads refundDelayBlocks poolBlocks schedulerTotalSeats schedulerFloatingSeats schedulerMode");
+const sellerSettings = (value: unknown) => fields(value, "seedPriceSatoshis fullBlockPriceSatoshis maxBlocksPerBatch quoteLifetimeSeconds paymentTimeoutSeconds maxConcurrentSales minRefundDelayBlocks", { supportedArbiterPublicKeys: copy });
+const buyerSettings = (value: unknown) => fields(value, "buyerAutoPurchaseEnabled maxFullBlockPriceSatoshis maxConcurrentDownloads refundDelayBlocks poolBlocks schedulerTotalSeats schedulerSeatsPerSeller schedulerFloatingSeats schedulerMode");
 const supplier = (value: unknown) => fields(value, "name supplierPublicKeyHex enabled builtin", { addresses: copy });
 const appKey = (value: unknown) => fields(value, "ownerPublicKeyHex publisherPublicKeyHex appId");
 const appPolicy = (value: unknown) => fields(value, "updatedAt", { key: appKey, override: price });
@@ -224,12 +224,14 @@ const purchaseTask = (value: unknown) => ({ ...fields(value, `${purchaseFields} 
 const demand = (value: unknown) => fields(value, "seedHashHex requestMessageId expiresAtMs existingPurchaseSessionId currentMaxFullBlockPriceSatoshis downloadReadOnly interrupted", { quotes: each(quote), purchase });
 const fundingPool = (value: unknown) => fields(value, "poolId seedHashHex network state fundingTxid openingOutpoint recoveryTxid sellerPublicKeyHex recommendedFilename poolAmountSatoshis lockedSatoshis pendingReturnSatoshis needsRecovery historyDeleted canManage");
 const arbitrationTask = (value: unknown) => fields(value, "sessionId seedHashHex role state message txid action");
-const demandMonitor = (value: unknown) => fields(value, "lastReceivedAtMs sellerEnabled", {
+const demandMonitor = (value: unknown) => fields(value, "lastReceivedAtMs", {
   demands: each(value => fields(value, "requestMessageId requesterPublicKeyHex seedHashHex receivedAtMs expiresAtMs availability quoteStatus quotedAtMs quoteMessage")),
   network: value => fields(value, "channel subscriptionPhase error", { suppliers: each(value => fields(value, "supplierId name connectionState receiving subscribed error")) }),
 });
 function msControlResult(control: CoordinatorMsFileControl, value: unknown): unknown {
   switch (control.type) {
+    case "collector.config.get": return fields(value, "endpoint enabled");
+    case "collector.status": return fields(value, "enabled endpoint pendingCount inflight lastSuccessAt lastError");
     case "settings.get": return msSettings(value);
     case "settings.bitfsBuyer.get": return buyerSettings(value);
     case "settings.readConcurrency.get": return fields(value, concurrencyFields);
@@ -373,7 +375,7 @@ function topicEvent(value: unknown): CoordinatorTopicEvent {
     case "msfile.state": payload = fields(source, `msfileRevision status supplierGeneration sellerRuntimeStatus ${concurrencyFields}`, { globalSettings: price, sellerSettings, pendingApprovals: each(pendingApproval) }); break;
     case "sat.events": payload = fields(source, "satRevision", { event: value => fields(value, "type", { event: value => fields(value, "deliveryId ingressSupplierId channel requestIdHex chargedAmount receivedAtMs", { contentJson: copy }) }) }); break;
     case "channel.events": payload = fields(source, "channelRevision", { publicMessage: channelMessage, privateMessage: privateChannelMessage, subscriptionStatus, subscriptionStatuses: each(subscriptionStatus) }); break;
-    case "chain.height": payload = fields(source, "chainHeightRevision", { chainHeight: value => fields(value, "height network available updatedAtMs revision") }); break;
+    case "chain.height": payload = fields(source, "chainHeightRevision", { chainHeight: value => fields(value, "height blockHash network available updatedAtMs revision") }); break;
     case "chain.fees": payload = fields(source, "chainFeeRevision", { chainFees: value => fields(value, "", { main: feeSnapshot, test: feeSnapshot }) }); break;
   }
   return { ...common, ...payload } as unknown as CoordinatorTopicEvent;

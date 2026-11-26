@@ -2,7 +2,7 @@ import type { BsvNetwork, WocQueryTransport, WocRequestOptions } from "@keymaste
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 
-type ChainQueries = Pick<WocQueryTransport, "listScriptHistory" | "listScriptUnspent" | "getChainTransaction">;
+type ChainQueries = Pick<WocQueryTransport, "listScriptHistory" | "listScriptUnspent" | "getChainTransaction" | "getChainTransactions">;
 type Page = {
   result: unknown[];
   error?: string;
@@ -36,7 +36,15 @@ function ids(raw: unknown): string[] {
   return raw.map(id => id.toLowerCase());
 }
 
-export function createConnectChainQueries(read: Read, getRawTransaction: WocQueryTransport["getRawTransaction"]): ChainQueries {
+type TransactionBatch = WocQueryTransport["getChainTransactions"];
+type TransactionBatchEntry = Awaited<ReturnType<TransactionBatch>>["entries"][number];
+type ReadTransactions = (...args: Parameters<TransactionBatch>) => Promise<unknown>;
+
+export function createConnectChainQueries(
+  read: Read,
+  getRawTransaction: WocQueryTransport["getRawTransaction"],
+  readTransactions: ReadTransactions,
+): ChainQueries {
   return {
     async listScriptHistory(network, input, opts) {
       const hash = scriptHash(input.script);
@@ -112,6 +120,39 @@ export function createConnectChainQueries(read: Read, getRawTransaction: WocQuer
         if (token) tokens.add(token);
       } while (token);
       return { outputs: [...entries.values()] };
+    },
+
+    async getChainTransactions(network, input, opts) {
+      const response = await readTransactions(network, input, opts);
+      if (!Array.isArray(response)) throw new Error("Invalid WoC transaction batch");
+      const requested = new Set(input.txids);
+      const seen = new Set<string>();
+      const results = new Map<string, TransactionBatchEntry>();
+      for (const value of response) {
+        if (!value || typeof value !== "object" || typeof value.txid !== "string") continue;
+        const txid = value.txid.toLowerCase();
+        if (!requested.has(txid)) continue;
+        if (seen.has(txid)) {
+          results.delete(txid);
+          continue;
+        }
+        seen.add(txid);
+        if (value.error === "unknown") {
+          results.set(txid, { txid, state: "not_observed" });
+          continue;
+        }
+        if (value.error) continue;
+        const rawTxHex = input.mode === "raw" ? value.hex : undefined;
+        if (input.mode === "raw" && (typeof rawTxHex !== "string" || !/^(?:[0-9a-f]{2})+$/iu.test(rawTxHex) ||
+            bytesToHex(sha256(sha256(hexToBytes(rawTxHex))).reverse()) !== txid)) continue;
+        if (typeof value.blockhash === "string" && txidPattern.test(value.blockhash) &&
+            uint(value.blockheight) && (value.confirmations === undefined || (uint(value.confirmations) && value.confirmations > 0))) {
+          results.set(txid, { txid, state: "confirmed", height: value.blockheight, blockHash: value.blockhash.toLowerCase(), rawTxHex });
+        } else if (!value.blockhash && (value.confirmations === undefined || value.confirmations === 0)) {
+          results.set(txid, { txid, state: "unconfirmed", rawTxHex });
+        }
+      }
+      return { entries: [...results.values()] };
     },
 
     async getChainTransaction(network, txid, opts) {

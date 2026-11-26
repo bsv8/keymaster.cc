@@ -487,7 +487,10 @@ export function createBitfsBuyerDownloadPlan(input: {
           const block = plan.blocks[hash];
           return block?.sessionId === sessionId && block.state === "claimed";
         }) ?? [];
-        if (pool.inFlightBlockHashHex !== claimed[0] || !same(claimed, entries.map((entry) => entry.hash))) {
+        // 播放优先级可改变派发顺序；认领按 manifest 顺序重建，这里校验集合与池内责任，不要求顺序一致。
+        const delivered = new Set(entries.map((entry) => entry.hash));
+        if (!pool.inFlightBlockHashHex || !delivered.has(pool.inFlightBlockHashHex)
+          || claimed.length !== delivered.size || claimed.some((hash) => !delivered.has(hash))) {
           throw new Error("BitFS 验收批次与当前池独占认领不一致");
         }
         const total = entries.reduce((sum, entry) => sum + BigInt(entry.paid), 0n);

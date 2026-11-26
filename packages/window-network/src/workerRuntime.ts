@@ -262,7 +262,7 @@ export function createWindowP2pWorkerRuntime(ports: WindowP2pWorkerPorts) {
       if (!lease.transportReady) {
         clearWindowP2pExecutorLeaseLocked();
       } else {
-        // 新 Host 就绪后卖方 stream 通道恢复；若卖方仍启用则回到 ready/selling。
+        // 新 Host 就绪后，已装配的卖方恢复 stream 通道。
         ports.events.ready();
         void syncWindowP2pExecutorConfig().catch(() => {
           if (windowP2pExecutorLease?.leaseId === lease.leaseId) clearWindowP2pExecutorLeaseLocked();
@@ -538,13 +538,14 @@ export function createWindowP2pWorkerRuntime(ports: WindowP2pWorkerPorts) {
 
   function windowP2pExecutorBridgeBytesForOperation(operation: WindowP2pExecutorOperation): number {
     if (operation.type !== "lane" || !operation.operation || typeof operation.operation !== "object") return 0;
-    const laneOperation = operation.operation as { type?: unknown; kind?: unknown; wire?: unknown; frame?: unknown; requestBytesHex?: unknown };
+    const laneOperation = operation.operation as { type?: unknown; kind?: unknown; wire?: unknown; frame?: unknown; length?: unknown };
     if ((laneOperation.type === "requestSsp" || laneOperation.type === "requestSpi") && laneOperation.wire instanceof Uint8Array) {
       return laneOperation.wire.byteLength + MAX_WIRE_BYTES;
     }
     if (laneOperation.wire instanceof Uint8Array) return laneOperation.wire.byteLength;
     if (laneOperation.frame instanceof Uint8Array) return laneOperation.frame.byteLength;
     if (laneOperation.type === "read") return laneOperation.kind === "block" ? MSFILE_MAX_BLOCK_BYTES : MSFILE_MAX_SEED_BYTES;
+    if (laneOperation.type === "bitfs-connect-range" && typeof laneOperation.length === "number") return laneOperation.length;
     return 0;
   }
 

@@ -255,13 +255,7 @@ export interface WocQueryTransport {
     options?: WocRequestOptions
   ): Promise<WocTransactionObservation>;
 
-  /** 读取节点当前最佳链高度；用于高度锁，不得由本地时钟估算。 */
   getFeeRecommendation(network: BsvNetwork, options?: WocRequestOptions): Promise<import("./chainFees.js").WocFeeRecommendation>;
-
-  getChainHeight(
-    network: BsvNetwork,
-    options?: WocRequestOptions
-  ): Promise<number>;
 
   /** 查询指定 outpoint 的 confirmed/unconfirmed spender。 */
   getSpentOutput(
@@ -277,6 +271,8 @@ export interface WocQueryTransport {
   listScriptHistory(network: BsvNetwork, input: import("keymaster-connect/protocol").ChainScriptHistoryParams, options?: WocRequestOptions): Promise<import("keymaster-connect/protocol").ChainScriptHistoryResult>;
   listScriptUnspent(network: BsvNetwork, script: string, options?: WocRequestOptions): Promise<import("keymaster-connect/protocol").MethodResult<"chain.list_script_unspent">>;
   getChainTransaction(network: BsvNetwork, txid: string, options?: WocRequestOptions): Promise<import("keymaster-connect/protocol").ChainTransactionResult>;
+
+  getChainTransactions(network: BsvNetwork, input: import("keymaster-connect/protocol").ChainTransactionBatchParams, options?: WocRequestOptions): Promise<import("keymaster-connect/protocol").ChainTransactionBatchResult>;
 
   /** Confirmed raw transaction bytes for provider adapters. */
   getRawTransaction(

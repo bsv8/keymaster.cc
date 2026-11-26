@@ -26,7 +26,11 @@ export function createChainHeightReader({ coordinatorClient, wallet }: ChainHeig
     const candidate = (event as CoordinatorChainHeightEvent | undefined)?.chainHeight;
     if (!candidate || !Number.isSafeInteger(candidate.height) || candidate.height < 0
       || typeof candidate.available !== "boolean" || (candidate.network !== "main" && candidate.network !== "test")) return;
-    cached = project(candidate);
+    const next = project(candidate);
+    const changed = cached.height !== next.height || cached.blockHash !== next.blockHash
+      || cached.available !== next.available || cached.network !== next.network;
+    cached = next;
+    if (!changed) return;
     for (const handler of [...handlers]) notify(handler);
   });
   return {

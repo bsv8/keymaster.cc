@@ -4,7 +4,7 @@ import { createBitfsTransactionJournal, type BitfsTransactionJournal, type Bitfs
 import { createBitfsWocChainPort } from "./wocChain.js";
 
 type FundingResource = { resourceId: string; publicKeyHex: string; network: "main" | "test"; address: string; generation: number };
-type FundingPlan = { ownerPublicKeyHex: string; network: "main" | "test"; amountSatoshis: number; feeRateSatoshisPerKb: number; outputs?: Array<{ scriptHex: string; value: string }> };
+type FundingPlan = import("@keymaster/contracts").ProtocolFundingPlanRequest & { ownerPublicKeyHex: string; network: "main" | "test" };
 export interface WorkerFundingDependencies {
   session(): { vaultStatus: string; activePublicKeyHex?: string; sessionEpoch: string };
   journalStore(): BorrowedModuleFileStore;

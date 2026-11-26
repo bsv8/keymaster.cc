@@ -37,7 +37,7 @@ export function createMsFileWorkerProjection(ports: {
       globalBlockReadConcurrency: state?.globalBlockReadConcurrency ?? msfileReadConcurrencySettings.globalBlockReadConcurrency,
       globalStatConcurrency: state?.globalStatConcurrency ?? msfileReadConcurrencySettings.globalStatConcurrency,
       sellerSettings: state?.sellerSettings ?? { ...MSFILE_SELLER_SETTINGS_DEFAULT, supportedArbiterPublicKeys: [] },
-      sellerRuntimeStatus: state?.sellerRuntimeStatus ?? (ports.session().unlocked ? "disabled" : "waiting-unlock"),
+      sellerRuntimeStatus: state?.sellerRuntimeStatus ?? (ports.session().unlocked ? "waiting-dependency" : "waiting-unlock"),
       pendingApprovals: state?.pendingApprovals ?? []
     };
     const nextConcurrency = normalizeMsFileReadConcurrencySettings(event) ?? msfileReadConcurrencySettings;

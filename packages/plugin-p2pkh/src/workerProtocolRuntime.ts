@@ -86,7 +86,7 @@ export async function createWorkerProtocolRuntime(deps: WorkerProtocolDependenci
     async releasePrepared(input) { check(); await executor.releasePrepared!(input); check(); },
     async releasePreparedSubmission(input) { await executor.releasePreparedSubmission(scoped(input)); check(); },
   };
-  const planFunding = async (input: { ownerPublicKeyHex: string; network: "main" | "test"; amountSatoshis: number; feeRateSatoshisPerKb: number; outputs?: Array<{ scriptHex: string; value: string }> }) => {
+  const planFunding = async (input: import("@keymaster/contracts").ProtocolFundingPlanRequest & { ownerPublicKeyHex: string; network: "main" | "test" }) => {
     check();
     const address = deriveP2pkhAddress(input.ownerPublicKeyHex, input.network);
     const walletScriptHex = p2pkhAddressToScriptHex(address, input.network);
@@ -130,7 +130,12 @@ export async function createWorkerProtocolRuntime(deps: WorkerProtocolDependenci
       check();
       const selected = allocation.selectedInputs.map(row => ({txid: row.utxo.txid, vout: row.utxo.vout, value: row.utxo.value, address: row.utxo.address}));
       const txOutputs = [...outputs, ...(BigInt(allocation.changeSats) > 0n ? [{scriptHex: walletScriptHex, value: allocation.changeSats}] : [])];
-      const unsignedTxHex = buildUnsigned({inputs: selected, outputs: txOutputs});
+      // Final input sequences make locktime inert. Vary the bytes of a new
+      // opening so it cannot reuse the outpoint of a cancelled opening plan.
+      const unsignedTxHex = input.distinctTransaction
+        ? buildUnsigned({ inputs: selected.map(input => ({ ...input, sequence: 0xffffffff })),
+          outputs: txOutputs, locktime: Number.parseInt(submissionId.slice(0, 8), 16) })
+        : buildUnsigned({ inputs: selected, outputs: txOutputs });
       deps.submissions.prepare({...input, submissionId, allocationId: allocation.allocationId, unsignedTxHex, inputs: selected,
         outputs: outputs.map(row => ({scriptHex: row.scriptHex, value: Number(row.value)})), feeSatoshis: Number(allocation.feeSats),
         changeSatoshis: Number(allocation.changeSats), ...(BigInt(allocation.changeSats) > 0n ? {changeAddress: address} : {})});

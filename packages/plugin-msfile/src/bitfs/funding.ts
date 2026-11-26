@@ -714,7 +714,7 @@ export interface BitfsFundingPrepareDeps {
   /** 每次都必须提供已绑定当前 Key 的受限协议交易准备器。 */
   protocolSpend: ProtocolSpendService;
   /** 钱包输入由 manager 申请分配，不由 BitFS 根据账本选币或重复保护。 */
-  planFunding(input: { ownerPublicKeyHex: string; network: BsvNetwork; amountSatoshis: number; feeRateSatoshisPerKb: number; outputs: Array<{ scriptHex: string; value: string }> }): Promise<import("@keymaster/contracts").ProtocolFundingPlan>;
+  planFunding(input: import("@keymaster/contracts").ProtocolFundingPlanRequest & { ownerPublicKeyHex: string; network: BsvNetwork }): Promise<import("@keymaster/contracts").ProtocolFundingPlan>;
   /** 广播前错误取消原申请后释放；广播未知／已成功均不释放，迟到签名作废。 */
   releaseFundingPlan(input: { ownerPublicKeyHex: string; network: BsvNetwork; allocationId: string; submissionId: string }): Promise<boolean>;
   /** 当前 Key 与网络对应的唯一找零地址和锁定脚本。 */
@@ -877,7 +877,7 @@ export async function prepareBitfsFunding(input: {
     amountSatoshis: outputAmountNumber, feeRateSatoshisPerKb: input.feeRateSatoshisPerKb, maxFeeSatoshis: input.maxFeeSatoshis,
   }));
   const selection = await deps.planFunding({ ownerPublicKeyHex: owner, network, amountSatoshis: outputAmountNumber,
-    feeRateSatoshisPerKb: input.feeRateSatoshisPerKb, outputs: [{ scriptHex: outputScript, value: outputAmount }] }).catch(error => {
+    feeRateSatoshisPerKb: input.feeRateSatoshisPerKb, distinctTransaction: true, outputs: [{ scriptHex: outputScript, value: outputAmount }] }).catch(error => {
     logFunding("opening.selection.failed", () => ({ error }));
     throw error;
   });

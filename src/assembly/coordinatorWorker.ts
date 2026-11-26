@@ -2360,7 +2360,7 @@ async function buildTopicBaselines(
         supplierGeneration: 0, globalSettings: null,
         ...MSFILE_READ_CONCURRENCY_RECOMMENDED,
         sellerSettings: { ...MSFILE_SELLER_SETTINGS_DEFAULT, supportedArbiterPublicKeys: [] },
-        sellerRuntimeStatus: coordinatorState.vaultStatus === "unlocked" ? "disabled" as const : "waiting-unlock" as const,
+        sellerRuntimeStatus: coordinatorState.vaultStatus === "unlocked" ? "waiting-dependency" as const : "waiting-unlock" as const,
         pendingApprovals: []
       };
       return [{ topic, baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot: cached }];
@@ -3479,6 +3479,7 @@ const coordinatorRuntimePlugins = [
     walletOrigin: () => globalThis.location.origin,
     runChainBroadcast: (signal, submit) => withCoordinatorFinalIoLease("write", signal, submit, { auditOperation: "connect.chain.broadcast" }),
     channel: connectWorkerChannel,
+    chainHeight: wocWorkerRuntime.chainHeight,
     lock: async () => { await closeWalletRuntime("connect-logout"); return {status:"ok",sessionEpoch:coordinatorState.sessionEpoch}; },
   }),
   vaultWorkerRuntime.plugin,

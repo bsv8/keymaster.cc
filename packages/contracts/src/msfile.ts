@@ -337,8 +337,6 @@ export interface MsFileSupplierConfig {
 
 /** 当前 Key 的 BitFS 卖方持久化设置。 */
 export interface MsFileSellerSettings {
-  /** 是否允许当前 Key 作为 BitFS 卖方。 */
-  sellerEnabled: boolean;
   /** 单个 Seed 的售价（聪）。 */
   seedPriceSatoshis: MsFileSatoshiAmount;
   /** 一个完整 256 KiB Block 的售价（聪）。 */
@@ -371,6 +369,8 @@ export interface MsFileBitfsBuyerSettings {
   poolBlocks: number;
   /** 下载策略器：任务内总席位（基础 + 浮动），最小 2、上限 16。 */
   schedulerTotalSeats: number;
+  /** 每个真实卖家可提供的正文下载席位数（1–16）。 */
+  schedulerSeatsPerSeller: number;
   /** 下载策略器：浮动位（未测速在席卖家上限），1–总席位−1。 */
   schedulerFloatingSeats: number;
   /** 下载策略器开关：`off` 阻止新购买；`on` 由下载策略器决策（缺省开启）。 */
@@ -385,6 +385,7 @@ export const MSFILE_BITFS_BUYER_SETTINGS_DEFAULT: Readonly<MsFileBitfsBuyerSetti
   refundDelayBlocks: 5,
   poolBlocks: 4,
   schedulerTotalSeats: 8,
+  schedulerSeatsPerSeller: 1,
   schedulerFloatingSeats: 2,
   schedulerMode: "on",
 });
@@ -396,6 +397,7 @@ export const MSFILE_BITFS_BUYER_LIMITS = Object.freeze({
   poolBlocks: 64,
   /** 下载策略器总席位上限。 */
   schedulerTotalSeats: 16,
+  schedulerSeatsPerSeller: 16,
   /** nLockTime 小于 500000000 才按区块高度解释；开池还须检查当前高度之和。 */
   refundDelayBlocks: 499_999_999,
 });
@@ -408,6 +410,7 @@ export function normalizeMsFileBitfsBuyerSettings(input: unknown): MsFileBitfsBu
   const refundDelayBlocks = value.refundDelayBlocks === undefined ? MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.refundDelayBlocks : value.refundDelayBlocks;
   const poolBlocks = value.poolBlocks === undefined ? MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.poolBlocks : value.poolBlocks;
   const schedulerTotalSeats = value.schedulerTotalSeats === undefined ? MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.schedulerTotalSeats : value.schedulerTotalSeats;
+  const schedulerSeatsPerSeller = value.schedulerSeatsPerSeller === undefined ? MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.schedulerSeatsPerSeller : value.schedulerSeatsPerSeller;
   const schedulerFloatingSeats = value.schedulerFloatingSeats === undefined ? MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.schedulerFloatingSeats : value.schedulerFloatingSeats;
   const schedulerMode = value.schedulerMode === undefined ? MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.schedulerMode : value.schedulerMode;
   if (typeof value.buyerAutoPurchaseEnabled !== "boolean"
@@ -424,6 +427,9 @@ export function normalizeMsFileBitfsBuyerSettings(input: unknown): MsFileBitfsBu
     || !Number.isSafeInteger(schedulerTotalSeats)
     || (schedulerTotalSeats as number) < 2
     || (schedulerTotalSeats as number) > MSFILE_BITFS_BUYER_LIMITS.schedulerTotalSeats
+    || !Number.isSafeInteger(schedulerSeatsPerSeller)
+    || (schedulerSeatsPerSeller as number) < 1
+    || (schedulerSeatsPerSeller as number) > MSFILE_BITFS_BUYER_LIMITS.schedulerSeatsPerSeller
     || !Number.isSafeInteger(schedulerFloatingSeats)
     || (schedulerFloatingSeats as number) < 1
     || (schedulerFloatingSeats as number) >= (schedulerTotalSeats as number)
@@ -435,6 +441,7 @@ export function normalizeMsFileBitfsBuyerSettings(input: unknown): MsFileBitfsBu
     refundDelayBlocks: refundDelayBlocks as number,
     poolBlocks: poolBlocks as number,
     schedulerTotalSeats: schedulerTotalSeats as number,
+    schedulerSeatsPerSeller: schedulerSeatsPerSeller as number,
     schedulerFloatingSeats: schedulerFloatingSeats as number,
     schedulerMode,
   };
@@ -619,6 +626,12 @@ export interface MsFileBitfsTaskSnapshot extends MsFileBitfsPurchaseSnapshot {
 
 /** 当前 Seed 的 ChannelProtocol 需求与已验证报价视图。 */
 export interface MsFileBitfsDemandSnapshot {
+  /** Persistent scheduler facts for the associated purchase. */
+  taskId?: string;
+  funds?: "none" | "pending" | "settled" | "problem";
+  taskEndReason?: "completed" | "cancelled" | "failed" | "replaced";
+  /** 本轮下载结束的可公开错误类别。 */
+  failure?: "insufficient-funds" | "funding-unknown" | "purchase-interrupted";
   /** 当前需求的 Seed Hash。 */
   seedHashHex: string;
   /** 已签名 Hash 请求的 message_id；未发布时为 null。 */
@@ -644,11 +657,10 @@ export interface MsFileBitfsDemandSnapshot {
   currentMaxFullBlockPriceSatoshis?: MsFileSatoshiAmount | null;
 }
 
-/** 新安装与旧 schema 升级时采用的安全卖方缺省值。 */
+/** 卖方缺省值，价格以 mainnet 为基准。 */
 export const MSFILE_SELLER_SETTINGS_DEFAULT: Readonly<MsFileSellerSettings> = Object.freeze({
-  sellerEnabled: false,
-  seedPriceSatoshis: "0",
-  fullBlockPriceSatoshis: "0",
+  seedPriceSatoshis: "100",
+  fullBlockPriceSatoshis: "100",
   maxBlocksPerBatch: 1,
   quoteLifetimeSeconds: 300,
   paymentTimeoutSeconds: 60,
@@ -656,6 +668,12 @@ export const MSFILE_SELLER_SETTINGS_DEFAULT: Readonly<MsFileSellerSettings> = Ob
   maxConcurrentSales: 1,
   minRefundDelayBlocks: 4,
 });
+
+/** 当前钱包网络的卖方缺省设置。 */
+export function msFileDefaultSellerSettings(network: "main" | "test" | undefined): MsFileSellerSettings {
+  const price = network === "test" ? "10" : MSFILE_SELLER_SETTINGS_DEFAULT.seedPriceSatoshis;
+  return { ...MSFILE_SELLER_SETTINGS_DEFAULT, seedPriceSatoshis: price, fullBlockPriceSatoshis: price, supportedArbiterPublicKeys: [] };
+}
 
 /** 卖方设置边界；设置页与 Coordinator DTO 校验共同使用。 */
 export const MSFILE_SELLER_LIMITS = Object.freeze({
@@ -675,7 +693,6 @@ export const MSFILE_SELLER_LIMITS = Object.freeze({
 export function normalizeMsFileSellerSettings(input: unknown): MsFileSellerSettings | undefined {
   if (typeof input !== "object" || input === null || Array.isArray(input)) return undefined;
   const value = input as Record<string, unknown>;
-  if (typeof value.sellerEnabled !== "boolean") return undefined;
   const seedPriceSatoshis = normalizeMsFileSatoshiAmount(value.seedPriceSatoshis);
   const fullBlockPriceSatoshis = normalizeMsFileSatoshiAmount(value.fullBlockPriceSatoshis);
   if (seedPriceSatoshis === undefined || fullBlockPriceSatoshis === undefined) return undefined;
@@ -700,7 +717,6 @@ export function normalizeMsFileSellerSettings(input: unknown): MsFileSellerSetti
     supportedArbiterPublicKeys.push(item);
   }
   return {
-    sellerEnabled: value.sellerEnabled,
     seedPriceSatoshis,
     fullBlockPriceSatoshis,
     quoteLifetimeSeconds: value.quoteLifetimeSeconds as number,
@@ -712,16 +728,10 @@ export function normalizeMsFileSellerSettings(input: unknown): MsFileSellerSetti
   };
 }
 
-/**
- * 卖方运行状态；用户开关与实际可接单状态分开表达。
- *
- * 关键区分：`waiting-dependency` 是**依赖还没好**，不是配置坏了。它绝不能用
- * `configuration-error` 表达，否则用户会被要求手动再切一次开关才能恢复。
- */
+/** 卖方当前可接单状态。 */
 export type MsFileSellerRuntimeStatus =
-  | "disabled"
   | "waiting-unlock"
-  /** 已开开关，但声明的依赖单元当前不可用；就绪后自动转就绪，无需用户重切。 */
+  /** 依赖单元当前不可用，就绪后自动重新装配。 */
   | "waiting-dependency"
   | "indexing"
   | "configuration-error"
@@ -781,7 +791,7 @@ export interface MsFileSettingsSnapshot {
   suppliers: MsFileSupplierConfig[];
   /** 供应商配置世代；每次变更递增，使旧连接失效。 */
   supplierGeneration: number;
-  /** 当前 Key 的卖方配置；旧设置文件缺失时 sellerEnabled=false。 */
+  /** 当前 Key 的卖方配置，缺省售价按钱包网络决定。 */
   sellerSettings: MsFileSellerSettings;
   /** Coordinator 中唯一卖方运行单元的当前状态。 */
   sellerRuntimeStatus: MsFileSellerRuntimeStatus;
@@ -976,9 +986,13 @@ export interface MsFileService {
     sellerStatus(): { ready: boolean };
     importFile(input: import("keymaster-connect/protocol").MsFileImportParams, signal?: AbortSignal): Promise<{ seedHashHex: string }>;
     readLocal(seedHashHex: string, signal?: AbortSignal): Promise<import("keymaster-connect/protocol").MsFileContentResult | undefined>;
-    discover(seedHashHex: string, signal?: AbortSignal): Promise<MsFileBitfsDemandSnapshot>;
-    snapshot(seedHashHex: string, signal?: AbortSignal): Promise<MsFileBitfsDemandSnapshot>;
-    purchase(seedHashHex: string, quote: MsFileBitfsQuoteView, signal?: AbortSignal): Promise<MsFileBitfsDemandSnapshot>;
+    hasLocal(seedHashHex: string, signal?: AbortSignal): Promise<boolean>;
+    readRange(seedHashHex: string, taskId: string | undefined, offset: number, length: number, signal: AbortSignal):
+      Promise<import("keymaster-connect/protocol").MsFileContentRangeResult>;
+    discover(seedHashHex: string, signal?: AbortSignal, manualPurchase?: boolean): Promise<MsFileBitfsDemandSnapshot>;
+    snapshot(seedHashHex: string, signal?: AbortSignal, taskId?: string): Promise<MsFileBitfsDemandSnapshot>;
+    purchase(seedHashHex: string, quote: MsFileBitfsQuoteView, signal?: AbortSignal, maxFullBlockPriceSatoshis?: string): Promise<MsFileBitfsDemandSnapshot>;
+    setDownloadPrice(seedHashHex: string, taskId: string, maxFullBlockPriceSatoshis: string, signal: AbortSignal): Promise<void>;
   };
 }
 
@@ -1038,7 +1052,6 @@ export interface MsFileHeardDemand {
 export interface MsFileDemandMonitorSnapshot {
   demands: MsFileHeardDemand[];
   lastReceivedAtMs: number | null;
-  sellerEnabled: boolean;
   network: {
     channel: string;
     subscriptionPhase: string;

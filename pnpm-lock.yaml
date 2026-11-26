@@ -374,8 +374,8 @@ importers:
         specifier: 5.1.6
         version: 5.1.6
       keymaster-bitfs:
-        specifier: 0.1.0
-        version: 0.1.0(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)))
+        specifier: 0.2.0
+        version: 0.2.0(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)))
       keymaster-trade-scheduler:
         specifier: 0.3.0
         version: 0.3.0
@@ -1979,8 +1979,8 @@ packages:
   keyhold@2.1.0:
     resolution: {integrity: sha512-MsphUUVSp9VcpNuO5m7Ug4kd1yhUSr8HUBgZ22EzM0PwwzA1SU8fbf0omgy2apBW7yiVY5yX/7ITd2ow5BDvSQ==}
 
-  keymaster-bitfs@0.1.0:
-    resolution: {integrity: sha512-D5WUJ6v9+GXJIZeEWJiPis+WHUNeBdZqGPP92iVA+RYyGF0ZXrV2pRI91iaKxr/bhiihp2Tali3DGFuVyP1X8g==}
+  keymaster-bitfs@0.2.0:
+    resolution: {integrity: sha512-mGsSi5GbeUwyB0WUALQP9Hhd31Xqfvuu/Zh7CdPF+qCoi534BMpx9C+oUDmWzBoe5guyXWCfbiRwdOJmGWCV6Q==}
     hasBin: true
 
   keymaster-connect@0.3.0:
@@ -4635,7 +4635,7 @@ snapshots:
     dependencies:
       '@noble/curves': 2.2.0
 
-  keymaster-bitfs@0.1.0(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))):
+  keymaster-bitfs@0.2.0(react-native-webrtc@124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))):
     dependencies:
       '@bsv/sdk': 2.0.5
       '@chainsafe/libp2p-noise': 17.0.0

@@ -46,8 +46,11 @@ export function createPublicMsFileService(service: MsFileService, assertActive: 
       sellerStatus: () => call(() => service.connectContent!.sellerStatus()),
       importFile: (...args: Parameters<NonNullable<MsFileService["connectContent"]>["importFile"]>) => call(() => service.connectContent!.importFile(...args)),
       readLocal: (hash: string, signal?: AbortSignal) => call(() => service.connectContent!.readLocal(hash, signal)),
+      hasLocal: (hash: string, signal?: AbortSignal) => call(() => service.connectContent!.hasLocal(hash, signal)),
+      readRange: (...args: Parameters<NonNullable<MsFileService["connectContent"]>["readRange"]>) => call(() => service.connectContent!.readRange(...args)),
+      setDownloadPrice: (...args: Parameters<NonNullable<MsFileService["connectContent"]>["setDownloadPrice"]>) => call(() => service.connectContent!.setDownloadPrice(...args)),
       discover: (hash: string, signal?: AbortSignal) => call(() => service.connectContent!.discover(hash, signal)),
-      snapshot: (hash: string, signal?: AbortSignal) => call(() => service.connectContent!.snapshot(hash, signal)),
+      snapshot: (hash: string, signal?: AbortSignal, taskId?: string) => call(() => service.connectContent!.snapshot(hash, signal, taskId)),
       purchase: (...args: Parameters<NonNullable<MsFileService["connectContent"]>["purchase"]>) => call(() => service.connectContent!.purchase(...args)),
     }) } : {}),
     connect: Object.freeze(Object.assign(Object.create(null), {

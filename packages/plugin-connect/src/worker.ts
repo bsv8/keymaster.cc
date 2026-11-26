@@ -17,6 +17,7 @@ export interface ConnectWorkerPorts {
  walletOrigin(): string;
  runChainBroadcast: NonNullable<ConnectServiceDeps["runChainBroadcast"]>;
  channel: ConnectChannelRuntime;
+  chainHeight: NonNullable<ConnectServiceDeps["chainHeight"]>;
  lock(): Promise<import("@keymaster/contracts").CoordinatorCommandResult>;
 }
 /** One authority per wallet Worker instance; no business state is owned by a Window relay. */
@@ -69,7 +70,7 @@ export function createConnectWorkerPlugin(ports: ConnectWorkerPorts) {
     try { await execute(lease); } finally { if (held) release(); }
   };
   const deps: ConnectServiceDeps = { vault, walletState: wallet, storageRepository: repository, domains, walletOrigin: ports.walletOrigin(), runConnectRequest, runtimeSignal: ctx.scope.signal, hostedApplication: true, runChainBroadcast: ports.runChainBroadcast, getP2pkhService: () => adapter,
-    getChain: () => ctx.optionalCapability(WOC_CAPABILITY),
+    chainHeight: ports.chainHeight, getChain: () => ctx.optionalCapability(WOC_CAPABILITY),
     getChainBroadcast: () => ctx.optionalCapability(WOC_WORKER_BROADCAST_CAPABILITY), getMsfileService: () => ctx.optionalCapability(MSFILE_SERVICE_CAPABILITY), connectChannelRuntime: ports.channel };
   const host = new ApplicationConnectionHost(deps, repository);
   await host.initialize();

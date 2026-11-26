@@ -79,7 +79,7 @@ export interface MsFileServiceImplDeps {
   builtinSuppliers?: readonly MsFileSupplierConfig[];
   /** 当前 Owner 的 local 内容来源；缺失时只保留 remote proxy 行为。 */
   localSource?: MsFileLocalContentSource;
-  /** Coordinator 在设置提交后启动/停止唯一卖方运行单元。 */
+  /** Coordinator 在设置提交后重新装配唯一卖方运行单元。 */
   onSellerSettingsChanged?(settings: MsFileSellerSettings): Promise<import("@keymaster/contracts").MsFileSellerRuntimeStatus>;
 }
 
@@ -191,7 +191,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
   };
   private cachedSuppliers: MsFileSupplierConfig[] = [];
   private cachedSellerSettings: MsFileSellerSettings = cloneSellerSettings(MSFILE_SELLER_SETTINGS_DEFAULT);
-  private sellerStatus: import("@keymaster/contracts").MsFileSellerRuntimeStatus = "disabled";
+  private sellerStatus: import("@keymaster/contracts").MsFileSellerRuntimeStatus = "waiting-dependency";
   /**
    * 最近一次广播的快照（审查修复）：emit() 只有内容真的变化才广播。
    * 读取路径（getSettingsSnapshot）也会调用 emit 做“读时发现变化才同步”，
@@ -423,8 +423,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     this.sellerStatus = this.onSellerSettingsChanged
       ? await this.onSellerSettingsChanged(cloneSellerSettings(settings))
       : sellerRuntimeStatus(settings, Boolean(this.localSource));
-    // 卖方开关与索引状态由 Coordinator 单实例消费；设置变化先清 local Stat
-    // 缓存，避免上传/删除与运行态切换后的旧可用性继续存在。
+    // 卖方运行态重新装配后清除旧的本地可用性缓存。
     this.statCache.clear();
     this.emit();
   }
@@ -1162,7 +1161,6 @@ function sellerRuntimeStatus(
   settings: Readonly<MsFileSellerSettings>,
   localSourceAvailable: boolean,
 ): import("@keymaster/contracts").MsFileSellerRuntimeStatus {
-  if (!settings.sellerEnabled) return "disabled";
   if (!localSourceAvailable || settings.supportedArbiterPublicKeys.length === 0) return "configuration-error";
   return "ready";
 }

@@ -52,17 +52,17 @@ export interface MsFileStatusResourceSnapshot {
 type AmountDraft = { text: string; unlimited: boolean };
 type ConcurrencyField = keyof MsFileReadConcurrencySettings;
 type ConcurrencyDraft = Record<ConcurrencyField, string>;
-type BitfsBuyerSettingsDraft = Omit<MsFileBitfsBuyerSettings, "maxConcurrentDownloads" | "refundDelayBlocks" | "poolBlocks" | "schedulerTotalSeats" | "schedulerFloatingSeats"> & {
+type BitfsBuyerSettingsDraft = Omit<MsFileBitfsBuyerSettings, "maxConcurrentDownloads" | "refundDelayBlocks" | "poolBlocks" | "schedulerTotalSeats" | "schedulerSeatsPerSeller" | "schedulerFloatingSeats"> & {
   maxConcurrentDownloads: string;
   refundDelayBlocks: string;
   poolBlocks: string;
   schedulerTotalSeats: string;
+  schedulerSeatsPerSeller: string;
   schedulerFloatingSeats: string;
 };
 
 /** 卖方状态缺省文案；正式界面优先使用 i18n 资源。 */
 const SELLER_RUNTIME_STATUS_LABELS: Record<MsFileSellerRuntimeStatus, string> = {
-  "disabled": "已关闭",
   "waiting-unlock": "等待解锁",
   "waiting-dependency": "等待依赖就绪",
   "indexing": "正在建立本地索引",
@@ -156,6 +156,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
     refundDelayBlocks: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.refundDelayBlocks),
     poolBlocks: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.poolBlocks),
     schedulerTotalSeats: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.schedulerTotalSeats),
+    schedulerSeatsPerSeller: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.schedulerSeatsPerSeller),
     schedulerFloatingSeats: String(MSFILE_BITFS_BUYER_SETTINGS_DEFAULT.schedulerFloatingSeats),
   });
   const [editingKey, setEditingKey] = useState<string | null>(null);
@@ -177,6 +178,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
         refundDelayBlocks: String(buyerSettings.refundDelayBlocks),
         poolBlocks: String(buyerSettings.poolBlocks),
         schedulerTotalSeats: String(buyerSettings.schedulerTotalSeats),
+        schedulerSeatsPerSeller: String(buyerSettings.schedulerSeatsPerSeller),
         schedulerFloatingSeats: String(buyerSettings.schedulerFloatingSeats),
       });
       setAuthorizations(await service.listAppAuthorizations());
@@ -268,6 +270,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
       refundDelayBlocks: Number(bitfsBuyerDraft.refundDelayBlocks),
       poolBlocks: Number(bitfsBuyerDraft.poolBlocks),
       schedulerTotalSeats: Number(bitfsBuyerDraft.schedulerTotalSeats),
+      schedulerSeatsPerSeller: Number(bitfsBuyerDraft.schedulerSeatsPerSeller),
       schedulerFloatingSeats: Number(bitfsBuyerDraft.schedulerFloatingSeats),
     });
     if (!candidate) {
@@ -286,6 +289,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
         refundDelayBlocks: String(candidate.refundDelayBlocks),
         poolBlocks: String(candidate.poolBlocks),
         schedulerTotalSeats: String(candidate.schedulerTotalSeats),
+        schedulerSeatsPerSeller: String(candidate.schedulerSeatsPerSeller),
         schedulerFloatingSeats: String(candidate.schedulerFloatingSeats),
       });
       setStatusMessage("BitFS 买方设置已保存。已开始的购买沿用任务创建时固定的调度设置。");
@@ -530,7 +534,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
   const suppliers = snapshot?.suppliers ?? [];
   const enabledSourceCount = suppliers.filter((supplier) => supplier.enabled).length;
   const serviceStatus = statusResource.status;
-  const sellerStatus = snapshot?.sellerRuntimeStatus ?? "disabled";
+  const sellerStatus = snapshot?.sellerRuntimeStatus ?? "waiting-dependency";
 
   return (
     <section className="msfile-settings" aria-label={t("msfile.settings.group", { defaultValue: "Local files" })}>
@@ -687,7 +691,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
         <header className="msfile-settings__section-header">
           <div>
             <h2 id="msfile-selling-title">{t("msfile.settings.section.seller", { defaultValue: "出售本地文件" })}</h2>
-            <p>{t("msfile.settings.section.seller.desc", { defaultValue: "控制当前 Key 是否可以通过 BitFS 出售完整本地文件。" })}</p>
+            <p>{t("msfile.settings.section.seller.desc", { defaultValue: "设置 BitFS 本地文件的售价和交易条件。" })}</p>
           </div>
           <span className={`msfile-settings__status is-${sellerStatus}`}>
             {t(`msfile.settings.seller.status.${sellerStatus}`, {
@@ -696,22 +700,11 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
           </span>
         </header>
         <div className="msfile-settings__callout">
-          <p>{t("msfile.settings.seller.warning", {
-            defaultValue: "开启后，卖方运行期间会暂停 Vault 自动锁，但不会自动解锁；手动锁定仍会立即停止接单并清除内存索引。"
-          })}</p>
           <p>{t("msfile.settings.seller.degraded", {
             defaultValue: "“依赖暂不可用”表示 BitFS 卖方协议或 Window 传输尚未就绪，此时不会对外报价。"
           })}</p>
         </div>
         <div className="msfile-settings__form-grid">
-          <label className="msfile-settings__checkbox is-wide">
-            <input
-              type="checkbox"
-              checked={sellerDraft.sellerEnabled}
-              onChange={(event) => setSellerDraft((current) => ({ ...current, sellerEnabled: event.target.checked }))}
-            />
-            <span>{t("msfile.settings.seller.enable", { defaultValue: "允许当前 Key 出售本地文件" })}</span>
-          </label>
           <div className="msfile-settings__field">
             <label htmlFor="msfile-seller-seed-price">{t("msfile.settings.seller.seedPrice", { defaultValue: "单个 Seed 售价（聪）" })}</label>
             <input
@@ -801,7 +794,7 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
           </div>
         </div>
         <div className="msfile-settings__section-actions">
-          <Button onClick={() => void saveSellerSettings()}>{t("msfile.settings.seller.save", { defaultValue: "保存卖方设置" })}</Button>
+          <Button disabled={!snapshot} onClick={() => void saveSellerSettings()}>{t("msfile.settings.seller.save", { defaultValue: "保存卖方设置" })}</Button>
         </div>
       </section>
       <ArbitrationPanel service={service} role="seller" />
@@ -856,6 +849,18 @@ function MsFileSettingsInner({ service }: { service: MsFileService }) {
               max={MSFILE_BITFS_BUYER_LIMITS.poolBlocks}
               value={bitfsBuyerDraft.poolBlocks}
               onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, poolBlocks: event.target.value }))}
+            />
+          </div>
+          <div className="msfile-settings__field">
+            <label htmlFor="msfile-buyer-seatsPerSeller">{t("msfile.settings.bitfsBuyer.schedulerSeatsPerSeller", { defaultValue: "调度器：每个卖家的并行下载席位（1–16）" })}</label>
+            <input
+              id="msfile-buyer-seatsPerSeller"
+              className="msfile-settings__control"
+              type="number"
+              min={1}
+              max={MSFILE_BITFS_BUYER_LIMITS.schedulerSeatsPerSeller}
+              value={bitfsBuyerDraft.schedulerSeatsPerSeller}
+              onChange={(event) => setBitfsBuyerDraft((current) => ({ ...current, schedulerSeatsPerSeller: event.target.value }))}
             />
           </div>
           <div className="msfile-settings__field">

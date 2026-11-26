@@ -15,6 +15,7 @@ import { arbitrationFeeForItems } from "./arbitrationFees.js";
 import { bitfsDownloadLockName, tryBitfsDownloadLock } from "./buyerDownloadLock.js";
 import { createMsFileLocalContentSource } from "./localContentSource.js";
 import { createBitfsPurchaseTasks } from "./purchaseTasks.js";
+import { readSchedulerTaskState, schedulerTaskFields } from "./schedulerHost/taskState.js";
 
 type Offer = Extract<MsFileP2pLaneOperation, { type: "bitfs-webrtc-buyer-offer" }>;
 type WireEvent = { type?: string; sessionId?: unknown; frame?: unknown; bytesIn?: unknown; reason?: unknown };
@@ -32,6 +33,7 @@ export function createBitfsBuyerWindowRuntime(options: {
   const localSource = createMsFileLocalContentSource(content);
   let identityKey: string | undefined;
   let generation = Date.now();
+  const failures = new Map<string, NonNullable<MsFileBitfsDemandSnapshot["failure"]>>();
 
   function identity() {
     const value = coordinator.getBootstrapSnapshot();
@@ -40,6 +42,7 @@ export function createBitfsBuyerWindowRuntime(options: {
     const identity = `${value.sessionEpoch}:${value.runGeneration}:${value.walletGeneration}`;
     if (identityKey !== identity) {
       identityKey = identity;
+      failures.clear();
       generation = Math.max(Date.now(), generation + 1);
     }
     return { owner: key.publicKeyHex.toLowerCase(), network: key.bsvNetwork, generation };
@@ -47,11 +50,29 @@ export function createBitfsBuyerWindowRuntime(options: {
 
   async function wallet<T>(seed: string, signal: AbortSignal, operation: CoordinatorBitfsBuyerWalletOperation): Promise<T> {
     signal.throwIfAborted();
-    const result = await coordinator.msfileControl({ type: "bitfs.buyer.wallet", seedHashHex: seed, operation }, signal);
-    signal.throwIfAborted();
-    if (result.status !== "ok") throw Object.assign(new Error("message" in result ? result.message : "BitFS 钱包操作失败"),
-      { code: "code" in result ? result.code : undefined });
-    return result.value as T;
+    traceDev("keymaster.bitfs.buyer-window", "wallet.start", () => ({
+      seedHashHex: seed, operation: operation.type,
+      sessionId: "sessionId" in operation ? operation.sessionId : undefined,
+    }));
+    try {
+      const result = await coordinator.msfileControl({ type: "bitfs.buyer.wallet", seedHashHex: seed, operation }, signal);
+      signal.throwIfAborted();
+      traceDev("keymaster.bitfs.buyer-window", "wallet.finish", () => ({
+        seedHashHex: seed, operation: operation.type,
+        sessionId: "sessionId" in operation ? operation.sessionId : undefined,
+        status: result.status,
+      }));
+      if (result.status !== "ok") throw Object.assign(new Error("message" in result ? result.message : "BitFS 钱包操作失败"),
+        { code: "code" in result ? result.code : undefined });
+      return result.value as T;
+    } catch (error) {
+      traceDev("keymaster.bitfs.buyer-window", "wallet.failed", () => ({
+        seedHashHex: seed, operation: operation.type,
+        sessionId: "sessionId" in operation ? operation.sessionId : undefined,
+        aborted: signal.aborted, error,
+      }));
+      throw error;
+    }
   }
 
   const bytes = (value: Uint8Array): ArrayBuffer => Uint8Array.from(value).buffer;
@@ -113,6 +134,10 @@ export function createBitfsBuyerWindowRuntime(options: {
     },
     async blockHeight() {
       const snapshot = coordinator.getChainHeightSnapshot();
+      traceDev("keymaster.bitfs.buyer-window", "blockHeight.read", () => ({
+        network: identity().network, available: snapshot.available,
+        snapshotNetwork: snapshot.network, height: snapshot.height,
+      }));
       if (!snapshot.available || snapshot.network !== identity().network || snapshot.height === undefined) throw new Error("链高度尚未同步");
       return snapshot.height;
     },
@@ -132,18 +157,23 @@ export function createBitfsBuyerWindowRuntime(options: {
         .catch(error => traceDev("keymaster.bitfs.buyer-window", "storage-notify.failed", () => ({ seedHashHex, sessionId, error })));
     },
     onStopped: (seedHashHex, committed) => traceDev("keymaster.bitfs.buyer-window", "download.stopped", () => ({ seedHashHex, committed })),
-    onError: (seedHashHex, error) => traceDev("keymaster.bitfs.buyer-window", "download.failed", () => ({ seedHashHex, error })),
+    onError(seed, error) {
+      traceDev("keymaster.bitfs.buyer-window", "download.failed", () => ({ seedHashHex: seed, error }));
+      const code = (error as { code?: string } | undefined)?.code;
+      failures.set(seed, code === "insufficient-funds" || code === "funding-unknown" ? code : "purchase-interrupted");
+      if (failures.size > 64) failures.delete(failures.keys().next().value!);
+    },
   });
 
-  async function readOther(seed: string, snapshot: BitfsBuyerSnapshot): Promise<MsFileBitfsDemandSnapshot> {
+  async function readOther(seed: string, snapshot: BitfsBuyerSnapshot, taskId?: string): Promise<MsFileBitfsDemandSnapshot> {
     if (!isValidMsFileHashHex(seed)) throw new Error("BitFS Seed Hash 无效");
     const current = identity();
     const locks = await navigator.locks?.query();
-    const held = locks?.held?.some(lock => lock.name === bitfsDownloadLockName(current.owner, seed)) === true;
     const tasks = createBitfsPurchaseTasks(journal, current.owner, seed);
     const rows = await tasks.list();
-    const active = rows.find(task => task.state === "active");
-    const latest = rows.at(-1);
+    const active = rows.find(task => task.state === "active" && (!taskId || task.taskId === taskId));
+    const latest = taskId ? rows.find(task => task.taskId === taskId) : rows.at(-1);
+    const held = (!taskId || active !== undefined) && locks?.held?.some(lock => lock.name === bitfsDownloadLockName(current.owner, seed)) === true;
     // 下载运行时在任务结束后撤掉报价。完成状态来自持久任务和当前本地内容。
     if (!held && !active && latest?.state === "ended" && latest.endReason === "completed") {
       const localFile = await localSource.stat(seed, lifecycle);
@@ -164,20 +194,51 @@ export function createBitfsBuyerWindowRuntime(options: {
       : undefined;
     return {
       seedHashHex: seed, requestMessageId: null, expiresAtMs: null, quotes: [], currentMaxFullBlockPriceSatoshis: null,
-      existingPurchaseSessionId: active?.taskId ?? null, downloadReadOnly: held, interrupted: !held && Boolean(active || intent || partial),
+      existingPurchaseSessionId: active?.taskId ?? null,
+      taskId: active?.taskId ?? (held ? undefined : latest?.taskId),
+      taskEndReason: !active && !held ? latest?.endReason : undefined,
+      downloadReadOnly: held, interrupted: !held && Boolean(active || intent || partial),
       purchase: purchase && progress ? {
         sessionId: purchase.sessionId, phase: held ? "requesting-blocks" : "connection-closed",
         openingAmountSatoshis: null, verifiedBlockCount: progress.completedBlockCount,
         totalBlockCount: progress.totalBlockCount, message: held ? "正在下载" : "下载已中断，已保留本地记录",
-      } : snapshot.purchase,
+      } : taskId && taskId !== snapshot.existingPurchaseSessionId ? undefined : snapshot.purchase,
     };
   }
 
-  async function show(snapshot: BitfsBuyerSnapshot): Promise<MsFileBitfsDemandSnapshot> {
-    return snapshot.requestMessageId ? snapshot : readOther(snapshot.seedHashHex, snapshot);
+  async function show(snapshot: BitfsBuyerSnapshot, requestedTaskId?: string): Promise<MsFileBitfsDemandSnapshot> {
+    const result: MsFileBitfsDemandSnapshot = snapshot.requestMessageId && (!requestedTaskId || requestedTaskId === snapshot.existingPurchaseSessionId)
+      ? snapshot : await readOther(snapshot.seedHashHex, snapshot, requestedTaskId);
+    const current = identity();
+    if (!requestedTaskId && result.requestMessageId && !result.existingPurchaseSessionId) {
+      const previous = (await createBitfsPurchaseTasks(journal, current.owner, snapshot.seedHashHex).list())
+        .find(task => task.state === "active");
+      if (previous) return { ...result, taskId: previous.taskId };
+    }
+    const taskId = result.taskId ?? result.existingPurchaseSessionId ?? result.completedPurchase?.taskId;
+    if (!taskId) return result;
+    traceDev("keymaster.bitfs.buyer-window", "scheduler.read.start", () => ({
+      seedHashHex: result.seedHashHex, taskId, network: current.network,
+    }));
+    const saved = await readSchedulerTaskState({ store: journal, ownerPublicKeyHex: current.owner, network: current.network, taskId })
+      .catch(error => {
+        traceDev("keymaster.bitfs.buyer-window", "scheduler.read.failed", () => ({
+          seedHashHex: result.seedHashHex, taskId, network: current.network, error,
+        }));
+        throw error;
+      });
+    if (!saved) return { ...result, taskId };
+    traceDev("keymaster.bitfs.buyer-window", "scheduler.read.finish", () => ({
+      seedHashHex: result.seedHashHex, taskId, revision: saved.revision,
+      execution: saved.intent, pools: Object.keys(saved.pools).length,
+      requests: Object.keys(saved.requests).length, failure: saved.failure,
+    }));
+    return { ...result, taskId, funds: schedulerTaskFields(saved).schedulerState?.funds, ...(saved.failure ? { failure: "insufficient-funds" } : {}) };
   }
 
   return {
+    readPlaybackRange: buyer.readPlaybackRange,
+    setDownloadPrice: buyer.setDownloadPrice,
     registerOffer(offer: Offer): AbortSignal | undefined {
       return buyer.registerOffer({
         ...offer,
@@ -189,6 +250,11 @@ export function createBitfsBuyerWindowRuntime(options: {
       const input = raw as WireEvent;
       if (typeof input.sessionId !== "string") return Promise.resolve(false);
       const { sessionId } = input;
+      traceDev("keymaster.bitfs.buyer-window", "transport.event.start", () => ({
+        sessionId, inputType: input.type,
+        frameBytes: input.frame instanceof Uint8Array ? input.frame.byteLength : undefined,
+        bytesIn: input.bytesIn, reason: input.reason,
+      }));
       let event: BitfsBuyerTransportEvent;
       if (input.type === "bitfs-webrtc-frame" && input.frame instanceof Uint8Array) {
         event = { type: "frame", sessionId, frame: input.frame };
@@ -201,13 +267,35 @@ export function createBitfsBuyerWindowRuntime(options: {
       } else {
         return Promise.resolve(false);
       }
-      return buyer.onTransportEvent(event);
+      return buyer.onTransportEvent(event).then(accepted => {
+        traceDev("keymaster.bitfs.buyer-window", "transport.event.finish", () => ({
+          sessionId, eventType: event.type, accepted,
+        }));
+        return accepted;
+      }).catch(error => {
+        traceDev("keymaster.bitfs.buyer-window", "transport.event.failed", () => ({
+          sessionId, eventType: event.type, error,
+        }));
+        throw error;
+      });
     },
-    publishBitfsDemand: async (seed: string) => show(await buyer.download(seed)),
-    resumeBitfsDownload: async (seed: string) => show(await buyer.resume(seed)),
+    publishBitfsDemand: async (seed: string, manualPurchase = false) => {
+      failures.delete(seed);
+      return show(await buyer.download(seed, manualPurchase));
+    },
+    resumeBitfsDownload: async (seed: string) => {
+      failures.delete(seed);
+      return show(await buyer.resume(seed));
+    },
     deleteBitfsDownload: buyer.deleteDownload,
-    getBitfsDemand: async (seed: string) => show(await buyer.getDownload(seed)),
-    startBitfsPurchase: async (seed: string, sessionId: string, max?: string) => show(await buyer.startPurchase(seed, sessionId, max)),
+    getBitfsDemand: async (seed: string, taskId?: string) => {
+      const observed = await buyer.getDownload(seed);
+      const snapshot = await show(observed, taskId);
+      const failure = !taskId || taskId === observed.existingPurchaseSessionId ? failures.get(seed) : undefined;
+      return failure ? { ...snapshot, failure } : snapshot;
+    },
+    startBitfsPurchase: async (seed: string, sessionId: string, max?: string, requireNew?: boolean) =>
+      show(await buyer.startPurchase(seed, sessionId, max, requireNew)),
     cancelBitfsDemand: buyer.withdrawDemand,
     cancelBitfsPurchase: async (seed: string) => show(await buyer.stop(seed)),
     stop: buyer.close,

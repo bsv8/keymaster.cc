@@ -44,6 +44,7 @@ export const WOC_MSG = {
   TX_SPENT_OUTPUTS: "woc.tx.spentOutputs",
   TX_RAW: "woc.tx.raw",
   CHAIN_READ: "woc.chain.read",
+  CHAIN_TRANSACTION_BATCH: "woc.chain.transaction-batch",
   TX_BROADCAST: "woc.tx.broadcast",
   // token / collectible 协议查询：与上面 coin 类 endpoint 共享 actor 的
   // priority queue / 限流 / 429 backoff / 多标签页协调。

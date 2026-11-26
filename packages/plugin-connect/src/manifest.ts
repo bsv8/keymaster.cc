@@ -407,7 +407,7 @@ const connectPluginDefinition = {
   }, {
     id: "protocol.coordinator-worker", runtime: "shared-worker", scopeKind: "storage",
     connect: { providerMethods: ["domain.profiles", "domain.get_public_key",
-      "chain.get_height", "chain.list_script_history", "chain.get_transaction", "chain.list_script_unspent", "chain.broadcast", "application.key", "application.sign_message", "application.sign_payment"] },
+      "chain.get_height", "chain.list_script_history", "chain.get_transaction", "chain.get_transactions", "chain.list_script_unspent", "chain.broadcast", "application.key", "application.sign_message", "application.sign_payment"] },
     provides: [CONNECT_APP_SOURCE_BATCH_CAPABILITY], privateProvides: [CONNECT_PRIVATE_COMMAND, CONNECT_PRIVATE_EVENTS],
     storages: [CONNECT_STORAGE_DECLARATIONS.files],
     dependencies: defineRuntimeUnitDependencies([

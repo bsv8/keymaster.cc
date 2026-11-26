@@ -10,6 +10,7 @@ import { createProviderDispatch } from "./providerDispatch.js";
 import { KeymasterConnectReceiver, type ReceiverRequest } from "keymaster-connect/server";
 import type * as ConnectPublic from "keymaster-connect/protocol";
 import type { ProtocolResultMessage } from "keymaster-connect/protocol";
+import { msfileReadCancelled, msfileReadError, msfileReadInterrupted, toPublicMsFileReadStatus } from "./msfileReadStatus.js";
 // packages/plugin-connect/src/connectService.ts
 // 钱包 Connect 宿主：解锁/授权 UI 调度、串行执行、Vault 与实际业务、持久责任。
 // Client/Receiver 的协议校验、来源/绑定、在途去重与封包统一由独立 KeymasterConnect 实现。
@@ -127,7 +128,6 @@ import {
   type ConnectAuthSnapshot,
   type ProtocolError,
   type ProtocolErrorCode,
-  type ProtocolEventMessage,
   type ProtocolFailureReason,
   type ProtocolFeePoolAction,
   type ProtocolFeePoolDeliveryRecord,
@@ -143,6 +143,7 @@ import {
   type ProtocolSessionPhase,
   type ConnectSessionSnapshot,
   type ConnectStorageRepository,
+  type ConnectMsFileReadRecord,
   type MsFileService,
   type MsFileConnectAppContext,
   type MsFileStatResult,
@@ -241,6 +242,7 @@ export interface ConnectServiceDeps {
   runtimeSignal?: AbortSignal;
   walletOrigin?: string;
   getChain?: () => import("@keymaster/contracts").WocService | undefined;
+  chainHeight?: Pick<import("@keymaster/contracts").ChainHeightReader, "get" | "subscribe">;
   getChainBroadcast?: () => import("@keymaster/contracts").WocWorkerBroadcastService | undefined;
   runChainBroadcast?: <T>(signal: AbortSignal | undefined, submit: (signal: AbortSignal) => Promise<T>) => Promise<T>;
   runConnectRequest?: (execute: (lease: ConnectExecutionLease) => Promise<void>) => Promise<void>;
@@ -394,6 +396,8 @@ interface RequestRecord {
   /** AbortController owned by the request while provider I/O is running. */
   abortController?: AbortController;
   cancelRequested?: boolean;
+  msfileRead?: { key: string; initial: ConnectMsFileReadRecord; existing?: ConnectMsFileReadRecord };
+  msfileContinuationApproved?: boolean;
   /** 本地终态原因（写本地）；隐私敏感场景与对外解耦。 */
   failureReason?: ProtocolFailureReason;
   /* ============== 施工单 2026-06-28 001：connect.* 字段 ============== */
@@ -455,6 +459,8 @@ function requireVaultCommandAccepted(result: Awaited<ReturnType<import("@keymast
       : `${operation} failed: ${result.status}`;
   throw new Error(message);
 }
+
+const activeMsfileReads = new Set<string>();
 
 export class ConnectServiceImpl implements ConnectService {
   /** 会话级锁状态（施工单 2026-06-27 001 硬切换）。 */
@@ -628,11 +634,12 @@ export class ConnectServiceImpl implements ConnectService {
   /** 每个 Connect session 的虚拟精确频道集合。物理订阅由 Coordinator 统一复用。 */
   private readonly channelSubscriptionsBySessionId: Map<string, string[]> = new Map();
   private channelRuntimeUnsubscribe: (() => void) | undefined;
+  private chainHeightUnsubscribe: (() => void) | undefined;
   private readonly channelQuotaBySessionId: Map<string, { publishes: number[]; bytes: Array<{ at: number; size: number }>; inFlight: number }> = new Map();
   private channelSessionEpoch = 0;
   /** 协议绑定/在途关联只由独立 Receiver 持有；本类只保存业务执行记录。 */
   private readonly receiver: KeymasterConnectReceiver;
-  private readonly domainRequests = new Set<ReceiverRequest>();
+  private readonly directRequests = new Set<ReceiverRequest>();
 
   private assertWalletGeneration(rec: RequestRecord): void {
     const lifecycle = this.deps.walletState.snapshot();
@@ -700,6 +707,12 @@ export class ConnectServiceImpl implements ConnectService {
         this.dispatchChannelMessageReceived(event);
       });
     }
+    this.chainHeightUnsubscribe = deps.chainHeight?.subscribe(snapshot => {
+      if (!snapshot.available || deps.runtimeSignal?.aborted || deps.vault.status() !== "unlocked") return;
+      for (const [source, context] of this.channelSessionBySource) {
+        if (context.epoch === this.channelSessionEpoch) this.postChainHeight(source, context.origin, context.networkIdentity, snapshot);
+      }
+    });
   }
 
   /** MSFile capability 是可选依赖；缺失时 `msfile.*` fail closed。 */
@@ -1060,9 +1073,9 @@ export class ConnectServiceImpl implements ConnectService {
       // first so a late client cancel cannot abort an already approved request.
       const id = (event.data as { id?: unknown }).id;
       if (typeof id !== "string") return;
-      if ([...this.domainRequests].some(request => request.id === id && request.origin === event.origin && request.source === event.source)) {
+      if ([...this.directRequests].some(request => request.id === id && request.origin === event.origin && request.source === event.source)) {
         const cancelled = this.receiver.acceptCancel(event);
-        if (cancelled) this.receiver.replyError(cancelled, { code: "user_rejected", message: "Domain query cancelled" });
+        if (cancelled) this.receiver.replyError(cancelled, { code: "user_rejected", message: "Query cancelled" });
         return;
       }
       const candidate = this.findRequestByTransportId(event.source as Window | null, event.origin, id);
@@ -1104,7 +1117,7 @@ export class ConnectServiceImpl implements ConnectService {
   }
 
   private async handleDomainRequest(context: ReceiverRequest, query: DomainQuery): Promise<void> {
-    this.domainRequests.add(context);
+    this.directRequests.add(context);
     try {
       const directory = this.deps.domains;
       if (!directory) throw new DomainQueryError("domain_service_unavailable", "Domain queries unavailable");
@@ -1126,7 +1139,7 @@ export class ConnectServiceImpl implements ConnectService {
         : { code: "domain_service_unavailable" as const, message: "Domain query failed" };
       this.receiver.replyError(context, failure);
     } finally {
-      this.domainRequests.delete(context);
+      this.directRequests.delete(context);
     }
   }
 
@@ -1344,6 +1357,8 @@ export class ConnectServiceImpl implements ConnectService {
     this.endSession();
     this.channelRuntimeUnsubscribe?.();
     this.channelRuntimeUnsubscribe = undefined;
+    this.chainHeightUnsubscribe?.();
+    this.chainHeightUnsubscribe = undefined;
   }
 
   /**
@@ -2042,6 +2057,23 @@ export class ConnectServiceImpl implements ConnectService {
       errorCode: "",
       errorMessage: ""
     };
+    if (method === "msfile.content.status" || method === "msfile.content.range" || method === "msfile.content.price") {
+      const context = rec.protocol;
+      this.directRequests.add(context);
+      try {
+        rec.walletPublicKeyHex = rec.networkIdentity.publicKeyHex;
+        const result = await this.providerDispatch.get(method)!(rec);
+        if (!result) return;
+        context.signal.throwIfAborted();
+        await this.replyResultToRec(rec, result);
+      } catch (error) {
+        const failure = toProtocolError(error);
+        if (!context.signal.aborted) await this.replyErrorToRec(rec, failure.code, failure.message);
+      } finally {
+        this.directRequests.delete(context);
+      }
+      return;
+    }
     this.requestsByRecordId.set(recordId, rec);
 
     // 决定初始 phase。`setRecordPhase` 只更新内存 feed 卡（施工单
@@ -2208,15 +2240,33 @@ export class ConnectServiceImpl implements ConnectService {
     }
 
     if (this.isTerminalPhase(rec.phase)) return;
+    if (method === "msfile.content.read" || method === "msfile.content.open") {
+      const params = rec.params as MethodParams<"msfile.content.read">;
+      if (params.clientRequestId !== undefined) {
+        try {
+          rec.msfileRead = await this.claimMsfileRead(rec, params.seedHashHex, params.clientRequestId);
+          if (rec.protocol.signal.aborted || this.isTerminalPhase(rec.phase)) return;
+        } catch (error) {
+          const failure = toProtocolError(error);
+          rec.phase = "failed";
+          rec.errorCode = failure.code;
+          rec.errorMessage = failure.message;
+          rec.finishedAt = rec.updatedAt = Date.now();
+          this.writeFeedCommandFor(rec);
+          await this.replyErrorToRec(rec, failure.code, failure.message);
+          this.emitFeed();
+          return;
+        }
+      }
+    }
     if (method === "payment.cancel" && this.lockStateValue === "unlocked") {
-      // The worker's reservation transition arbitrates this call even while the
-      // same connection is waiting for commit approval.
+      // Reservation cancellation must work during another request's approval.
       this.setRecordPhase(recordId, "executing");
       await this.runRequest(rec);
       return;
     }
     // Payment must first obtain a real frozen preview; its external approval is requested before submit, not at the internal wallet signer.
-    if (method === "payment.pay" || method === "payment.commit" || method === "application.sign_payment" || method === "application.sign_message" || method === "msfile.import" || method === "msfile.content.read") {
+    if (method === "payment.pay" || method === "payment.commit" || method === "application.sign_payment" || method === "application.sign_message" || method === "msfile.import" || method === "msfile.content.read" || method === "msfile.content.open") {
       rec.autoExecuteAfterUnlock = true;
       this.applyManualPhaseDecision(recordId, origin, true);
       return;
@@ -3080,9 +3130,10 @@ export class ConnectServiceImpl implements ConnectService {
     "payment.prepare": rec => this.executePaymentPrepare(rec),
     "payment.commit": rec => this.executePaymentReservation(rec, true),
     "payment.cancel": rec => this.executePaymentReservation(rec, false),
-    "chain.get_height": rec => this.withChain(rec, async (woc, options) => ({ height: await woc.getChainHeight(options) })),
+    "chain.get_height": rec => this.executeChainHeight(rec),
     "chain.list_script_history": rec => this.withChain(rec, (woc, options) => woc.listScriptHistory(rec.params as MethodParams<"chain.list_script_history">, options)),
     "chain.get_transaction": rec => this.executeChainTransaction(rec),
+    "chain.get_transactions": rec => this.withChain(rec, (woc, options) => woc.getChainTransactions(rec.params as MethodParams<"chain.get_transactions">, options)),
     "chain.list_script_unspent": rec => this.withChain(rec, (woc, options) => woc.listScriptUnspent((rec.params as MethodParams<"chain.list_script_unspent">).script, options)),
     "chain.broadcast": rec => this.executeChainBroadcast(rec),
     "application.key": rec => this.executeApplicationKey(rec),
@@ -3097,7 +3148,11 @@ export class ConnectServiceImpl implements ConnectService {
     "channel.subscription_set": rec => this.executeChannelSubscriptionSet(rec),
     "msfile.seller.status": async rec => (await this.requireConnectContent(rec)).sellerStatus(),
     "msfile.import": rec => this.executeMsfileImport(rec),
-    "msfile.content.read": rec => this.executeMsfileContentRead(rec),
+    "msfile.content.read": rec => this.executeMsfileReadOperation(rec, false),
+    "msfile.content.status": rec => this.executeMsfileReadStatus(rec),
+    "msfile.content.open": rec => this.executeMsfileReadOperation(rec, true),
+    "msfile.content.price": rec => this.executeMsfileDownloadPrice(rec),
+    "msfile.content.range": rec => this.executeMsfileContentRange(rec),
     "msfile.stat": rec => this.executeMsfileStat(rec),
     "msfile.seed.read": rec => this.executeMsfileSeedRead(rec),
     "msfile.block.read": rec => this.executeMsfileBlockRead(rec),
@@ -3182,8 +3237,254 @@ export class ConnectServiceImpl implements ConnectService {
     return content.importFile({ fileName: input.fileName, content: input.content }, rec.protocol.signal);
   }
 
-  private async executeMsfileContentRead(rec: RequestRecord): Promise<ConnectPublic.MsFileContentResult> {
-    const { seedHashHex } = rec.params as MethodParams<"msfile.content.read">;
+  private async executeMsfileReadOperation(rec: RequestRecord, open: boolean): Promise<ConnectPublic.MsFileContentResult | ConnectPublic.MsFileReadStatus> {
+    if (!rec.msfileRead) {
+      if (open) throw protocolError("internal_error", "File operation was not recorded");
+      const local = await this.readMsfileContent(rec, false);
+      return local!;
+    }
+    const { key, initial, existing: previous } = rec.msfileRead;
+    const { seedHashHex } = initial;
+    const repo = this.deps.storageRepository;
+    if (!repo?.getConnectRead || !repo.putConnectRead) throw protocolError("internal_error", "File operation storage is unavailable");
+    if (previous) {
+      const stored = await this.getMsfileRead(key);
+      if (open) return toPublicMsFileReadStatus(await this.projectMsfileReadStatus(rec, key, stored));
+      const error = msfileReadError(stored);
+      if (error && !(stored.phase === "interrupted" && stored.taskId)) throw error;
+      const content = await this.requireConnectContent(rec);
+      const local = await content.readLocal(seedHashHex, rec.protocol.signal);
+      if (local) return local;
+      if (error) throw error;
+      throw protocolError("msfile_unavailable", "请按原读取编号查询或在钱包中继续下载。");
+    }
+    let status = initial;
+    let follow = false;
+    const update = async (patch: Partial<ConnectMsFileReadRecord>) => {
+      const next = { ...status, ...patch };
+      await repo.putConnectRead!(key, next);
+      status = next;
+    };
+    try {
+      const result = await this.readMsfileContent(rec, open, update);
+      follow = open && status.phase === "downloading";
+      return open ? toPublicMsFileReadStatus(status) : result!;
+    } catch (error) {
+      const failure = toProtocolError(error);
+      // A disconnected observer cannot decide the outcome of a dispatched purchase.
+      follow = rec.protocol.signal.aborted && rec.failureReason !== "user_canceled" &&
+        (status.phase === "downloading" || (status.phase === "discovering" && rec.msfileContinuationApproved === true));
+      if (!follow) {
+        const cancelled = rec.failureReason === "user_canceled" || failure.code === "msfile_read_cancelled" ||
+          (failure.code === "user_rejected" && !rec.protocol.signal.aborted);
+        await update({
+          phase: cancelled ? "cancelled" :
+            rec.protocol.signal.aborted || failure.code === "msfile_read_interrupted" ? "interrupted" : "failed",
+          error: failure,
+        });
+      }
+      throw error;
+    } finally {
+      activeMsfileReads.delete(key);
+      if (follow) {
+        activeMsfileReads.add(key);
+        void this.trackMsfileDownload(status, update).catch(error => {
+          if (!this.deps.runtimeSignal?.aborted) traceDev("keymaster.connect.content", "tracking.failed", () => ({ error }));
+        }).finally(() => activeMsfileReads.delete(key));
+      }
+    }
+  }
+
+  private async claimMsfileRead(rec: RequestRecord, seedHashHex: string, clientRequestId: string): Promise<NonNullable<RequestRecord["msfileRead"]>> {
+    const key = await this.msfileReadKey(rec, clientRequestId);
+    const repo = this.deps.storageRepository;
+    if (!repo?.claimConnectRead) throw protocolError("internal_error", "File operation storage is unavailable");
+    const initial: ConnectMsFileReadRecord = { clientRequestId, seedHashHex, phase: "accepted" };
+    const existing = await repo.claimConnectRead(key, initial);
+    if (existing && existing.seedHashHex !== seedHashHex) {
+      throw protocolError("id_conflict", "读取编号已用于另一文件。");
+    }
+    if (!existing && !rec.protocol.signal.aborted) {
+      activeMsfileReads.add(key);
+      rec.protocol.signal.addEventListener("abort", () => activeMsfileReads.delete(key), { once: true });
+    }
+    return { key, initial, existing };
+  }
+
+  private async msfileReadKey(rec: RequestRecord, clientRequestId: string): Promise<string> {
+    const session = await this.requireConnectSession(rec, rec.walletPublicKeyHex);
+    this.assertSessionOwnerIsActive(session);
+    this.receiver.assertCurrent(rec.protocol);
+    rec.protocol.signal.throwIfAborted();
+    const scope = ["keymaster.connect-msfile-read.v1", rec.origin, session.networkIdentity.bsvNetwork,
+      session.ownerPublicKeyHex.toLowerCase(), permissionKeyFor(rec.origin, session.appPublicKeyHex), clientRequestId];
+    return bytesToHex(sha256Bytes(new TextEncoder().encode(JSON.stringify(scope))));
+  }
+
+  private async executeMsfileReadStatus(rec: RequestRecord): Promise<ConnectPublic.MsFileReadStatus> {
+    const { clientRequestId } = rec.params as MethodParams<"msfile.content.status">;
+    const key = await this.msfileReadKey(rec, clientRequestId);
+    return toPublicMsFileReadStatus(await this.projectMsfileReadStatus(rec, key, await this.getMsfileRead(key)));
+  }
+
+  private msfileWalletBlockPriceMax(rec: RequestRecord): string {
+    return rec.networkIdentity.bsvNetwork === "test" ? "100" : "1000";
+  }
+
+  private async executeMsfileDownloadPrice(rec: RequestRecord): Promise<ConnectPublic.MsFileDownloadPriceResult> {
+    const { clientRequestId, maxFullBlockPriceSatoshis } = rec.params as MethodParams<"msfile.content.price">;
+    const content = await this.requireConnectContent(rec);
+    const walletMaxFullBlockPriceSatoshis = this.msfileWalletBlockPriceMax(rec);
+    if (clientRequestId !== undefined && maxFullBlockPriceSatoshis !== undefined) {
+      if (BigInt(maxFullBlockPriceSatoshis) > BigInt(walletMaxFullBlockPriceSatoshis)) {
+        throw protocolError("msfile_price_limit_exceeded", "完整块单价超出钱包允许的上限。");
+      }
+      const stored = await this.getMsfileRead(await this.msfileReadKey(rec, clientRequestId));
+      if (!stored.priceAdjustable || !stored.taskId || stored.phase !== "downloading") {
+        throw protocolError("invalid_request", "该读取记录没有正在运行且可调价的下载任务。");
+      }
+      await content.setDownloadPrice(stored.seedHashHex, stored.taskId, maxFullBlockPriceSatoshis, rec.protocol.signal);
+    }
+    return { walletMaxFullBlockPriceSatoshis };
+  }
+
+  private async getMsfileRead(key: string): Promise<ConnectMsFileReadRecord> {
+    const repo = this.deps.storageRepository;
+    if (!repo?.getConnectRead) throw protocolError("internal_error", "File operation storage is unavailable");
+    const status = await repo.getConnectRead(key);
+    if (!status) throw protocolError("msfile_read_not_found", "找不到此读取操作。");
+    return status;
+  }
+
+  private async projectMsfileReadStatus(rec: RequestRecord, key: string, status: ConnectMsFileReadRecord,
+    signal = rec.protocol.signal): Promise<ConnectMsFileReadRecord> {
+    if (status.phase !== "downloading" && status.phase !== "discovering" &&
+        !(status.taskId && (status.phase === "available" || status.phase === "failed" || status.phase === "cancelled" || status.phase === "interrupted"))) {
+      if ((status.phase === "accepted" || status.phase === "awaiting-approval") && !activeMsfileReads.has(key)) {
+        return { ...status, phase: "interrupted" };
+      }
+      return status;
+    }
+    const content = await this.requireConnectContent(rec);
+    return this.observeMsfileDownload(status, content, signal, activeMsfileReads.has(key));
+  }
+
+  private async observeMsfileDownload(
+    status: ConnectMsFileReadRecord,
+    content: NonNullable<MsFileService["connectContent"]>,
+    signal: AbortSignal,
+    active = false,
+  ): Promise<ConnectMsFileReadRecord> {
+    const terminalFailure = status.phase === "failed" || status.phase === "cancelled";
+    const available = status.phase === "available" || (!terminalFailure && await content.hasLocal(status.seedHashHex, signal));
+    const snapshot = await content.snapshot(status.seedHashHex, signal, status.taskId);
+    const taskId = snapshot.taskId ?? snapshot.existingPurchaseSessionId ?? snapshot.completedPurchase?.taskId ?? undefined;
+    const matches = !status.taskId || taskId === status.taskId;
+    if (terminalFailure) return { ...status, funds: matches ? snapshot.funds ?? status.funds : status.funds };
+    if (available) return { ...status, phase: "available", taskId: status.taskId ?? taskId, funds: matches ? snapshot.funds ?? status.funds : status.funds };
+    if (!matches) return { ...status, phase: "interrupted" };
+    const failed = (snapshot.failure && snapshot.failure !== "purchase-interrupted") || snapshot.taskEndReason === "failed";
+    const phase = snapshot.taskEndReason === "cancelled" ? "cancelled" : failed ? "failed" :
+      snapshot.failure === "purchase-interrupted" || snapshot.interrupted || (!snapshot.downloadReadOnly && !snapshot.requestMessageId && !active)
+        ? "interrupted" : status.phase === "discovering" && !taskId ? "discovering" : "downloading";
+    const error = snapshot.failure ? { code: "msfile_unavailable" as const, message: ({
+      "insufficient-funds": "钱包可用余额不足，无法购买此文件。",
+      "funding-unknown": "开池交易结果待核对，请查看钱包购买历史。",
+      "purchase-interrupted": "BitFS 下载已中断，请查看钱包购买历史。",
+    })[snapshot.failure] } : undefined;
+    return { ...status, phase, taskId, funds: snapshot.funds,
+      currentMaxFullBlockPriceSatoshis: snapshot.currentMaxFullBlockPriceSatoshis ?? status.currentMaxFullBlockPriceSatoshis,
+      verifiedBlockCount: snapshot.purchase?.verifiedBlockCount ?? undefined,
+      totalBlockCount: snapshot.purchase?.totalBlockCount ?? undefined, error };
+  }
+
+  private async trackMsfileDownload(
+    status: ConnectMsFileReadRecord,
+    update: (status: ConnectMsFileReadRecord) => Promise<void>,
+  ): Promise<void> {
+    const signal = this.deps.runtimeSignal;
+    const content = this.currentMsfileService()?.connectContent;
+    if (!signal || !content) return;
+    while (!signal.aborted) {
+      const next = await this.observeMsfileDownload(status, content, signal);
+      signal.throwIfAborted();
+      if (next.phase === "interrupted") return;
+      if (next.phase !== status.phase || next.taskId !== status.taskId || next.funds !== status.funds) {
+        await update(next);
+        status = next;
+      }
+      if (["failed", "available", "cancelled"].includes(status.phase) && status.funds !== "pending") return;
+      await new Promise<void>(resolve => {
+        const wake = () => {
+          clearTimeout(timer);
+          signal.removeEventListener("abort", wake);
+          resolve();
+        };
+        const timer = setTimeout(wake, 1_000);
+        signal.addEventListener("abort", wake, { once: true });
+        if (signal.aborted) wake();
+      });
+    }
+  }
+
+  private async executeMsfileContentRange(rec: RequestRecord): Promise<ConnectPublic.MsFileContentRangeResult> {
+    const { clientRequestId, offset, length } = rec.params as MethodParams<"msfile.content.range">;
+    const key = await this.msfileReadKey(rec, clientRequestId);
+    const timeout = AbortSignal.timeout(length === 0 ? 25_000 : 55_000);
+    const signal = AbortSignal.any([rec.protocol.signal, timeout]);
+    try {
+      while (true) {
+        signal.throwIfAborted();
+        const stored = await this.getMsfileRead(key);
+        const resuming = stored.phase === "interrupted" && Boolean(stored.taskId);
+        const status = resuming ? await this.projectMsfileReadStatus(rec, key, stored, signal) : stored;
+        const failure = msfileReadError(status);
+        if (failure) throw failure;
+        if (status.phase === "available" || status.phase === "downloading") {
+          const content = await this.requireConnectContent(rec);
+          const taskId = status.taskId ?? (status.phase === "downloading"
+            ? (await content.snapshot(status.seedHashHex, signal)).existingPurchaseSessionId ?? undefined
+            : undefined);
+          const range = await content.readRange(status.seedHashHex, taskId, offset, length, signal);
+          signal.throwIfAborted();
+          if (range.fileSizeBytes !== undefined && (range.content || length === 0 || offset >= range.fileSizeBytes)) return range;
+          if (status.phase === "available") throw protocolError("msfile_content_not_found", "钱包中的文件已经不可用。");
+        }
+        if (!resuming) {
+          const observed = await this.projectMsfileReadStatus(rec, key, stored, signal);
+          const error = msfileReadError(observed);
+          if (error) throw error;
+        }
+        await new Promise<void>(resolve => {
+          const wake = () => {
+            clearTimeout(timer);
+            signal.removeEventListener("abort", wake);
+            resolve();
+          };
+          const timer = setTimeout(wake, 350);
+          signal.addEventListener("abort", wake, { once: true });
+          if (signal.aborted) wake();
+        });
+      }
+    } catch (error) {
+      rec.protocol.signal.throwIfAborted();
+      if (timeout.aborted) {
+        throw protocolError("msfile_range_timeout", "这段内容尚未下载完成，可以用原读取编号重试。");
+      }
+      throw error;
+    }
+  }
+
+  private async readMsfileContent(
+    rec: RequestRecord,
+    open: boolean,
+    update?: (patch: Partial<ConnectMsFileReadRecord>) => Promise<void>,
+  ): Promise<ConnectPublic.MsFileContentResult | undefined> {
+    const { seedHashHex, maxFullBlockPriceSatoshis } = rec.params as MethodParams<"msfile.content.read">;
+    const walletPriceMax = this.msfileWalletBlockPriceMax(rec);
+    if (maxFullBlockPriceSatoshis !== undefined && BigInt(maxFullBlockPriceSatoshis) > BigInt(walletPriceMax)) {
+      throw protocolError("msfile_price_limit_exceeded", "完整块单价超出钱包允许的上限。");
+    }
     const content = await this.requireConnectContent(rec);
     const signal = rec.protocol.signal;
     const diagnostic = (event: string, details: Record<string, unknown> = {}) => {
@@ -3194,24 +3495,54 @@ export class ConnectServiceImpl implements ConnectService {
       this.assertWalletGeneration(rec);
       this.receiver.assertCurrent(rec.protocol);
     };
-    let result = await content.readLocal(seedHashHex, signal);
+    const approvedSignal = () => {
+      if (!rec.msfileContinuationApproved || !this.deps.runtimeSignal) {
+        verifyCurrent();
+        return signal;
+      }
+      if (rec.failureReason === "user_canceled") throw protocolError("user_rejected", "Operation was cancelled");
+      this.assertWalletGeneration(rec);
+      this.deps.runtimeSignal.throwIfAborted();
+      return this.deps.runtimeSignal;
+    };
+    const keepPurchaseAfterApproval = rec.msfileRead && this.deps.runtimeSignal
+      ? () => { rec.msfileContinuationApproved = true; }
+      : undefined;
+    if (open && await content.hasLocal(seedHashHex, signal)) {
+      verifyCurrent();
+      await update?.({ phase: "available" });
+      return;
+    }
+    let result = open ? undefined : await content.readLocal(seedHashHex, signal);
     verifyCurrent();
     diagnostic("read.start", { local: Boolean(result) });
-    if (result) return result;
-    const policy = await this.currentMsfileService()?.getBitfsBuyerSettings?.();
-    if (policy?.buyerAutoPurchaseEnabled) {
-      rec.approvalSummary = `允许按钱包自动购买设置发现并购买此文件，完整块上限 ${policy.maxFullBlockPriceSatoshis} 聪。`;
-      await this.askForExecutionApproval(rec);
-      await this.requireConnectContent(rec);
+    if (result) {
+      await update?.({ phase: "available" });
+      return result;
     }
-    verifyCurrent();
-    let request = await content.discover(seedHashHex, signal);
-    const expires = request.expiresAtMs;
+    const policy = await this.currentMsfileService()?.getBitfsBuyerSettings?.();
+    if (maxFullBlockPriceSatoshis === undefined && policy?.buyerAutoPurchaseEnabled) {
+      await update?.({ phase: "awaiting-approval" });
+      rec.approvalSummary = `允许按钱包自动购买设置发现并购买此文件，完整块上限 ${policy.maxFullBlockPriceSatoshis} 聪。`;
+      await this.askForExecutionApproval(rec, keepPurchaseAfterApproval);
+    }
+    await update?.({ phase: "discovering" });
+    let request = await content.discover(seedHashHex, approvedSignal(), maxFullBlockPriceSatoshis !== undefined);
+    // On testnet an online seller quoted within a few seconds in the Publish E2E.
+    // Give discovery headroom without applying this limit to approvals or downloads.
+    const quoteDeadline = Date.now() + 30_000;
     let purchaseRequested = false;
+    let followedOtherWindow = false;
     let lastProgress: string | undefined;
     while (true) {
       verifyCurrent();
       const purchase = request.purchase;
+      followedOtherWindow ||= request.downloadReadOnly === true;
+      if (request.downloadReadOnly && !purchaseRequested) {
+        await update?.({ phase: "downloading", taskId: request.existingPurchaseSessionId ?? undefined });
+        purchaseRequested = true;
+      }
+      const otherWindowStopped = followedOtherWindow && !request.downloadReadOnly && !request.requestMessageId;
       const phase = purchase?.phase;
       const stopped = phase !== undefined && ["failed", "cancelled", "connection-closed", "refunded"].includes(phase);
       const allBlocksVerified = purchase?.totalBlockCount != null && purchase.totalBlockCount > 0 &&
@@ -3224,34 +3555,65 @@ export class ConnectServiceImpl implements ConnectService {
       }
       // Read the verified durable file independently of pool settlement. Reading it
       // neither changes the purchase journal nor releases the scheduler's slot.
-      if (request.completedPurchase || phase === "closing-pool" || phase === "close-unknown" || allBlocksVerified || stopped) {
-        result = await content.readLocal(seedHashHex, signal);
+      if (request.completedPurchase || phase === "closing-pool" || phase === "close-unknown" || allBlocksVerified || stopped || otherWindowStopped) {
+        if (open && await content.hasLocal(seedHashHex, signal)) {
+          verifyCurrent();
+          await update?.({ phase: "available" });
+          return;
+        }
+        if (!open) result = await content.readLocal(seedHashHex, signal);
         verifyCurrent();
         if (result) {
           diagnostic("read.return", { phase, completedPurchase: Boolean(request.completedPurchase), bytes: result.content.bytes.byteLength });
+          await update?.({ phase: "available" });
           return result;
         }
       }
-      if (stopped) {
-        diagnostic("read.stopped", { phase, message: purchase?.message });
-        throw protocolError("internal_error", "BitFS purchase stopped before the file was available");
+      if (request.failure === "insufficient-funds") {
+        throw protocolError("internal_error", "钱包可用余额不足，无法购买此文件。");
       }
-      if (!request.purchase && !purchaseRequested && request.quotes.length) {
-        const quote = request.quotes[0]!;
+      if (phase === "funding-unknown" || request.failure === "funding-unknown") {
+        throw protocolError("internal_error", "开池交易结果待核对，请在钱包购买历史中查看资金状态。");
+      }
+      if (stopped || request.failure === "purchase-interrupted" || request.interrupted || otherWindowStopped) {
+        diagnostic("read.stopped", { phase, message: purchase?.message });
+        if (request.taskEndReason === "cancelled" || phase === "cancelled") throw msfileReadCancelled;
+        if (request.taskEndReason === "failed" || phase === "failed" || phase === "refunded") {
+          throw protocolError("internal_error", "读取失败，请查看钱包购买历史。");
+        }
+        throw msfileReadInterrupted;
+      }
+      if (open && (request.downloadReadOnly || request.purchase || purchaseRequested)) {
+        const taskId = request.existingPurchaseSessionId ?? request.completedPurchase?.taskId;
+        await update?.({ phase: "downloading", ...(taskId ? { taskId } : {}) });
+        return;
+      }
+      const quote = request.quotes.find(offer => maxFullBlockPriceSatoshis === undefined ||
+        BigInt(offer.fullBlockPriceSatoshis) <= BigInt(maxFullBlockPriceSatoshis));
+      if (!request.purchase && !purchaseRequested && quote) {
         const describe = `卖方 ${quote.sellerPublicKeyHex}，${quote.fileSizeBytes} 字节，种子 ${quote.seedPriceSatoshis} 聪，完整块 ${quote.fullBlockPriceSatoshis} 聪，末块 ${quote.tailPriceSatoshis} 聪。钱包将按买方设置处理费用池与费用。`;
-        rec.approvalSummary = describe;
-        await this.askForExecutionApproval(rec);
-        await this.requireConnectContent(rec);
-        verifyCurrent();
-        request = await content.purchase(seedHashHex, quote, signal);
+        rec.approvalSummary = maxFullBlockPriceSatoshis === undefined ? describe :
+          `${describe} 初始完整块上限 ${maxFullBlockPriceSatoshis} 聪，允许此应用在 1 至 ${walletPriceMax} 聪内调整。`;
+        await update?.({ phase: "awaiting-approval" });
+        await this.askForExecutionApproval(rec, keepPurchaseAfterApproval);
+        await update?.({ phase: "downloading", taskId: request.taskId ?? request.existingPurchaseSessionId ?? quote.sessionId });
+        request = await content.purchase(seedHashHex, quote, approvedSignal(), maxFullBlockPriceSatoshis);
         purchaseRequested = true;
+        if (request.existingPurchaseSessionId) await update?.({ taskId: request.existingPurchaseSessionId,
+          ...(maxFullBlockPriceSatoshis === undefined ? {} : {
+            priceAdjustable: true, currentMaxFullBlockPriceSatoshis: maxFullBlockPriceSatoshis,
+          }) });
         diagnostic("purchase.started", { sessionId: quote.sessionId, phase: request.purchase?.phase });
         continue;
       }
-      if ((!request.purchase && (expires === null || Date.now() >= expires)) ||
+      const discoveryExpired = request.expiresAtMs === null || Date.now() >= request.expiresAtMs;
+      if ((!request.downloadReadOnly && !request.purchase &&
+          (discoveryExpired || (!purchaseRequested && !quote && Date.now() >= quoteDeadline))) ||
           (!request.requestMessageId && !request.downloadReadOnly)) {
-        diagnostic("read.unavailable", { phase, purchaseRequested, discoveryExpired: expires === null || Date.now() >= expires });
-        throw protocolError("internal_error", "BitFS file unavailable or no seller quote received");
+        diagnostic("read.unavailable", { phase, purchaseRequested, discoveryExpired });
+        throw protocolError("internal_error", request.quotes.length && maxFullBlockPriceSatoshis !== undefined
+          ? "没有符合完整块价格上限的卖家报价。"
+          : "未收到 BitFS 卖家报价。请确认卖家的钱包在线，再重试读取。");
       }
       const poll = async () => {
         await new Promise<void>(resolve => setTimeout(resolve, 750));
@@ -3746,6 +4108,16 @@ export class ConnectServiceImpl implements ConnectService {
    *   - owner key 必须在 walletState 内可查，且 identityStatus === "ready"；
    *   - 业务文档 不可用时直接拒掉（fail-closed）。
    */
+  private async createLoginProof(session: ConnectSessionRecord, challenge: string | undefined) {
+    if (challenge === undefined) return {};
+    const envelope = cborEncode([
+      "keymaster.connect.login-proof.v1", session.origin,
+      hexToBytes(session.ownerPublicKeyHex), session.networkIdentity.bsvNetwork, hexToBytes(challenge),
+    ]);
+    const signature = await this.signWithSessionOwner(session, envelope, "identity");
+    return { loginProof: { envelope: toBinaryField(envelope, "application/cbor"), signature: toBinaryField(signature) } };
+  }
+
   private async executeConnectLogin(rec: RequestRecord): Promise<ConnectLoginResult> {
     const params = rec.params as ConnectLoginParams;
     const ownerPublicKeyHex = rec.ownerPublicKeyHex;
@@ -3794,12 +4166,14 @@ export class ConnectServiceImpl implements ConnectService {
     // 目录身份与版本检查先于授权提交：applicationIdentified 只做发布验证与目录
     // 归并，抛错时不创建会话、不设置当前授权，也不登记连接。
     await this.deps.applicationIdentified?.(rec.origin,permissionKeyFor(rec.origin,record.appPublicKeyHex),undefined,record.appDisplay,rec.verifiedPublication);
+    const loginProof = await this.createLoginProof(record, params.loginChallenge);
     this.assertWalletGeneration(rec);
     this.receiver.assertCurrent(rec.protocol);
     await this.deps.storageRepository.putConnectSession(record);
     this.currentAuthorizationId = record.authorizationId;
     this.deps.applicationSessionEstablished?.(rec.origin, record.appPublicKeyHex!, undefined, record.appDisplay, rec.verifiedPublication);
     return {
+      ...loginProof,
       authorizationId: record.authorizationId!,
       walletPublicKeyHex: key.publicKeyHex,
       networkIdentity: projectNetworkIdentity(key),
@@ -3990,6 +4364,7 @@ export class ConnectServiceImpl implements ConnectService {
     // 也不登记连接。
     await this.deps.applicationIdentified?.(rec.origin,verifiedAppHex,record.directoryUrl,rec.verifiedDisplay,rec.verifiedPublication);
     const now = Date.now();
+    const loginProof = await this.createLoginProof(session, params.loginChallenge);
     this.assertWalletGeneration(rec);
     this.receiver.assertCurrent(rec.protocol);
     const next: ConnectSessionRecord = { ...session, lastUsedAt: now };
@@ -3998,6 +4373,7 @@ export class ConnectServiceImpl implements ConnectService {
     this.currentAuthorizationId = session.authorizationId;
     this.deps.applicationSessionEstablished?.(rec.origin, verifiedAppHex, record.directoryUrl, rec.verifiedDisplay, rec.verifiedPublication);
     return {
+      ...loginProof,
       authorizationId: session.authorizationId!,
       walletPublicKeyHex: session.ownerPublicKeyHex,
       networkIdentity: session.networkIdentity,
@@ -4339,11 +4715,14 @@ export class ConnectServiceImpl implements ConnectService {
     assertBoundPayment();
   }
 
-  private async askForExecutionApproval(rec: RequestRecord): Promise<void> {
+  private async askForExecutionApproval(rec: RequestRecord, onApproved?: () => void): Promise<void> {
     this.receiver.assertCurrent(rec.protocol);
     rec.autoApproved = false;
     const ask = () => new Promise<boolean>(resolve => {
-      rec.paymentApproval = resolve;
+      rec.paymentApproval = approved => {
+        if (approved) onApproved?.();
+        resolve(approved);
+      };
       this.setRecordPhase(rec.recordId, "confirming");
       const timeout = this.resolveConfirmTimeoutSnapshot(rec.origin);
       this.startConfirmTimeout(rec.recordId, timeout.initialSeconds, timeout.startedFromFallback);
@@ -4352,6 +4731,18 @@ export class ConnectServiceImpl implements ConnectService {
     const approved = await (rec.executionLease ? rec.executionLease.waitForUser(ask) : ask());
     if (!approved) throw protocolError("user_rejected", "Operation was not approved");
     this.setRecordPhase(rec.recordId, "executing");
+  }
+
+  private async executeChainHeight(rec: RequestRecord): Promise<MethodResult<"chain.get_height">> {
+    const session = await this.requireConnectSession(rec, rec.walletPublicKeyHex);
+    this.assertWalletGeneration(rec);
+    this.receiver.assertCurrent(rec.protocol);
+    this.assertSessionOwnerIsActive(session);
+    const snapshot = this.deps.chainHeight?.get();
+    if (!snapshot?.available || snapshot.network !== session.networkIdentity.bsvNetwork) {
+      throw protocolError("internal_error", "Chain height has not been synchronized yet");
+    }
+    return { height: snapshot.height, blockHash: snapshot.blockHash };
   }
 
   private async withChain<T>(rec: RequestRecord, run: (woc: import("@keymaster/contracts").WocService,
@@ -5446,6 +5837,10 @@ export class ConnectServiceImpl implements ConnectService {
       wireResult = identityResult;
     } else if (rec.method === "connect.logout") wireResult = { revokedAt: (result as ConnectLogoutResult).revokedAt };
     this.receiver.replyResult(rec.protocol, wireResult as ConnectPublic.MethodResult);
+    if (rec.method === "connect.login" || rec.method === "connect.launch") {
+      const snapshot = this.deps.chainHeight?.get();
+      if (snapshot) this.postChainHeight(rec.source, rec.origin, rec.networkIdentity, snapshot);
+    }
   }
 
   private async replyErrorToRec(
@@ -5453,11 +5848,20 @@ export class ConnectServiceImpl implements ConnectService {
     code: ProtocolErrorCode,
     errorMessage: string
   ): Promise<void> {
+    if (rec.msfileRead && !rec.msfileRead.existing) activeMsfileReads.delete(rec.msfileRead.key);
     // 候选 SDK 新增 authorization_expired；正式依赖升级前向旧 Receiver 类型兼容透传。
     this.receiver.replyError(rec.protocol, { code: code as never, message: errorMessage });
   }
 
-  private postEventMessage(target: Window, origin: string, message: ProtocolEventMessage): void {
+  /** 高度只通过 Receiver 当前有效的绑定送到对应网络的 App。 */
+  private postChainHeight(target: Window, origin: string, identity: NetworkIdentity, snapshot: import("@keymaster/contracts").ChainHeightSnapshot): void {
+    if (!snapshot.available || snapshot.network !== identity.bsvNetwork) return;
+    this.postEventMessage(target, origin, {
+      v: PROTOCOL_VERSION, type: "event", event: "chain.height_changed", data: { height: snapshot.height, blockHash: snapshot.blockHash },
+    });
+  }
+
+  private postEventMessage(target: Window, origin: string, message: ConnectPublic.ProtocolEventPayload): void {
     this.receiver.sendEvent(target, origin, message);
   }
 
@@ -5641,7 +6045,7 @@ export class ConnectServiceImpl implements ConnectService {
       decision,
       status,
       textSummary: rec.approvalSummary ?? this.summarizeText(rec.params),
-      ...(rec.method === "msfile.content.read"
+      ...(rec.method === "msfile.content.read" || rec.method === "msfile.content.open"
         ? { seedHashHex: (rec.params as MethodParams<"msfile.content.read">).seedHashHex }
         : {}),
       claimsSummary: this.summarizeClaims(rec.params),
@@ -5913,7 +6317,7 @@ export class ConnectServiceImpl implements ConnectService {
 
   private isRequestCancellable(rec: RequestRecord): boolean {
     return rec.phase === "confirming" || rec.phase === "waiting_unlock_manual" ||
-      rec.phase === "executing" && (rec.method === "msfile.content.read" ||
+      rec.phase === "executing" && (rec.method === "msfile.content.read" || rec.method === "msfile.content.open" ||
         rec.method.startsWith("chain.") && rec.method !== "chain.broadcast");
   }
 
@@ -5991,7 +6395,9 @@ function toProtocolError(err: unknown): ProtocolError {
   if (err && typeof err === "object" && "code" in err && "message" in err) {
     const e = err as { code?: unknown; message?: unknown };
     if (typeof e.code === "string" && typeof e.message === "string") {
-      if (e.code.startsWith("storage_") || e.code.startsWith("msfile_")) {
+      if (e.code.startsWith("storage_") ||
+          (e.code.startsWith("msfile_") && e.code !== "msfile_read_interrupted" && e.code !== "msfile_read_cancelled" &&
+            e.code !== "msfile_range_timeout")) {
         return { code: e.code as ProtocolErrorCode, message: e.code };
       }
       return { code: e.code as ProtocolErrorCode, message: e.message };

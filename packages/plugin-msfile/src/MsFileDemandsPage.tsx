@@ -41,8 +41,7 @@ function DemandRecords({ service }: { service: MsFileBucketService }) {
   return <section className="msfile-purchases msfile-demands">
     <header className="msfile-purchases__toolbar"><h2>{t("msfile.demands.title")}</h2><AppLink to="/settings/local-files">{t("msfile.demands.sellerSettings")}</AppLink></header>
     <p className="msfile-demands__summary">{t("msfile.demands.memory")} · {t("msfile.demands.lastReceived")}: {time(snapshot?.lastReceivedAtMs ?? null)}</p>
-    <p>{t("msfile.demands.selling")}: {snapshot ? t(snapshot.sellerEnabled ? "msfile.demands.enabled" : "msfile.demands.disabled") : "—"} · {t("msfile.demands.subscription")}: {snapshot ? status(snapshot.network.subscriptionPhase) : "—"} <code>{snapshot?.network.channel}</code></p>
-    {snapshot && !snapshot.sellerEnabled ? <p>{t("msfile.demands.offNotice")}</p> : null}
+    <p>{t("msfile.demands.subscription")}: {snapshot ? status(snapshot.network.subscriptionPhase) : "—"} <code>{snapshot?.network.channel}</code></p>
     {error || snapshot?.network.error ? <p role="alert">{error || snapshot?.network.error}</p> : null}
     <div className="msfile-purchases__scroll"><table className="msfile-purchases__table" aria-label={t("msfile.demands.connections")}>
       <thead><tr><th>{t("msfile.demands.supplier")}</th><th>{t("msfile.demands.connection")}</th><th>{t("msfile.demands.receive")}</th><th>{t("msfile.demands.subscription")}</th><th>{t("msfile.demands.error")}</th></tr></thead>
